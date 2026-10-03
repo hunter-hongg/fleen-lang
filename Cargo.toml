@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "fleen-compiler",
+    "fleen-vm",
+    "fleen-verify",
+]

@@ -1,0 +1,164 @@
+(* ============================================ *)
+(* Fleen 语言 EBNF 文法 v0.0.1                  *)
+(* ============================================ *)
+
+(* ---------- 程序 ---------- *)
+
+program         = { import_decl | declaration } ;
+
+import_decl     = "import" , module_path ;
+
+module_path     = ident , { "." , ident } ;
+
+
+(* ---------- 声明 ---------- *)
+
+declaration     = const_decl
+                | func_decl
+                | var_binding
+                | expr_stmt ;
+
+
+(* ---------- 变量绑定 ---------- *)
+
+var_binding     = [ type_annot ] , "=" , expr ;
+
+const_decl      = "const" , ident , [ type_annot ] , "=" , expr ;
+
+type_annot      = ":" , type ;
+
+
+(* ---------- 函数 ---------- *)
+
+func_decl       = "func" , ident , "(" , [ param_list ] , ")"
+                  , [ type_annot ]
+                  , ( "=" , expr
+                    | block ) ;
+
+param_list      = param , { "," , param } ;
+
+param           = ident , ":" , type ;
+
+
+(* ---------- 类型 ---------- *)
+
+type            = base_type
+                | array_type
+                | box_type
+                | ref_type
+                | result_type
+                | func_type ;
+
+base_type       = "int" | "float" | "bool" | "string" | "unit" ;
+
+array_type      = "[" , type , "]" ;
+
+box_type        = "box" , "<" , type , ">" ;
+
+ref_type        = "ref" , type ;
+
+result_type     = "Result" , "<" , type , "," , type , ">" ;
+
+func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
+
+
+(* ---------- 语句/表达式 ---------- *)
+
+expr_stmt       = expr ;
+
+block           = "{" , { declaration | expr } , "}" ;
+
+
+(* ---------- 表达式 ---------- *)
+
+expr            = if_expr
+                | while_expr
+                | choose_expr
+                | assign_expr ;
+
+assign_expr     = logic_or , [ "=" , assign_expr ] ;
+
+if_expr         = "if" , expr , block
+                  , { "elif" , expr , block }
+                  , [ "else" , block ] ;
+
+while_expr      = "while" , expr , block ;
+
+choose_expr     = "choose" , expr , "{"
+                  , { when_clause }
+                  , [ otherwise_clause ]
+                  , "}" ;
+
+when_clause     = "when" , pattern , [ "if" , expr ] , block ;
+
+otherwise_clause = "otherwise" , block ;
+
+pattern         = literal
+                | ident ;
+
+
+(* ---------- 运算符优先级（从低到高） ---------- *)
+
+logic_or        = logic_and , { "or" , logic_and } ;
+
+logic_and       = equality , { "and" , equality } ;
+
+equality        = comparison , { ( "==" | "!=" ) , comparison } ;
+
+comparison      = additive , { ( "<" | ">" | "<=" | ">=" ) , additive } ;
+
+additive        = multiplicative , { ( "+" | "-" ) , multiplicative } ;
+
+multiplicative  = unary , { ( "*" | "/" | "%" ) , unary } ;
+
+unary           = [ "-" | "!" ] , postfix ;
+
+postfix         = primary , { call_suffix | index_suffix | field_suffix } ;
+
+call_suffix     = "(" , [ arg_list ] , ")" ;
+
+index_suffix    = "[" , expr , "]" ;
+
+field_suffix    = "." , ident ;
+
+arg_list        = expr , { "," , expr } ;
+
+
+(* ---------- 基本表达式 ---------- *)
+
+primary         = literal
+                | ident
+                | "(" , expr , ")"
+                | block
+                | struct_literal ;
+
+struct_literal  = ident , "{" , [ field_init , { "," , field_init } ] , "}" ;
+
+field_init      = ident , ":" , expr ;
+
+
+(* ---------- 字面量 ---------- *)
+
+literal         = int_lit
+                | float_lit
+                | bool_lit
+                | string_lit ;
+
+int_lit         = digit , { digit } ;
+
+float_lit       = digit , { digit } , "." , digit , { digit } ;
+
+bool_lit        = "true" | "false" ;
+
+string_lit      = '"' , { any_char } , '"' ;
+
+
+(* ---------- 标识符 ---------- *)
+
+ident           = letter , { letter | digit | "_" } ;
+
+letter          = "a" .. "z" | "A" .. "Z" | "_" ;
+
+digit           = "0" .. "9" ;
+
+any_char        = ? 除双引号外的任意字符 ? ;
