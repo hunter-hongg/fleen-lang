@@ -3,6 +3,37 @@
 所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，
 版本语义遵循 [SPEC.md](SPEC.md) §13（`0.0.x` = 早期开发，API 不稳定）。
 
+## 0.0.2 — 未发布（所有权起步）
+
+> 特性规划与设计决议：[docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。
+> 以下为已定稿的 0.0.2 范围；实现落地后在正式条目中逐项确认。
+
+### ✨ 语言特性（规划）
+
+- **所有权系统**：`string` / `box<T>` 拥有唯一所有者；`move` 显式转移、
+  `clone` 深拷贝；Copy 类型（`int` / `float` / `bool` / 函数值）不受影响；
+  使用已移动的值在编译期拒绝（`UseAfterMove` 等）
+- **`box<T>`**：`box expr` 堆分配、`deref b` 读写点内值、确定性释放（无 GC）
+- **`ref T`**：只读借用，仅函数参数位置——句柄不逃逸，无需借用检查器
+- **错误处理**：`Ok(v)` / `Err(e)` 构造、`choose` 的 `Ok`/`Err` pattern
+  （两臂齐即穷尽）、`?` 传播运算符；`main` 可返回 `Result`
+  （`Err` → stderr + 退出码 1）
+- **ASI**：分号可选（parser 端"可续接"判定，显式分号仍合法）
+
+### 🛠 工具链（规划）
+
+- 字节码 v2：所有权指令（`AllocBox` / `MoveLocal` / `CloneLocal` 等，
+  0x80–0x93）与 Result 指令（0xA0–0xA4）；v1 模块向后兼容
+- `Value::Str(Rc<str>)` → `Str(Box<str>)`（所有权表示，偿还 0.0.1 临时决策）
+- `span_map` 生成 + 运行时错误携带源码位置（`.fln` 模式显示行列）
+- `print` 内建真实签名（`printable` 集合），移除 typeck 特判（0.0.1 已知 Hack）
+
+### ⚠️ Breaking（规划）
+
+- owned 值（`string` / `box<T>`）赋值/传参需显式 `move` 或 `clone`
+- `move` / `clone` / `deref` 成为保留字（0.0.1 可用作标识符）
+- `print(函数值)` 由 0.0.1 的放行改为编译错误
+
 ## 0.0.1 — Swift Fox (2026-10-06) 🦊
 
 首个里程碑版本：从源码到字节码到执行的**完整工具链**。一门表达式优先的小型语言，

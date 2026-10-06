@@ -250,9 +250,9 @@ pub fn codegen(mir: Mir) -> Bytecode { ... }
 | 阶段 | 输入 | 输出 | 职责 |
 |------|------|------|------|
 | Lex | 源码 | Token 流 | 词法 |
-| Parse | Token 流 | AST | 语法 |
+| Parse | Token 流 | AST | 语法（0.0.2 起含 ASI 判定） |
 | Resolve | AST | HIR | 名字解析、作用域 |
-| Typeck | HIR | Typed HIR | 类型推导、检查 |
+| Typeck | HIR | Typed HIR | 类型推导、检查（0.0.2 起含所有权检查子遍历 `typeck/ownership.rs`，仍是同一阶段，不新增独立阶段） |
 | Lower | Typed HIR | MIR | 控制流展平 |
 | Codegen | MIR | Bytecode | 字节码生成 |
 | Execute | Bytecode | 结果 | VM 执行 |
@@ -473,6 +473,8 @@ fix/xxx       # 修复分支
 
 **0.0.1 目标：Fibonacci 能跑。**
 
+**0.0.2 目标：所有权起步（规划见 `docs/0.0.2/PLAN.md`）。**
+
 ---
 
 ## 14. Fleen 语言快速参考
@@ -501,6 +503,22 @@ const y: int = 42;   // 类型标注 + 不可变
 
 > `=` 的三义性（绑定 / 赋值 / 遮蔽）判定详见 `docs/DESIGN.md` §3.6 与 §4.5。
 
+### 所有权（0.0.2）
+
+```fleen
+s = "hello";
+t = move s;        // 转移所有权，s 之后不可用
+t = clone t;       // 深拷贝
+b = box 42;        // 堆分配，b: box<int>
+n = deref b;       // 读点内值（副本）
+deref b = n + 1;   // 写点内值
+
+func shout(s: ref string): int { print(s); 42 }  // 只读借用，仅参数位置
+```
+
+> Copy 类型（`int` / `float` / `bool` / `unit` / 函数值）不受影响。
+> 细则见 `docs/DESIGN.md` §10 与 `docs/0.0.2/PLAN.md` §3.1–3.3。
+
 ### 函数
 
 ```fleen
@@ -526,10 +544,11 @@ result = apply(add, 1, 2);
 
 ### 控制流
 
-> **分号说明**（0.0.1）：语句末尾需显式写分号 `;`。ASI（自动分号插入）计划在后续版本实现。
+> **分号说明**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI（自动分号插入）落地，
+> 分号可选（显式分号仍合法），判定规则见 `docs/DESIGN.md` §3.9。
 > **注意**：`func` 声明末尾无分号；函数体最后一个表达式无分号，否则返回值被丢弃。
 > **表达式语句规则**：
-> - if、while、choose 等控制流表达式作为语句使用时，必须加分号
+> - if、while、choose 等控制流表达式作为语句使用时，0.0.1 必须加分号（0.0.2 起可省略）
 > - choose-when 结构中，`when` 子句和 `otherwise` 子句本身不带分号
 > - 只有 `choose` 整体作为表达式语句使用时，末尾才加分号
 >
@@ -574,37 +593,38 @@ and
 < > <= >=
 + -
 * / %
-- !    (一元)
-;       (显式分号，0.0.1 必填)
+?      (后缀，0.0.2)
+box deref move clone - !    (一元前缀；box/deref/move/clone 为 0.0.2 新增)
+;       (显式分号：0.0.1 必填，0.0.2 起可选)
 ```
 
 ---
 
-## 15. 0.0.1 特性范围
+## 15. 特性范围
 
-| 特性 | 0.0.1 |
-|------|-------|
-| `=` 绑定/赋值 | ✅ |
-| `const` 不可变 | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ |
-| `func` 单行 / 多行 | ✅ |
-| `if` / `elif` / `else` | ✅ |
-| `while` | ✅ |
-| `choose` | ✅ |
-| `Result` | ✅ |
-| 函数类型 | ✅ |
-| 分号 `;` | ✅ |
-| `?` | ❌ |
-| `move` / `clone` | ❌ |
-| `box<T>` | ❌ |
-| `ref` | ❌ |
-| `struct` | ❌ |
-| `for` | ❌ |
-| `async` | ❌ |
-| FFI | ❌ |
-| 泛型 | ❌ |
-| 运算符重载 | ❌ |
-| 指针 | ❌ |
+| 特性 | 0.0.1 | 0.0.2 |
+|------|-------|-------|
+| `=` 绑定/赋值 | ✅ | ✅ |
+| `const` 不可变 | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅（string 转为 owned 语义） |
+| `func` 单行 / 多行 | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ |
+| `while` | ✅ | ✅ |
+| `choose` | ✅ | ✅（+ `Ok`/`Err` pattern） |
+| `Result` | ✅（仅类型） | ✅（+ `Ok`/`Err` 构造、`?`） |
+| 函数类型 | ✅ | ✅ |
+| 分号 `;` | ✅ 必填 | ✅ 可选（ASI） |
+| `?` | ❌ | ✅ |
+| `move` / `clone` | ❌ | ✅ |
+| `box<T>` | ❌ | ✅ |
+| `ref` | ❌ | ✅（仅参数） |
+| `struct` | ❌ | ❌（0.0.3） |
+| `for` | ❌ | ❌（0.0.3） |
+| `async` | ❌ | ❌（0.0.4） |
+| FFI | ❌ | ❌ |
+| 泛型 | ❌ | ❌（0.1.0） |
+| 运算符重载 | ❌ | ❌（0.1.0） |
+| 指针 `ptr` / `addr` | ❌ | ❌（0.0.5） |
 
 ---
 
@@ -622,4 +642,4 @@ and
 | 性能 | 避免热路径 clone，预分配 |
 | Git | Conventional Commits |
 | 禁止 | unwrap、panic、全局可变、跳阶段 |
-| 分号 | 0.0.1 必填 `;`，ASI 在后续版本 |
+| 分号 | 0.0.1 必填 `;`；0.0.2 起可选（ASI） |

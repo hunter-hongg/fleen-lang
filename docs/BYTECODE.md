@@ -1,9 +1,13 @@
-# Fleen 字节码规范 v0.0.1
+# Fleen 字节码规范 v0.0.2
 
 > **快、简、安、直觉**
 > 本文档定义 Fleen 编译器（`codegen` 阶段）的输出格式，
 > 以及 Fleen VM（`fleen-vm`）的执行模型。
 > 编译器与 VM 必须共同遵守本文档。
+>
+> **v0.0.2 增量**：所有权指令（0x80–0x93）、Result 指令（0xA0–0xA4）、
+> `Value` 所有权表示、`span_map` 生成。设计决议见 `docs/0.0.2/PLAN.md`；
+> 实现落地前，当前工具链仍产出/执行 v1，读取端须同时接受 `{1, 2}`。
 
 ---
 
@@ -15,7 +19,8 @@ Fleen 编译到**自定义栈式字节码**，由自研 VM 解释执行。
 - **编码**：字节流，小端序（little-endian）
 - **指令格式**：`opcode: u8` + 定长/变长操作数
 - **结构**：一个字节码模块（`Module`）= 常量池 + 函数表 + 全局变量表 + 入口点
-- **无 GC、无异常表、无元循环指令**：与语言设计一致（所有权由 0.0.2+ 的指令承担）
+- **无 GC、无异常表、无元循环指令**：与语言设计一致（所有权由 v2 的 `AllocBox` /
+  `MoveLocal` / `CloneLocal` 等指令承担，§5.9–5.10；释放由值的确定性析构完成）
 
 ### 阶段衔接
 
@@ -94,7 +99,19 @@ pub struct Func {
 }
 ```
 
-> **0.0.1 决定**：`span_map` 暂不生成，留空 `Box::new([])`。`SpanEntry` 定义推迟到 0.0.2（需配合调试器/回溯设计）。
+> **SpanEntry（0.0.2 定义并启用）**：
+>
+> ```rust
+> pub struct SpanEntry {
+>     pub offset: u32,  // 指令起始字节偏移（相对函数 code）
+>     pub start: u32,   // 源码起始字节偏移
+>     pub end: u32,     // 源码结束字节偏移
+> }
+> ```
+>
+> 0.0.1 决定暂不生成（留空 `Box::new([])`）。0.0.2 起 codegen 逐指令填充
+> `span_map`（数据来源：MIR 指令携带的 Span），供运行时错误诊断使用；
+> 读取端对空表与非空表都必须接受。
 
 规则：
 - **内置函数用 `is_builtin: true` 标记**，不靠函数名判断：语言允许用户遮蔽内建名（如自定义 `func print`），仅凭名字无法区分宿主内置与用户函数。
@@ -142,7 +159,11 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(Rc<str>),   // 0.0.1 字符串不可变，共享即可；0.0.2 引入 move/clone 后改为所有权模型
+    Str(Box<str>),                 // 0.0.2：独占所有权（0.0.1 临时用的 Rc<str> 已按计划替换）
+    Boxed(Box<Value>),             // 0.0.2：box<T>，唯一所有权
+    Ref { base: u32, slot: u16 },  // 0.0.2：借用句柄，仅存在于被调帧生命期
+    Ok(Box<Value>),                // 0.0.2：Result 构造
+    Err(Box<Value>),               // 0.0.2：Result 构造
     Unit,           // 空值，占位
     Func(FuncId),   // 一等值函数引用
 }
@@ -151,10 +172,18 @@ pub enum Value {
 规则：
 - 值**自描述类型**，VM 据此做算术指令的快速分派
 - 类型不匹配的算术指令（如 `int + string`）是 **VM 错误**（`RuntimeError`），但正常编译通过的字节码不应出现——那是 `typeck` 的职责
+- **所有权纪律由 typeck 静态保证**；VM 侧 Rust 的移动/丢弃语义即运行时实现，
+  `Drop` 确定性完成（帧销毁 truncate、槽位覆盖、`Pop`），无 GC
+- `Eq` 语义：`Str` 按内容比较；`Boxed` 比较点内值（与 Rust `Box: PartialEq` 一致）；
+  `Ref` 解引用后比较
+- `Ref` 句柄不可逃逸：仅由 `MakeRefLocal` 在实参准备时生成，只读、不可存储、
+  随调用结束消亡（越界读取 → `RuntimeError::BorrowOutOfRange`，防御性）
+- `Value` 不落盘：常量池无 `Ref` / `Boxed` / `Ok` / `Err` 形态
 
-> ⚠️ **临时决策**：`Str(Rc<str>)` 仅适用于 0.0.1——字符串不可变，无循环引用风险，`Rc` 的确定性析构不算 GC。
-> 0.0.2 引入 `move` / `clone` 后，`Rc` 的共享语义与所有权模型冲突（`clone` 是深拷贝，`Rc::clone` 是计数 +1），
-> **必须替换为所有权表示**，届时 `clone` 语义重新定义。实现者不要在 0.0.1 的代码里对 `Rc<str>` 产生依赖。
+> **0.0.2 决定**：0.0.1 的 `Str(Rc<str>)` 是临时决策——字符串不可变、无循环引用风险，
+> `Rc` 的确定性析构不算 GC。引入 `move` / `clone` 后 `Rc` 的共享语义与所有权模型冲突
+> （`clone` 是深拷贝，`Rc::clone` 是计数 +1），已按 `docs/0.0.2/PLAN.md` §5.3
+> 替换为 `Str(Box<str>)`：`clone` 是深拷贝，计数共享不复存在。
 
 ### 3.3 调用约定
 
@@ -212,14 +241,17 @@ pub enum RuntimeError {
 0x50–0x5F  控制流
 0x60–0x6F  函数调用
 0x70–0x7F  选择（choose 辅助）
-0x80–0x8F  预留（0.0.2: box / ref）
-0x90–0x9F  预留（0.0.2: move / clone）
-0xA0–0xFF  预留
+0x80–0x83  box / ref（0.0.2，§5.9）
+0x84–0x8F  预留
+0x90–0x93  move / clone（0.0.2，§5.10）
+0x94–0x9F  预留
+0xA0–0xA4  Result / 错误处理（0.0.2，§5.11）
+0xA5–0xFF  预留
 ```
 
 ---
 
-## 5. 指令集（v0.0.1）
+## 5. 指令集（v0.0.1 基础 + v0.0.2 增量）
 
 ### 5.1 常量与栈操作
 
@@ -320,11 +352,59 @@ pub enum RuntimeError {
 规则：
 - `BindMatch` 不弹出栈顶：被匹配值还要参与后续比较或作为分支值来源
 
+### 5.9 box / ref（v0.0.2）
+
+| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+|--------|--------|------|--------|------|
+| `AllocBox` | — | 1 | `v → b` | 堆分配，值的所有权转入 box |
+| `DerefBox` | — | 1 | `b → b v` | 读点内值（副本/深拷贝），box 仍在栈上 |
+| `StoreDerefBox` | — | 1 | `b v →` | 写点内值，旧值释放 |
+| `MakeRefLocal` | `u16` (slot) | 3 | `→ ref` | 生成借用句柄指向本帧 `stack_base + slot`（实参准备） |
+
+规则：
+- `box` 唯一所有权：**没有**"移出 box"指令——读取产生副本，需要值由语言层
+  `clone deref b`（`DerefBox`）承担
+- `MakeRefLocal` 的 slot 校验同 `LoadLocal`/`StoreLocal`（slot < `locals`）；
+  句柄值 `Ref { base, slot }` 中的 `base` 由 VM 在调用时绑定调用方帧，
+  不是编码的一部分
+
+### 5.10 move / clone（v0.0.2）
+
+| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+|--------|--------|------|--------|------|
+| `DupDeep` | — | 1 | `v → v v` | 深拷贝栈顶（`clone` 的栈上形态） |
+| `MoveLocal` | `u16` (slot) | 3 | `→ v` | **消耗性读**：取出槽值，槽清为 `Unit` |
+| `CloneLocal` | `u16` (slot) | 3 | `→ v` | 非消耗读：深拷贝槽值，槽不动 |
+| `CloneGlobal` | `u16` (GlobalId) | 3 | `→ v` | 非消耗读全局（owned 全局的唯一读法） |
+
+规则：
+- 0.0.1 的 `LoadLocal` / `LoadGlobal`（非消耗读、浅复制）**保持不变**，
+  仅用于 Copy 类型；owned 类型的消耗性读用 `MoveLocal`、非消耗读用
+  `CloneLocal`/`CloneGlobal`，由 codegen 按静态类型选择
+- "已移动"槽位的内容对 VM 不可见（typeck 保证不再读取）；`MoveLocal` 用
+  `mem::replace` 清槽，避免旧值延迟到帧销毁才释放
+
+### 5.11 Result / 错误处理（v0.0.2）
+
+| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+|--------|--------|------|--------|------|
+| `PackOk` | — | 1 | `v → ok(v)` | 构造 `Ok` |
+| `PackErr` | — | 1 | `v → err(e)` | 构造 `Err` |
+| `IsErr` | — | 1 | `r → bool` | 测试 `Err` |
+| `UnwrapOk` | — | 1 | `r → v` | 取出 Ok payload（转移） |
+| `UnwrapErr` | — | 1 | `r → e` | 取出 Err payload（转移） |
+
+规则：
+- `UnwrapOk` 遇 `Err`（或反之）→ `RuntimeError::ResultMismatch`（防御性，
+  合法编译产物不会出现——分支由 `IsErr` + 跳转保证）
+- payload 的取出是**转移**：`Result` 值被消耗
+
 ---
 
 ## 6. 源码构造 → 字节码对照
 
-> **分号说明**（0.0.1）：语句末尾需显式写分号 `;`。ASI（自动分号插入）计划在后续版本实现。
+> **分号说明**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI 落地、分号可选——
+> 分号的有无在 AST 之后不可见，本节对照不受影响。
 > **函数声明不加分号**：`func` 声明末尾无分号，语法见 `SYNTAX.ebnf`。
 > **返回值**：函数体最后一个表达式无分号，否则会丢弃返回值。
 
@@ -484,6 +564,58 @@ Unit                  ; unit 函数显式压入 Unit
 Return
 ```
 
+### 6.7 `?` 传播（v0.0.2）
+
+```fleen
+q = div(a, b)?;
+```
+
+```text
+<eval div(a, b)>      ; r: Result
+Dup                   ; r r
+IsErr                 ; r bool
+JumpIfTrue  L_err
+UnwrapOk              ; r → v
+StoreLocal q
+Jump        L_cont
+L_err:
+UnwrapErr             ; r → e
+Return                ; 提前返回 Err（函数级）
+L_cont:
+```
+
+### 6.8 choose（Result scrutinee，v0.0.2）
+
+```fleen
+choose div(10, 2) {
+    when Ok(v) { v }
+    when Err(e) { 0 - 1 }
+}
+```
+
+```text
+<eval div(10, 2)>     ; r
+Dup
+IsErr
+JumpIfTrue  L_err
+UnwrapOk              ; payload v（转移）
+StoreLocal v          ; when Ok(v) 绑定
+<ok arm body>         ; 尾值
+Jump        L_end
+L_err:
+UnwrapErr             ; payload e（转移）
+StoreLocal e
+<err arm body>
+L_end:
+```
+
+规则：
+- `Ok`/`Err` 臂的 payload 由 `UnwrapOk`/`UnwrapErr` **转移**后 `StoreLocal` 绑定，
+  无需 `BindMatch`（被匹配值已被消耗，不再参与比较链）
+- 带 guard（`when Ok(x) if x > 0`）时，codegen 需在 guard 求值前保留 payload
+  可回退（实现期确定具体序列，验收标准：语义等价 + verify 通过）
+- 穷尽性由 `typeck` 检查：`Ok` + `Err` 两臂齐即穷尽
+
 ---
 
 ## 7. 完整示例
@@ -556,6 +688,7 @@ Return
 - [ ] `StoreGlobal` 的目标全部 `mutable: true`，**唯一例外**：入口函数（全局初始化的 `__init__`）中对全局的初始化写（用于给 `const` 全局赋初值）
 - [ ] 常量池无重复项
 - [ ] 每个函数 `locals >= params`，且所有 `LoadLocal` / `StoreLocal` 的 slot 操作数 < `locals`
+  （0.0.2 起 `MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot 同规则）
 
 ### 每指令栈深效果（Δdepth）
 
@@ -574,6 +707,10 @@ Return
 | `Call` | 1 - p（p 为被调函数 `params` 数） | p |
 | `CallValue` | -(argc + 1) + 1 = -argc | argc + 1 |
 | `BindMatch` | 0 | 1 |
+| `AllocBox` / `DerefBox` / `DupDeep` | +1 | 1 |
+| `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` | +1 | 0 |
+| `StoreDerefBox` | -2 | 2 |
+| `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` | 0 | 1 |
 | `Return` | 视为路径终止 | 1（返回值在栈顶） |
 
 规则：
@@ -591,6 +728,7 @@ Return
 ## 9. 二进制序列化（`.flnc`）
 
 0.0.1 定义内存 `Module` 的二进制落盘格式，扩展名 `.flnc`。所有整数**小端**，多字节字段按下述宽度。
+0.0.2 **零布局变更**：`version` 升为 `2`，读取端接受 `{1, 2}`；`span_map` 自 0.0.2 起填充（§2）。
 
 ### 文件头
 
@@ -643,6 +781,7 @@ Return
 - `is_builtin` / `mutable` 只接受 `0` 或 `1`，其他字节视为格式错误。
 - 常量池 `tag` 只接受 `0/1/2`，其他视为格式错误。
 - 后续版本（2+）只在**末尾追加**新表；已有表的字段顺序与宽度保持稳定。
+- `version` 接受 `{1, 2}`（0.0.2 起）；v2 不改变任何 v1 已有表的字段顺序与宽度。
 
 ---
 
@@ -651,7 +790,7 @@ Return
 | 字节码版本 | 对应语言版本 | 内容 |
 |-----------|-------------|------|
 | 1 | 0.0.1 | 本文档定义的指令集 |
-| 2 | 0.0.2 | + `box` / `ref` / `move` / `clone` 指令（0x80–0x9F 组） |
+| 2 | 0.0.2 | + 所有权指令 `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal`（0x80–0x83）、`DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal`（0x90–0x93）、Result 指令（0xA0–0xA4）；`span_map` 开始填充（§5.9–5.11、§2） |
 | 3 | 0.0.3 | + `struct` / 数组指令 |
 
 规则：

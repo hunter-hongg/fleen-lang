@@ -1,5 +1,8 @@
 (* ============================================ *)
-(* Fleen 语言 EBNF 文法 v0.0.1                  *)
+(* Fleen 语言 EBNF 文法 v0.0.2                  *)
+(* 0.0.2 新增：box/deref/move/clone 前缀表达式、 *)
+(* ? 后缀、Ok/Err pattern、deref 赋值目标、     *)
+(* 分号可选（ASI）                              *)
 (* ============================================ *)
 
 (* ---------- 程序 ---------- *)
@@ -65,7 +68,8 @@ func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 (* ---------- 语句/表达式 ---------- *)
 
 expr_stmt       = expr , [ ";" ] ;
-(* 注：0.0.1 要求表达式语句末尾显式加分号 *)
+(* 注：0.0.1 要求表达式语句末尾显式加分号；0.0.2 起 ASI 落地、分号可选 *)
+(* （parser 端"可续接"白名单判定，显式分号永远合法），见 DESIGN.md §3.9 *)
 (* 特殊规则：choose/when/otherwise 结构中，when 子句和 otherwise 子句本身不带分号 *)
 (* 只有 choose 整体作为表达式语句使用时，末尾才加分号 *)
 
@@ -80,6 +84,8 @@ expr            = if_expr
                 | assign_expr ;
 
 assign_expr     = logic_or , [ "=" , assign_expr ] ;
+(* 0.0.2：赋值目标扩展为 deref b（写 box 点内值，不可带类型标注）；
+   合法性由语义阶段校验，文法只认形态 *)
 
 if_expr         = "if" , expr , block
                   , { "elif" , expr , block }
@@ -104,10 +110,15 @@ otherwise_clause = "otherwise" , block ;
 
 pattern         = neg_pattern
                 | literal
-                | ident ;
+                | ident
+                | result_pattern ;
 
 (* P5: choose pattern also accepts negated numeric literals *)
 neg_pattern     = "-" , (int_lit | float_lit) ;
+
+(* 0.0.2：Result 的 Ok/Err pattern，绑定按转移语义；
+   Ok + Err 两臂齐即穷尽，无需 otherwise *)
+result_pattern  = ( "Ok" | "Err" ) , "(" , ident , ")" ;
 
 
 (* ---------- 运算符优先级（从低到高） ---------- *)
@@ -124,9 +135,16 @@ additive        = multiplicative , { ( "+" | "-" ) , multiplicative } ;
 
 multiplicative  = unary , { ( "*" | "/" | "%" ) , unary } ;
 
-unary           = [ "-" | "!" ] , postfix ;
+unary           = [ unary_prefix ] , postfix ;
 
-postfix         = primary , { call_suffix | index_suffix | field_suffix } ;
+(* 0.0.2：box/deref/move/clone 为前缀关键字表达式，右结合，同 - / ! 一元层；
+   move/clone 的操作数须为合法位置（ident 或 deref b），由语义阶段校验 *)
+unary_prefix    = "-" | "!" | "box" | "deref" | "move" | "clone" ;
+
+postfix         = primary , { call_suffix | index_suffix | field_suffix | question_suffix } ;
+
+(* 0.0.2：? 传播运算符，操作数须为 Result<T, E>，见 DESIGN.md §8 *)
+question_suffix = "?" ;
 
 call_suffix     = "(" , [ arg_list ] , ")" ;
 
@@ -182,4 +200,5 @@ any_char        = ? 除双引号外的任意字符 ? ;
 comment         = "//" , { any_char_except_newline } , newline
                 | "/*" , { any_char } , "*/" ;
 
-(* 注：0.0.1 要求显式分号，ASI（自动分号插入）计划在后续版本实现 *)
+(* 注：0.0.1 要求显式分号；0.0.2 起 ASI（自动分号插入）落地，分号可选，
+   显式分号仍合法 *)

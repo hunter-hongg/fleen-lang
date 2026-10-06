@@ -2,6 +2,10 @@
 
 > **快、简、安、直觉**
 > 编译运行都快 · 简洁清晰 · 内存安全 · 直觉友好
+>
+> **0.0.2 增量**：所有权（`move` / `clone` / `box<T>` / `ref`）、`?` 与 `Ok`/`Err`、
+> ASI（分号可选）已定稿 —— 决议与细则见 `docs/0.0.2/PLAN.md`，
+> 正文相应小节已同步标注（标注"0.0.2"的内容实现落地前不代表当前工具链行为）。
 
 ---
 
@@ -9,7 +13,8 @@
 
 Fleen 是一门静态类型、编译到字节码的编程语言。语法学 Python，所有权学 Rust，设计哲学是**显式、简洁、无魔法**。
 
-> **注意**：0.0.1 版本要求显式分号 `;`，ASI（自动分号插入）计划在后续版本实现。
+> **注意**：0.0.1 要求显式分号 `;`；0.0.2 起 ASI（自动分号插入）落地，分号可选
+> （显式分号仍合法），判定规则见 §3.9。
 
 - **文件后缀**：`.fln`
 - **编译目标**：字节码 + VM
@@ -49,8 +54,10 @@ true / false // bool
 ```
 func  const  if  elif  else  while  choose
 when  otherwise  return  import  unsafe  trusted
-box  ref  move  clone  true  false
+box  ref  deref  move  clone  true  false
 ```
+
+> `deref` 为 0.0.2 新增关键字（box 点内值读写，见 §10.3）。
 
 ---
 
@@ -147,7 +154,8 @@ a = b = 5;        // ❌ 错误：b 未绑定
 
 > **关于 `x = x + 1`**：首次出现时报错（绑定前使用，§3.1）；已绑定时是正常赋值（②）。循环体内的 `x = x + 1` 是对**外层** `x` 的赋值，见 §4.5。
 
-> **分号说明**：0.0.1 要求语句末尾显式写分号 `;`。ASI（自动分号插入）计划在后续版本实现，届时分号可省略。
+> **分号说明**：0.0.1 要求语句末尾显式写分号 `;`。0.0.2 起 ASI（自动分号插入）
+> 落地，分号可省略（显式分号仍合法），判定规则见 §3.9。
 >
 > **表达式语句分号规则**：
 > - if、while、choose 等控制流表达式作为语句使用时，必须加分号
@@ -183,6 +191,68 @@ error: type annotation not allowed on assignment
    |
 help: remove the type annotation: `x = 43`
 ```
+
+### 3.8 所有权与绑定（0.0.2）
+
+值分三类（完整模型见 §10.1）：
+
+| 类别 | 类型 | 绑定/赋值/传参语义 |
+|------|------|--------------------|
+| Copy | `int` `float` `bool` `unit` 函数值 | 隐式按位复制，一切照旧（0.0.1 规则不变） |
+| Owned | `string` `box<T>`、含 owned 分量的 `Result<T, E>` | 唯一所有者；转移需 `move`，复制需 `clone` |
+| Borrow | `ref T`（仅函数参数位置，§10.4） | 只读借用，不转移 |
+
+**绑定视角的核心规则：**
+
+```fleen
+s = "hello";       // 绑定 owned 值（RHS 是新值，无需关键字）
+t = move s;        // 转移：s 之后不可再用
+t = clone t;       // 深拷贝：原值仍可用
+y = fib(n);        // 合法：函数返回值是新鲜值，天然转移
+```
+
+1. Copy 类型的使用**永远**不需要 `move` / `clone`；
+2. owned 局部变量进入**消费位置**（绑定/赋值 RHS 顶层、实参、`choose` scrutinee）
+   必须显式 `move` / `clone`，裸写是编译错误（help 提示补关键字）；
+3. **产出位置隐式转移**：函数尾、块尾、if/choose 分支尾的值顺"出口"流走；
+   分支尾的转移是条件性转移，之后使用报"可能已移动"；
+4. 比较运算与 `print` 实参是**只读使用**：自动复制，不转移；
+5. 禁止 `move deref b`（移出 box）、`move g`（移出全局——owned 全局读取即深拷贝、
+   写入即替换）、`move s`（s 为 `ref` 参数）。
+
+所有权检查在 typeck 内做流敏感分析（`typeck/ownership.rs`，0.0.2 新增），
+以函数为单位、不穿越函数边界。
+
+### 3.9 分号与 ASI（0.0.2）
+
+0.0.2 起分号可选，判定在 **parser 端**做白名单式"可续接"判定
+（lexer 与 Token 流保持纯粹；Fleen 无 `return` 关键字、无 `++`，无 JS 式 ASI 陷阱面）：
+
+> 语句结束后——
+> 1. 下一 token 是 `;` → 消费（**显式分号永远合法**，新旧风格可混用）；
+> 2. 下一 token ∈ **新语句起始集** 或 ∈ `{ }`, EOF → 隐式结束；
+> 3. 下一 token ∈ **续接集** → 不结束，表达式继续（运算符续接优先）；
+> 4. 其余 → 报错 `ExpectedSemiOrNewStmt`（带 Span 与期望提示）。
+
+| 集合 | 成员 |
+|------|------|
+| 新语句起始集 | `func` `const` `if` `while` `choose` `import`、标识符、字面量、`box` `deref` `move` `clone` `!` `-` |
+| 续接集 | `+` `*` `/` `%` `==` `!=` `<` `>` `<=` `>=` `and` `or` `?` `.` `[` `(` |
+| 终止集 | `}` EOF |
+
+**陷阱用例**（必须进规范与测试）：
+
+| 代码 | 解析结果 | 说明 |
+|------|---------|------|
+| `x = 1` ⏎ `y = 2` | 两条语句 | 标识符 ∈ 起始集 |
+| `x = 1` ⏎ `- 2` | `x = (1 - 2)` | `-` ∈ 续接集，二元续接优先 |
+| `f()` ⏎ `(g())` | `f()(g())` 调用链 | `(` ∈ 续接集（调用）；想分开请写 `;` |
+| `f()` ⏎ `[0]` | `f()[0]` 索引 | `[` ∈ 续接集 |
+| `x = 1` ⏎ `!flag` | 两条语句 | `!` 非二元续接，`!flag` ∈ 起始集 |
+| `if c { 1 }` ⏎ `else { 2 }` | 语法错误 | `else` 不续接已完结的 if 语句 |
+
+不变量：`func` 声明后无分号、块尾表达式无分号、`when`/`otherwise` 无分号的规则不变；
+分号的有无在 AST 之后不可见（不影响 MIR 与字节码）。
 
 ---
 
@@ -400,7 +470,7 @@ if x > 0 {
 };
 ```
 
-`if` 是表达式，有返回值。**注意：0.0.1 要求表达式语句末尾加分号。**
+`if` 是表达式，有返回值。**注意：0.0.1 要求表达式语句末尾加分号（0.0.2 起 ASI 使其可选，§3.9）。**
 
 ### while
 
@@ -410,7 +480,7 @@ while x < 10 {
 };
 ```
 
-**注意：0.0.1 要求表达式语句末尾加分号。**
+**注意：0.0.1 要求表达式语句末尾加分号（0.0.2 起 ASI 使其可选，§3.9）。**
 
 **0.0.1 只做 `while`，`for` 依赖迭代器，后做。**
 
@@ -446,22 +516,50 @@ neg_pattern = "-" , (int_lit | float_lit)
 ## 8. 错误处理
 
 ```fleen
-// 注意：0.0.1 暂不支持 `Ok`/`Err` pattern，以下为后续版本语法；
-// 0.0.1 中必须用空值绑定 + otherwise 分支显式处理。
-res = choose may_fail() {
-    when Ok(value) { value }
-    when Err(e) {
-        log("Error: ", e)
-        return -1
-    }
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
 }
+
+func ratio(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;      // Err 则整函数立即返回该 Err
+    r = div(q, 2)?;
+    Ok(r)
+}
+
+res = choose ratio(10, 2) {
+    when Ok(v) { v }
+    when Err(e) {
+        print("error: ", e);
+        0 - 1
+    }
+};
 ```
 
-**0.0.1 只做 `choose`，不做 `?` 语法糖。`?` 计划在 0.0.2。**
+> **版本说明**：0.0.1 无 `Ok`/`Err` 构造语法与 pattern（`Result<T, E>` 仅有类型，
+> 须用空值绑定 + otherwise 显式处理）；上例语法与 `?` 自 **0.0.2** 起转正
+> （决议见 `docs/0.0.2/PLAN.md` §3.4）。
+>
+> **词法定性**（0.0.2）：`move` / `clone` / `deref` 是**关键字**
+> （`is_keyword()` 返回 true，从合法标识符变为保留字，"保留字用作绑定名"
+> 由 parser 在期望标识符处报错）；`?` 是**标点 token**（`TokenKind::Question`，
+> `is_keyword()` 返回 false），不参与保留字判定。
 
-- `Result<T, E>` 是轻量代数类型（P4: 使用尖括号，与 EBNF 保持一致）
-- 错误必须显式处理
-- `panic` 仅用于不可恢复错误，不可捕获
+**0.0.2 语义：**
+
+- `Ok(expr)` / `Err(expr)` 是内建构造表达式（可被用户遮蔽，机制同 `print`），
+  类型由**上下文**确定（函数返回类型标注、绑定类型标注、`?` 所在函数返回类型、
+  choose scrutinee）；无上下文 → 编译错误，提示补类型标注
+- `choose` 支持 `when Ok(v)` / `when Err(e)` pattern，绑定按**转移**语义；
+  `Ok` + `Err` 两臂齐即穷尽，无需 `otherwise`；带 guard 的臂不计入穷尽
+- `?` 后缀运算符：操作数类型为 `Result<T, E>`，所在函数返回类型须为
+  `Result<T2, E>`（`E` 完全相等，0.0.2 无错误类型转换）；`Err` 时整函数立即返回该 `Err`
+- 表达式语句的值类型为 `Result<T, E>` → 编译错误（`UnhandledResult`）：
+  Result 不允许静默丢弃，提示绑定或加 `?`
+- `main` 可返回 `Result<T, E>`：VM 收到 `Err` 时打印 stderr 并以退出码 1 结束
+- 无 `return` 关键字（§5）：`?` 是唯一的提前返回机制
+- `Result<T, E>` 是轻量代数类型（尖括号，与 EBNF 一致）；错误必须显式处理；
+  `panic` 仅用于不可恢复错误，不可捕获
 
 ---
 
@@ -480,10 +578,10 @@ unit
 ### 复合类型
 
 ```fleen
-[T]              // 数组
-box<T>           // 堆指针
-ref T            // 只读借用（仅函数参数）
-Result<T, E>     // 错误处理
+[T]              // 数组（0.0.3）
+box<T>           // 堆指针，唯一所有权；box expr 分配、deref 读写（0.0.2，§10.3）
+ref T            // 只读借用，仅函数参数（0.0.2，§10.4）
+Result<T, E>     // 错误处理（0.0.2 起 Ok/Err/? 转正，§8）
 ```
 
 ### 函数类型
@@ -494,18 +592,114 @@ Result<T, E>     // 错误处理
 
 ---
 
-## 10. 指针
+## 10. 指针与所有权
+
+> **版本说明**：0.0.1 不做；`box<T>` / `deref` / `ref` / `move` / `clone` 自 **0.0.2** 起
+> 转正（决议与细则见 `docs/0.0.2/PLAN.md` §3.1–3.3）。
+> `ptr` / `addr` / `unsafe` 仍不做（0.0.5）。
 
 ```fleen
-ptr<T>    // 裸指针，unsafe
-box<T>    // 堆指针，安全，唯一所有权
-
-addr x        // 取地址，安全
-deref p       // 解引用 ptr，unsafe
-deref b       // 解引用 box，安全
+box<T>    // 堆指针，安全，唯一所有权（0.0.2）
+ref T     // 只读借用，仅函数参数（0.0.2）
+ptr<T>    // 裸指针，unsafe（0.0.5）
+addr x    // 取地址（0.0.5）
 ```
 
-**0.0.1 不做。**
+### 10.1 所有权模型
+
+值分三类（`is_copy(T)` 由 typeck 判定）：
+
+| 类别 | 类型 | 赋值/传参语义 |
+|------|------|---------------|
+| Copy | `int` `float` `bool` `unit` 函数值 | 隐式按位复制，一切照旧 |
+| Owned | `string` `box<T>`、含 owned 分量的 `Result<T, E>` | 唯一所有者；转移需 `move`，复制需 `clone` |
+| Borrow | `ref T`（仅参数位置） | 只读借用，不转移 |
+
+### 10.2 move / clone
+
+| 表达式 | 效果 |
+|--------|------|
+| `move x` | 转移 `x` 的所有权，此后 `x` 不可再用（`UseAfterMove`） |
+| `clone x` | 深拷贝，`x` 仍可用 |
+| `clone deref b` | 深拷贝 box 点内值，box 不动 |
+| `clone g`（g 为全局） | 深拷贝（owned 全局的读取语义即深拷贝，见规则 5） |
+
+**核心规则：**
+
+1. Copy 类型永远不需要 `move` / `clone`
+2. owned 局部变量进入**消费位置**（绑定/赋值 RHS 顶层、实参、`choose` scrutinee）
+   必须显式 `move` / `clone`；裸写是编译错误（help 提示补关键字）
+3. **产出位置隐式转移**：函数尾、块尾、if/choose 分支尾的值顺"出口"流走，
+   无需关键字；分支尾的转移是条件性转移，之后使用报"可能已移动"
+4. 比较运算与 `print` 实参是**只读使用**：自动复制，不转移
+5. 禁止：`move deref b`（不可移出 box）、`move g`（不可移出全局——owned 全局
+   读取即深拷贝、写入即替换）、`move s`（s 为 `ref` 参数）
+6. `move` / `clone` 作用于 Copy 类型 → 编译错误，提示去掉关键字
+
+```fleen
+s = "hello";
+t = move s;        // 转移，s 之后不可用
+t = clone t;       // 深拷贝，t 仍可用
+```
+
+```
+error: use of moved value `s`
+  --> demo.fln:4:11
+   |
+ 3 | t = move s;
+   |          - `s` moved here
+ 4 | print(s);
+   |       ^ `s` was moved
+   |
+help: clone the value if you still need it: `t = clone s;`
+```
+
+### 10.3 box<T>
+
+```fleen
+b = box 42;            // b: box<int>，堆分配
+n = deref b;           // 读：副本（owned 点内值为深拷贝）
+deref b = n + 1;       // 写：替换点内值，旧值释放
+c = clone b;           // 新 box + 新点内值
+s = box "heap";
+t = clone deref s;     // 深拷贝点内值，box 本身不动
+```
+
+- `box expr` 前缀关键字分配（类型位置 `box<T>` 与表达式位置按语法位置区分）；
+  `deref` 前缀关键字读写；赋值目标可为 `deref b`（不可带类型标注）
+- `deref b` 读取产生点内值的**副本**（`T: Copy` 按位复制，owned 深拷贝）——
+  box 拥有点内值，读取不等于取走所有权；"显式 clone"规则只约束变量位置
+- 点内类型允许集合（0.0.2）：`int` `float` `bool` `string` `box<U>` `Result<T, E>`
+- **不可移出 box**：`move deref b` 编译错误，需要值请 `clone deref b`
+- **确定性释放（无 GC）**：持有者离开作用域、被重新赋值、值被丢弃时立即释放；
+  无循环引用可能（box 唯一所有权、`ref` 不可存储）→ 不需要 GC，与 §14 一致
+
+### 10.4 ref：只读借用（仅函数参数）
+
+```fleen
+func shout(s: ref string): int {
+    print(s);          // 只读使用
+    42
+}
+
+func main(): int {
+    name = "fleen";
+    shout(name);       // 传借用，name 仍可用
+    shout(name);       // 再借一次，合法
+    0
+}
+```
+
+- `ref T` 只能出现在**函数参数类型**位置；`ref` 局部变量、`ref` 全局、
+  返回 `ref`、嵌套 `ref ref T` 一律编译错误（`RefNotAllowedHere`）
+- ref 参数只读：赋值（`AssignToRefParam`）、`move`（`MoveOfBorrowed`）均错误；
+  `clone s` 得到 owned `T`；可作为 `ref T` 实参转发（句柄流动，零拷贝）
+- 实参**不转移**：传局部/全局/另一 ref 参数均可，不需要 `move`/`clone`；
+  不支持借用 box 内部（`deref b` 作 ref 实参）
+- `ref T` 是独立类型（`ref string ≠ string`）：把 `ref string` 赋给 `string`
+  绑定是类型错误，提示 `clone s`；传 `move x` 给 `ref` 参数报错（借用不接受转移）
+- **无需借用检查器**：句柄只存活于一次调用——被借槽位调用期间不被改写
+  （调用方挂起）、句柄无法逃逸（不能赋值/存储/返回）→ 没有悬垂的可能
 
 ---
 
@@ -541,7 +735,7 @@ func normal() {
 }
 ```
 
-**0.0.1 不做。**
+**0.0.1 不做（0.0.5）。**
 
 ---
 
@@ -555,7 +749,7 @@ func normal() {
 
 **不支持函数重载，支持运算符重载（后续版本）。**
 
-**0.0.1 分号规则**：语句末尾需显式写分号 `;`。ASI 在后续版本实现。
+**分号规则**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI 落地，分号可选（显式仍合法，见 §3.9）。
 
 ---
 
@@ -645,32 +839,35 @@ x = 44;              // 改的是哪个？
 
 ---
 
-## 17. 0.0.1 范围
+## 17. 特性范围
 
-| 特性 | 0.0.1 |
-|------|-------|
-| `=` 绑定/赋值 | ✅ |
-| `const` 不可变 | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ |
-| `func` 单行 / 多行 | ✅ |
-| `if` / `elif` / `else` | ✅ |
-| `while` | ✅ |
-| `choose` | ✅ |
-| `Result` | ✅ |
-| 函数类型 | ✅ |
-| 分号 `;` | ✅ |
-| `?` | ❌ |
-| `move` / `clone` | ❌ |
-| `box<T>` | ❌ |
-| `ref` | ❌ |
-| `struct` | ❌ |
-| `for` | ❌ |
-| `async` | ❌ |
-| FFI | ❌ |
-| 泛型 | ❌ |
-| 运算符重载 | ❌ |
+| 特性 | 0.0.1 | 0.0.2 |
+|------|-------|-------|
+| `=` 绑定/赋值 | ✅ | ✅ |
+| `const` 不可变 | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅（string 转为 owned 语义） |
+| `func` 单行 / 多行 | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ |
+| `while` | ✅ | ✅ |
+| `choose` | ✅ | ✅（+ `Ok`/`Err` pattern） |
+| `Result` | ✅（仅类型） | ✅（+ `Ok`/`Err` 构造、`?`） |
+| 函数类型 | ✅ | ✅ |
+| 分号 `;` | ✅ 必填 | ✅ 可选（ASI） |
+| `?` | ❌ | ✅ |
+| `move` / `clone` | ❌ | ✅ |
+| `box<T>` | ❌ | ✅ |
+| `ref` | ❌ | ✅（仅参数） |
+| `struct` | ❌ | ❌（0.0.3） |
+| `for` | ❌ | ❌（0.0.3） |
+| `async` | ❌ | ❌（0.0.4） |
+| FFI | ❌ | ❌ |
+| 泛型 | ❌ | ❌（0.1.0） |
+| 运算符重载 | ❌ | ❌（0.1.0） |
+| 指针 `ptr` / `addr` | ❌ | ❌（0.0.5） |
 
 **0.0.1 目标：Fibonacci 能跑。**
+
+**0.0.2 目标：所有权起步 —— 规划见 `docs/0.0.2/PLAN.md`。**
 
 ---
 
@@ -678,20 +875,20 @@ x = 44;              // 改的是哪个？
 
 | 版本 | 内容 |
 |------|------|
-| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI |
+| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI —— **已定稿，规划见 `docs/0.0.2/PLAN.md`** |
 | 0.0.3 | `struct` / `for` / 迭代器 |
 | 0.0.4 | `async` / `await` |
 | 0.0.5 | `unsafe` / `trusted` |
 | 0.1.0 | 泛型 / 运算符重载 |
 
-### 已知 Hack（必须在 0.0.2 修复）
+### 已知 Hack（0.0.2 修复方案已定）
 
-- **`print` 类型检查被放宽**：typeck 中 `print` 的签名仍是 `(string) -> unit`，但
-  `typeck_call` 对 `print` 特判，跳过参数类型检查（任意类型、任意元数）。动机：
-  DESIGN.md 的 Fibonacci 示例需要 `print(fib(x))`（int），而 typeck 原定义为 string。
-  正确做法（0.0.2）：内建函数支持可变参数/多态签名（如按类型分派的 trait 或
-  `any` 参数转换），恢复严格检查，并把 `check_builtin_print_wrong_arg` 测试改回
-  期望 `ArgTypeMismatch`。
+- **`print` 类型检查被放宽**（0.0.1 现状）：typeck 中 `print` 的签名仍是
+  `(string) -> unit`，但 `typeck_call` 对 `print` 特判，跳过参数类型检查
+  （任意类型、任意元数），`check_builtin_print_wrong_arg` 测试暂期望编译通过。
+  0.0.2 修复方案已定稿（`docs/0.0.2/PLAN.md` §6）：内建签名表 +
+  `printable` 集合（int/float/bool/string/unit），恢复严格检查；
+  实现落地后本节清空。
 
 ---
 

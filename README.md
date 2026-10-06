@@ -33,6 +33,10 @@ func main(): int {
 `choose` 模式匹配（支持守卫）。0.0.1 需显式分号，`struct` / `for` / 泛型等
 尚未纳入 —— 完整范围见 [SPEC.md](SPEC.md) §15。
 
+**0.0.2（规划中）**：所有权系统（`move` / `clone` / `box<T>` / `ref`）、
+`?` 错误传播（含 `Ok` / `Err` 构造与 pattern）、ASI 分号可选 ——
+规划与设计决议见 [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。
+
 ## 快速开始
 
 需要 Rust 1.85+（2024 edition）。
@@ -75,6 +79,7 @@ cargo doc --no-deps
 - [docs/DESIGN.md](docs/DESIGN.md) —— 语言设计草案
 - [docs/SYNTAX.ebnf](docs/SYNTAX.ebnf) —— EBNF 文法
 - [docs/BYTECODE.md](docs/BYTECODE.md) —— 字节码格式规范
+- [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) —— 0.0.2 特性规划（所有权起步）
 - [CHANGELOG.md](CHANGELOG.md) —— 版本日志
 
 ## 许可证
