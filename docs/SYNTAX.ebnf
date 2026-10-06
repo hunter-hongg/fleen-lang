@@ -21,9 +21,9 @@ declaration     = const_decl
 
 (* ---------- 变量绑定 ---------- *)
 
-var_binding     = [ type_annot ] , "=" , expr ;
+var_binding     = ident , [ type_annot ] , "=" , expr , [ ";" ] ;
 
-const_decl      = "const" , ident , [ type_annot ] , "=" , expr ;
+const_decl      = "const" , ident , [ type_annot ] , "=" , expr , [ ";" ] ;
 
 type_annot      = ":" , type ;
 
@@ -32,7 +32,7 @@ type_annot      = ":" , type ;
 
 func_decl       = "func" , ident , "(" , [ param_list ] , ")"
                   , [ type_annot ]
-                  , ( "=" , expr
+                  , ( "=" , expr , [ ";" ]
                     | block ) ;
 
 param_list      = param , { "," , param } ;
@@ -64,9 +64,12 @@ func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 
 (* ---------- 语句/表达式 ---------- *)
 
-expr_stmt       = expr ;
+expr_stmt       = expr , [ ";" ] ;
+(* 注：0.0.1 要求表达式语句末尾显式加分号 *)
+(* 特殊规则：choose/when/otherwise 结构中，when 子句和 otherwise 子句本身不带分号 *)
+(* 只有 choose 整体作为表达式语句使用时，末尾才加分号 *)
 
-block           = "{" , { declaration | expr } , "}" ;
+block           = "{" , { declaration | expr_stmt } , "}" ;
 
 
 (* ---------- 表达式 ---------- *)
@@ -81,20 +84,30 @@ assign_expr     = logic_or , [ "=" , assign_expr ] ;
 if_expr         = "if" , expr , block
                   , { "elif" , expr , block }
                   , [ "else" , block ] ;
+(* 注：if_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
 
 while_expr      = "while" , expr , block ;
+(* 注：while_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
 
 choose_expr     = "choose" , expr , "{"
                   , { when_clause }
                   , [ otherwise_clause ]
                   , "}" ;
+(* 注：choose_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
+(* 注意：when 子句和 otherwise 子句本身不带分号，只有整体末尾加分号 *)
 
 when_clause     = "when" , pattern , [ "if" , expr ] , block ;
+(* 注：when 子句不带分号 *)
 
 otherwise_clause = "otherwise" , block ;
+(* 注：otherwise 子句不带分号 *)
 
-pattern         = literal
+pattern         = neg_pattern
+                | literal
                 | ident ;
+
+(* P5: choose pattern also accepts negated numeric literals *)
+neg_pattern     = "-" , (int_lit | float_lit) ;
 
 
 (* ---------- 运算符优先级（从低到高） ---------- *)
@@ -162,3 +175,11 @@ letter          = "a" .. "z" | "A" .. "Z" | "_" ;
 digit           = "0" .. "9" ;
 
 any_char        = ? 除双引号外的任意字符 ? ;
+
+
+(* ---------- 注释 ---------- *)
+
+comment         = "//" , { any_char_except_newline } , newline
+                | "/*" , { any_char } , "*/" ;
+
+(* 注：0.0.1 要求显式分号，ASI（自动分号插入）计划在后续版本实现 *)
