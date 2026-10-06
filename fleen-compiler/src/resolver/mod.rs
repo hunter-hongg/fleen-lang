@@ -3,19 +3,27 @@
 //! Transforms AST → HIR (High-level IR) with resolved names and scope information.
 //!
 //! Key semantics (per `DESIGN.md`):
-//! - **Binding vs assignment** (§3.1): first occurrence of `x = expr` in a scope is a
-//!   binding; a later occurrence in the *same* scope is an assignment.
-//! - **Shadowing** (§4.3): inside a block, `x = expr` is always a *new binding* that
+//! - **Binding vs assignment** (§3.1): in statement position, `x = expr` binds a
+//!   new name if the name is unbound at this position, and assigns to the
+//!   existing binding if the name is already bound here.
+//! - **Shadowing** (§4.3): inside a block, `x = expr` is a *new binding* that
 //!   shadows the outer `x` (if mutability matches); it never assigns to the outer one.
+//! - **Loop bodies** (§4.5): inside a `while` body (including nested blocks, up
+//!   to the function boundary), `x = expr` *assigns* to an existing outer
+//!   mutable binding instead of shadowing it — the counter idiom
+//!   `while c { x = x + 1; }` updates the outer variable.
+//! - **Expression position**: `x = expr` is *assignment only*; it never binds.
+//!   Targets follow the same rules, so it never writes through a function boundary.
 //! - **Function scope** (§4.2/§4.3): the function body is independent; declarations
-//!   inside it do not shadow-check against enclosing scopes.
-//! - **Forward references**: function names are collected before bodies are resolved,
-//!   so a function may be called before its declaration. Variables cannot.
+//!   inside it do not shadow-check against enclosing scopes ("函数不生效").
+//! - **Forward references**: function names are collected before bodies are
+//!   resolved, so a function may be called before its declaration. Variables cannot.
 
 pub mod error;
 pub mod hir;
 pub mod scope;
 
+use crate::lexer::Span;
 use crate::parser::ast::*;
 use error::{ResolveError, ResolveErrorKind};
 use hir::{
@@ -23,7 +31,8 @@ use hir::{
     ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir, ParamHir,
     PatternHir, StmtHir, VarBindingHir,
 };
-use scope::{Binding, BindingKind, ScopeStack};
+use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
+use std::collections::HashMap;
 
 /// Builtin functions available in every program (registered in the global scope).
 const BUILTINS: &[&str] = &["print"];
@@ -37,8 +46,7 @@ const BUILTINS: &[&str] = &["print"];
 /// - `Ok(Hir)`: Resolution successful, all names bound.
 /// - `Err(Vec<ResolveError>)`: Resolution errors (collected, not fail-fast).
 pub fn resolve(ast: Ast) -> Result<Hir, Vec<ResolveError>> {
-    let resolver = Resolver::new();
-    resolver.resolve_program(ast)
+    Resolver::new().resolve_program(ast)
 }
 
 /// Main resolver struct holding state during resolution.
@@ -51,6 +59,9 @@ struct Resolver {
     hir_id_counter: u32,
     /// Counter for generating unique binding IDs.
     binding_id_counter: u32,
+    /// Top-level functions collected in the forward-reference pass, mapped to
+    /// their `BindingId`. Used to avoid double-declaring them in the main pass.
+    global_funcs: HashMap<String, BindingId>,
 }
 
 impl Resolver {
@@ -60,6 +71,7 @@ impl Resolver {
             errors: Vec::new(),
             hir_id_counter: 0,
             binding_id_counter: 0,
+            global_funcs: HashMap::new(),
         }
     }
 
@@ -75,46 +87,23 @@ impl Resolver {
         id
     }
 
-    fn add_error(&mut self, kind: ResolveErrorKind, span: crate::lexer::Span) {
+    fn add_error(&mut self, kind: ResolveErrorKind, span: Span) {
         self.errors.push(ResolveError { kind, span });
     }
 
     /// Main entry point: resolve the entire program.
     fn resolve_program(mut self, ast: Ast) -> Result<Hir, Vec<ResolveError>> {
-        // Register builtin functions in the global scope.
         self.register_builtins();
+        self.predeclare_global_functions(&ast);
+        let global_funcs = std::mem::take(&mut self.global_funcs);
 
-        // First pass: collect top-level function declarations for forward references.
-        // The global scope does not shadow-check (Global kind), so duplicates among
-        // builtins/functions are simply overwritten by design of `declare` failing
-        // silently here; a duplicate user function shadows nothing and is reported
-        // by later phases if needed.
-        for item in &ast.items {
-            if let Item::Decl(Decl::Func(func_decl)) = item {
-                let binding_id = self.next_binding_id();
-                let _ = self.scopes.declare(
-                    func_decl.name.clone(),
-                    Binding {
-                        id: binding_id,
-                        kind: BindingKind::Function,
-                        mutable: false, // functions are immutable bindings
-                        span: func_decl.span,
-                        hir_id: HirId(0), // placeholder, filled when the body resolves
-                    },
-                );
-            }
-        }
-
-        // Second pass: resolve all items. Errors are collected; a failed item
-        // contributes an error placeholder so positions of later items stay stable.
         let mut hir_items = Vec::new();
         for item in ast.items {
-            match self.resolve_item(item) {
-                Ok(hir_item) => hir_items.push(hir_item),
-                Err(_) => {
-                    // Error already recorded by add_error.
-                }
+            if let Ok(hir_item) = self.resolve_item(item, &global_funcs) {
+                hir_items.push(hir_item);
             }
+            // On Err the error was already recorded by `add_error`; the item
+            // contributes no placeholder because the HIR is discarded anyway.
         }
 
         if !self.errors.is_empty() {
@@ -135,19 +124,57 @@ impl Resolver {
                 (*name).to_string(),
                 Binding {
                     id: binding_id,
-                    kind: BindingKind::Function,
+                    kind: BindingKind::Builtin,
                     mutable: false,
-                    span: crate::lexer::Span::new(0, 0), // builtins have no source span
+                    builtin: true,
+                    span: Span::new(0, 0), // builtins have no source span
                     hir_id: HirId(0),
                 },
             );
         }
     }
 
-    fn resolve_item(&mut self, item: Item) -> Result<HirItem, ()> {
+    /// First pass: declare all top-level functions so bodies can call
+    /// functions declared later in the file. Duplicate top-level function
+    /// names are reported here.
+    fn predeclare_global_functions(&mut self, ast: &Ast) {
+        for item in &ast.items {
+            if let Item::Decl(Decl::Func(func_decl)) = item {
+                let binding_id = self.next_binding_id();
+                let binding = Binding {
+                    id: binding_id,
+                    kind: BindingKind::Function,
+                    mutable: false, // function names are immutable bindings
+                    builtin: false,
+                    span: func_decl.span,
+                    hir_id: HirId(0), // placeholder, filled when the body resolves
+                };
+                match self.scopes.declare(func_decl.name.clone(), binding) {
+                    Ok(()) => {
+                        self.global_funcs.insert(func_decl.name.clone(), binding_id);
+                    }
+                    Err(first) => {
+                        self.add_error(
+                            ResolveErrorKind::DuplicateBinding {
+                                name: func_decl.name.clone(),
+                                first_span: first.span,
+                            },
+                            func_decl.span,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_item(
+        &mut self,
+        item: Item,
+        global_funcs: &HashMap<String, BindingId>,
+    ) -> Result<HirItem, ()> {
         let hir_item = match item {
             Item::Import(import_decl) => HirItem::Import(self.resolve_import(import_decl)),
-            Item::Decl(decl) => HirItem::Decl(self.resolve_decl(decl)?),
+            Item::Decl(decl) => HirItem::Decl(self.resolve_decl(decl, global_funcs)?),
             Item::Expr(expr) => HirItem::Expr(self.resolve_expr(expr)?),
         };
         Ok(hir_item)
@@ -160,48 +187,111 @@ impl Resolver {
         }
     }
 
-    fn resolve_decl(&mut self, decl: Decl) -> Result<DeclHir, ()> {
+    fn resolve_decl(
+        &mut self,
+        decl: Decl,
+        global_funcs: &HashMap<String, BindingId>,
+    ) -> Result<DeclHir, ()> {
         match decl {
-            Decl::Func(func) => Ok(DeclHir::Func(self.resolve_func_decl(func)?)),
+            Decl::Func(func) => Ok(DeclHir::Func(self.resolve_func_decl(func, global_funcs)?)),
             Decl::Var(var) => Ok(DeclHir::Var(self.resolve_var_binding(var)?)),
             Decl::Const(c) => Ok(DeclHir::Const(self.resolve_const_decl(c)?)),
         }
     }
 
     /// Resolve a function declaration.
-    fn resolve_func_decl(&mut self, func: FuncDecl) -> Result<FuncDeclHir, ()> {
-        // Declare the function in the CURRENT scope (before entering function scope).
-        // This allows nested functions to be called by later code in the same scope.
-        let binding_id = self.next_binding_id();
-        let _ = self.scopes.declare(
-            func.name.clone(),
-            Binding {
-                id: binding_id,
-                kind: BindingKind::Function,
-                mutable: false,
-                span: func.span,
-                hir_id: HirId(0), // placeholder, filled after body resolves
-            },
-        );
+    ///
+    /// The name is declared in the *current* scope before entering the function
+    /// scope, so nested functions are visible to later code in the same scope
+    /// and recursive calls resolve. Top-level functions were already declared
+    /// by the forward-reference pass, so they are not declared again here.
+    fn resolve_func_decl(
+        &mut self,
+        func: FuncDecl,
+        global_funcs: &HashMap<String, BindingId>,
+    ) -> Result<FuncDeclHir, ()> {
+        let predeclared = global_funcs.get(&func.name).copied();
+        let binding_id = match predeclared {
+            Some(id) => id,
+            None => {
+                let id = self.next_binding_id();
+                let binding = Binding {
+                    id,
+                    kind: BindingKind::Function,
+                    mutable: false,
+                    builtin: false,
+                    span: func.span,
+                    hir_id: HirId(0),
+                };
+                match self.scopes.declare(func.name.clone(), binding) {
+                    Ok(()) => id,
+                    Err(first) => {
+                        self.add_error(
+                            ResolveErrorKind::DuplicateBinding {
+                                name: func.name.clone(),
+                                first_span: first.span,
+                            },
+                            func.span,
+                        );
+                        // Still resolve the body so later errors are collected.
+                        id
+                    }
+                }
+            }
+        };
 
-        // Enter function scope for the function body
+        let (params, body) = self.resolve_function_body(func.params, func.body);
+
+        let hir_id = self.next_hir_id();
+        if let Some(binding) = self.scopes.get_mut_by_id(binding_id) {
+            binding.hir_id = hir_id;
+        }
+
+        Ok(FuncDeclHir {
+            name: func.name,
+            params,
+            ret_type: func.ret_type,
+            body,
+            hir_id,
+            span: func.span,
+        })
+    }
+
+    /// Enter the function scope, resolve parameters and body, and *always*
+    /// leave the scope — even when body resolution fails. Without this,
+    /// a failure deep in the body leaks the function scope and corrupts
+    /// shadow/loop checks for the rest of the program.
+    fn resolve_function_body(
+        &mut self,
+        params: Vec<Param>,
+        body: FuncBody,
+    ) -> (Vec<ParamHir>, FuncBodyHir) {
         self.scopes.enter_function_scope();
 
-        // Resolve parameters
         let mut hir_params = Vec::new();
-        for param in func.params {
+        for param in params {
             let binding_id = self.next_binding_id();
             let hir_id = self.next_hir_id();
-            let _ = self.scopes.declare(
-                param.name.clone(),
-                Binding {
-                    id: binding_id,
-                    kind: BindingKind::Parameter,
-                    mutable: false, // parameters are immutable in 0.0.1
-                    span: param.span,
-                    hir_id,
-                },
-            );
+            let binding = Binding {
+                id: binding_id,
+                kind: BindingKind::Parameter,
+                mutable: false, // parameters are immutable in 0.0.1
+                builtin: false,
+                span: param.span,
+                hir_id,
+            };
+            match self.scopes.declare(param.name.clone(), binding) {
+                Ok(()) => {}
+                Err(first) => {
+                    self.add_error(
+                        ResolveErrorKind::DuplicateBinding {
+                            name: param.name.clone(),
+                            first_span: first.span,
+                        },
+                        param.span,
+                    );
+                }
+            }
             hir_params.push(ParamHir {
                 name: param.name,
                 ty: param.ty,
@@ -211,65 +301,67 @@ impl Resolver {
             });
         }
 
-        // Resolve function body
-        let hir_body = match func.body {
-            FuncBody::SingleExpr(expr) => {
-                let hir_expr = self.resolve_expr(*expr)?;
-                FuncBodyHir::SingleExpr(Box::new(hir_expr))
-            }
-            FuncBody::Block(block) => {
-                let hir_block = self.resolve_block(block)?;
-                FuncBodyHir::Block(hir_block)
-            }
+        let body_result = match body {
+            FuncBody::SingleExpr(expr) => match self.resolve_expr(*expr) {
+                Ok(hir_expr) => Ok(FuncBodyHir::SingleExpr(Box::new(hir_expr))),
+                Err(()) => Ok(FuncBodyHir::Block(BlockHir {
+                    stmts: vec![StmtHir::Error],
+                    tail_expr: None,
+                    hir_id: self.next_hir_id(),
+                    span: Span::new(0, 0),
+                })),
+            },
+            FuncBody::Block(block) => self
+                .resolve_block_inner(block, ScopeKind::Block)
+                .map(FuncBodyHir::Block),
         };
 
-        // Exit function scope
         self.scopes.exit_scope();
 
-        let hir_id = self.next_hir_id();
-        let func_hir = FuncDeclHir {
-            name: func.name.clone(),
-            params: hir_params,
-            ret_type: func.ret_type,
-            body: hir_body,
-            hir_id,
-            span: func.span,
+        let hir_body = match body_result {
+            Ok(b) => b,
+            Err(()) => FuncBodyHir::Block(BlockHir {
+                stmts: vec![StmtHir::Error],
+                tail_expr: None,
+                hir_id: HirId(0),
+                span: Span::new(0, 0),
+            }),
         };
-
-        // Update the binding's hir_id in the scope where it was declared
-        if let Some(binding) = self.scopes.get_mut(&func.name) {
-            binding.hir_id = hir_id;
-        }
-
-        Ok(func_hir)
+        (hir_params, hir_body)
     }
 
-    /// Resolve a variable binding statement `x = expr` / `x: int = expr`.
+    /// Resolve a statement-position `x = expr` / `x: int = expr`.
     ///
-    /// Semantics depend on the current scope kind:
-    /// - Name exists in the current scope → assignment to that binding
-    ///   (must be mutable; error otherwise).
-    /// - Name not in current scope → new binding (shadowing an outer name if any;
-    ///   mutability must match the shadowed name, per DESIGN.md §4.3).
+    /// Unified `=` semantics (DESIGN.md §3.1/§3.4/§4.5):
+    /// - Name bound at this position (current scope, or loop body with an
+    ///   outer mutable binding up to the function boundary) → **assignment**:
+    ///   the binding must be mutable and cannot carry a type annotation.
+    /// - Otherwise → **new binding**; an outer name is shadowed (mutability
+    ///   must match, per §4.3).
     ///
     /// The initializer is resolved BEFORE the binding is declared, so
-    /// `x = x + 1` correctly fails (x not in scope during init resolution).
+    /// `x = x + 1` on a first occurrence fails (§3.1) while
+    /// `x = x + 1` on an assignment sees the existing binding.
     fn resolve_var_binding(&mut self, var: VarBinding) -> Result<VarBindingHir, ()> {
-        // First resolve the initializer WITHOUT the new binding in scope.
-        // This implements "use before binding is an error" (DESIGN.md §3.1).
         let init = self.resolve_expr(*var.init)?;
-
         let hir_id = self.next_hir_id();
 
-        // Now check if this is an assignment (name already in current scope) or new binding.
-        let existing = self
-            .scopes
-            .current_get(&var.name)
-            .map(|b| (b.id, b.mutable));
-
-        if let Some((existing_id, existing_mutable)) = existing {
-            // Assignment to an existing binding in the same scope.
-            if !existing_mutable {
+        // Assignment to an existing binding visible at this position.
+        if let Some(target) = self.scopes.find_assign_target(&var.name) {
+            let (existing_id, mutable, kind) = (target.id, target.mutable, target.kind);
+            // A function name already bound *in this scope* is a name clash,
+            // not an assignment target (DESIGN.md §3.5: one binding per name).
+            if kind == BindingKind::Function {
+                self.add_error(
+                    ResolveErrorKind::DuplicateBinding {
+                        name: var.name.clone(),
+                        first_span: target.span,
+                    },
+                    var.span,
+                );
+                return Err(());
+            }
+            if !mutable {
                 self.add_error(
                     ResolveErrorKind::AssignToImmutable {
                         name: var.name.clone(),
@@ -278,93 +370,99 @@ impl Resolver {
                 );
                 return Err(());
             }
-            // Per DESIGN.md §3.4: assignment cannot carry a type annotation.
             if var.ty.is_some() {
                 self.add_error(ResolveErrorKind::TypeAnnotationOnAssignment, var.span);
                 return Err(());
             }
 
-            if let Some(binding) = self.scopes.get_mut(&var.name) {
+            if let Some(binding) = self.scopes.get_mut_by_id(existing_id) {
                 binding.hir_id = hir_id;
             }
-
-            Ok(VarBindingHir {
+            return Ok(VarBindingHir {
                 name: var.name,
                 ty: var.ty,
                 init: Box::new(init),
                 binding_id: existing_id,
                 hir_id,
                 span: var.span,
-            })
-        } else {
-            // New binding. If it shadows an outer name, mutability must match
-            // (DESIGN.md §4.3). Function boundary acts as a shadowing barrier
-            // (DESIGN.md §4.3: "函数不生效").
-            let new_mutable = true; // plain bindings are mutable
-            if let Some(outer) = self.scopes.exists_until_function(&var.name)
-                && outer.mutable != new_mutable
-            {
-                self.add_error(
-                    ResolveErrorKind::ShadowingMutabilityMismatch {
-                        outer_mutable: outer.mutable,
-                        inner_mutable: new_mutable,
-                    },
-                    var.span,
-                );
-                return Err(());
-            }
-
-            let binding_id = self.next_binding_id();
-
-            let _ = self.scopes.declare(
-                var.name.clone(),
-                Binding {
-                    id: binding_id,
-                    kind: BindingKind::Variable,
-                    mutable: true,
-                    span: var.span,
-                    hir_id,
-                },
-            );
-
-            Ok(VarBindingHir {
-                name: var.name,
-                ty: var.ty,
-                init: Box::new(init),
-                binding_id,
-                hir_id,
-                span: var.span,
-            })
+            });
         }
+
+        // New binding. If it shadows an outer name, mutability must match
+        // (DESIGN.md §4.3); parameters, functions and builtins are exempt.
+        let new_mutable = true; // plain bindings are mutable
+        if let Some(outer) = self.scopes.find_shadow_domain(&var.name)
+            && outer.kind.shadow_checks()
+            && outer.mutable != new_mutable
+        {
+            self.add_error(
+                ResolveErrorKind::ShadowingMutabilityMismatch {
+                    outer_mutable: outer.mutable,
+                    inner_mutable: new_mutable,
+                },
+                var.span,
+            );
+            return Err(());
+        }
+
+        let binding_id = self.next_binding_id();
+        if let Err(first) = self.scopes.declare(
+            var.name.clone(),
+            Binding {
+                id: binding_id,
+                kind: BindingKind::Variable,
+                mutable: true,
+                builtin: false,
+                span: var.span,
+                hir_id,
+            },
+        ) {
+            self.add_error(
+                ResolveErrorKind::DuplicateBinding {
+                    name: var.name.clone(),
+                    first_span: first.span,
+                },
+                var.span,
+            );
+            return Err(());
+        }
+
+        Ok(VarBindingHir {
+            name: var.name,
+            ty: var.ty,
+            init: Box::new(init),
+            binding_id,
+            hir_id,
+            span: var.span,
+        })
     }
 
     /// Resolve a const declaration.
     fn resolve_const_decl(&mut self, c: ConstDecl) -> Result<ConstDeclHir, ()> {
-        // First resolve the initializer WITHOUT the new binding in scope.
+        // Resolve the initializer WITHOUT the new binding in scope.
         let init = self.resolve_expr(*c.init)?;
-
         let hir_id = self.next_hir_id();
 
-        let existing = self.scopes.current_get(&c.name).map(|b| (b.id, b.mutable));
-
-        if let Some((_existing_id, existing_mutable)) = existing {
-            // const on an existing name in the same scope:
-            // - const → const: re-binding an immutable name is an error (DESIGN.md §3.5)
-            // - mutable → const: would change mutability, ambiguous (DESIGN.md §16.3)
-            let _ = existing_mutable;
+        // `const` on a name already bound in the same scope is always an error
+        // (DESIGN.md §3.5: mutable → const and const → const are both ❌).
+        if let Some(existing) = self.scopes.current_get(&c.name)
+            && !existing.builtin
+        {
             self.add_error(
-                ResolveErrorKind::DuplicateDeclaration {
+                ResolveErrorKind::DuplicateBinding {
                     name: c.name.clone(),
+                    first_span: existing.span,
                 },
                 c.span,
             );
             return Err(());
         }
 
-        // New const binding. Shadow-check only against scopes up to function boundary
-        // (DESIGN.md §4.3: "函数不生效").
+        // Shadow-check up to the function boundary only (DESIGN.md §4.3:
+        // "函数不生效"); parameters/functions/builtins are exempt.
         let new_mutable = false; // const is immutable
-        if let Some(outer) = self.scopes.exists_until_function(&c.name)
+        if let Some(outer) = self.scopes.find_shadow_domain(&c.name)
+            && outer.kind.shadow_checks()
             && outer.mutable != new_mutable
         {
             self.add_error(
@@ -378,17 +476,26 @@ impl Resolver {
         }
 
         let binding_id = self.next_binding_id();
-
-        let _ = self.scopes.declare(
+        if let Err(first) = self.scopes.declare(
             c.name.clone(),
             Binding {
                 id: binding_id,
-                kind: BindingKind::Variable,
+                kind: BindingKind::Const,
                 mutable: false,
+                builtin: false,
                 span: c.span,
                 hir_id,
             },
-        );
+        ) {
+            self.add_error(
+                ResolveErrorKind::DuplicateBinding {
+                    name: c.name.clone(),
+                    first_span: first.span,
+                },
+                c.span,
+            );
+            return Err(());
+        }
 
         Ok(ConstDeclHir {
             name: c.name,
@@ -489,84 +596,84 @@ impl Resolver {
                 let o = self.resolve_expr(*obj)?;
                 ExprHir::Field(Box::new(o), field)
             }
-            Expr::Int(n) => ExprHir::Int(n),
-            Expr::Float(f) => ExprHir::Float(f),
-            Expr::Bool(b) => ExprHir::Bool(b),
-            Expr::Str(s) => ExprHir::Str(s),
-            Expr::Ident(name) => self.resolve_ident(name)?,
+            Expr::Int(n, span) => ExprHir::Int(n, span),
+            Expr::Float(f, span) => ExprHir::Float(f, span),
+            Expr::Bool(b, span) => ExprHir::Bool(b, span),
+            Expr::Str(s, span) => ExprHir::Str(s, span),
+            Expr::Ident(name, span) => self.resolve_ident(name, span)?,
             Expr::Block(block) => ExprHir::Block(self.resolve_block(block)?),
         };
         Ok(hir)
     }
 
-    /// Resolve an assignment expression: `lhs = rhs`.
-    /// LHS must be an identifier (for now).
+    /// Resolve an expression-position assignment: `x = rhs`.
+    ///
+    /// Expression-position `=` is assignment only — it never binds and never
+    /// shadows. The target follows the same lookup as statement-position `=`
+    /// (current scope, or loop body), so it can never write through a
+    /// function boundary (DESIGN.md §4.2).
     fn resolve_assign(&mut self, lhs: Expr, rhs: Expr) -> Result<ExprHir, ()> {
-        let lhs_name = match lhs {
-            Expr::Ident(name) => name,
-            _ => {
-                self.add_error(
-                    ResolveErrorKind::InvalidAssignmentTarget,
-                    // Use a default span; the parser ensures LHS is ident
-                    crate::lexer::Span::new(0, 0),
-                );
+        let (lhs_name, lhs_span) = match lhs {
+            Expr::Ident(name, span) => (name, span),
+            other => {
+                self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
                 return Err(());
             }
         };
 
         let rhs_hir = self.resolve_expr(rhs)?;
 
-        // Look up the variable in scope
-        match self.scopes.get(&lhs_name) {
-            Some(binding) => {
-                if !binding.mutable {
-                    self.add_error(
-                        ResolveErrorKind::AssignToImmutable {
-                            name: lhs_name.clone(),
-                        },
-                        rhs_hir.span(),
-                    );
-                    return Err(());
-                }
-                Ok(ExprHir::Assign {
-                    name: lhs_name,
-                    binding_id: binding.id,
-                    rhs: Box::new(rhs_hir),
-                    hir_id: self.next_hir_id(),
-                })
-            }
+        match self.scopes.find_assign_target(&lhs_name) {
             None => {
                 self.add_error(
                     ResolveErrorKind::UndeclaredVariable {
                         name: lhs_name.clone(),
                     },
-                    rhs_hir.span(),
+                    lhs_span,
                 );
                 Err(())
+            }
+            Some(binding) if !binding.mutable => {
+                self.add_error(
+                    ResolveErrorKind::AssignToImmutable {
+                        name: lhs_name.clone(),
+                    },
+                    lhs_span,
+                );
+                Err(())
+            }
+            Some(binding) => {
+                let binding_id = binding.id;
+                Ok(ExprHir::Assign {
+                    name: lhs_name,
+                    binding_id,
+                    rhs: Box::new(rhs_hir),
+                    hir_id: self.next_hir_id(),
+                    span: lhs_span,
+                })
             }
         }
     }
 
     /// Resolve an identifier expression (variable or function reference).
-    fn resolve_ident(&mut self, name: String) -> Result<ExprHir, ()> {
-        // Get binding info first (immutable borrow)
-        let binding_info = match self.scopes.get(&name) {
-            Some(binding) => (binding.id, binding.span),
+    /// The recorded span is the *use* site, not the definition site.
+    fn resolve_ident(&mut self, name: String, span: Span) -> Result<ExprHir, ()> {
+        let binding_id = match self.scopes.get(&name) {
+            Some(binding) => binding.id,
             None => {
                 self.add_error(
                     ResolveErrorKind::UndeclaredVariable { name: name.clone() },
-                    crate::lexer::Span::new(0, 0), // TODO: need better span from AST
+                    span,
                 );
                 return Err(());
             }
         };
 
-        // Now we can mutate
         Ok(ExprHir::Ident {
             name,
-            binding_id: binding_info.0,
+            binding_id,
             hir_id: self.next_hir_id(),
-            span: binding_info.1, // use definition span for now
+            span,
         })
     }
 
@@ -598,9 +705,11 @@ impl Resolver {
     }
 
     fn resolve_while_expr(&mut self, while_expr: ExprWhile) -> Result<ExprWhileHir, ()> {
-        // The condition sees the enclosing scope; only the body is a new scope.
+        // The condition sees the enclosing scope; the body is a *loop* scope,
+        // where `x = expr` assigns an existing outer mutable binding instead of
+        // shadowing it (DESIGN.md §4.5).
         let condition = self.resolve_expr(*while_expr.condition)?;
-        let body = self.resolve_block(while_expr.body)?;
+        let body = self.resolve_block_inner(while_expr.body, ScopeKind::Loop)?;
 
         Ok(ExprWhileHir {
             condition: Box::new(condition),
@@ -619,21 +728,41 @@ impl Resolver {
             // the pattern binding must not leak into the enclosing scope.
             self.scopes.enter_block_scope();
 
-            let pattern = self.resolve_pattern(arm.pattern)?;
-            let guard = if let Some(g) = arm.guard {
-                Some(Box::new(self.resolve_expr(*g)?))
-            } else {
-                None
+            let pattern = self.resolve_pattern(arm.pattern);
+            let guard = match (pattern.as_ref(), arm.guard) {
+                (Ok(_), Some(g)) => match self.resolve_expr(*g) {
+                    Ok(hir_guard) => Some(Box::new(hir_guard)),
+                    Err(()) => None,
+                },
+                _ => None,
             };
-            let body = self.resolve_block(arm.body)?;
+            let body = self.resolve_block_inner(arm.body, ScopeKind::Block);
 
+            // Leave the arm scope even when the arm failed to resolve.
             self.scopes.exit_scope();
 
-            arms.push(ChooseArmHir {
-                pattern,
-                guard,
-                body,
-            });
+            match (pattern, body) {
+                (Ok(pattern), Ok(body)) => {
+                    arms.push(ChooseArmHir {
+                        pattern,
+                        guard,
+                        body,
+                    });
+                }
+                (pattern, body) => {
+                    // Placeholder arm keeps later arms' positions stable.
+                    arms.push(ChooseArmHir {
+                        pattern: pattern.unwrap_or(PatternHir::Error),
+                        guard,
+                        body: body.unwrap_or(BlockHir {
+                            stmts: vec![StmtHir::Error],
+                            tail_expr: None,
+                            hir_id: HirId(0),
+                            span: Span::new(0, 0),
+                        }),
+                    });
+                }
+            }
         }
 
         Ok(ExprChooseHir {
@@ -650,11 +779,13 @@ impl Resolver {
                 let hir_expr = self.resolve_expr(expr)?;
                 Ok(PatternHir::Literal(Box::new(hir_expr)))
             }
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, span) => {
                 // Pattern binding: declares a new variable in the arm's scope.
-                // Shadow-check against enclosing scopes (mutability must match).
+                // Shadow-check up to the function boundary; parameters,
+                // functions and builtins are exempt (DESIGN.md §4.3).
                 let new_mutable = true; // pattern bindings are mutable
-                if let Some(outer) = self.scopes.exists_until_function(&name)
+                if let Some(outer) = self.scopes.find_shadow_domain(&name)
+                    && outer.kind.shadow_checks()
                     && outer.mutable != new_mutable
                 {
                     self.add_error(
@@ -662,41 +793,61 @@ impl Resolver {
                             outer_mutable: outer.mutable,
                             inner_mutable: new_mutable,
                         },
-                        crate::lexer::Span::new(0, 0), // TODO: need pattern span from AST
+                        span,
                     );
                     return Err(());
                 }
 
                 let binding_id = self.next_binding_id();
                 let hir_id = self.next_hir_id();
-
-                let _ = self.scopes.declare(
+                if let Err(first) = self.scopes.declare(
                     name.clone(),
                     Binding {
                         id: binding_id,
                         kind: BindingKind::Variable,
                         mutable: true,
-                        span: crate::lexer::Span::new(0, 0), // TODO: need pattern span from AST
+                        builtin: false,
+                        span,
                         hir_id,
                     },
-                );
+                ) {
+                    self.add_error(
+                        ResolveErrorKind::DuplicateBinding {
+                            name: name.clone(),
+                            first_span: first.span,
+                        },
+                        span,
+                    );
+                    return Err(());
+                }
 
                 Ok(PatternHir::Ident {
                     name,
                     binding_id,
                     hir_id,
+                    span,
                 })
             }
         }
     }
 
+    /// Resolve a block in a fresh `Block` scope.
     fn resolve_block(&mut self, block: Block) -> Result<BlockHir, ()> {
-        self.scopes.enter_block_scope();
+        self.resolve_block_inner(block, ScopeKind::Block)
+    }
 
+    /// Resolve a block in a fresh scope of the given kind, always leaving it.
+    fn resolve_block_inner(&mut self, block: Block, kind: ScopeKind) -> Result<BlockHir, ()> {
+        match kind {
+            ScopeKind::Loop => self.scopes.enter_loop_scope(),
+            _ => self.scopes.enter_block_scope(),
+        }
+
+        // Error recovery: a failed statement contributes an Error placeholder
+        // so later statements still resolve (errors are collected, not
+        // fail-fast).
         let mut hir_stmts = Vec::new();
         for stmt in block.stmts {
-            // Error recovery: a failed statement contributes an Error placeholder
-            // so later statements still resolve (errors are collected, not fail-fast).
             let hir_stmt = match self.resolve_stmt(stmt) {
                 Ok(s) => s,
                 Err(()) => StmtHir::Error,
@@ -704,15 +855,15 @@ impl Resolver {
             hir_stmts.push(hir_stmt);
         }
 
-        let tail_expr = if let Some(expr) = block.tail_expr {
-            let hir_expr = self.resolve_expr(*expr)?;
-            Some(Box::new(hir_expr))
-        } else {
-            None
+        let tail_result: Result<Option<Box<ExprHir>>, ()> = match block.tail_expr {
+            Some(expr) => self.resolve_expr(*expr).map(|e| Some(Box::new(e))),
+            None => Ok(None),
         };
 
+        // Leave the scope *before* propagating a tail-expression failure.
         self.scopes.exit_scope();
 
+        let tail_expr = tail_result?;
         Ok(BlockHir {
             stmts: hir_stmts,
             tail_expr,
@@ -723,7 +874,11 @@ impl Resolver {
 
     fn resolve_stmt(&mut self, stmt: Stmt) -> Result<StmtHir, ()> {
         match stmt {
-            Stmt::Decl(decl) => Ok(StmtHir::Decl(self.resolve_decl(decl)?)),
+            Stmt::Decl(decl) => {
+                // Nested declarations are never pre-declared top-level functions.
+                let empty = HashMap::new();
+                Ok(StmtHir::Decl(self.resolve_decl(decl, &empty)?))
+            }
             Stmt::Expr(expr, has_semi) => {
                 let hir_expr = self.resolve_expr(*expr)?;
                 Ok(StmtHir::Expr(Box::new(hir_expr), has_semi))

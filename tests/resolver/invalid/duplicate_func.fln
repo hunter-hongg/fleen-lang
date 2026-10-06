@@ -1,0 +1,4 @@
+// Test: duplicate function declaration in the same scope
+func f(): int = 1
+func f(): int = 2
+r = f();

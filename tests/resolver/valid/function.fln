@@ -1,0 +1,3 @@
+// Test function declaration and call
+func add(a: int, b: int): int = a + b
+result = add(1, 2);

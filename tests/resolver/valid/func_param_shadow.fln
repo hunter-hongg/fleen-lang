@@ -1,0 +1,7 @@
+// Test: function parameters shadow outer variables
+x = 42;
+func foo(x: int) {
+    print(x);
+}
+foo(10);
+print(x);

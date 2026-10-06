@@ -1,0 +1,9 @@
+// Test choose expression
+func main() {
+    x = 1;
+    choose x {
+        when 1 { "one" }
+        when 2 { "two" }
+        otherwise { "other" }
+    };
+}

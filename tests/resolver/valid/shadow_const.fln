@@ -1,0 +1,6 @@
+// Test: shadowing const with const
+const x = 42;
+{
+    const x = 10;
+};
+print(x);

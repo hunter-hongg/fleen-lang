@@ -1,0 +1,5 @@
+// Test: shadowing with mismatched mutability
+x = 42;
+{
+    const x = 10;
+};

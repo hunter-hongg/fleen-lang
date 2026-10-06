@@ -1,0 +1,5 @@
+// Test: duplicate declaration in same scope
+func main() {
+    x = 42;
+    const x = 10;
+}

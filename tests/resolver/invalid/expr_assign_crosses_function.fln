@@ -1,0 +1,5 @@
+// Test: expression-position `=` must not write through a function boundary
+x = 1;
+func f() {
+    y = (x = 2);
+}

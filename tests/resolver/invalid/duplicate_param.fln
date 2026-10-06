@@ -1,0 +1,2 @@
+// Test: duplicate parameter name
+func f(a: int, a: int): int = a

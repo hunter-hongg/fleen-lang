@@ -1,0 +1,7 @@
+// Test: loop body assigns the outer binding instead of shadowing (DESIGN.md §4.5)
+func main() {
+    x = 0;
+    while x < 10 {
+        x = x + 1;
+    };
+}

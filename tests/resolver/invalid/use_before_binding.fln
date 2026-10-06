@@ -1,0 +1,5 @@
+// Test: use variable before binding in same scope
+func main() {
+    print(x);
+    x = 42;
+}

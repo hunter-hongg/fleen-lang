@@ -1,0 +1,5 @@
+// Test: a parameter may be shadowed inside the body (no mutability conflict)
+func f(x: int): int {
+    x = 2;
+    x
+}

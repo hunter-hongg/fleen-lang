@@ -1,0 +1,15 @@
+// Test: choose with guard condition
+func main() {
+    x = 15;
+    choose x {
+        when n if n > 10 {
+            print("big: ", n)
+        }
+        when n if n > 5 {
+            print("medium: ", n)
+        }
+        otherwise {
+            print("small")
+        }
+    };
+}

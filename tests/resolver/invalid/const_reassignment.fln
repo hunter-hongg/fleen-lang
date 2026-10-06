@@ -1,0 +1,3 @@
+// Test: assignment to const variable
+const x = 42;
+x = 10;

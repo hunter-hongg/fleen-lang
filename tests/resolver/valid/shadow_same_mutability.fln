@@ -1,0 +1,6 @@
+// Test: shadowing with same mutability (mutable shadows mutable)
+x = 42;
+{
+    x = 10;
+};
+print(x);

@@ -1,0 +1,3 @@
+// Test: user bindings may shadow builtin functions
+print = 42;
+const print2 = 1;

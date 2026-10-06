@@ -1,0 +1,4 @@
+// Test: use of undeclared variable
+func main() {
+    print(y);
+}

@@ -1,0 +1,12 @@
+// Test: choose with pattern bindings
+func main() {
+    x = 42;
+    choose x {
+        when y {
+            print("matched: ", y)
+        }
+        otherwise {
+            print("no match")
+        }
+    };
+}

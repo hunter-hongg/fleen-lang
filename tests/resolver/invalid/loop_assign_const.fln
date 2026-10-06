@@ -1,0 +1,7 @@
+// Test: assignment to a const inside a loop body is still an error
+func main() {
+    const x = 0;
+    while x < 3 {
+        x = 1;
+    };
+}

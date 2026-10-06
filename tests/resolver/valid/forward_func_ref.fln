@@ -1,0 +1,5 @@
+// Test: forward function reference
+func main() {
+    print(add(1, 2));
+}
+func add(a: int, b: int): int = a + b

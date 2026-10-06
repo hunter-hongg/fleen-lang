@@ -1,0 +1,12 @@
+// Test: pattern binding in function does NOT shadow outer const (function is independent)
+const x = 42;
+func main() {
+    choose 1 {
+        when x {
+            print(x)
+        }
+        otherwise {
+            print("other")
+        }
+    };
+}

@@ -1,0 +1,7 @@
+// Test: nested function declarations preserve the enclosing shadow barrier
+x = 42;
+func outer() {
+    func inner() { }
+    func also_inner() { }
+    const x = 1;
+}
