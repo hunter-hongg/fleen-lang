@@ -1,0 +1,46 @@
+// Simple Fleen example demonstrating core 0.0.1 features
+
+// Basic function
+func add(a: int, b: int): int = a + b;
+
+// Fibonacci function
+func fib(n: int): int {
+    if n < 2 { n }
+    elif n == 2 { 1 }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+// Main function
+func main(): int {
+    // Variable bindings
+    x = 42;
+    const y = 100;
+
+    // Type annotated binding
+    z: int = 50;
+
+    // Reassignment
+    x = 43;
+
+    // if expression (as statement, requires semicolon)
+    result = if x > 0 { "positive" } elif x < 0 { "negative" } else { "zero" };
+
+    // while loop (as statement, requires semicolon)
+    count = 0;
+    while count < 5 {
+        count = count + 1;
+    };
+
+    // choose expression (as statement, requires semicolon)
+    choice = choose 10 {
+        when 0 { "zero" }
+        when 1 { "one" }
+        when 10 { "ten" }
+        otherwise { "other" }
+    };
+
+    // Function call
+    sum = add(3, 4);
+
+    0
+}
