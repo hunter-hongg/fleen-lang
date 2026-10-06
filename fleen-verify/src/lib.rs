@@ -1,6 +1,6 @@
 //! fleen-verify: static bytecode verification (BYTECODE.md §8).
 //!
-//! Verifies a [`Module`] without executing it. Used by the compiler
+//! Verifies a [`fleen_compiler::codegen::Module`] without executing it. Used by the compiler
 //! pipeline acceptance (codegen output must pass) and by the VM
 //! before running.
 
