@@ -1,0 +1,6 @@
+// Index and field expressions
+func f(arr: [int], obj: int): int {
+    a = arr[0];
+    b = obj.field;
+    a
+}

@@ -1,0 +1,5 @@
+/* block comment */
+func f(): int { 1 }
+/* multi
+   line */
+x = 1;

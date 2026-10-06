@@ -1,0 +1,2 @@
+// Result 类型使用方括号（P4）
+const r: Result[int, string] = 42;

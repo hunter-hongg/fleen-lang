@@ -1,0 +1,9 @@
+// choose 表达式中浮点模式（P5）
+// Note: choose as tail expression (no semicolon)
+func main(): int {
+    choose y {
+        when 1.5 { 10 }
+        when 2.5 { 20 }
+        otherwise { 0 }
+    }
+}

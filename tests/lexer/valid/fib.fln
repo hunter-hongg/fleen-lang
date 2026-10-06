@@ -1,0 +1,10 @@
+// Fibonacci test from SPEC.md
+func fib(n: int): int {
+    if n < 2 { n }
+    elif n == 2 { 1 }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+func main() {
+    result = fib(10);
+}

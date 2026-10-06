@@ -1,0 +1,6 @@
+// If/elif/else expression test
+func main(): int {
+    if x > 0 { 1 }
+    elif x < 0 { 2 }
+    else { 3 }
+}

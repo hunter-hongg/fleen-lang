@@ -1,0 +1,15 @@
+// Operators test
+func main() {
+    a = 1 + 2 - 3 * 4 / 5 % 6;
+    b = a == 10;
+    c = a != 20;
+    d = a < 30;
+    e = a > 40;
+    f = a <= 50;
+    g = a >= 60;
+    h = true and false;
+    i = true or false;
+    j = not true;
+    k = -5;
+    l = !false;
+}

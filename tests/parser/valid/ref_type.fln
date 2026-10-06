@@ -1,0 +1,2 @@
+// ref type annotation
+func f(r: ref int): int { 1 }

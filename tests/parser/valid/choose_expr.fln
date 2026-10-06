@@ -1,0 +1,7 @@
+// Choose expression test
+choose x {
+    when 0 { "zero" }
+    when 1 { "one" }
+    when n if n > 10 { "big" }
+    otherwise { "other" }
+};

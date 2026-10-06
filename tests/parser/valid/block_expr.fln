@@ -1,0 +1,2 @@
+// Block as expression
+x = { 1; 2 };

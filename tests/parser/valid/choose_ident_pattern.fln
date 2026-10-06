@@ -1,0 +1,5 @@
+// choose with identifier (binding) pattern
+choose x {
+    when y { y }
+    otherwise { 0 }
+};

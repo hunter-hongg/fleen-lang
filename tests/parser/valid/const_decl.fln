@@ -1,0 +1,3 @@
+// const declaration test
+const a = 1;
+const b: int = 2;

@@ -1,0 +1,4 @@
+// Basic parsing test
+x = 42;
+const y = 10;
+x: int = 42;

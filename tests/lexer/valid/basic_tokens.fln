@@ -1,0 +1,8 @@
+// Basic tokens test
+func main() {
+    x = 42;
+    y = 3.14;
+    z = "hello";
+    a = true;
+    b = false;
+}

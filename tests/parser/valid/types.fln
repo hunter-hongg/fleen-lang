@@ -1,0 +1,11 @@
+// Type annotation test
+const a: int = 42;
+const b: float = 3.14;
+const c: bool = true;
+const d: string = "hello";
+const e: Result<int, string> = 42;
+const arr: [int] = 0;
+const boxed: box<int> = 42;
+
+func typed_param(n: int, s: string, r: Result<int, string>, f: (int, int) -> int) {
+}

@@ -1,0 +1,3 @@
+// Result 类型尖括号语法测试（P4）
+const ok: Result<int, string> = 42;
+const err: Result<int, string> = 0;

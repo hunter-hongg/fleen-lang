@@ -1,0 +1,4 @@
+// Function types test
+func add(a: int, b: int): int = a + b
+
+func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)

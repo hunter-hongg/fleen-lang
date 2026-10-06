@@ -1,0 +1,7 @@
+// While loop test
+func main(): int {
+    while x < 10 {
+        x = x + 1;
+    }
+    0
+}

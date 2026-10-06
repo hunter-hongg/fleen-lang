@@ -1,0 +1,20 @@
+// Control flow test
+func main() {
+    if true {
+        x = 1;
+    } elif false {
+        x = 2;
+    } else {
+        x = 3;
+    };
+
+    while x < 10 {
+        x = x + 1;
+    };
+
+    choose x {
+        when 1 { "one" }
+        when 2 { "two" }
+        otherwise { "other" }
+    };
+}

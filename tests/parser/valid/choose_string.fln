@@ -1,0 +1,9 @@
+// choose 表达式中字符串模式（P5）
+// Note: choose as tail expression (no semicolon)
+func main(): int {
+    choose s {
+        when "hello" { 1 }
+        when "world" { 2 }
+        otherwise { 0 }
+    }
+}

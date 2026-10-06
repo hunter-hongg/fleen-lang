@@ -6,11 +6,12 @@ pub mod ast;
 pub mod error;
 pub mod expr;
 #[cfg(test)]
-pub mod tests;
+#[path = "tests.rs"]
+pub mod tests_mod;
 
 pub use error::{ParseError, ParseErrorKind};
 
-use crate::lexer::Token;
+use crate::lexer::{Span, Token};
 use ast::{Ast, Expr};
 
 /// Keywords that cannot be used as identifiers.
@@ -85,6 +86,15 @@ impl Parser {
             self.tokens[self.pos - 1].span.end
         } else {
             0
+        }
+    }
+
+    /// Get the full span of the previous token.
+    fn prev_span(&self) -> Span {
+        if self.pos > 0 {
+            self.tokens[self.pos - 1].span
+        } else {
+            Span::new(0, 0)
         }
     }
 
