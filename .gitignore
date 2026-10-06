@@ -1,1 +1,3 @@
 /target
+*.flnc
+release/*.tar.gz
