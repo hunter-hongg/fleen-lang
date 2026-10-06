@@ -27,10 +27,11 @@ use std::collections::HashMap;
 /// # Returns
 /// The MIR module: functions (incl. builtin placeholders) + globals.
 ///
-/// # Panics
-/// Panics on constructs that typeck already flags as unsupported
-/// (`Index`, `Field`, `Box`/`Ref`/`Array` types), which cannot be lowered
-/// in 0.0.1.
+/// # Errors
+/// Errors with `LowerError` on constructs that typeck already flags as
+/// unsupported (`Index`, `Field`, `Box`/`Ref`/`Array` types), which
+/// cannot be lowered in 0.0.1, or on defensively-checked invariant
+/// violations.
 pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
     let mut lcx = LowerCtx::new(&typed_hir);
     lcx.lower_globals(&typed_hir.items)?;
@@ -294,7 +295,16 @@ fn lower_global_init(
                         MirInstr::FDiv
                     }
                 }
-                _ => MirInstr::IMod,
+                _ => {
+                    if matches!(l.ty(), Type::Int) && matches!(r.ty(), Type::Int) {
+                        MirInstr::IMod
+                    } else {
+                        return Err(LowerError::new(
+                            LowerErrorKind::InvalidOperand { op: "mod" },
+                            expr.span(),
+                        ));
+                    }
+                }
             };
             out.push(op);
         }
@@ -386,13 +396,15 @@ impl<'a> FnBodyCx<'a> {
                 TypedStmtHir::Decl(TypedDeclHir::Var(v)) => {
                     self.slots.slot_for(v.binding_id);
                     self.lower_expr_into(fb, &v.init)?;
-                    let slot = self.slots.get(v.binding_id).expect("allocated");
+                    // Invariant: slot_for above just allocated it.
+                    let slot = self.slots.get(v.binding_id).expect("slot just allocated");
                     fb.emit(MirInstr::StoreLocal(slot));
                 }
                 TypedStmtHir::Decl(TypedDeclHir::Const(c)) => {
                     self.slots.slot_for(c.binding_id);
                     self.lower_expr_into(fb, &c.init)?;
-                    let slot = self.slots.get(c.binding_id).expect("allocated");
+                    // Invariant: slot_for above just allocated it.
+                    let slot = self.slots.get(c.binding_id).expect("slot just allocated");
                     fb.emit(MirInstr::StoreLocal(slot));
                 }
                 TypedStmtHir::Decl(TypedDeclHir::Func(_)) => {
@@ -436,10 +448,12 @@ impl<'a> FnBodyCx<'a> {
                 if self.is_function_binding(*binding_id) {
                     match self.lcx.func_ids.get(name) {
                         Some(&fid) => fb.emit(MirInstr::LoadFunc(fid)),
-                        None => panic!(
-                            "lower: binding {binding_id} (name `{name}`) is neither a local slot, a global, nor a function; slots={:?}",
-                            self.slots.slot_of.keys().collect::<Vec<_>>()
-                        ),
+                        None => {
+                            return Err(LowerError::new(
+                                LowerErrorKind::UndeclaredBinding { name: name.clone() },
+                                *span,
+                            ));
+                        }
                     }
                 } else {
                     match self.loc(*binding_id, name, *span)? {
@@ -518,7 +532,18 @@ impl<'a> FnBodyCx<'a> {
                     },
                 )?
             }
-            TypedExprHir::Mod(l, r) => self.binop(fb, l, r, |_| MirInstr::IMod)?,
+            TypedExprHir::Mod(l, r) => {
+                self.lower_expr_into(fb, l)?;
+                self.lower_expr_into(fb, r)?;
+                if matches!(l.ty(), Type::Int) && matches!(r.ty(), Type::Int) {
+                    fb.emit(MirInstr::IMod);
+                } else {
+                    return Err(LowerError::new(
+                        LowerErrorKind::InvalidOperand { op: "mod" },
+                        expr.span(),
+                    ));
+                }
+            }
             TypedExprHir::Eq(l, r)
             | TypedExprHir::Ne(l, r)
             | TypedExprHir::Lt(l, r)
@@ -586,14 +611,19 @@ impl<'a> FnBodyCx<'a> {
             }
             TypedExprHir::If(e) => self.lower_if(fb, e)?,
             TypedExprHir::While(e) => {
-                // c: cond; JumpIfFalse E   body: ...; Jump c   E: Unit …
+                // 独立头块：回边必须只重入"重新求条件"，而不是当前合并块。
+                // 否则首次进入（栈上有上文的汇合值）与回边进入（循环携带深度）
+                // 栈深不一致，verify 会（理应）报 StackDepthMismatch。
+                let head = fb.new_block();
+                fb.jump(head);
+                fb.start(head);
                 self.lower_expr_into(fb, &e.condition)?;
                 let c = fb.jump_if_false_later();
                 let body = fb.new_block();
                 fb.start(body);
                 self.lower_block(fb, &e.body)?;
                 fb.emit(MirInstr::Pop); // discard body's value
-                fb.jump(c);
+                fb.jump(head);
                 let end = fb.new_block();
                 fb.start(end);
                 fb.emit(MirInstr::Unit);
@@ -734,7 +764,8 @@ impl<'a> FnBodyCx<'a> {
                 }
                 TypedPatternHir::Ident { binding_id, .. } => {
                     self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("allocated");
+                    // Invariant: slot_for above just allocated it.
+                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
                     fb.emit(MirInstr::BindMatch(slot));
                     match &arm.guard {
                         None => {

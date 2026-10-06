@@ -2,6 +2,7 @@
 //!
 //! Pipeline: Lex → Parse → Resolve → Typeck → Lower → Codegen → Bytecode
 
+pub mod codegen;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
