@@ -99,33 +99,58 @@ impl std::fmt::Display for VerifyError {
                 write!(f, "instruction at pc {pc} runs past end of code")
             }
             Self::BadInstructionStream { pc } => {
-                write!(f, "code bytes not covered by instruction boundaries at pc {pc}")
+                write!(
+                    f,
+                    "code bytes not covered by instruction boundaries at pc {pc}"
+                )
             }
             Self::JumpTargetOutOfRange { pc, target } => {
                 write!(f, "jump at pc {pc} targets {target}, outside function body")
             }
             Self::JumpTargetNotBoundary { pc, target } => {
-                write!(f, "jump at pc {pc} targets {target}, not an instruction boundary")
+                write!(
+                    f,
+                    "jump at pc {pc} targets {target}, not an instruction boundary"
+                )
             }
             Self::FallOffEnd { pc } => {
-                write!(f, "instruction at pc {pc} falls off the end of the function")
+                write!(
+                    f,
+                    "instruction at pc {pc} falls off the end of the function"
+                )
             }
             Self::ConstIndexOutOfRange { pc, index } => {
-                write!(f, "Const at pc {pc} references constant index {index}, out of range")
+                write!(
+                    f,
+                    "Const at pc {pc} references constant index {index}, out of range"
+                )
             }
             Self::FuncIndexOutOfRange { pc, index } => {
-                write!(f, "instruction at pc {pc} references function index {index}, out of range")
+                write!(
+                    f,
+                    "instruction at pc {pc} references function index {index}, out of range"
+                )
             }
             Self::GlobalIndexOutOfRange { pc, index } => {
-                write!(f, "global access at pc {pc} references index {index}, out of range")
+                write!(
+                    f,
+                    "global access at pc {pc} references index {index}, out of range"
+                )
             }
             Self::ReturnDepthWrong { pc, depth } => {
                 write!(f, "Return at pc {pc} expects stack depth 1, found {depth}")
             }
             Self::StackUnderflow { pc, needed, actual } => {
-                write!(f, "stack underflow at pc {pc}: needs {needed}, has {actual}")
+                write!(
+                    f,
+                    "stack underflow at pc {pc}: needs {needed}, has {actual}"
+                )
             }
-            Self::StackDepthMismatch { pc, expected, actual } => {
+            Self::StackDepthMismatch {
+                pc,
+                expected,
+                actual,
+            } => {
                 write!(
                     f,
                     "stack depth mismatch at pc {pc}: predecessor expects {expected}, got {actual}"
@@ -138,13 +163,19 @@ impl std::fmt::Display for VerifyError {
                 )
             }
             Self::DuplicateConst { first, second } => {
-                write!(f, "constant pool entries {first} and {second} are duplicates")
+                write!(
+                    f,
+                    "constant pool entries {first} and {second} are duplicates"
+                )
             }
             Self::LocalsLessThanParams { func } => {
                 write!(f, "function {func}: locals < params")
             }
             Self::LocalSlotOutOfRange { pc, slot, locals } => {
-                write!(f, "local slot {slot} at pc {pc} out of range (locals = {locals})")
+                write!(
+                    f,
+                    "local slot {slot} at pc {pc} out of range (locals = {locals})"
+                )
             }
             Self::BadEntry { entry } => write!(f, "entry function id {entry} out of range"),
         }
