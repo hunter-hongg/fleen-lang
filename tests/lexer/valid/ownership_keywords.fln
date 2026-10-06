@@ -1,0 +1,8 @@
+// 0.0.2 ownership keywords + `?` (lexer only - not expected to parse)
+// move / clone / deref become keywords in 0.0.2
+move clone deref
+// `?` lexes as a single token, also adjacent to an expression
+?
+x?
+// identifiers starting with a keyword prefix stay identifiers
+moved clone_x deref2

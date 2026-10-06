@@ -1,4 +1,4 @@
 // All keywords test (lexer only - not a valid program)
 // This file tests that all keywords are recognized by the lexer
 // It is NOT expected to parse successfully
-func const if elif else while choose when otherwise import true false int float bool string unit Result box ref or and not
+func const if elif else while choose when otherwise import true false int float bool string unit Result box ref or and not move clone deref

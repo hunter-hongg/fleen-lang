@@ -102,6 +102,7 @@ impl<'a> Lexer<'a> {
                 }
                 return Ok(self.make_token(TokenKind::Bang, 1));
             }
+            '?' => return Ok(self.make_token(TokenKind::Question, 1)),
             '=' => {
                 if self.next_char == Some('=') {
                     return Ok(self.make_token(TokenKind::Eq, 2));
@@ -281,6 +282,9 @@ impl<'a> Lexer<'a> {
             "Result" => TokenKind::ResultType,
             "box" => TokenKind::BoxType,
             "ref" => TokenKind::RefType,
+            "move" => TokenKind::Move,
+            "clone" => TokenKind::Clone,
+            "deref" => TokenKind::Deref,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -450,6 +454,70 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::Or);
         assert_eq!(tokens[1].kind, TokenKind::And);
         assert_eq!(tokens[2].kind, TokenKind::Not);
+    }
+
+    #[test]
+    fn tokenize_ownership_keywords() {
+        let tokens = tokenize("move clone deref").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Move);
+        assert_eq!(tokens[1].kind, TokenKind::Clone);
+        assert_eq!(tokens[2].kind, TokenKind::Deref);
+    }
+
+    #[test]
+    fn tokenize_question() {
+        let tokens = tokenize("?").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Question);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tokenize_question_adjacent_to_expr() {
+        // `x?` is the typical `?` suffix form (0.0.2 Result propagation)
+        let tokens = tokenize("x?").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "x"));
+        assert_eq!(tokens[1].kind, TokenKind::Question);
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tokenize_double_question() {
+        // `??` lexes as two separate tokens (chained `?` on nested Result)
+        let tokens = tokenize("f(x)??").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "f"));
+        assert_eq!(tokens[1].kind, TokenKind::LParen);
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "x"));
+        assert_eq!(tokens[3].kind, TokenKind::RParen);
+        assert_eq!(tokens[4].kind, TokenKind::Question);
+        assert_eq!(tokens[5].kind, TokenKind::Question);
+        assert_eq!(tokens[6].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tokenize_keyword_prefix_identifiers() {
+        // Keywords must not swallow longer identifiers that start with them
+        let tokens = tokenize("moved clone_x deref2 moveit").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "moved"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "clone_x"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "deref2"));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "moveit"));
+    }
+
+    #[test]
+    fn ownership_keyword_metadata() {
+        assert!(TokenKind::Move.is_keyword());
+        assert!(TokenKind::Clone.is_keyword());
+        assert!(TokenKind::Deref.is_keyword());
+        // `?` is punctuation, not a keyword
+        assert!(!TokenKind::Question.is_keyword());
+        assert_eq!(TokenKind::Move.keyword_str(), Some("move"));
+        assert_eq!(TokenKind::Clone.keyword_str(), Some("clone"));
+        assert_eq!(TokenKind::Deref.keyword_str(), Some("deref"));
+        assert_eq!(TokenKind::Question.keyword_str(), None);
+        assert_eq!(TokenKind::Move.to_string(), "move");
+        assert_eq!(TokenKind::Clone.to_string(), "clone");
+        assert_eq!(TokenKind::Deref.to_string(), "deref");
+        assert_eq!(TokenKind::Question.to_string(), "?");
     }
 
     #[test]

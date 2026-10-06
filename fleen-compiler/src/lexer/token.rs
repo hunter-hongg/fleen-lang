@@ -93,6 +93,14 @@ pub enum TokenKind {
     /// `not` / `!` operator
     Not,
 
+    // Ownership keywords (0.0.2)
+    /// `move` keyword (0.0.2: ownership transfer)
+    Move,
+    /// `clone` keyword (0.0.2: deep copy)
+    Clone,
+    /// `deref` keyword (0.0.2: box pointee read/write)
+    Deref,
+
     // Literals
     /// Integer literal (e.g., `42`)
     IntLit(i64),
@@ -130,6 +138,8 @@ pub enum TokenKind {
     Percent,
     /// `!`
     Bang,
+    /// `?` (0.0.2: Result propagation suffix)
+    Question,
     /// `.`
     Dot,
     /// `,`
@@ -190,6 +200,9 @@ impl TokenKind {
                 | TokenKind::Or
                 | TokenKind::And
                 | TokenKind::Not
+                | TokenKind::Move
+                | TokenKind::Clone
+                | TokenKind::Deref
         )
     }
 
@@ -219,6 +232,9 @@ impl TokenKind {
             TokenKind::Or => "or",
             TokenKind::And => "and",
             TokenKind::Not => "not",
+            TokenKind::Move => "move",
+            TokenKind::Clone => "clone",
+            TokenKind::Deref => "deref",
             _ => return None,
         })
     }
@@ -227,29 +243,6 @@ impl TokenKind {
 impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TokenKind::Func => write!(f, "func"),
-            TokenKind::Const => write!(f, "const"),
-            TokenKind::If => write!(f, "if"),
-            TokenKind::Elif => write!(f, "elif"),
-            TokenKind::Else => write!(f, "else"),
-            TokenKind::While => write!(f, "while"),
-            TokenKind::Choose => write!(f, "choose"),
-            TokenKind::When => write!(f, "when"),
-            TokenKind::Otherwise => write!(f, "otherwise"),
-            TokenKind::Import => write!(f, "import"),
-            TokenKind::True => write!(f, "true"),
-            TokenKind::False => write!(f, "false"),
-            TokenKind::IntType => write!(f, "int"),
-            TokenKind::FloatType => write!(f, "float"),
-            TokenKind::BoolType => write!(f, "bool"),
-            TokenKind::StringType => write!(f, "string"),
-            TokenKind::UnitType => write!(f, "unit"),
-            TokenKind::ResultType => write!(f, "Result"),
-            TokenKind::BoxType => write!(f, "box"),
-            TokenKind::RefType => write!(f, "ref"),
-            TokenKind::Or => write!(f, "or"),
-            TokenKind::And => write!(f, "and"),
-            TokenKind::Not => write!(f, "not"),
             TokenKind::IntLit(n) => write!(f, "{}", n),
             TokenKind::FloatLit(n) => write!(f, "{}", n),
             TokenKind::StringLit(s) => write!(f, "\"{}\"", s),
@@ -267,6 +260,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Slash => write!(f, "/"),
             TokenKind::Percent => write!(f, "%"),
             TokenKind::Bang => write!(f, "!"),
+            TokenKind::Question => write!(f, "?"),
             TokenKind::Dot => write!(f, "."),
             TokenKind::Comma => write!(f, ","),
             TokenKind::Colon => write!(f, ":"),
@@ -279,6 +273,12 @@ impl fmt::Display for TokenKind {
             TokenKind::RBracket => write!(f, "]"),
             TokenKind::Arrow => write!(f, "->"),
             TokenKind::Eof => write!(f, "EOF"),
+            // 关键字的拼写只在 keyword_str() 里维护一份；上方已穷举全部
+            // 非关键字变体，能落到此臂的必然是关键字
+            other => match other.keyword_str() {
+                Some(kw) => f.write_str(kw),
+                None => unreachable!("non-keyword variants are all matched above"),
+            },
         }
     }
 }
