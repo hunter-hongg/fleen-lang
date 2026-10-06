@@ -1,0 +1,5 @@
+func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
+
+func add(a: int, b: int): int = a + b
+
+result = apply(add, 1, 2);

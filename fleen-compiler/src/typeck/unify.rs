@@ -45,6 +45,27 @@ pub fn unify_assign(
     }
 }
 
+/// Unify argument types for a call, reporting `ArgTypeMismatch`.
+pub fn unify_arg(
+    expected: &Type,
+    found: &Type,
+    index: usize,
+    span: crate::lexer::Span,
+) -> Result<(), TypeckError> {
+    if expected == found {
+        Ok(())
+    } else {
+        Err(TypeckError::new(
+            TypeckErrorKind::ArgTypeMismatch {
+                index,
+                expected: expected.clone(),
+                found: found.clone(),
+            },
+            span,
+        ))
+    }
+}
+
 /// Check if a type is a function type and return its signature.
 pub fn as_func_type(ty: &Type) -> Option<(&Vec<Type>, &Type)> {
     match ty {

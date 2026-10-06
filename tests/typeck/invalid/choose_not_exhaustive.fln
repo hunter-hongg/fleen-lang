@@ -1,0 +1,4 @@
+x = 1;
+choose x {
+    when 0 { "zero" }
+};

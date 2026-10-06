@@ -1,0 +1,15 @@
+func fib(n: int): int {
+    if n < 2 { n }
+    elif n == 2 { 1 }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+func main(): int {
+    x = 0;
+    const limit = 10;
+    while x < limit {
+        print("tick");
+        x = x + 1;
+    };
+    fib(x)
+}

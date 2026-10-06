@@ -27,8 +27,6 @@ pub enum TypeckErrorKind {
         scrutinee_type: Type,
         missing_patterns: Vec<String>,
     },
-    /// Result type must be handled (warning in 0.0.1).
-    ResultHandlingRequired,
     /// Unsupported type for codegen.
     UnsupportedType { ty: Type },
     /// Invalid operand type for operator.
@@ -47,6 +45,12 @@ pub enum TypeckErrorKind {
     AssignTypeMismatch { expected: Type, found: Type },
     /// Variable not found (should not happen after resolver).
     UndefinedVariable { name: String },
+    /// Expression is not callable as a function.
+    NotCallable { ty: Type },
+    /// Feature parsed but not supported in 0.0.1.
+    UnsupportedFeature { feature: String },
+    /// Invariant violated (resolver guarantee broken); indicates a compiler bug.
+    InternalError { message: String },
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -70,9 +74,6 @@ impl fmt::Display for TypeckErrorKind {
                     scrutinee_type.name(),
                     missing_patterns.join(", ")
                 )
-            }
-            TypeckErrorKind::ResultHandlingRequired => {
-                write!(f, "Result type must be handled")
             }
             TypeckErrorKind::UnsupportedType { ty } => {
                 write!(f, "type `{}` is not supported in 0.0.1", ty.name())
@@ -114,6 +115,15 @@ impl fmt::Display for TypeckErrorKind {
             }
             TypeckErrorKind::UndefinedVariable { name } => {
                 write!(f, "undefined variable `{}`", name)
+            }
+            TypeckErrorKind::NotCallable { ty } => {
+                write!(f, "cannot call value of type `{}`", ty.name())
+            }
+            TypeckErrorKind::UnsupportedFeature { feature } => {
+                write!(f, "{} is not supported in 0.0.1", feature)
+            }
+            TypeckErrorKind::InternalError { message } => {
+                write!(f, "internal compiler error: {}", message)
             }
         }
     }

@@ -8,7 +8,6 @@
 //! - **Choose exhaustiveness**: must have `otherwise` or cover all cases (Bool, Result)
 //! - **Function calls**: argument types must match parameter types
 
-pub mod check;
 pub mod error;
 pub mod infer;
 pub mod typed_hir;

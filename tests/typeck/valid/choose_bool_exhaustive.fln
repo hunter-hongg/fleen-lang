@@ -1,0 +1,5 @@
+b = true;
+choose b {
+    when true { 1 }
+    when false { 0 }
+};

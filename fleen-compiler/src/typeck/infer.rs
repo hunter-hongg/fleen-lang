@@ -13,7 +13,7 @@ use crate::typeck::typed_hir::{
     TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir,
     TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir, TypedVarBindingHir,
 };
-use crate::typeck::unify::{as_func_type, unify, unify_assign};
+use crate::typeck::unify::{as_func_type, unify, unify_arg, unify_assign};
 use std::collections::HashMap;
 
 /// Convert `ast::Type` to `typed_hir::Type`.
@@ -431,8 +431,14 @@ impl TypeChecker {
 
             ExprHir::Not(expr) => {
                 let typed_expr = self.typeck_expr(*expr)?;
-                if let Err(e) = unify(&Type::Bool, &typed_expr.ty(), typed_expr.span()) {
-                    self.add_error(e.kind, e.span);
+                if !matches!(typed_expr.ty(), Type::Bool) {
+                    self.add_error(
+                        TypeckErrorKind::InvalidOperand {
+                            op: "!".to_string(),
+                            ty: typed_expr.ty().clone(),
+                        },
+                        typed_expr.span(),
+                    );
                     return Err(());
                 }
                 Ok(TypedExprHir::Not(Box::new(typed_expr)))
@@ -470,8 +476,13 @@ impl TypeChecker {
         let typed_cond = self.typeck_expr(*if_expr.condition)?;
 
         // Condition must be Bool
-        if let Err(e) = unify(&Type::Bool, &typed_cond.ty(), typed_cond.span()) {
-            self.add_error(e.kind, e.span);
+        if !matches!(typed_cond.ty(), Type::Bool) {
+            self.add_error(
+                TypeckErrorKind::ConditionNotBool {
+                    found: typed_cond.ty().clone(),
+                },
+                typed_cond.span(),
+            );
             return Err(());
         }
 
@@ -480,8 +491,13 @@ impl TypeChecker {
         let mut typed_elifs = Vec::new();
         for (cond, block) in &if_expr.elif_branches {
             let typed_cond = self.typeck_expr((**cond).clone())?;
-            if let Err(e) = unify(&Type::Bool, &typed_cond.ty(), typed_cond.span()) {
-                self.add_error(e.kind, e.span);
+            if !matches!(typed_cond.ty(), Type::Bool) {
+                self.add_error(
+                    TypeckErrorKind::ConditionNotBool {
+                        found: typed_cond.ty().clone(),
+                    },
+                    typed_cond.span(),
+                );
                 return Err(());
             }
             let typed_block = self.typeck_block(block)?;
@@ -524,8 +540,13 @@ impl TypeChecker {
         let typed_cond = self.typeck_expr(*while_expr.condition)?;
 
         // Condition must be Bool
-        if let Err(e) = unify(&Type::Bool, &typed_cond.ty(), typed_cond.span()) {
-            self.add_error(e.kind, e.span);
+        if !matches!(typed_cond.ty(), Type::Bool) {
+            self.add_error(
+                TypeckErrorKind::ConditionNotBool {
+                    found: typed_cond.ty().clone(),
+                },
+                typed_cond.span(),
+            );
             return Err(());
         }
 
@@ -554,8 +575,13 @@ impl TypeChecker {
             let typed_guard = match &arm.guard {
                 Some(guard) => {
                     let typed_guard = self.typeck_expr((**guard).clone())?;
-                    if let Err(e) = unify(&Type::Bool, &typed_guard.ty(), typed_guard.span()) {
-                        self.add_error(e.kind, e.span);
+                    if !matches!(typed_guard.ty(), Type::Bool) {
+                        self.add_error(
+                            TypeckErrorKind::ConditionNotBool {
+                                found: typed_guard.ty().clone(),
+                            },
+                            typed_guard.span(),
+                        );
                         return Err(());
                     }
                     Some(Box::new(typed_guard))
@@ -785,6 +811,20 @@ impl TypeChecker {
             return Err(());
         }
 
+        // `%` is only defined for Int in 0.0.1 (BYTECODE.md defines IMod,
+        // no FMod). Reject float operands here instead of failing later
+        // in `lower`.
+        if op == "%" && matches!(typed_lhs.ty(), Type::Float) {
+            self.add_error(
+                TypeckErrorKind::InvalidOperand {
+                    op: op.to_string(),
+                    ty: typed_lhs.ty().clone(),
+                },
+                typed_lhs.span(),
+            );
+            return Err(());
+        }
+
         Ok(match op {
             "+" => TypedExprHir::Add(Box::new(typed_lhs), Box::new(typed_rhs)),
             "-" => TypedExprHir::Sub(Box::new(typed_lhs), Box::new(typed_rhs)),
@@ -828,7 +868,7 @@ impl TypeChecker {
         let mut typed_args = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
             let typed_arg = self.typeck_expr(arg)?;
-            if let Err(e) = unify(&param_types[i], &typed_arg.ty(), typed_arg.span()) {
+            if let Err(e) = unify_arg(&param_types[i], &typed_arg.ty(), i, typed_arg.span()) {
                 self.add_error(e.kind, e.span);
                 return Err(());
             }
