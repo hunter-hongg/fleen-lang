@@ -11,7 +11,7 @@ fn lower_src(source: &str) -> Mir {
     let ast = parse(tokens).unwrap();
     let hir = resolve(ast).unwrap();
     let typed = typeck(hir).expect("typeck should succeed");
-    super::lower(typed)
+    super::lower(typed).expect("lower should succeed")
 }
 
 fn find_func<'a>(mir: &'a Mir, name: &str) -> &'a MirFunc {

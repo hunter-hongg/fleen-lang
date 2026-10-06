@@ -31,15 +31,67 @@ use std::collections::HashMap;
 /// Panics on constructs that typeck already flags as unsupported
 /// (`Index`, `Field`, `Box`/`Ref`/`Array` types), which cannot be lowered
 /// in 0.0.1.
-pub fn lower(typed_hir: TypedHir) -> Mir {
+pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
     let mut lcx = LowerCtx::new(&typed_hir);
-    lcx.lower_globals(&typed_hir.items);
-    lcx.lower_funcs(&typed_hir.items);
-    Mir {
+    lcx.lower_globals(&typed_hir.items)?;
+    lcx.lower_funcs(&typed_hir.items)?;
+    Ok(Mir {
         funcs: lcx.funcs,
         globals: lcx.globals,
+    })
+}
+
+/// An error during lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LowerError {
+    pub kind: LowerErrorKind,
+    pub span: crate::lexer::Span,
+}
+
+/// Kinds of lowering errors.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LowerErrorKind {
+    /// A feature that the parser/typeck accept but 0.0.1 cannot lower.
+    UnsupportedFeature { feature: &'static str },
+    /// A global initializer with control flow (if/while/choose/block).
+    ComplexGlobalInit,
+    /// An indirect (function-value) call in a global initializer.
+    IndirectCallInGlobalInit,
+    /// An identifier resolved to no known slot/global/function.
+    UndeclaredBinding { name: String },
+    /// Negation or arithmetic on an incompatible type (typeck invariant broken).
+    InvalidOperand { op: &'static str },
+}
+
+impl LowerError {
+    fn new(kind: LowerErrorKind, span: crate::lexer::Span) -> Self {
+        LowerError { kind, span }
     }
 }
+
+impl std::fmt::Display for LowerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            LowerErrorKind::UnsupportedFeature { feature } => {
+                write!(f, "unsupported feature in 0.0.1: {feature}")
+            }
+            LowerErrorKind::ComplexGlobalInit => {
+                write!(f, "global initializer must be a simple expression")
+            }
+            LowerErrorKind::IndirectCallInGlobalInit => {
+                write!(f, "indirect calls are not supported in global initializers")
+            }
+            LowerErrorKind::UndeclaredBinding { name } => {
+                write!(f, "undeclared binding: {name}")
+            }
+            LowerErrorKind::InvalidOperand { op } => {
+                write!(f, "invalid operand for operator {op}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LowerError {}
 
 /// Builtin function names known to 0.0.1.
 const BUILTINS: &[&str] = &["print"];
@@ -106,7 +158,7 @@ impl LowerCtx {
         ctx
     }
 
-    fn lower_globals(&mut self, items: &[TypedHirItem]) {
+    fn lower_globals(&mut self, items: &[TypedHirItem]) -> Result<(), LowerError> {
         for item in items {
             let (name, mutable, binding_id, init_expr) = match item {
                 TypedHirItem::Decl(TypedDeclHir::Var(v)) => {
@@ -120,7 +172,7 @@ impl LowerCtx {
             let gid = GlobalId(self.globals.len() as u32);
             self.global_of_binding.insert(binding_id, gid);
             let mut init = Vec::new();
-            lower_global_init(self, init_expr, &mut init);
+            lower_global_init(self, init_expr, &mut init)?;
             self.globals.push(MirGlobal {
                 global_id: gid,
                 name,
@@ -129,9 +181,10 @@ impl LowerCtx {
                 init,
             });
         }
+        Ok(())
     }
 
-    fn lower_funcs(&mut self, items: &[TypedHirItem]) {
+    fn lower_funcs(&mut self, items: &[TypedHirItem]) -> Result<(), LowerError> {
         for item in items {
             let TypedHirItem::Decl(TypedDeclHir::Func(f)) = item else {
                 continue;
@@ -144,8 +197,8 @@ impl LowerCtx {
                 slots,
             };
             match &f.body {
-                TypedFuncBodyHir::SingleExpr(e) => bcx.lower_expr_into(&mut fb, e),
-                TypedFuncBodyHir::Block(b) => bcx.lower_block(&mut fb, b),
+                TypedFuncBodyHir::SingleExpr(e) => bcx.lower_expr_into(&mut fb, e)?,
+                TypedFuncBodyHir::Block(b) => bcx.lower_block(&mut fb, b)?,
             }
             fb.end(Terminator::Return);
             let locals = bcx.slots.total();
@@ -154,6 +207,7 @@ impl LowerCtx {
             self.funcs[fid].entry = entry;
             self.funcs[fid].blocks = blocks;
         }
+        Ok(())
     }
 }
 
@@ -161,7 +215,11 @@ impl LowerCtx {
 ///
 /// Control-flow-bearing initializers are rejected: 0.0.1 requires global
 /// initializers to be "simple" (literals, arithmetic, calls, identifiers).
-fn lower_global_init(lcx: &LowerCtx, expr: &TypedExprHir, out: &mut Vec<MirInstr>) {
+fn lower_global_init(
+    lcx: &LowerCtx,
+    expr: &TypedExprHir,
+    out: &mut Vec<MirInstr>,
+) -> Result<(), LowerError> {
     match expr {
         TypedExprHir::Int(v, _) => out.push(MirInstr::ConstInt(*v)),
         TypedExprHir::Float(v, _) => out.push(MirInstr::ConstFloat(*v)),
@@ -176,19 +234,27 @@ fn lower_global_init(lcx: &LowerCtx, expr: &TypedExprHir, out: &mut Vec<MirInstr
             } else if let Some(&fid) = lcx.func_ids.get(name) {
                 out.push(MirInstr::LoadFunc(fid));
             } else {
-                unreachable!("global init references an unknown binding")
+                return Err(LowerError::new(
+                    LowerErrorKind::UndeclaredBinding { name: name.clone() },
+                    expr.span(),
+                ));
             }
         }
         TypedExprHir::Neg(e) => {
-            lower_global_init(lcx, e, out);
+            lower_global_init(lcx, e, out)?;
             match e.ty() {
                 Type::Int => out.push(MirInstr::NegI),
                 Type::Float => out.push(MirInstr::NegF),
-                other => unreachable!("Neg on {other:?} rejected by typeck"),
+                _ => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::InvalidOperand { op: "neg" },
+                        expr.span(),
+                    ));
+                }
             }
         }
         TypedExprHir::Not(e) => {
-            lower_global_init(lcx, e, out);
+            lower_global_init(lcx, e, out)?;
             out.push(MirInstr::Not);
         }
         TypedExprHir::Add(l, r)
@@ -196,8 +262,8 @@ fn lower_global_init(lcx: &LowerCtx, expr: &TypedExprHir, out: &mut Vec<MirInstr
         | TypedExprHir::Mul(l, r)
         | TypedExprHir::Div(l, r)
         | TypedExprHir::Mod(l, r) => {
-            lower_global_init(lcx, l, out);
-            lower_global_init(lcx, r, out);
+            lower_global_init(lcx, l, out)?;
+            lower_global_init(lcx, r, out)?;
             let is_int = matches!(l.ty(), Type::Int);
             let op = match expr {
                 TypedExprHir::Add(..) => {
@@ -238,8 +304,8 @@ fn lower_global_init(lcx: &LowerCtx, expr: &TypedExprHir, out: &mut Vec<MirInstr
         | TypedExprHir::Gt(l, r)
         | TypedExprHir::Le(l, r)
         | TypedExprHir::Ge(l, r) => {
-            lower_global_init(lcx, l, out);
-            lower_global_init(lcx, r, out);
+            lower_global_init(lcx, l, out)?;
+            lower_global_init(lcx, r, out)?;
             out.push(match expr {
                 TypedExprHir::Eq(..) => MirInstr::Eq,
                 TypedExprHir::Ne(..) => MirInstr::Ne,
@@ -252,14 +318,25 @@ fn lower_global_init(lcx: &LowerCtx, expr: &TypedExprHir, out: &mut Vec<MirInstr
         TypedExprHir::Call(callee, args, _) => match callee.as_ref() {
             TypedExprHir::Ident { name, .. } if lcx.func_ids.contains_key(name) => {
                 for a in args {
-                    lower_global_init(lcx, a, out);
+                    lower_global_init(lcx, a, out)?;
                 }
                 out.push(MirInstr::Call(lcx.func_ids[name]));
             }
-            _ => panic!("global init: indirect calls not supported in 0.0.1"),
+            _ => {
+                return Err(LowerError::new(
+                    LowerErrorKind::IndirectCallInGlobalInit,
+                    expr.span(),
+                ));
+            }
         },
-        other => panic!("global initializer {other:?} with control flow is not supported in 0.0.1"),
+        _ => {
+            return Err(LowerError::new(
+                LowerErrorKind::ComplexGlobalInit,
+                expr.span(),
+            ));
+        }
     }
+    Ok(())
 }
 
 /// Per-function lowering context.
@@ -271,13 +348,23 @@ struct FnBodyCx<'a> {
 impl<'a> FnBodyCx<'a> {
     /// Resolve where a binding lives. Function bindings are never dereferenced
     /// directly — they are treated specially (LoadFunc / direct Call).
-    fn loc(&self, binding_id: BindingId) -> Location {
+    fn loc(
+        &self,
+        binding_id: BindingId,
+        name: &str,
+        span: crate::lexer::Span,
+    ) -> Result<Location, LowerError> {
         if let Some(slot) = self.slots.get(binding_id) {
-            Location::Local(slot)
+            Ok(Location::Local(slot))
         } else if let Some(&gid) = self.lcx.global_of_binding.get(&binding_id) {
-            Location::Global(gid)
+            Ok(Location::Global(gid))
         } else {
-            unreachable!("binding {binding_id} has no slot and is not global")
+            Err(LowerError::new(
+                LowerErrorKind::UndeclaredBinding {
+                    name: name.to_string(),
+                },
+                span,
+            ))
         }
     }
 
@@ -292,19 +379,19 @@ impl<'a> FnBodyCx<'a> {
     /// Lower a block (statements then tail expression).
     ///
     /// On exit the block's value (tail expr, or `Unit`) is on the stack.
-    fn lower_block(&mut self, fb: &mut FnBuilder, block: &TypedBlockHir) {
+    fn lower_block(&mut self, fb: &mut FnBuilder, block: &TypedBlockHir) -> Result<(), LowerError> {
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
             match stmt {
                 TypedStmtHir::Decl(TypedDeclHir::Var(v)) => {
                     self.slots.slot_for(v.binding_id);
-                    self.lower_expr_into(fb, &v.init);
+                    self.lower_expr_into(fb, &v.init)?;
                     let slot = self.slots.get(v.binding_id).expect("allocated");
                     fb.emit(MirInstr::StoreLocal(slot));
                 }
                 TypedStmtHir::Decl(TypedDeclHir::Const(c)) => {
                     self.slots.slot_for(c.binding_id);
-                    self.lower_expr_into(fb, &c.init);
+                    self.lower_expr_into(fb, &c.init)?;
                     let slot = self.slots.get(c.binding_id).expect("allocated");
                     fb.emit(MirInstr::StoreLocal(slot));
                 }
@@ -312,7 +399,7 @@ impl<'a> FnBodyCx<'a> {
                     // Functions are hoisted; nothing emitted inline.
                 }
                 TypedStmtHir::Expr(e, has_semi) => {
-                    self.lower_expr_into(fb, e);
+                    self.lower_expr_into(fb, e)?;
                     let is_last_and_no_tail = i + 1 == n && block.tail_expr.is_none();
                     if *has_semi || !is_last_and_no_tail {
                         fb.emit(MirInstr::Pop);
@@ -322,13 +409,18 @@ impl<'a> FnBodyCx<'a> {
             }
         }
         match &block.tail_expr {
-            Some(tail) => self.lower_expr_into(fb, tail),
+            Some(tail) => self.lower_expr_into(fb, tail)?,
             None => fb.emit(MirInstr::Unit),
         }
+        Ok(())
     }
 
     /// Lower an expression; its value is left on the stack.
-    fn lower_expr_into(&mut self, fb: &mut FnBuilder, expr: &TypedExprHir) {
+    fn lower_expr_into(
+        &mut self,
+        fb: &mut FnBuilder,
+        expr: &TypedExprHir,
+    ) -> Result<(), LowerError> {
         match expr {
             TypedExprHir::Int(v, _) => fb.emit(MirInstr::ConstInt(*v)),
             TypedExprHir::Float(v, _) => fb.emit(MirInstr::ConstFloat(*v)),
@@ -336,7 +428,10 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Bool(true, _) => fb.emit(MirInstr::True),
             TypedExprHir::Bool(false, _) => fb.emit(MirInstr::False),
             TypedExprHir::Ident {
-                binding_id, name, ..
+                binding_id,
+                name,
+                span,
+                ..
             } => {
                 if self.is_function_binding(*binding_id) {
                     match self.lcx.func_ids.get(name) {
@@ -347,32 +442,40 @@ impl<'a> FnBodyCx<'a> {
                         ),
                     }
                 } else {
-                    match self.loc(*binding_id) {
+                    match self.loc(*binding_id, name, *span)? {
                         Location::Local(slot) => fb.emit(MirInstr::LoadLocal(slot)),
                         Location::Global(gid) => fb.emit(MirInstr::LoadGlobal(gid.0 as u16)),
                     }
                 }
             }
             TypedExprHir::Assign {
-                binding_id, rhs, ..
+                binding_id,
+                rhs,
+                span,
+                ..
             } => {
-                self.lower_expr_into(fb, rhs);
+                self.lower_expr_into(fb, rhs)?;
                 fb.emit(MirInstr::Dup);
-                match self.loc(*binding_id) {
+                match self.loc(*binding_id, "?", *span)? {
                     Location::Local(slot) => fb.emit(MirInstr::StoreLocal(slot)),
                     Location::Global(gid) => fb.emit(MirInstr::StoreGlobal(gid.0 as u16)),
                 }
             }
             TypedExprHir::Not(e) => {
-                self.lower_expr_into(fb, e);
+                self.lower_expr_into(fb, e)?;
                 fb.emit(MirInstr::Not);
             }
             TypedExprHir::Neg(e) => {
-                self.lower_expr_into(fb, e);
+                self.lower_expr_into(fb, e)?;
                 match e.ty() {
                     Type::Int => fb.emit(MirInstr::NegI),
                     Type::Float => fb.emit(MirInstr::NegF),
-                    other => unreachable!("Neg on {other:?} rejected by typeck"),
+                    _ => {
+                        return Err(LowerError::new(
+                            LowerErrorKind::InvalidOperand { op: "neg" },
+                            e.span(),
+                        ));
+                    }
                 }
             }
             TypedExprHir::Add(l, r) => {
@@ -383,7 +486,7 @@ impl<'a> FnBodyCx<'a> {
                     |int| {
                         if int { MirInstr::IAdd } else { MirInstr::FAdd }
                     },
-                )
+                )?
             }
             TypedExprHir::Sub(l, r) => {
                 self.binop(
@@ -393,7 +496,7 @@ impl<'a> FnBodyCx<'a> {
                     |int| {
                         if int { MirInstr::ISub } else { MirInstr::FSub }
                     },
-                )
+                )?
             }
             TypedExprHir::Mul(l, r) => {
                 self.binop(
@@ -403,7 +506,7 @@ impl<'a> FnBodyCx<'a> {
                     |int| {
                         if int { MirInstr::IMul } else { MirInstr::FMul }
                     },
-                )
+                )?
             }
             TypedExprHir::Div(l, r) => {
                 self.binop(
@@ -413,17 +516,17 @@ impl<'a> FnBodyCx<'a> {
                     |int| {
                         if int { MirInstr::IDiv } else { MirInstr::FDiv }
                     },
-                )
+                )?
             }
-            TypedExprHir::Mod(l, r) => self.binop(fb, l, r, |_| MirInstr::IMod),
+            TypedExprHir::Mod(l, r) => self.binop(fb, l, r, |_| MirInstr::IMod)?,
             TypedExprHir::Eq(l, r)
             | TypedExprHir::Ne(l, r)
             | TypedExprHir::Lt(l, r)
             | TypedExprHir::Gt(l, r)
             | TypedExprHir::Le(l, r)
             | TypedExprHir::Ge(l, r) => {
-                self.lower_expr_into(fb, l);
-                self.lower_expr_into(fb, r);
+                self.lower_expr_into(fb, l)?;
+                self.lower_expr_into(fb, r)?;
                 fb.emit(match expr {
                     TypedExprHir::Eq(..) => MirInstr::Eq,
                     TypedExprHir::Ne(..) => MirInstr::Ne,
@@ -436,11 +539,11 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::And(l, r) => {
                 // c0: l; JumpIfFalse F   c1: r; JumpIfFalse F   t: True   F: False
                 // Layout: c0, c1, t, F, M
-                self.lower_expr_into(fb, l);
+                self.lower_expr_into(fb, l)?;
                 let c0 = fb.jump_if_false_later();
                 let c1_b = fb.new_block();
                 fb.start(c1_b);
-                self.lower_expr_into(fb, r);
+                self.lower_expr_into(fb, r)?;
                 let c1 = fb.jump_if_false_later();
                 let t = fb.new_block();
                 fb.start(t);
@@ -460,11 +563,11 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Or(l, r) => {
                 // c0: l; JumpIfTrue T   c1: r; JumpIfTrue T   F: False   T: True
                 // Layout: c0, c1, F, T, M
-                self.lower_expr_into(fb, l);
+                self.lower_expr_into(fb, l)?;
                 let c0 = fb.jump_if_true_later();
                 let c1_b = fb.new_block();
                 fb.start(c1_b);
-                self.lower_expr_into(fb, r);
+                self.lower_expr_into(fb, r)?;
                 let c1 = fb.jump_if_true_later();
                 let f_b = fb.new_block();
                 fb.start(f_b);
@@ -481,14 +584,14 @@ impl<'a> FnBodyCx<'a> {
                 fb.resolve(jf, m);
                 fb.resolve(jt, m);
             }
-            TypedExprHir::If(e) => self.lower_if(fb, e),
+            TypedExprHir::If(e) => self.lower_if(fb, e)?,
             TypedExprHir::While(e) => {
                 // c: cond; JumpIfFalse E   body: ...; Jump c   E: Unit …
-                self.lower_expr_into(fb, &e.condition);
+                self.lower_expr_into(fb, &e.condition)?;
                 let c = fb.jump_if_false_later();
                 let body = fb.new_block();
                 fb.start(body);
-                self.lower_block(fb, &e.body);
+                self.lower_block(fb, &e.body)?;
                 fb.emit(MirInstr::Pop); // discard body's value
                 fb.jump(c);
                 let end = fb.new_block();
@@ -496,28 +599,39 @@ impl<'a> FnBodyCx<'a> {
                 fb.emit(MirInstr::Unit);
                 fb.resolve(c, end);
             }
-            TypedExprHir::Choose(e) => self.lower_choose(fb, e),
+            TypedExprHir::Choose(e) => self.lower_choose(fb, e)?,
             TypedExprHir::Call(callee, args, _) => match callee.as_ref() {
                 TypedExprHir::Ident {
                     name, binding_id, ..
                 } if self.is_function_binding(*binding_id) => {
                     for a in args {
-                        self.lower_expr_into(fb, a);
+                        self.lower_expr_into(fb, a)?;
                     }
                     fb.emit(MirInstr::Call(self.lcx.func_ids[name]));
                 }
                 _ => {
-                    self.lower_expr_into(fb, callee);
+                    self.lower_expr_into(fb, callee)?;
                     for a in args {
-                        self.lower_expr_into(fb, a);
+                        self.lower_expr_into(fb, a)?;
                     }
                     fb.emit(MirInstr::CallValue(args.len() as u8));
                 }
             },
-            TypedExprHir::Block(b) => self.lower_block(fb, b),
-            TypedExprHir::Index(..) => panic!("lower: Index is not supported in 0.0.1"),
-            TypedExprHir::Field(..) => panic!("lower: Field is not supported in 0.0.1"),
+            TypedExprHir::Block(b) => self.lower_block(fb, b)?,
+            TypedExprHir::Index(..) => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature { feature: "index" },
+                    expr.span(),
+                ));
+            }
+            TypedExprHir::Field(..) => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature { feature: "field" },
+                    expr.span(),
+                ));
+            }
         }
+        Ok(())
     }
 
     /// Lower `l op r`; `pick(is_int)` selects the instruction.
@@ -527,40 +641,41 @@ impl<'a> FnBodyCx<'a> {
         l: &TypedExprHir,
         r: &TypedExprHir,
         pick: impl Fn(bool) -> MirInstr,
-    ) {
-        self.lower_expr_into(fb, l);
-        self.lower_expr_into(fb, r);
+    ) -> Result<(), LowerError> {
+        self.lower_expr_into(fb, l)?;
+        self.lower_expr_into(fb, r)?;
         fb.emit(pick(matches!(l.ty(), Type::Int)));
+        Ok(())
     }
 
-    fn lower_if(&mut self, fb: &mut FnBuilder, e: &TypedExprIfHir) {
+    fn lower_if(&mut self, fb: &mut FnBuilder, e: &TypedExprIfHir) -> Result<(), LowerError> {
         // Layout: c0; then0; c1; then1; …; else-or-unit; M
         let mut cond_blocks: Vec<BlockId> = Vec::new();
         let mut branch_jumps: Vec<BlockId> = Vec::new();
 
-        self.lower_expr_into(fb, &e.condition);
+        self.lower_expr_into(fb, &e.condition)?;
         cond_blocks.push(fb.jump_if_false_later());
 
         let t0 = fb.new_block();
         fb.start(t0);
-        self.lower_block(fb, &e.then_branch);
+        self.lower_block(fb, &e.then_branch)?;
         branch_jumps.push(fb.jump_later());
 
         for (cond, body) in &e.elif_branches {
             let ci = fb.new_block();
             fb.start(ci);
-            self.lower_expr_into(fb, cond);
+            self.lower_expr_into(fb, cond)?;
             cond_blocks.push(fb.jump_if_false_later());
             let ti = fb.new_block();
             fb.start(ti);
-            self.lower_block(fb, body);
+            self.lower_block(fb, body)?;
             branch_jumps.push(fb.jump_later());
         }
 
         let eb = fb.new_block();
         fb.start(eb);
         match &e.else_branch {
-            Some(b) => self.lower_block(fb, b),
+            Some(b) => self.lower_block(fb, b)?,
             None => fb.emit(MirInstr::Unit),
         }
         branch_jumps.push(fb.jump_later());
@@ -577,12 +692,17 @@ impl<'a> FnBodyCx<'a> {
         for j in branch_jumps {
             fb.resolve(j, m);
         }
+        Ok(())
     }
 
-    fn lower_choose(&mut self, fb: &mut FnBuilder, e: &TypedExprChooseHir) {
+    fn lower_choose(
+        &mut self,
+        fb: &mut FnBuilder,
+        e: &TypedExprChooseHir,
+    ) -> Result<(), LowerError> {
         // Scrutinee loaded once; each arm: compare (+bind) (+guard), then body.
         // Layout: scrut; c0; body0; c1; body1; …; fallback-or-catchall; M
-        self.lower_expr_into(fb, &e.scrutinee);
+        self.lower_expr_into(fb, &e.scrutinee)?;
 
         let mut body_jumps: Vec<BlockId> = Vec::new();
         // Cond blocks of the *current* arm awaiting their false target.
@@ -597,19 +717,19 @@ impl<'a> FnBodyCx<'a> {
             match &arm.pattern {
                 TypedPatternHir::Literal(lit) => {
                     fb.emit(MirInstr::Dup);
-                    self.lower_expr_into(fb, lit);
+                    self.lower_expr_into(fb, lit)?;
                     fb.emit(MirInstr::Eq);
                     pending.push(fb.jump_if_false_later());
                     if let Some(guard) = &arm.guard {
                         let g = fb.new_block();
                         fb.start(g);
-                        self.lower_expr_into(fb, guard);
+                        self.lower_expr_into(fb, guard)?;
                         pending.push(fb.jump_if_false_later());
                     }
                     let ok = fb.new_block();
                     fb.start(ok);
                     fb.emit(MirInstr::Pop); // discard scrutinee value
-                    self.lower_block(fb, &arm.body);
+                    self.lower_block(fb, &arm.body)?;
                     body_jumps.push(fb.jump_later());
                 }
                 TypedPatternHir::Ident { binding_id, .. } => {
@@ -619,17 +739,17 @@ impl<'a> FnBodyCx<'a> {
                     match &arm.guard {
                         None => {
                             fb.emit(MirInstr::Pop);
-                            self.lower_block(fb, &arm.body);
+                            self.lower_block(fb, &arm.body)?;
                             body_jumps.push(fb.jump_later());
                             chain_done = true;
                         }
                         Some(guard) => {
-                            self.lower_expr_into(fb, guard);
+                            self.lower_expr_into(fb, guard)?;
                             pending.push(fb.jump_if_false_later());
                             let ok = fb.new_block();
                             fb.start(ok);
                             fb.emit(MirInstr::Pop);
-                            self.lower_block(fb, &arm.body);
+                            self.lower_block(fb, &arm.body)?;
                             body_jumps.push(fb.jump_later());
                         }
                     }
@@ -662,5 +782,6 @@ impl<'a> FnBodyCx<'a> {
         for j in body_jumps {
             fb.resolve(j, m);
         }
+        Ok(())
     }
 }
