@@ -771,21 +771,30 @@ func main(): int {
 
 ### 运行脚本
 ```bash
-# 编译
-cargo run -p fleen-compiler -- tests/e2e/fib.fln -o /tmp/fib.flnc
+# 一站式：编译 + 验证 + 执行（推荐）
+cargo fln tests/e2e/valid/fib.fln
+# 等价：cargo run -q -p fleen-vm -- tests/e2e/valid/fib.fln
+
+# 分步：单独编译（-o 指定输出路径）
+cargo run -p fleen-compiler -- tests/e2e/valid/fib.fln -o /tmp/fib.flnc
 
 # 验证
 cargo run -p fleen-verify -- /tmp/fib.flnc
 
-# 执行
+# 执行字节码
 cargo run -p fleen-vm -- /tmp/fib.flnc > /tmp/fib.out
 
 # 对比
-diff /tmp/fib.out tests/e2e/fib.expected
+diff /tmp/fib.out tests/e2e/valid/fib.expected
 ```
 
+> **状态**（2026-10-06）：已完成。E2E 由 `fleen-vm/tests/e2e.rs` 驱动，`cargo test`
+> 即覆盖；用例布局 `tests/e2e/valid/`（stdout 比对）+ `tests/e2e/invalid/`
+> （退出码 `.exit` + stderr 关键字 `.stderr`），覆盖编译期四阶段错误与运行期
+> 除零/溢出/超递归深度。
+
 ### CI 集成
-- `cargo test` 包含 E2E 测试（或单独 `cargo test --test e2e`）
+- `cargo test` 包含 E2E 测试（单独跑：`cargo test -p fleen-vm --test e2e`）
 
 ---
 

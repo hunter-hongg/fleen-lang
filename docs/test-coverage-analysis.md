@@ -4,6 +4,7 @@
 
 **Date**: 2026-10-06 (updated)
 **Status**: Superseded. This document only covers Lexer+Parser as of 2026-10-04; T03–T06 are now implemented. The "No gaps found" claims for T01/T02 are revised below: the previously missed items (unit-type fixture, block-comment fixture, `Result<...>` lexer fixture, `const`/`Index`/`Field`/`Block`/identifier-pattern fixtures, resolver `TypeAnnotationOnAssignment` and `AssignToImmutable`-in-`if` fixtures) have been added, plus typeck/lower tests documented in the 2026-10-06 review.
+**Update 2026-10-06 (later)**: T07 (Codegen), T08 (Verify), T09 (VM) are also implemented, and T10 (E2E) is wired into `cargo test` — see §4–§6 below for the refreshed status.
 
 ---
 
@@ -298,22 +299,20 @@ The integration tests follow a clean pattern:
 
 ---
 
-## 4. Unimplemented Stages (T03-T10)
+## 4. Stage Status (T03-T10)
 
-Per the TICKETS.md roadmap, the following stages are placeholders:
+Refreshed 2026-10-06. Earlier revisions of this section listed T03–T10 as placeholders; all stages now exist and are tested:
 
-| Ticket | Stage | Status | Implementation |
-|---------|-------|--------|----------------|
-| T03 | Resolver | ❌ Placeholder | No `resolver/` module |
-| T04 | BindCheck | ❌ Placeholder | No `binder/` module |
-| T05 | Typeck | ❌ Placeholder | No `typeck/` module |
-| T06 | Lower | ❌ Placeholder | No `lower/` module |
-| T07 | Codegen | ❌ Placeholder | No `codegen/` module |
-| T08 | Verify | ❌ Placeholder | No `fleen-verify/src/` logic |
-| T09 | VM | ❌ Placeholder | No `fleen-vm/src/` logic |
-| T10 | E2E | ❌ Not started | No `tests/e2e/fib.fln` or `fib.expected` |
-
-These stages have no test coverage yet (they don't exist).
+| Ticket | Stage | Status | Implementation & tests |
+|---------|-------|--------|------------------------|
+| T03 | Resolver | ✅ Implemented | `fleen-compiler/src/resolver/`, `tests/resolver/{valid,invalid}/` |
+| T04 | BindCheck | ✅ Implemented (merged into resolver/typeck) | mutability checks live in `resolver/` (e.g. assign-to-const), types in `typeck/` |
+| T05 | Typeck | ✅ Implemented | `fleen-compiler/src/typeck/`, `tests/typeck/{valid,invalid}/` |
+| T06 | Lower | ✅ Implemented | `fleen-compiler/src/lower/` |
+| T07 | Codegen | ✅ Implemented | `fleen-compiler/src/codegen/`, `tests/codegen_integration.rs` |
+| T08 | Verify | ✅ Implemented | `fleen-verify/src/` (verify + stack analysis, unit tests) |
+| T09 | VM | ✅ Implemented | `fleen-vm/src/` (unit tests on hand-written bytecode) |
+| T10 | E2E | ✅ Implemented | `tests/e2e/{valid,invalid}/`, runner `fleen-vm/tests/e2e.rs`, runs under `cargo test` |
 
 ---
 
@@ -331,17 +330,18 @@ These stages have no test coverage yet (they don't exist).
 - All error cases covered (missing semicolons, braces, parens, keyword-as-ident, invalid Result syntax)
 - Full program (Fibonacci) parses correctly
 
-### Downstream stages (T03-T10): ⚠️ **Not yet implemented**
-- No test files exist for resolver, typeck, lower, codegen, verify, or VM
-- E2E test files (`tests/e2e/fib.fln`, `fib.expected`) do not exist yet
+### Downstream stages (T03-T10): ✅ **Implemented & tested** (2026-10-06)
+- Resolver, typeck, lower, codegen, verify and VM each have unit + integration tests
+- E2E (`tests/e2e/valid/` + `tests/e2e/invalid/`) runs the real `fleen-vm` binary via `fleen-vm/tests/e2e.rs` under `cargo test`
 
 ---
 
 ## 6. Recommendations
 
 1. **Lexer & Parser coverage is complete** — no additional tests needed for T01/T02
-2. **Next priority: create E2E test scaffold** — even though the VM doesn't exist yet, creating `tests/e2e/fib.fln` and `fib.expected` matches the project's spec-driven approach and serves as the acceptance target for T09/T10
-3. **Downstream stages**: When implementing T03-T10, follow the same test pattern:
+2. **E2E test scaffold** — ✅ done 2026-10-06: `tests/e2e/` now has `valid/` (stdout-diff) and `invalid/` (exit-code + stderr-needle) fixtures, executed by `fleen-vm/tests/e2e.rs` under `cargo test`
+3. **Downstream stages** — ✅ done 2026-10-06, following the same test pattern:
    - Unit tests in each module (`mod tests`)
    - Integration test files in `tests/{stage}/valid/` and `tests/{stage}/invalid/`
    - Structural assertions for valid cases, error-span assertions for invalid cases
+4. **Remaining gap**: no fuzzing / malformed-bytecode corpus for `fleen-verify` beyond its unit tests; revisit when bytecode format evolves

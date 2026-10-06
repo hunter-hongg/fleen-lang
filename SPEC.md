@@ -36,7 +36,13 @@ fleen/
 ├── fleen-vm/               # 虚拟机 crate
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs
+│       ├── lib.rs          # 库入口：Vm / Value / RuntimeError
+│       ├── main.rs         # CLI：.fln 一站式（编译→验证→执行）或 .flnc
+│       ├── error.rs
+│       ├── frame.rs
+│       ├── value.rs
+│       ├── vm.rs
+│       └── tests.rs
 ├── fleen-verify/           # 验证/工具 crate
 │   ├── Cargo.toml
 │   └── src/
@@ -48,20 +54,26 @@ fleen/
     ├── parser/
     │   ├── valid/
     │   └── invalid/
+    ├── resolver/
+    │   ├── valid/
+    │   └── invalid/
     ├── typeck/
     │   ├── valid/
     │   └── invalid/
     └── e2e/
-        ├── fib.fln
-        └── fib.expected
+        ├── valid/          # <name>.fln + <name>.expected（stdout 逐行比对）
+        └── invalid/        # <name>.fln + <name>.exit + <name>.stderr
 ```
+
+> **单命令运行**：`cargo fln <file.fln>` 一站式完成编译 → 验证 → 执行
+> （等价于 `cargo run -q -p fleen-vm -- <file.fln>`，别名定义在 `.cargo/config.toml`）。
 
 ### crate 职责
 
 | crate | 职责 |
 |-------|------|
 | `fleen-compiler` | 词法 → 语法 → 语义 → 字节码 |
-| `flee n-vm` | 执行字节码 |
+| `fleen-vm` | 执行字节码；CLI 兼作一站式驱动（`.fln`：编译 → 验证 → 执行） |
 | `fleen-verify` | 静态分析 / 验证工具 |
 
 ---
@@ -275,12 +287,15 @@ tests/
 ├── parser/
 │   ├── valid/
 │   └── invalid/
+├── resolver/
+│   ├── valid/
+│   └── invalid/
 ├── typeck/
 │   ├── valid/
 │   └── invalid/
 └── e2e/
-    ├── fib.fln
-    └── fib.expected
+    ├── valid/      # <name>.fln + <name>.expected
+    └── invalid/    # <name>.fln + <name>.exit + <name>.stderr
 ```
 
 **规则：**
