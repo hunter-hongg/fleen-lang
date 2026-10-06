@@ -837,6 +837,26 @@ impl TypeChecker {
 
     /// Type check a function call.
     fn typeck_call(&mut self, func: ExprHir, args: Vec<ExprHir>) -> Result<TypedExprHir, ()> {
+        // HACK (0.0.1): `print` accepts any argument types and arity.
+        // The builtin is declared as `(string) -> unit`, but DESIGN.md's
+        // Fibonacci example needs `print(fib(x))` on ints. A proper
+        // variadic/polymorphic builtin (e.g. traits or `any` per-arg
+        // coercion) is required in 0.0.2; do not extend this special case.
+        if let ExprHir::Ident { ref name, .. } = func
+            && name == "print"
+        {
+            let mut typed_args = Vec::new();
+            for arg in args {
+                typed_args.push(self.typeck_expr(arg)?);
+            }
+            let typed_func = self.typeck_expr(func)?;
+            return Ok(TypedExprHir::Call(
+                Box::new(typed_func),
+                typed_args,
+                Type::Unit,
+            ));
+        }
+
         let typed_func = self.typeck_expr(func)?;
         let func_type = typed_func.ty().clone();
 

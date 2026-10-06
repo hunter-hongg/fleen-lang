@@ -411,15 +411,12 @@ fn check_builtin_print() {
     assert_eq!(only_expr_ty(&hir), Type::Unit);
 }
 
+// HACK: 0.0.1 放宽了 `print` 的类型检查（接受任意参数），见 infer.rs。
+// 0.0.2 恢复后此测试应回退为期望 ArgTypeMismatch。
 #[test]
 fn check_builtin_print_wrong_arg() {
-    let errs = compile_err("print(1);");
-    assert!(
-        err_kinds(&errs)
-            .iter()
-            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
-        "expected ArgTypeMismatch, got {errs:?}"
-    );
+    let hir = compile_ok("print(1);");
+    assert_eq!(only_expr_ty(&hir), Type::Unit);
 }
 
 // ========== Variable Binding Tests ==========

@@ -684,6 +684,15 @@ x = 44;              // 改的是哪个？
 | 0.0.5 | `unsafe` / `trusted` |
 | 0.1.0 | 泛型 / 运算符重载 |
 
+### 已知 Hack（必须在 0.0.2 修复）
+
+- **`print` 类型检查被放宽**：typeck 中 `print` 的签名仍是 `(string) -> unit`，但
+  `typeck_call` 对 `print` 特判，跳过参数类型检查（任意类型、任意元数）。动机：
+  DESIGN.md 的 Fibonacci 示例需要 `print(fib(x))`（int），而 typeck 原定义为 string。
+  正确做法（0.0.2）：内建函数支持可变参数/多态签名（如按类型分派的 trait 或
+  `any` 参数转换），恢复严格检查，并把 `check_builtin_print_wrong_arg` 测试改回
+  期望 `ArgTypeMismatch`。
+
 ---
 
 ## 19. 誓言
