@@ -2,20 +2,43 @@ use std::env;
 use std::fs;
 use std::process;
 
+/// CLI: compile a `.fln` source file to a `.flnc` bytecode module.
+///
+/// Usage: `fleen-compiler <file.fln> [-o <out.flnc>]`
+///
+/// `-o` selects the output path; by default the bytecode is written next to
+/// the source with a `.flnc` extension.
+///
+/// Exit codes: 0 success, 1 compile failure, 2 usage / IO error.
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let mut file_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
 
-    if args.len() < 2 {
-        eprintln!("Usage: {} <file.fln>", args[0]);
-        process::exit(1);
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-o" => match args.next() {
+                Some(path) => out_path = Some(path),
+                None => usage("Error: -o requires a path argument"),
+            },
+            other => {
+                if file_path.replace(other.to_string()).is_some() {
+                    usage("Error: only one input file is allowed");
+                }
+            }
+        }
     }
 
-    let file_path = &args[1];
-    let source = match fs::read_to_string(file_path) {
+    let file_path = match file_path {
+        Some(p) => p,
+        None => usage("Error: missing input file"),
+    };
+
+    let source = match fs::read_to_string(&file_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error reading file {}: {}", file_path, e);
-            process::exit(1);
+            process::exit(2);
         }
     };
 
@@ -95,11 +118,25 @@ fn main() {
     };
 
     // Write .flnc
-    let out = std::path::Path::new(file_path).with_extension("flnc");
+    let out = out_path.unwrap_or_else(|| {
+        std::path::Path::new(&file_path)
+            .with_extension("flnc")
+            .display()
+            .to_string()
+    });
     let bytes = fleen_compiler::codegen::to_bytes(&module);
     if let Err(e) = fs::write(&out, &bytes) {
-        eprintln!("Error writing {}: {}", out.display(), e);
-        process::exit(1);
+        eprintln!("Error writing {}: {}", out, e);
+        process::exit(2);
     }
-    println!("\nWrote {} ({} bytes)", out.display(), bytes.len());
+    println!("\nWrote {} ({} bytes)", out, bytes.len());
+}
+
+/// Print usage (with an optional reason) and exit with the usage code.
+fn usage(message: &str) -> ! {
+    if !message.is_empty() {
+        eprintln!("{message}");
+    }
+    eprintln!("Usage: fleen-compiler <file.fln> [-o <out.flnc>]");
+    process::exit(2);
 }

@@ -1,0 +1,3 @@
+func recurse(n: int): int = recurse(n)
+
+func main(): int = recurse(0)

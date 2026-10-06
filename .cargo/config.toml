@@ -1,0 +1,4 @@
+# `cargo fln <file.fln>` = compile + verify + execute in one command.
+# Expands to: cargo run -q -p fleen-vm -- <file.fln>
+[alias]
+fln = "run -q -p fleen-vm --"
