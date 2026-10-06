@@ -13,7 +13,7 @@ use crate::typeck::typed_hir::{
     TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir,
     TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir, TypedVarBindingHir,
 };
-use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_assign};
+use crate::typeck::unify::{as_func_type, unify, unify_assign};
 use std::collections::HashMap;
 
 /// Convert `ast::Type` to `typed_hir::Type`.
@@ -44,9 +44,7 @@ pub struct TypeChecker {
     /// Collected errors.
     errors: Vec<TypeckError>,
     /// Counter for generating unique HIR node IDs.
-    hir_id_counter: u32,
     /// Counter for generating unique binding IDs.
-    binding_id_counter: u32,
     /// Function signatures collected in forward pass.
     func_signatures: HashMap<String, (Vec<Type>, Type)>,
     /// Binding ID to type mapping.
@@ -59,25 +57,9 @@ impl TypeChecker {
         Self {
             scopes: ScopeStack::new(),
             errors: Vec::new(),
-            hir_id_counter: 0,
-            binding_id_counter: 0,
             func_signatures: HashMap::new(),
             binding_types: HashMap::new(),
         }
-    }
-
-    /// Generate the next HIR ID.
-    fn next_hir_id(&mut self) -> HirId {
-        let id = HirId(self.hir_id_counter);
-        self.hir_id_counter += 1;
-        id
-    }
-
-    /// Generate the next binding ID.
-    fn next_binding_id(&mut self) -> BindingId {
-        let id = BindingId(self.binding_id_counter);
-        self.binding_id_counter += 1;
-        id
     }
 
     /// Add an error to the collection.
@@ -157,8 +139,11 @@ impl TypeChecker {
         // Add parameters to scope
         let mut typed_params = Vec::new();
         for param in &func.params {
-            let binding_id = self.next_binding_id();
-            let hir_id = self.next_hir_id();
+            // Keep the resolver's binding_id so that TypedParamHir, body
+            // identifier uses, and slot allocation in `lower` all refer to
+            // the same binding.
+            let binding_id = param.binding_id;
+            let hir_id = param.hir_id;
             let param_type = convert_type(&param.ty);
             let _ = self.scopes.declare(
                 param.name.clone(),
@@ -186,25 +171,29 @@ impl TypeChecker {
         let typed_body = match &func.body {
             FuncBodyHir::SingleExpr(expr) => {
                 let typed_expr = self.typeck_expr((**expr).clone())?;
-                // Check return type
-                if let Some(ref ret_type) = func.ret_type {
-                    let typed_ret_type = convert_type(ret_type);
-                    if let Err(e) = unify(&typed_ret_type, &typed_expr.ty(), typed_expr.span()) {
-                        self.add_error(e.kind, e.span);
-                        return Err(());
-                    }
+                // Check return type: an omitted annotation means `unit`.
+                let expected_ret = func
+                    .ret_type
+                    .as_ref()
+                    .map(convert_type)
+                    .unwrap_or(Type::Unit);
+                if let Err(e) = unify(&expected_ret, &typed_expr.ty(), typed_expr.span()) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
                 }
                 TypedFuncBodyHir::SingleExpr(Box::new(typed_expr))
             }
             FuncBodyHir::Block(block) => {
                 let typed_block = self.typeck_block(block)?;
-                // Check return type
-                if let Some(ref ret_type) = func.ret_type {
-                    let typed_ret_type = convert_type(ret_type);
-                    if let Err(e) = unify(&typed_ret_type, &typed_block.ty, typed_block.span) {
-                        self.add_error(e.kind, e.span);
-                        return Err(());
-                    }
+                // Check return type: an omitted annotation means `unit`.
+                let expected_ret = func
+                    .ret_type
+                    .as_ref()
+                    .map(convert_type)
+                    .unwrap_or(Type::Unit);
+                if let Err(e) = unify(&expected_ret, &typed_block.ty, typed_block.span) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
                 }
                 TypedFuncBodyHir::Block(typed_block)
             }
@@ -296,14 +285,16 @@ impl TypeChecker {
             return Err(());
         }
 
-        // Add binding to scope
-        let binding_id = self.next_binding_id();
-        let hir_id = self.next_hir_id();
+        // Add binding to scope. Keep the resolver's binding_id so
+        // `TypedConstDeclHir`, body uses, and `lower` slot allocation
+        // agree on the same binding.
+        let binding_id = c.binding_id;
+        let hir_id = c.hir_id;
         let _ = self.scopes.declare(
             c.name.clone(),
             Binding {
                 id: binding_id,
-                kind: BindingKind::Variable,
+                kind: BindingKind::Const,
                 mutable: false,
                 builtin: false,
                 span: c.span,
@@ -604,14 +595,9 @@ impl TypeChecker {
                 span: choose_expr.span,
             }))
         } else {
-            // Empty choose (should not happen in valid code)
-            Ok(TypedExprHir::Choose(TypedExprChooseHir {
-                scrutinee: Box::new(typed_scrutinee),
-                arms: typed_arms,
-                ty: Type::Unit,
-                hir_id: choose_expr.hir_id,
-                span: choose_expr.span,
-            }))
+            // Empty `choose` always fails the exhaustiveness check above,
+            // so this branch is unreachable in the current flow.
+            unreachable!("exhaustiveness check rejects an empty choose")
         }
     }
 
@@ -630,10 +616,17 @@ impl TypeChecker {
                 }
                 Ok(TypedPatternHir::Literal(Box::new(typed_expr)))
             }
-            PatternHir::Ident { name, span, .. } => {
-                // Pattern binding: new variable with scrutinee type
-                let new_binding_id = self.next_binding_id();
-                let new_hir_id = self.next_hir_id();
+            PatternHir::Ident {
+                name,
+                binding_id: pat_binding_id,
+                hir_id: pat_hir_id,
+                span,
+            } => {
+                // Pattern binding: new variable with scrutinee type.
+                // Keep the resolver's binding_id for consistency with
+                // guard/body identifier uses and `lower`.
+                let new_binding_id = *pat_binding_id;
+                let new_hir_id = *pat_hir_id;
                 let _ = self.scopes.declare(
                     name.clone(),
                     Binding {
@@ -645,6 +638,9 @@ impl TypeChecker {
                         hir_id: new_hir_id,
                     },
                 );
+                // Record the pattern binding's type so `lookup_type` finds it.
+                self.binding_types
+                    .insert(new_binding_id, scrutinee_type.clone());
                 Ok(TypedPatternHir::Ident {
                     name: name.clone(),
                     binding_id: new_binding_id,
@@ -664,23 +660,31 @@ impl TypeChecker {
         arms: &[TypedChooseArmHir],
         span: Span,
     ) -> Result<(), ()> {
+        // Only guard-free arms count toward exhaustiveness: an arm with a
+        // guard may not actually fire, so it cannot cover its pattern.
+        let count = |pred: &dyn Fn(&TypedChooseArmHir) -> bool| {
+            arms.iter().any(|arm| arm.guard.is_none() && pred(arm))
+        };
+
         // Check for otherwise (parsed as wildcard pattern `_`)
         let has_otherwise = arms.iter().any(|arm| {
-            matches!(&arm.pattern, TypedPatternHir::Ident { name, .. } if name == "_" || name == "otherwise")
+            arm.guard.is_none()
+                && matches!(&arm.pattern, TypedPatternHir::Ident { name, .. } if name == "_" || name == "otherwise")
         });
 
         if has_otherwise {
             return Ok(());
         }
 
-        // Check for Bool exhaustiveness
+        // Bool is the only scrutinee type whose values we can enumerate,
+        // so it needs explicit `true` and `false` arms.
         if matches!(scrutinee_type, Type::Bool) {
-            let has_true = arms.iter().any(|arm| {
-                matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Bool(true, _)))
-            });
-            let has_false = arms.iter().any(|arm| {
-                matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Bool(false, _)))
-            });
+            let has_true = count(
+                &|arm| matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Bool(true, _))),
+            );
+            let has_false = count(
+                &|arm| matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Bool(false, _))),
+            );
 
             if !has_true || !has_false {
                 let mut missing = Vec::new();
@@ -699,50 +703,20 @@ impl TypeChecker {
                 );
                 return Err(());
             }
+            return Ok(());
         }
 
-        // Check for Result exhaustiveness
-        if as_result_type(scrutinee_type).is_some() {
-            let has_ok = arms.iter().any(|arm| {
-                matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Call(..)))
-            });
-            let has_err = arms.iter().any(|arm| {
-                matches!(&arm.pattern, TypedPatternHir::Literal(expr) if matches!(**expr, TypedExprHir::Call(..)))
-            });
-
-            if !has_ok || !has_err {
-                let mut missing = Vec::new();
-                if !has_ok {
-                    missing.push("Ok".to_string());
-                }
-                if !has_err {
-                    missing.push("Err".to_string());
-                }
-                self.add_error(
-                    TypeckErrorKind::ChooseNotExhaustive {
-                        scrutinee_type: scrutinee_type.clone(),
-                        missing_patterns: missing,
-                    },
-                    span,
-                );
-                return Err(());
-            }
-        }
-
-        // For other types (Int, Float, String), require otherwise
-        // since we can't enumerate all possible values
-        if !matches!(scrutinee_type, Type::Bool | Type::Result(..)) {
-            self.add_error(
-                TypeckErrorKind::ChooseNotExhaustive {
-                    scrutinee_type: scrutinee_type.clone(),
-                    missing_patterns: vec!["otherwise".to_string()],
-                },
-                span,
-            );
-            return Err(());
-        }
-
-        Ok(())
+        // All other scrutinee types (Int, Float, String, Result, ...) are
+        // not enumerable, and 0.0.1 has no `Ok`/`Err` pattern syntax,
+        // so `otherwise` is required.
+        self.add_error(
+            TypeckErrorKind::ChooseNotExhaustive {
+                scrutinee_type: scrutinee_type.clone(),
+                missing_patterns: vec!["otherwise".to_string()],
+            },
+            span,
+        );
+        Err(())
     }
 
     /// Type check a binary operator.
@@ -831,10 +805,7 @@ impl TypeChecker {
             Some((params, ret)) => (params.clone(), ret.clone()),
             None => {
                 self.add_error(
-                    TypeckErrorKind::TypeMismatch {
-                        expected: Type::Func(vec![], Box::new(Type::Unit)),
-                        found: func_type,
-                    },
+                    TypeckErrorKind::NotCallable { ty: func_type },
                     typed_func.span(),
                 );
                 return Err(());
@@ -882,19 +853,42 @@ impl TypeChecker {
             return Err(());
         }
 
-        // Array type (unsupported in 0.0.1)
-        Ok(TypedExprHir::Index(
-            Box::new(typed_arr),
-            Box::new(typed_idx),
-        ))
+        // Arrays are parsed but not supported in 0.0.1.
+        match typed_arr.ty() {
+            Type::Array(_) => {
+                self.add_error(
+                    TypeckErrorKind::UnsupportedFeature {
+                        feature: "array indexing".to_string(),
+                    },
+                    typed_arr.span(),
+                );
+                Err(())
+            }
+            other => {
+                self.add_error(
+                    TypeckErrorKind::TypeMismatch {
+                        expected: Type::Array(Box::new(Type::Unsupported("elem".to_string()))),
+                        found: other,
+                    },
+                    typed_arr.span(),
+                );
+                Err(())
+            }
+        }
     }
 
     /// Type check a field access.
-    fn typeck_field(&mut self, obj: ExprHir, field: String) -> Result<TypedExprHir, ()> {
+    fn typeck_field(&mut self, obj: ExprHir, _field: String) -> Result<TypedExprHir, ()> {
         let typed_obj = self.typeck_expr(obj)?;
 
-        // Field access (unsupported in 0.0.1)
-        Ok(TypedExprHir::Field(Box::new(typed_obj), field))
+        // Structs/fields are parsed but not supported in 0.0.1.
+        self.add_error(
+            TypeckErrorKind::UnsupportedFeature {
+                feature: "field access".to_string(),
+            },
+            typed_obj.span(),
+        );
+        Err(())
     }
 
     /// Look up the type of a variable.
@@ -911,9 +905,17 @@ impl TypeChecker {
                 if let Some(ty) = self.binding_types.get(&binding.id) {
                     Ok(ty.clone())
                 } else {
-                    // Fallback: if we don't have a type, assume Unit
-                    // This shouldn't happen in well-formed code
-                    Ok(Type::Unit)
+                    // The resolver should have registered every binding with
+                    // a type; reaching this means the resolver and typeck
+                    // disagree — treat as a compiler bug, never silently
+                    // invent a type.
+                    self.add_error(
+                        TypeckErrorKind::InternalError {
+                            message: format!("no recorded type for binding `{name}`"),
+                        },
+                        span,
+                    );
+                    Err(())
                 }
             }
             None => {
