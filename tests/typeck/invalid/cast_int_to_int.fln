@@ -1,0 +1,2 @@
+// 0.0.2 U13: identity cast is rejected too.
+x = 42 as int;

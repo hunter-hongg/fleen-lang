@@ -1,0 +1,5 @@
+// 0.0.2 U13: box values are not scalars, so `b as string` is rejected.
+// (The body alone triggers the error; no call site needed.)
+func f(b: box<int>) {
+    x = b as string;
+}

@@ -301,6 +301,8 @@ pub fn stack_effect(
         | Opcode::Le
         | Opcode::Ge => (-1, 2),
         Opcode::Not | Opcode::NegI | Opcode::NegF => (0, 1),
+        // 0.0.2 U13: ToStr pops a scalar and pushes a fresh string (Δ0, min 1).
+        Opcode::ToStr => (0, 1),
         Opcode::Jump => (0, 0),
         Opcode::JumpIfFalse | Opcode::JumpIfTrue => (-1, 1),
         Opcode::Call => {

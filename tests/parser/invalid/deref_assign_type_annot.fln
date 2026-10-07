@@ -1,3 +1,3 @@
-// 0.0.2 U02: `deref b = v` cannot carry a type annotation (DESIGN.md §3.2.1).
+// 0.0.2 U02: `deref b = v` cannot carry a type annotation (DESIGN.md §3.4).
 b = box 1;
 deref b: int = 2;

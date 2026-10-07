@@ -1,0 +1,5 @@
+// 0.0.2 U02: `Ok(v, w)` — a Result pattern takes exactly one payload binding.
+r = 1;
+choose r {
+    when Ok(v, w) { v }
+}

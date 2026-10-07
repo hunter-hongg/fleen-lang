@@ -1,0 +1,20 @@
+// 0.0.2 ASI: statement-final semicolons omitted (newline-sensitive),
+// mixed styles coexist with explicit semicolons.
+func fib(n: int): int {
+    if n < 2 { n }
+    elif n == 2 { 1 }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+func main(): int {
+    x = 0
+    const limit = 10
+    sum = 0
+    while x < limit {
+        print(fib(x))
+        sum = sum + fib(x)
+        x = x + 1
+    }
+    print(sum)
+    0
+}

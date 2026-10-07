@@ -339,6 +339,11 @@ fn lower_global_init(
                 ));
             }
         },
+        // 0.0.2 U13: scalar → string in a global initializer.
+        TypedExprHir::Cast(inner, _) => {
+            lower_global_init(lcx, inner, out)?;
+            out.push(MirInstr::ToStr);
+        }
         _ => {
             return Err(LowerError::new(
                 LowerErrorKind::ComplexGlobalInit,
@@ -648,6 +653,10 @@ impl<'a> FnBodyCx<'a> {
                 }
             },
             TypedExprHir::Block(b) => self.lower_block(fb, b)?,
+            TypedExprHir::Cast(inner, _) => {
+                self.lower_expr_into(fb, inner)?;
+                fb.emit(MirInstr::ToStr);
+            }
             TypedExprHir::Index(..) => {
                 return Err(LowerError::new(
                     LowerErrorKind::UnsupportedFeature { feature: "index" },

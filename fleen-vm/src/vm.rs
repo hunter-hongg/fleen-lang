@@ -5,6 +5,7 @@ use std::rc::Rc;
 use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
 
 use crate::error::RuntimeError;
+use crate::fmt::fmt_scalar;
 use crate::frame::CallFrame;
 use crate::value::Value;
 
@@ -126,7 +127,17 @@ impl Vm {
     fn exec_builtin(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         match name {
             "print" => {
-                let line: String = args.iter().map(|a| a.to_string()).collect();
+                // 0.0.2 U13: scalar rendering shares `fmt_scalar` with `ToStr`
+                // so print and `as string` can never drift apart. Non-scalar,
+                // non-string values still fall back to `Display` until U04
+                // tightens the typeck side to `string`-only.
+                let line: String = args
+                    .iter()
+                    .map(|a| match a {
+                        Value::Str(s) => s.to_string(),
+                        other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
+                    })
+                    .collect();
                 println!("{line}");
                 Ok(Value::Unit)
             }
@@ -389,6 +400,14 @@ impl Vm {
                     return Err(RuntimeError::StackShape);
                 }
                 self.stack[idx] = v;
+            }
+            // 0.0.2 U13: scalar → string. Typeck guarantees the operand is a
+            // scalar; a non-scalar reaching here is a compiler bug, so this is
+            // a hard error rather than a silent fallback.
+            Opcode::ToStr => {
+                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let s = fmt_scalar(&v).ok_or(RuntimeError::CastOperandNotScalar)?;
+                self.stack.push(Value::Str(Rc::from(s.as_str())));
             }
         }
         self.frames

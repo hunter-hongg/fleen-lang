@@ -470,9 +470,11 @@ impl TypeChecker {
             ExprHir::Clone(_, span) => self.reject_unsupported("`clone` expression", span),
             ExprHir::Box(_, span) => self.reject_unsupported("`box` expression", span),
             ExprHir::Deref(_, span) => self.reject_unsupported("`deref` expression", span),
+            // 0.0.2 U13: `as` cast — whitelist: only scalar (int/float/bool) → string.
+            ExprHir::Cast(inner, ty, span) => self.typeck_cast(*inner, ty, span),
             ExprHir::Question(_, span) => self.reject_unsupported("`?` operator", span),
-            ExprHir::AssignDeref { span, .. } => {
-                self.reject_unsupported("`deref b = v` assignment", span)
+            ExprHir::AssignDeref { name, span, .. } => {
+                self.reject_unsupported(&format!("`deref {name} = v` assignment"), span)
             }
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             ExprHir::Block(block) => {
@@ -686,12 +688,16 @@ impl TypeChecker {
                     span: *span,
                 })
             }
-            PatternHir::ResultCtor { span, .. } => {
+            PatternHir::ResultCtor { ctor, span, .. } => {
                 // 0.0.2 U02: the form parses and resolves; Result pattern
                 // semantics (payload binding types, exhaustiveness) land in U04.
+                let ctor_name = match ctor {
+                    ast::ResultCtor::Ok => "Ok",
+                    ast::ResultCtor::Err => "Err",
+                };
                 self.add_error(
                     TypeckErrorKind::UnsupportedFeature {
-                        feature: "`Ok`/`Err` pattern".to_string(),
+                        feature: format!("`{ctor_name}` pattern"),
                     },
                     *span,
                 );
@@ -983,6 +989,36 @@ impl TypeChecker {
             typed_obj.span(),
         );
         Err(())
+    }
+
+    /// Type check an `as` cast expression (0.0.2 U13).
+    ///
+    /// 0.0.2 whitelist: only scalar (int/float/bool) → string is allowed.
+    /// All other casts are rejected with `UnsupportedCast`.
+    fn typeck_cast(
+        &mut self,
+        inner: ExprHir,
+        target: ast::Type,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let typed_inner = self.typeck_expr(inner)?;
+        let target_ty = convert_type(&target);
+
+        // 0.0.2 whitelist: only int/float/bool → string.
+        let valid = matches!(typed_inner.ty(), Type::Int | Type::Float | Type::Bool)
+            && matches!(target_ty, Type::String);
+        if !valid {
+            self.add_error(
+                TypeckErrorKind::UnsupportedCast {
+                    from: typed_inner.ty(),
+                    to: target_ty,
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        Ok(TypedExprHir::Cast(Box::new(typed_inner), span))
     }
 
     /// Look up the type of a variable.

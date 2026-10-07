@@ -521,22 +521,30 @@ mod tests {
     // ========== Error Cases ==========
 
     #[test]
-    fn error_missing_semicolon_in_expr_stmt() {
-        // Per SPEC §14 (0.0.1): semicolons are required at top level
-        let err = parse_err("42");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    fn asi_bare_expr_stmt_at_eof() {
+        // 0.0.2 ASI: `42` at EOF gets an inserted `;` — valid since ASI.
+        // (Was a missing-semicolon error in 0.0.1.)
+        let ast = parse_str("42");
+        assert!(matches!(ast.items[0], Item::Expr(Expr::Int(_, _))));
     }
 
     #[test]
     fn error_missing_rbrace_in_block() {
+        // 0.0.2 ASI: the inserted `;` lets the binding parse; the unclosed
+        // brace then surfaces as UnexpectedEof.
         let err = parse_err("func main() { x = 42 ");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        assert!(matches!(err.kind, ParseErrorKind::UnexpectedEof));
     }
 
     #[test]
     fn error_expected_expression() {
+        // A stray `;` at statement position is rejected by the statement-
+        // entry guard (ASI.md §4 #4).
         let err = parse_err(";");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
     }
 
     #[test]
@@ -1082,8 +1090,413 @@ func main() {
 
     #[test]
     fn reject_deref_assign_with_type_annotation() {
-        // `deref b` cannot carry a type annotation (DESIGN.md §3.2.1)
+        // `deref b` cannot carry a type annotation (DESIGN.md §3.4); the
+        // error must name the problem, not a generic "expected `;`"
         let err = parse_err("deref b: int = 2;");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(
+                expected.contains("cannot carry a type annotation"),
+                "got: {expected}"
+            );
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn parse_prefix_binds_tighter_than_additive() {
+        // `deref b + 1` = (deref b) + 1: prefix binds tighter than `+`,
+        // so `n = deref b + 1;` assigns `Add(Deref(b), 1)` to `n`
+        let ast = parse_str("n = deref b + 1;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Add(lhs, _) = &*v.init else {
+                    panic!("expected Add expr")
+                };
+                assert!(
+                    matches!(&**lhs, Expr::Deref(inner, _) if matches!(&**inner, Expr::Ident(n, _) if n == "b"))
+                );
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_question_binds_tighter_than_clone() {
+        // `clone b?` = clone(b?): `?` is postfix, binds tighter than prefix
+        let ast = parse_str("y = clone b?;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Clone(inner, _) = &*v.init else {
+                    panic!("expected Clone expr")
+                };
+                assert!(matches!(&**inner, Expr::Question(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_prefix_takes_unary_operand() {
+        // Prefixes recurse into the unary level (SYNTAX.ebnf v0.0.2:
+        // unary = unary_prefix unary), so `deref -x` = deref(neg(x))
+        let ast = parse_str("y = deref -x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Deref(inner, _) = &*v.init else {
+                    panic!("expected Deref expr")
+                };
+                assert!(
+                    matches!(&**inner, Expr::Neg(operand) if matches!(&**operand, Expr::Ident(n, _) if n == "x"))
+                );
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_prefix_stacks_on_itself() {
+        // `move move x` = move(move(x)): same recursion, non-`box` prefix
+        let ast = parse_str("y = move move x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Move(inner, _) = &*v.init else {
+                    panic!("expected Move expr")
+                };
+                assert!(matches!(&**inner, Expr::Move(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reject_box_as_binding_name() {
+        // 0.0.2: `box` is reserved in both type and expression position;
+        // `box = 1` hits the BoxType branch of reject_keyword_binding_name
+        let err = parse_err("box = 1;");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("keyword `box`"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn reject_result_pattern_without_binding() {
+        // `Ok()` — parse_result_pattern requires exactly one payload binding
+        let err = parse_err("choose r { when Ok() { 0 } }");
         assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    // ========== ASI（0.0.2，见 docs/0.0.2/ASI.md §5.1 陷阱表） ==========
+
+    #[test]
+    fn asi_two_stmts_across_newline() {
+        // `x = 1` ⏎ `y = 2` → 两条语句
+        let ast = parse_str("x = 1\ny = 2\n");
+        assert_eq!(ast.items.len(), 2);
+    }
+
+    #[test]
+    fn asi_binding_before_rbrace() {
+        // `{ x = 1 }` → 绑定贴 `}` 免分号，无尾表达式
+        let ast = parse_str("{ x = 1 }");
+        let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
+            panic!("expected block expr");
+        };
+        assert_eq!(block.stmts.len(), 1);
+        assert!(block.tail_expr.is_none());
+    }
+
+    #[test]
+    fn asi_const_before_rbrace() {
+        let ast = parse_str("{ const y = 2 }");
+        let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
+            panic!("expected block expr");
+        };
+        assert!(matches!(&block.stmts[0], Stmt::Decl(Decl::Const(_))));
+    }
+
+    #[test]
+    fn asi_tail_expr_preserved() {
+        // `{ 42 }` → 尾表达式（pass 不在 `}` 前插分号）
+        let ast = parse_str("{ 42 }");
+        let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
+            panic!("expected block expr");
+        };
+        assert!(block.stmts.is_empty());
+        assert!(matches!(
+            block.tail_expr.as_deref().expect("tail"),
+            Expr::Int(_, _)
+        ));
+    }
+
+    #[test]
+    fn asi_explicit_semi_still_discards() {
+        // `{ f(); }` → 语句（has_semi），块值 unit
+        let ast = parse_str("{ f(); }");
+        let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
+            panic!("expected block expr");
+        };
+        assert!(matches!(&block.stmts[0], Stmt::Expr(_, true)));
+        assert!(block.tail_expr.is_none());
+    }
+
+    #[test]
+    fn asi_cross_line_if_else_is_one_expr() {
+        // `if c { 1 }` ⏎ `else { 2 }` → 一个 if-else 表达式
+        let ast = parse_str("r = if c { 1 }\nelse { 2 };\n");
+        let Item::Decl(Decl::Var(binding)) = &ast.items[0] else {
+            panic!("expected binding");
+        };
+        assert!(matches!(*binding.init, Expr::If(_)));
+    }
+
+    #[test]
+    fn asi_allman_braces() {
+        // Allman 风格：`{` 单独成行不断句
+        let ast = parse_str("r = if c\n{ 1 }\nelse\n{ 2 };\n");
+        let Item::Decl(Decl::Var(binding)) = &ast.items[0] else {
+            panic!("expected binding");
+        };
+        assert!(matches!(*binding.init, Expr::If(_)));
+    }
+
+    #[test]
+    fn asi_if_stmt_then_binding() {
+        // `if c { 1 }` ⏎ `y = 2` → if 语句完结，pass 插分号
+        let ast = parse_str("if c { 1 }\ny = 2\n");
+        assert_eq!(ast.items.len(), 2);
+    }
+
+    #[test]
+    fn asi_else_after_terminated_if_rejected() {
+        // `if c { 1 };` ⏎ `else { 2 }` → else 不续接已完结的 if 语句
+        let err = parse_err("if c { 1 };\nelse { 2 }\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn asi_same_line_juxtaposition_rejected() {
+        // `x = 1 y = 2`（同行拼接）→ 语法错误
+        let err = parse_err("x = 1 y = 2\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn asi_block_expr_stmt_needs_leading_semi() {
+        // `x = 1` ⏎ `{ print(1) }` → 块表达式语句需前导分号
+        // （`{` ∉ 隐式结束集，pass 不断句，绑定收尾报错）
+        let err = parse_err("x = 1\n{ print(1) }\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn asi_double_semicolon_rejected() {
+        let err = parse_err("x = 1;;\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn asi_binary_continues_across_lines() {
+        // `x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`
+        let ast = parse_str("x = 1\n- 2\n");
+        let Item::Decl(Decl::Var(binding)) = &ast.items[0] else {
+            panic!("expected binding");
+        };
+        assert!(matches!(*binding.init, Expr::Sub(_, _)));
+    }
+
+    #[test]
+    fn asi_if_head_binary_climb() {
+        // `if c { 1 }` ⏎ `- 2` ⇒ `(if-expr) - 2`（block-like 头续接爬升）
+        let ast = parse_str("if c { 1 }\n- 2\n");
+        assert!(matches!(ast.items[0], Item::Expr(Expr::Sub(_, _))));
+    }
+
+    #[test]
+    fn asi_call_chain_across_lines() {
+        // `f()` ⏎ `(g())` ⇒ `f()(g())`
+        let ast = parse_str("f()\n(g())\n");
+        let Item::Expr(Expr::Call(func, _)) = &ast.items[0] else {
+            panic!("expected call");
+        };
+        assert!(matches!(**func, Expr::Call(_, _)));
+    }
+
+    #[test]
+    fn asi_choose_arms_across_lines() {
+        // `}` ⏎ `when` —— 臂延续不断句
+        let ast = parse_str("choose x {\nwhen 0 { 1 }\nwhen 1 { 2 }\n}\n");
+        let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
+            panic!("expected choose");
+        };
+        assert_eq!(choose.arms.len(), 2);
+    }
+
+    #[test]
+    fn asi_when_guard_across_lines() {
+        // `when 0` ⏎ `if guard { … }` —— guard 可跨行（pass 插入分号被跳过）
+        let ast = parse_str("choose x {\nwhen 0\nif x > 1 { 1 }\n}\n");
+        let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
+            panic!("expected choose");
+        };
+        assert!(choose.arms[0].guard.is_some());
+    }
+
+    #[test]
+    fn asi_func_decl_then_binding() {
+        // `func f() { 1 }` ⏎ `x = 2` → 两个 item（pass 在 `}` 后插分号）
+        let ast = parse_str("func f() { 1 }\nx = 2\n");
+        assert_eq!(ast.items.len(), 2);
+    }
+
+    #[test]
+    fn asi_binding_in_when_arm_before_rbrace() {
+        // when 臂内绑定贴 `}` 免分号
+        let ast = parse_str("choose x {\nwhen 0 { y = 1 }\n}\n");
+        let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
+            panic!("expected choose");
+        };
+        assert!(choose.arms[0].body.tail_expr.is_none());
+    }
+
+    #[test]
+    fn asi_assign_shape_before_rbrace_is_statement() {
+        // `deref b = v` 贴 `}` 按语句处理，不作尾表达式（ASI.md §4 #2：
+        // Assign 的 lower 栈残留与 Unit 类型错位的防御）
+        let ast = parse_str("func f() {\nderef b = 3\n}");
+        let Item::Decl(Decl::Func(func)) = &ast.items[0] else {
+            panic!("expected func decl");
+        };
+        let FuncBody::Block(block) = &func.body else {
+            panic!("expected block body");
+        };
+        assert_eq!(block.stmts.len(), 1);
+        assert!(matches!(
+            &block.stmts[0],
+            Stmt::Expr(e, false) if matches!(**e, Expr::Assign(_, _))
+        ));
+        assert!(block.tail_expr.is_none());
+    }
+
+    #[test]
+    fn asi_block_with_explicit_semi_binding_is_statement() {
+        // `{ x = 1; }` —— 显式分号：绑定按语句处理，块值 unit（ASI.md §5.1）
+        let ast = parse_str("{ x = 1; }");
+        let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
+            panic!("expected block expression");
+        };
+        assert_eq!(block.stmts.len(), 1);
+        assert!(block.tail_expr.is_none());
+    }
+
+    // ========== 0.0.2 U13: `as` casts ==========
+
+    #[test]
+    fn parse_cast_simple() {
+        let ast = parse_str("y = 1 as string;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Cast(inner, ty, _) = &*v.init else {
+                    panic!("expected Cast expr")
+                };
+                assert!(matches!(&**inner, Expr::Int(1, _)));
+                assert_eq!(*ty, Type::Base(BaseType::String));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cast_tighter_than_binary() {
+        // `1 + 2 as string` = `1 + (2 as string)`
+        let ast = parse_str("y = 1 + 2 as string;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Add(lhs, rhs) = &*v.init else {
+                    panic!("expected Add expr")
+                };
+                assert!(matches!(&**lhs, Expr::Int(1, _)));
+                assert!(matches!(&**rhs, Expr::Cast(_, _, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cast_deref_operand_unary_first() {
+        // `deref b as string` = `(deref b) as string`
+        let ast = parse_str("y = deref b as string;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Cast(inner, _, _) = &*v.init else {
+                    panic!("expected Cast expr")
+                };
+                assert!(matches!(&**inner, Expr::Deref(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cast_box_operand_includes_cast() {
+        // `box 1 as string` = `box (1 as string)` — box parses its operand
+        // at the cast level (unlike deref/move/clone which take unary).
+        let ast = parse_str("y = box 1 as string;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Box(inner, _) = &*v.init else {
+                    panic!("expected Box expr")
+                };
+                assert!(matches!(&**inner, Expr::Cast(_, _, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cast_call_operand() {
+        // `f(x) as string`
+        let ast = parse_str("y = f(x) as string;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Cast(inner, _, _) = &*v.init else {
+                    panic!("expected Cast expr")
+                };
+                assert!(matches!(&**inner, Expr::Call(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cast_missing_type_is_error() {
+        let err = parse_err("y = 42 as;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_as_as_binding_name_is_error() {
+        // `as` is a reserved keyword (0.0.2 U13). The statement-entry guard
+        // rejects it before the keyword-binding check (unlike move/clone/
+        // deref, `as` cannot start a statement).
+        let err = parse_err("as = 1;");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
     }
 }

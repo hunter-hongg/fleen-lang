@@ -2,6 +2,7 @@
 //!
 //! Uses recursive descent + precedence climbing for expression parsing.
 
+pub mod asi;
 pub mod ast;
 pub mod error;
 pub mod expr;
@@ -39,9 +40,15 @@ const KEYWORDS: &[&str] = &[
     "or",
     "and",
     "not",
+    "as",
 ];
 
 /// Parse a token stream into an AST.
+///
+/// The stream first goes through the ASI pass (`asi::insert_semis`), which
+/// consumes `Newline` tokens and inserts explicit `Semi` tokens at statement
+/// boundaries (0.0.2, docs/0.0.2/ASI.md) — the parser proper sees a
+/// 0.0.1-shaped stream.
 ///
 /// # Arguments
 /// - `tokens`: 词法分析后的 Token 流
@@ -59,6 +66,7 @@ const KEYWORDS: &[&str] = &[
 /// let ast = parse(tokens).unwrap();
 /// ```
 pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
+    let tokens = asi::insert_semis(tokens)?;
     let mut parser = Parser::new(tokens);
     parser.parse_program()
 }
@@ -101,6 +109,12 @@ impl Parser {
     /// Get the kind of the current token.
     fn current_kind(&self) -> &crate::lexer::TokenKind {
         &self.current().kind
+    }
+
+    /// Get the kind of the token `n` positions ahead of the current one
+    /// (0 = current), or `None` past the end of the stream.
+    fn peek_kind(&self, n: usize) -> Option<&crate::lexer::TokenKind> {
+        self.tokens.get(self.pos + n).map(|t| &t.kind)
     }
 
     /// Advance to the next token, returning the current token.
@@ -154,6 +168,17 @@ impl Parser {
         }
     }
 
+    /// Error at the current token: a statement boundary was required here
+    /// (explicit or ASI-inserted `;`) but the token is something else.
+    fn err_expected_stmt_end(&self) -> ParseError {
+        ParseError {
+            kind: ParseErrorKind::ExpectedSemiOrNewStmt {
+                found: self.current().kind.clone(),
+            },
+            span: self.current().span,
+        }
+    }
+
     /// Check if the given identifier is a keyword.
     fn check_keyword(&self, name: &str) -> bool {
         KEYWORDS.contains(&name)
@@ -170,10 +195,11 @@ impl Parser {
             crate::lexer::TokenKind::Deref => "deref",
             crate::lexer::TokenKind::BoxType => "box",
             crate::lexer::TokenKind::RefType => "ref",
+            crate::lexer::TokenKind::As => "as",
             _ => return Ok(()),
         };
         let next_starts_binding = matches!(
-            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            self.peek_kind(1),
             Some(crate::lexer::TokenKind::Assign) | Some(crate::lexer::TokenKind::Colon)
         );
         if next_starts_binding {
@@ -192,6 +218,34 @@ impl Parser {
         }
     }
 
+    /// Reject a type annotation on a `deref` assignment target
+    /// (`deref b: int = v`). Only plain bindings may be annotated
+    /// (DESIGN.md §3.4); erroring here gives an actionable message
+    /// instead of a generic "expected `;`" at the colon.
+    fn reject_deref_assign_type_annot(&self) -> Result<(), ParseError> {
+        if matches!(self.current_kind(), crate::lexer::TokenKind::Deref)
+            && matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Ident(_)))
+            && matches!(self.peek_kind(2), Some(crate::lexer::TokenKind::Colon))
+        {
+            let found = self
+                .peek_kind(2)
+                .cloned()
+                .unwrap_or(crate::lexer::TokenKind::Eof);
+            let span = self.tokens[self.pos + 2].span;
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "`=` (a `deref` assignment target cannot carry a type \
+                               annotation; annotate the binding instead, e.g. \
+                               `b: box<int> = box v`)"
+                        .to_string(),
+                    found,
+                },
+                span,
+            });
+        }
+        Ok(())
+    }
+
     /// Parse the entire program.
     fn parse_program(&mut self) -> Result<Ast, ParseError> {
         // P1: Handle empty token stream (only EOF)
@@ -206,6 +260,13 @@ impl Parser {
         let mut items = Vec::new();
 
         while !self.is_at_end() {
+            // Statement-entry guard (ASI.md §4 #4): a token that can neither
+            // start a statement nor close anything is reported here instead
+            // of surfacing as a generic "expected expression" deep inside
+            // primary parsing (e.g. a stray `else`, `;`, or `)`).
+            if !asi::can_start_stmt(self.current_kind()) {
+                return Err(self.err_expected_stmt_end());
+            }
             let item = self.parse_item()?;
             items.push(item);
         }
@@ -233,11 +294,12 @@ impl Parser {
 
         // Check for variable binding: ident followed by : or =
         if self.check(&crate::lexer::TokenKind::Ident(String::new())) {
-            let next_kind = &self.tokens[self.pos + 1].kind;
-            if matches!(
+            let next_kind = self.peek_kind(1);
+            let is_binding = matches!(
                 next_kind,
-                crate::lexer::TokenKind::Colon | crate::lexer::TokenKind::Assign
-            ) {
+                Some(crate::lexer::TokenKind::Colon) | Some(crate::lexer::TokenKind::Assign)
+            );
+            if is_binding {
                 // P3: Check if identifier is a keyword
                 if let crate::lexer::TokenKind::Ident(name) = self.current_kind()
                     && self.check_keyword(name)
@@ -259,26 +321,18 @@ impl Parser {
             }
         }
 
-        // Expression statement at top level
+        // Expression statement at top level.
+        // The ASI pass has inserted a `Semi` at every complete statement
+        // boundary, so a missing `;` here means same-line juxtaposition
+        // (`f() g()`) — rejected per the newline-sensitive semantics.
         self.reject_keyword_binding_name()?;
+        self.reject_deref_assign_type_annot()?;
         let expr = self.parse_expr()?;
-        // Per SPEC.md §14 (0.0.1): semicolons required for non-block-like
-        // expressions. Block-like expressions (if/while/choose/block) can be
-        // used as statements without a trailing semicolon, matching parse_block.
-        let is_block_like = matches!(
-            &expr,
-            Expr::If(_) | Expr::While(_) | Expr::Choose(_) | Expr::Block(_)
-        );
-        if is_block_like {
-            // Block-like expressions can end with or without a trailing semicolon
-            let _ = self.matches(&crate::lexer::TokenKind::Semi);
+        if self.matches(&crate::lexer::TokenKind::Semi) {
+            Ok(ast::Item::Expr(expr))
         } else {
-            self.expect(
-                &crate::lexer::TokenKind::Semi,
-                "expected `;` after expression (required in 0.0.1)",
-            )?;
+            Err(self.err_expected_stmt_end())
         }
-        Ok(ast::Item::Expr(expr))
     }
 
     /// Parse an import declaration.
@@ -339,10 +393,11 @@ impl Parser {
 
         let init = self.parse_expr()?;
 
-        self.expect(
-            &crate::lexer::TokenKind::Semi,
-            "expected `;` after const declaration",
-        )?;
+        if self.check(&crate::lexer::TokenKind::RBrace) {
+            // ASI (ASI.md §3.4): `const` immediately before `}` needs no `;`.
+        } else if !self.matches(&crate::lexer::TokenKind::Semi) {
+            return Err(self.err_expected_stmt_end());
+        }
 
         let end = self.prev_span_end();
         Ok(ast::ConstDecl {
@@ -371,10 +426,13 @@ impl Parser {
 
         let init = self.parse_expr()?;
 
-        self.expect(
-            &crate::lexer::TokenKind::Semi,
-            "expected `;` after variable binding",
-        )?;
+        if self.check(&crate::lexer::TokenKind::RBrace) {
+            // ASI (ASI.md §3.4): a binding immediately before `}` needs no
+            // `;` — the pass never inserts before a closing brace, and a
+            // binding can never be a block tail expression.
+        } else if !self.matches(&crate::lexer::TokenKind::Semi) {
+            return Err(self.err_expected_stmt_end());
+        }
 
         let end = self.prev_span_end();
         Ok(ast::VarBinding {
@@ -427,6 +485,10 @@ impl Parser {
             // Multi-line: func name(params): type { ... }
             ast::FuncBody::Block(self.parse_block()?)
         };
+        // The ASI pass inserts a `Semi` after the closing `}` when another
+        // statement follows (or at EOF); 0.0.1 never required one here, so
+        // it stays optional (ASI.md §4).
+        let _ = self.matches(&crate::lexer::TokenKind::Semi);
 
         let end = self.prev_span_end();
         Ok(ast::FuncDecl {
@@ -604,15 +666,21 @@ impl Parser {
                     span: self.tokens[self.pos - 1].span,
                 });
             }
+            // Statement-entry guard (ASI.md §4 #4): catches stray `else`,
+            // `;`, `)` etc. at statement position with an actionable error
+            // instead of a generic "expected expression".
+            if !asi::can_start_stmt(self.current_kind()) {
+                return Err(self.err_expected_stmt_end());
+            }
 
             // Check for declaration
             let is_decl = self.check(&crate::lexer::TokenKind::Const)
                 || self.check(&crate::lexer::TokenKind::Func)
                 || (self.check(&crate::lexer::TokenKind::Ident(String::new())) && {
-                    let next_kind = &self.tokens[self.pos + 1].kind;
                     matches!(
-                        next_kind,
-                        crate::lexer::TokenKind::Colon | crate::lexer::TokenKind::Assign
+                        self.peek_kind(1),
+                        Some(crate::lexer::TokenKind::Colon)
+                            | Some(crate::lexer::TokenKind::Assign)
                     )
                 });
 
@@ -629,46 +697,29 @@ impl Parser {
                     stmts.push(ast::Stmt::Decl(ast::Decl::Var(decl)));
                 }
             } else {
-                // Expression: may be statement or tail expression
+                // Expression: statement or tail expression. The ASI pass
+                // guarantees a `Semi` after every complete statement, so a
+                // missing one here is same-line juxtaposition or the block
+                // tail (ASI.md §4).
                 self.reject_keyword_binding_name()?;
+                self.reject_deref_assign_type_annot()?;
                 let expr = self.parse_expr()?;
 
                 if self.matches(&crate::lexer::TokenKind::Semi) {
-                    // Statement: expression with semicolon
                     stmts.push(ast::Stmt::Expr(Box::new(expr), true));
-                } else {
-                    // Block-like expressions (if/while/choose/block) can end
-                    // without a semicolon, followed by more statements or }
-                    let is_block_like = matches!(
-                        &expr,
-                        Expr::If(_) | Expr::While(_) | Expr::Choose(_) | Expr::Block(_)
-                    );
-
-                    if is_block_like {
-                        // Block-like expression without semicolon as statement
-                        // or this could be the tail expression
-                        if self.check(&crate::lexer::TokenKind::RBrace) {
-                            tail_expr = Some(Box::new(expr));
-                            break;
-                        } else {
-                            // More statements follow
-                            stmts.push(ast::Stmt::Expr(Box::new(expr), false));
-                        }
-                    } else if self.check(&crate::lexer::TokenKind::RBrace) {
-                        // Tail expression (non-block-like) without semicolon
+                } else if self.check(&crate::lexer::TokenKind::RBrace) {
+                    if matches!(expr, Expr::Assign(_, _)) {
+                        // Assignment-shaped expressions (`deref b = v`,
+                        // `x.y = v`) cannot be block tails: lowering leaves
+                        // the RHS value on the stack while typeck types the
+                        // assignment Unit (ASI.md §4 #2). Treat as statement.
+                        stmts.push(ast::Stmt::Expr(Box::new(expr), false));
+                    } else {
                         tail_expr = Some(Box::new(expr));
                         break;
-                    } else {
-                        let found = self.current().kind.clone();
-                        let span = self.current().span;
-                        return Err(ParseError {
-                            kind: ParseErrorKind::Expected {
-                                expected: "`;` or `}`".to_string(),
-                                found,
-                            },
-                            span,
-                        });
                     }
+                } else {
+                    return Err(self.err_expected_stmt_end());
                 }
             }
         }

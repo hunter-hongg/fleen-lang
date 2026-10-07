@@ -140,6 +140,22 @@ impl fmt::Display for BaseType {
     }
 }
 
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Base(bt) => write!(f, "{}", bt),
+            Type::Array(t) => write!(f, "[{}]", t),
+            Type::Box(t) => write!(f, "box<{}>", t),
+            Type::Ref(t) => write!(f, "ref {}", t),
+            Type::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
+            Type::Func(params, ret) => {
+                let ps: Vec<String> = params.iter().map(|t| t.to_string()).collect();
+                write!(f, "({},) -> {}", ps.join(", "), ret)
+            }
+        }
+    }
+}
+
 /// Block: sequence of statements with optional tail expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
@@ -206,8 +222,10 @@ pub enum Expr {
     Clone(Box<Expr>, Span),
     /// `box <expr>` (0.0.2: heap allocation)
     Box(Box<Expr>, Span),
-    /// `deref <postfix>` (0.0.2: box pointee read)
+    /// `deref <unary>` (0.0.2: box pointee read)
     Deref(Box<Expr>, Span),
+    /// `<expr> as <type>` (0.0.2 U13: type cast; 0.0.2 whitelist: scalar → string only)
+    Cast(Box<Expr>, Type, Span),
     /// `<expr>?` (0.0.2: Result propagation suffix)
     Question(Box<Expr>, Span),
     /// `func(args)`
@@ -256,6 +274,7 @@ impl Expr {
             | Expr::Clone(_, s)
             | Expr::Box(_, s)
             | Expr::Deref(_, s)
+            | Expr::Cast(_, _, s)
             | Expr::Question(_, s) => *s,
             Expr::Call(f, _) => f.span(),
             Expr::Index(a, _) => a.span(),
@@ -363,6 +382,7 @@ impl fmt::Display for Expr {
             Expr::Clone(e, _) => write!(f, "(clone {})", e),
             Expr::Box(e, _) => write!(f, "(box {})", e),
             Expr::Deref(e, _) => write!(f, "(deref {})", e),
+            Expr::Cast(e, ty, _) => write!(f, "({} as {})", e, ty),
             Expr::Question(e, _) => write!(f, "({}?)", e),
             Expr::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
             Expr::Ne(lhs, rhs) => write!(f, "({} != {})", lhs, rhs),

@@ -176,8 +176,10 @@ pub enum ExprHir {
     Clone(Box<ExprHir>, Span),
     /// `box <expr>` (0.0.2)
     Box(Box<ExprHir>, Span),
-    /// `deref <postfix>` (0.0.2)
+    /// `deref <unary>` (0.0.2)
     Deref(Box<ExprHir>, Span),
+    /// `<expr> as <type>` (0.0.2 U13: type cast; 0.0.2 whitelist: scalar → string only)
+    Cast(Box<ExprHir>, Type, Span),
     /// `<expr>?` (0.0.2 Result propagation; span covers operand and `?`)
     Question(Box<ExprHir>, Span),
     /// Function call
@@ -230,6 +232,7 @@ impl ExprHir {
             | ExprHir::Clone(_, s)
             | ExprHir::Box(_, s)
             | ExprHir::Deref(_, s)
+            | ExprHir::Cast(_, _, s)
             | ExprHir::Question(_, s) => *s,
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(a, _) => a.span(),

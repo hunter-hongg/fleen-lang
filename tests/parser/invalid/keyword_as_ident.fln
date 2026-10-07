@@ -1,2 +1,3 @@
-// 关键字作为标识符（P3）
+// 0.0.2 U13: `as` is a reserved keyword — cannot bind to it.
 if = 42;
+as = 1;

@@ -1,0 +1,8 @@
+// 0.0.2 U02: prefix keywords take any unary-level operand
+// (SYNTAX.ebnf v0.0.2: unary = unary_prefix unary). The parser only checks
+// the form; operand legality (place requirements, box types) is typeck's.
+x = 1;
+deref -x;
+move move x;
+clone clone x;
+box box x;

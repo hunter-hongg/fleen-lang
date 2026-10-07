@@ -149,4 +149,7 @@ pub enum MirInstr {
     CallValue(u8),
     // choose helper: copy stack top into the binding slot (v → v).
     BindMatch(u16),
+    // 0.0.2 U13: type cast (scalar → string); pops a scalar, pushes a fresh
+    // owned string. Stack effect: Δ0, min 1 (v → s).
+    ToStr,
 }

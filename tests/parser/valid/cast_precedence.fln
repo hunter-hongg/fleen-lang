@@ -1,0 +1,6 @@
+// 0.0.2 U13: `as` cast layer — precedence vs unary/binary (parser level only,
+// these shapes are what typeck's whitelist must accept or reject).
+x = 1 + 2 as string;
+y = deref b as string;
+b = box 1 as string;
+f = apply(1, 2) as string;

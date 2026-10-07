@@ -1,0 +1,3 @@
+// 0.0.2 U02: reserved words are rejected as binding names with a type
+// annotation too (the Colon branch of reject_keyword_binding_name).
+move: int = 1;

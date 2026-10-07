@@ -1,0 +1,3 @@
+// 0.0.2 U13: `as` continues the expression across a newline (ASI.md §4).
+x = 42
+as string

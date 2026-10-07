@@ -1,0 +1,2 @@
+// 0.0.2 U13: `int as float` is not in the whitelist.
+x = 1 as float;

@@ -1,0 +1,6 @@
+// 0.0.2 U02: `Ok()` without a payload binding is not a valid pattern
+// (parse_result_pattern requires exactly one binding identifier).
+r = 1;
+choose r {
+    when Ok() { 0 }
+}

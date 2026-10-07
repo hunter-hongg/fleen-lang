@@ -1,0 +1,2 @@
+// 0.0.2 U13: `as` must be followed by a type.
+x = 42 as;

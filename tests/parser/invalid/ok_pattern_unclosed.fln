@@ -1,0 +1,5 @@
+// 0.0.2 U02: `Ok(v` — missing closing paren in a Result pattern.
+r = 1;
+choose r {
+    when Ok(v { v }
+}

@@ -1,0 +1,12 @@
+// 0.0.2 U13 end-to-end: `e as string` across the full pipeline.
+func main(): int {
+    x = 42
+    print(x as string)
+    f = 3.5
+    print(f as string)
+    b = true
+    print(b as string)
+    n = 0 - 7
+    print(n as string)
+    0
+}

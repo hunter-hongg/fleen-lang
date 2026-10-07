@@ -7,6 +7,7 @@
 //! in-process, making it a one-command compile → verify → execute driver.
 
 pub mod error;
+pub mod fmt;
 pub mod frame;
 pub mod value;
 pub mod vm;

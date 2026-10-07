@@ -1,0 +1,8 @@
+x = 1 +
+2
+f = fib_like
+g = f
+h = x
+- 3
+k = h
+!false

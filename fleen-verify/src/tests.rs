@@ -33,6 +33,7 @@ const JUMP: u8 = Opcode::Jump as u8;
 const JUMP_IF_FALSE: u8 = Opcode::JumpIfFalse as u8;
 const STORE_GLOBAL: u8 = Opcode::StoreGlobal as u8;
 const LOAD_LOCAL: u8 = Opcode::LoadLocal as u8;
+const TO_STR: u8 = Opcode::ToStr as u8;
 
 fn u32le(v: u32) -> [u8; 4] {
     v.to_le_bytes()
@@ -316,4 +317,40 @@ fn call_stack_effect() {
         0,
     );
     assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn valid_to_str_cast() {
+    // 0.0.2 U13：Const 压标量，ToStr 换成新鲜 string（Δ0，min 1），Return 前深度仍为 1。
+    let mut code = vec![CONST_INT];
+    code.extend_from_slice(&u32le(1));
+    code.push(TO_STR);
+    code.push(RETURN);
+    let m = module(
+        vec![Const::Str("main".into()), Const::Int(42)],
+        vec![func(ConstId(0), 0, 0, code)],
+        vec![],
+        0,
+    );
+    assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn to_str_on_empty_stack() {
+    // ToStr min_depth_before = 1：空栈上执行须报 StackUnderflow。
+    let code = vec![TO_STR, RETURN];
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 0, code)],
+        vec![],
+        0,
+    );
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0
+        })
+    );
 }

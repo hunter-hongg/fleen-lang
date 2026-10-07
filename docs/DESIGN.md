@@ -4,7 +4,8 @@
 > 编译运行都快 · 简洁清晰 · 内存安全 · 直觉友好
 >
 > **0.0.2 增量**：所有权（`move` / `clone` / `box<T>` / `ref`）、`?` 与 `Ok`/`Err`、
-> ASI（分号可选）已定稿 —— 决议与细则见 `docs/0.0.2/PLAN.md`，
+> ASI（分号可选）已定稿 —— 决议与细则见 `docs/0.0.2/ASI.md`（权威），
+> `docs/0.0.2/PLAN.md` §3.5 为摘要，
 > 正文相应小节已同步标注（标注"0.0.2"的内容实现落地前不代表当前工具链行为）。
 
 ---
@@ -54,10 +55,11 @@ true / false // bool
 ```
 func  const  if  elif  else  while  choose
 when  otherwise  return  import  unsafe  trusted
-box  ref  deref  move  clone  true  false
+box  ref  deref  move  clone  as  true  false
 ```
 
-> `deref` 为 0.0.2 新增关键字（box 点内值读写，见 §10.3）。
+> `deref` 为 0.0.2 新增关键字（box 点内值读写，见 §10.3）；
+> `as` 为 0.0.2 新增保留字（类型转换，见 §9"类型转换 as"）。
 
 ---
 
@@ -158,7 +160,7 @@ a = b = 5;        // ❌ 错误：b 未绑定
 > 落地，分号可省略（显式分号仍合法），判定规则见 §3.9。
 >
 > **表达式语句分号规则**：
-> - if、while、choose 等控制流表达式作为语句使用时，必须加分号
+> - if、while、choose 等控制流表达式作为语句使用时，0.0.1 必须加分号（0.0.2 起可省略）
 > - choose-when 结构中，`when` 子句和 `otherwise` 子句本身不带分号
 > - 只有 `choose` 整体作为表达式语句使用时，末尾才加分号
 > - 函数体内的尾表达式（返回值）不加分号
@@ -225,34 +227,45 @@ y = fib(n);        // 合法：函数返回值是新鲜值，天然转移
 
 ### 3.9 分号与 ASI（0.0.2）
 
-0.0.2 起分号可选，判定在 **parser 端**做白名单式"可续接"判定
-（lexer 与 Token 流保持纯粹；Fleen 无 `return` 关键字、无 `++`，无 JS 式 ASI 陷阱面）：
+0.0.2 起分号可选，语义为**换行敏感**：语句边界在换行处判定，同行语句拼接非法。
+架构上，Lex 与 Parse 之间增加独立的 **ASI pass**（`parser/asi.rs` 纯函数）：
+消费全部 `Newline` token，在语句边界插入显式 `;`，对既不能续接也不能起始
+语句的 token 报错 `ExpectedSemiOrNewStmt`。pass 输出的 Token 流与 0.0.1
+同构（分号齐全），Parse 阶段沿用原有逻辑。
 
-> 语句结束后——
-> 1. 下一 token 是 `;` → 消费（**显式分号永远合法**，新旧风格可混用）；
-> 2. 下一 token ∈ **新语句起始集** 或 ∈ `{ }`, EOF → 隐式结束；
-> 3. 下一 token ∈ **续接集** → 不结束，表达式继续（运算符续接优先）；
+> 语句完成后（换行或 EOF 处）——
+> 1. 下一 token ∈ **隐式结束集** → 插入 `;`（断句）；
+> 2. 下一 token ∈ **续接集** 或构造延续集（`else` `elif` `when` `otherwise`）→ 不断句，续接优先；
+> 3. 上一 token 不能结尾语句（运算符、`=`、`,`、前缀关键字之后）→ 不断句，跨行续接；
 > 4. 其余 → 报错 `ExpectedSemiOrNewStmt`（带 Span 与期望提示）。
 
 | 集合 | 成员 |
 |------|------|
-| 新语句起始集 | `func` `const` `if` `while` `choose` `import`、标识符、字面量、`box` `deref` `move` `clone` `!` `-` |
-| 续接集 | `+` `*` `/` `%` `==` `!=` `<` `>` `<=` `>=` `and` `or` `?` `.` `[` `(` |
+| 新语句起始集 | `func` `const` `if` `while` `choose` `import`、标识符、字面量、`box` `deref` `move` `clone` `not` `!` `-` `(` `{` |
+| 续接集 | `+` `-` `*` `/` `%` `==` `!=` `<` `>` `<=` `>=` `and` `or` `?` `.` `[` `(` |
 | 终止集 | `}` EOF |
+
+> 隐式结束集 = 起始集 ∖ {`(`, `-`, `{`} ∪ {`}`, EOF}：`(` `-` 续接优先，
+> `{` 的豁免使 Allman 风格不断句（代价：块表达式语句需前导分号）。
 
 **陷阱用例**（必须进规范与测试）：
 
 | 代码 | 解析结果 | 说明 |
 |------|---------|------|
 | `x = 1` ⏎ `y = 2` | 两条语句 | 标识符 ∈ 起始集 |
+| `x = 1 y = 2`（同行） | 语法错误 | 换行敏感：同行拼接非法，typo 不被静默吞掉 |
 | `x = 1` ⏎ `- 2` | `x = (1 - 2)` | `-` ∈ 续接集，二元续接优先 |
 | `f()` ⏎ `(g())` | `f()(g())` 调用链 | `(` ∈ 续接集（调用）；想分开请写 `;` |
 | `f()` ⏎ `[0]` | `f()[0]` 索引 | `[` ∈ 续接集 |
 | `x = 1` ⏎ `!flag` | 两条语句 | `!` 非二元续接，`!flag` ∈ 起始集 |
-| `if c { 1 }` ⏎ `else { 2 }` | 语法错误 | `else` 不续接已完结的 if 语句 |
+| `if c { 1 }` ⏎ `else { 2 }` | 一个 if-else 表达式 | `else` 归属该 if（跨行连接合法） |
+| `if c { 1 };` ⏎ `else { 2 }` | 语法错误 | `else` 不续接**已完结**（有分号）的 if 语句 |
+| `{ x = 1 }` | 合法（绑定语句） | `}` 前免分号，由 parser 结构区分尾表达式与绑定 |
+| `x = 1` ⏎ `{ print(1) }` | 语法错误 | 以 `{` 开头的块表达式语句需前导分号（`{` 不在隐式结束集，亦是 Allman 风格安全的代价） |
 
 不变量：`func` 声明后无分号、块尾表达式无分号、`when`/`otherwise` 无分号的规则不变；
 分号的有无在 AST 之后不可见（不影响 MIR 与字节码）。
+架构、集合精确定义与完整陷阱表见 **`docs/0.0.2/ASI.md`**（权威设计）。
 
 ---
 
@@ -589,6 +602,28 @@ Result<T, E>     // 错误处理（0.0.2 起 Ok/Err/? 转正，§8）
 ```fleen
 (int, int) -> int
 ```
+
+### 类型转换 `as`（0.0.2 临时，泛型后重审）
+
+```fleen
+x = 42 as string;    // "42"
+f = 1.5 as string;   // "1.5"
+b = true as string;  // "true"
+```
+
+- **优先级**：`as` 介于一元前缀与二元运算符之间（同 Rust）：
+  `deref b as string` = `(deref b) as string`；`1 + 2 as string` = `1 + (2 as string)`；
+  `box 1 as string` = `box (1 as string)`
+- **白名单（仅此三条）**：`int as string`（十进制，含负号）、
+  `float as string`（与 print 的 float 输出一致）、`bool as string`（`"true"` / `"false"`）。
+  其余一切（`string as string`、`int as float`、`box<T> as …`、`ref T` 操作数、恒等转换）
+  → `UnsupportedCast { from, to }`
+- **结果是新鲜 owned string**：消费位置无需 `move` / `clone`（与"RHS 是新值"一致）
+- **临时性**：0.0.2 白名单仅为 print 修复的最小配套；完整转换矩阵与
+  From-like 机制随泛型（0.1.0）再议，0.0.2 不引入任何隐式数值转换
+- **print 仅接受 string 也是临时的**：0.0.2 print 对非 string 实参报
+  `ArgTypeMismatch` 并提示 `as string`；print 的格式化与 `as string` 共用
+  同一 helper（`fleen-vm/src/fmt.rs`），两条路径不会漂移
 
 ---
 

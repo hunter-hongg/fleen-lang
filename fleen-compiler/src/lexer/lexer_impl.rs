@@ -28,12 +28,27 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenize the entire source code into a vector of tokens.
+    ///
+    /// 0.0.2: line breaks are preserved as `Newline` tokens (collapsed runs of
+    /// blank lines, none at file start) for the ASI pass between Lex and
+    /// Parse (docs/0.0.2/ASI.md).
     pub fn tokenize(&mut self) -> Result<Vec<Token>, Vec<LexError>> {
         let mut tokens = Vec::with_capacity(self.chars.as_str().len() / 4);
         let mut errors = Vec::new();
 
         while !self.is_eof() {
-            self.skip_whitespace_and_comments(&mut errors);
+            let ws_start = self.byte_offset;
+            let saw_newline = self.skip_whitespace_and_comments(&mut errors);
+
+            // Collapse runs of blank lines into a single Newline, and never
+            // emit one at file start. EOF needs no trailing Newline — the
+            // ASI pass treats EOF as a boundary itself.
+            if saw_newline && !tokens.is_empty() {
+                tokens.push(Token::new(
+                    TokenKind::Newline,
+                    Span::new(ws_start, self.byte_offset),
+                ));
+            }
 
             if self.is_eof() {
                 break;
@@ -285,6 +300,7 @@ impl<'a> Lexer<'a> {
             "move" => TokenKind::Move,
             "clone" => TokenKind::Clone,
             "deref" => TokenKind::Deref,
+            "as" => TokenKind::As,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -294,11 +310,18 @@ impl<'a> Lexer<'a> {
         Ok(Token::new(kind, span))
     }
 
-    /// Skip whitespace and comments.
-    fn skip_whitespace_and_comments(&mut self, errors: &mut Vec<LexError>) {
+    /// Skip whitespace and comments. Returns whether a line break was crossed
+    /// (line-comment-terminating newlines count; newlines inside block
+    /// comments do not).
+    fn skip_whitespace_and_comments(&mut self, errors: &mut Vec<LexError>) -> bool {
+        let mut saw_newline = false;
         loop {
             match self.current_char {
-                Some(' ') | Some('\t') | Some('\r') | Some('\n') => {
+                Some(' ') | Some('\t') | Some('\r') => {
+                    self.advance();
+                }
+                Some('\n') => {
+                    saw_newline = true;
                     self.advance();
                 }
                 Some('/') if self.next_char == Some('/') => {
@@ -338,6 +361,7 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
+        saw_newline
     }
 
     /// Advance to the next character.
@@ -465,6 +489,13 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_as_keyword() {
+        let tokens = tokenize("as").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::As);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn tokenize_question() {
         let tokens = tokenize("?").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Question);
@@ -496,11 +527,13 @@ mod tests {
     #[test]
     fn tokenize_keyword_prefix_identifiers() {
         // Keywords must not swallow longer identifiers that start with them
-        let tokens = tokenize("moved clone_x deref2 moveit").unwrap();
+        let tokens = tokenize("moved clone_x deref2 moveit as_x asb").unwrap();
         assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "moved"));
         assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "clone_x"));
         assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "deref2"));
         assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "moveit"));
+        assert!(matches!(tokens[4].kind, TokenKind::Ident(ref s) if s == "as_x"));
+        assert!(matches!(tokens[5].kind, TokenKind::Ident(ref s) if s == "asb"));
     }
 
     #[test]
@@ -508,15 +541,18 @@ mod tests {
         assert!(TokenKind::Move.is_keyword());
         assert!(TokenKind::Clone.is_keyword());
         assert!(TokenKind::Deref.is_keyword());
+        assert!(TokenKind::As.is_keyword());
         // `?` is punctuation, not a keyword
         assert!(!TokenKind::Question.is_keyword());
         assert_eq!(TokenKind::Move.keyword_str(), Some("move"));
         assert_eq!(TokenKind::Clone.keyword_str(), Some("clone"));
         assert_eq!(TokenKind::Deref.keyword_str(), Some("deref"));
+        assert_eq!(TokenKind::As.keyword_str(), Some("as"));
         assert_eq!(TokenKind::Question.keyword_str(), None);
         assert_eq!(TokenKind::Move.to_string(), "move");
         assert_eq!(TokenKind::Clone.to_string(), "clone");
         assert_eq!(TokenKind::Deref.to_string(), "deref");
+        assert_eq!(TokenKind::As.to_string(), "as");
         assert_eq!(TokenKind::Question.to_string(), "?");
     }
 
@@ -565,7 +601,9 @@ mod tests {
     fn tokenize_comments() {
         let tokens = tokenize("foo // comment\nbar").unwrap();
         assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "foo"));
-        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "bar"));
+        // 0.0.2: line-comment-terminating newline is preserved for the ASI pass
+        assert_eq!(tokens[1].kind, TokenKind::Newline);
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "bar"));
     }
 
     #[test]
@@ -573,6 +611,37 @@ mod tests {
         let tokens = tokenize("foo /* comment */ bar").unwrap();
         assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "foo"));
         assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "bar"));
+    }
+
+    #[test]
+    fn newline_not_emitted_at_file_start() {
+        // ASI 契约（ASI.md §2）：源码开头的换行不发 Newline。
+        let tokens = tokenize("\n\n  foo").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "foo"));
+        assert!(!tokens.iter().any(|t| t.kind == TokenKind::Newline));
+    }
+
+    #[test]
+    fn newline_collapses_blank_lines() {
+        // 连续空白/空行折叠为单个 Newline（ASI.md §2）。
+        let tokens = tokenize("foo\n\n  \nbar").unwrap();
+        assert_eq!(tokens[1].kind, TokenKind::Newline);
+        assert_eq!(tokens[2].kind, TokenKind::Ident("bar".to_string()));
+    }
+
+    #[test]
+    fn crlf_is_single_newline() {
+        // `\r\n` 视为一个换行（ASI.md §2）。
+        let tokens = tokenize("foo\r\nbar").unwrap();
+        assert_eq!(tokens[1].kind, TokenKind::Newline);
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "bar"));
+    }
+
+    #[test]
+    fn newline_inside_block_comment_not_emitted() {
+        // 块注释内的换行不发；行注释末尾的照发（见 tokenize_comments）。
+        let tokens = tokenize("foo /* a\nb */ bar").unwrap();
+        assert!(!tokens.iter().any(|t| t.kind == TokenKind::Newline));
     }
 
     #[test]

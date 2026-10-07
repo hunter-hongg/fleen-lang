@@ -442,6 +442,8 @@ fn stack_delta(i: &MirInstr, func_params: &std::collections::HashMap<FuncId, u16
         | MirInstr::Ge => -1,
         MirInstr::Not | MirInstr::NegI | MirInstr::NegF => 0,
         MirInstr::BindMatch(_) => 0,
+        // 0.0.2 U13: ToStr pops a scalar and pushes a string (Δ0).
+        MirInstr::ToStr => 0,
         MirInstr::Call(fid) => 1 - func_params[fid] as i64,
         MirInstr::CallValue(argc) => -(*argc as i64),
     }

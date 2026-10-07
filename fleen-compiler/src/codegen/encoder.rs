@@ -148,6 +148,7 @@ fn mir_opcode(instr: &MirInstr) -> Opcode {
         MirInstr::LoadFunc(..) => Opcode::LoadFunc,
         MirInstr::CallValue(..) => Opcode::CallValue,
         MirInstr::BindMatch(..) => Opcode::BindMatch,
+        MirInstr::ToStr => Opcode::ToStr,
     }
 }
 

@@ -1,0 +1,19 @@
+// 0.0.2 U13: whitelist — int/float/bool → string, in binding / argument /
+// print positions.
+x = 42;
+s1 = x as string;
+
+f = 1.5;
+s2 = f as string;
+
+b = true;
+s3 = b as string;
+
+print(x as string);
+print(f as string);
+print(b as string);
+
+func take(s: string): string = s;
+r = take(x as string);
+r2 = take(f as string);
+r3 = take(b as string);

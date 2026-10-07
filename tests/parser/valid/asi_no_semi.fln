@@ -1,0 +1,13 @@
+x = 1
+y = x + 2
+print(y)
+if y > 2 {
+    print(y)
+}
+while y < 10 {
+    y = y + 1
+}
+choose y {
+    when 11 { print(11) }
+    otherwise { print(0) }
+}

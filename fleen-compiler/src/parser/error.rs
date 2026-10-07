@@ -15,6 +15,9 @@ pub struct ParseError {
 pub enum ParseErrorKind {
     /// Expected a specific token but found something else.
     Expected { expected: String, found: TokenKind },
+    /// Statement boundary holds a token that can neither continue the
+    /// previous statement nor start a new one (0.0.2 ASI, ASI.md §3).
+    ExpectedSemiOrNewStmt { found: TokenKind },
     /// Reached end of file unexpectedly.
     UnexpectedEof,
 }
@@ -24,6 +27,14 @@ impl fmt::Display for ParseErrorKind {
         match self {
             ParseErrorKind::Expected { expected, found } => {
                 write!(f, "expected {}, found {}", expected, found)
+            }
+            ParseErrorKind::ExpectedSemiOrNewStmt { found } => {
+                write!(
+                    f,
+                    "expected `;`, a continuation of the previous statement, \
+                     or the start of a new statement, found {}",
+                    found
+                )
             }
             ParseErrorKind::UnexpectedEof => {
                 write!(f, "unexpected end of input")

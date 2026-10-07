@@ -594,6 +594,10 @@ impl Resolver {
             Expr::Clone(expr, span) => ExprHir::Clone(Box::new(self.resolve_expr(*expr)?), span),
             Expr::Box(expr, span) => ExprHir::Box(Box::new(self.resolve_expr(*expr)?), span),
             Expr::Deref(expr, span) => ExprHir::Deref(Box::new(self.resolve_expr(*expr)?), span),
+            // 0.0.2 U13: type cast; operand resolved, target type passed through as-is.
+            Expr::Cast(expr, ty, span) => {
+                ExprHir::Cast(Box::new(self.resolve_expr(*expr)?), ty, span)
+            }
             Expr::Question(expr, span) => {
                 ExprHir::Question(Box::new(self.resolve_expr(*expr)?), span)
             }
@@ -652,52 +656,46 @@ impl Resolver {
 
         let rhs_hir = self.resolve_expr(rhs)?;
 
+        // Both targets resolve the box/variable by name; they differ only in
+        // lookup (plain assignment must find an assignable binding) and in
+        // mutability (writing a pointee does not rebind `b`, so `b` need not
+        // be mutable).
+        let (name, binding) = match &target {
+            AssignTarget::Ident(name) => (name, self.scopes.find_assign_target(name)),
+            AssignTarget::Deref(name) => (name, self.scopes.get(name)),
+        };
+        let Some(binding) = binding else {
+            self.add_error(
+                ResolveErrorKind::UndeclaredVariable { name: name.clone() },
+                span,
+            );
+            return Err(());
+        };
+        if matches!(target, AssignTarget::Ident(_)) && !binding.mutable {
+            self.add_error(
+                ResolveErrorKind::AssignToImmutable { name: name.clone() },
+                span,
+            );
+            return Err(());
+        }
+
+        let binding_id = binding.id;
+        let name = name.clone();
         match target {
-            AssignTarget::Ident(name) => match self.scopes.find_assign_target(&name) {
-                None => {
-                    self.add_error(
-                        ResolveErrorKind::UndeclaredVariable { name: name.clone() },
-                        span,
-                    );
-                    Err(())
-                }
-                Some(binding) if !binding.mutable => {
-                    self.add_error(
-                        ResolveErrorKind::AssignToImmutable { name: name.clone() },
-                        span,
-                    );
-                    Err(())
-                }
-                Some(binding) => {
-                    let binding_id = binding.id;
-                    Ok(ExprHir::Assign {
-                        name,
-                        binding_id,
-                        rhs: Box::new(rhs_hir),
-                        hir_id: self.next_hir_id(),
-                        span,
-                    })
-                }
-            },
-            AssignTarget::Deref(name) => match self.scopes.get(&name) {
-                None => {
-                    self.add_error(
-                        ResolveErrorKind::UndeclaredVariable { name: name.clone() },
-                        span,
-                    );
-                    Err(())
-                }
-                Some(binding) => {
-                    let binding_id = binding.id;
-                    Ok(ExprHir::AssignDeref {
-                        name,
-                        binding_id,
-                        rhs: Box::new(rhs_hir),
-                        hir_id: self.next_hir_id(),
-                        span: Span::new(span.start, rhs_span.end),
-                    })
-                }
-            },
+            AssignTarget::Ident(_) => Ok(ExprHir::Assign {
+                name,
+                binding_id,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span,
+            }),
+            AssignTarget::Deref(_) => Ok(ExprHir::AssignDeref {
+                name,
+                binding_id,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span: Span::new(span.start, rhs_span.end),
+            }),
         }
     }
 

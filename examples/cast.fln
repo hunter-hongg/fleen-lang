@@ -1,0 +1,60 @@
+// Fleen example: `as` type conversion (0.0.2 U13, temporary feature)
+//
+// 0.0.2 whitelist — only these three casts compile:
+//   int as string    decimal text (negative numbers keep the `-` sign)
+//   float as string  same rendering print uses (they share one helper)
+//   bool as string   "true" / "false"
+// Everything else (`string as string`, `int as float`, `box<T> as ...`,
+// identity casts) is rejected with `UnsupportedCast`.
+// Full conversion support arrives with generics (0.1.0). See DESIGN.md §9.
+
+// A function taking a string, to show casts in argument position.
+func shout(s: string): string = s
+
+func main(): int {
+    // ========== The three whitelisted casts ==========
+
+    // int → string (decimal; negatives keep the `-` sign)
+    x = 42
+    print(x as string)
+
+    n = 0 - 7
+    print(n as string)
+
+    // float → string (same output print would produce)
+    f = 3.5
+    print(f as string)
+
+    // bool → string
+    b = true
+    print(b as string)
+
+    // ========== The result is a fresh owned string ==========
+    // No `move` / `clone` needed: every `as string` creates a new value,
+    // so it can flow straight into bindings, arguments, or print.
+
+    print(shout(x as string))
+    print(shout(n as string))
+
+    // ========== Precedence: `as` binds like in Rust ==========
+    // `as` is tighter than binary operators, looser than unary prefixes:
+    //   1 + 2 as string  parses as  1 + (2 as string)  → type error
+    //   -n as string     parses as  (-n) as string
+    // Cast the result of arithmetic by parenthesizing it first:
+
+    print((1 + 2) as string)
+
+    // Unary prefixes bind tighter than `as`, so the negation happens
+    // before the cast:
+    print(-n as string)
+
+    // ========== ASI: `as` continues the line above ==========
+    // `as` is in the ASI continuation set, so a newline before it
+    // does not end the statement (same rule as binary operators):
+
+    m = 128
+    as string
+    print(m)
+
+    0
+}

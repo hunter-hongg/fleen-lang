@@ -9,7 +9,8 @@
 //! equality      = comparison { ("==" | "!=") comparison }
 //! comparison    = additive   { ("<" | ">" | "<=" | ">=") additive }
 //! additive      = multiplicative { ("+" | "-") multiplicative }
-//! multiplicative= unary      { ("*" | "/" | "%") unary }
+//! multiplicative= cast       { ("*" | "/" | "%") cast }
+//! cast          = unary    { "as" type }           (0.0.2 U13, F8)
 //! unary         = unary_prefix unary | postfix     (prefixes right-assoc)
 //! unary_prefix  = "-" | "!" | "box" | "deref" | "move" | "clone"
 //! postfix       = primary { call | index | field | "?" }
@@ -21,6 +22,12 @@
 //! and `box box 1` = `box(box(1))`); `?` is a postfix suffix binding tighter
 //! than any prefix (`deref b?` = `deref(b?)`). The parser only recognizes
 //! forms — operand legality (e.g. `move`'s place) is checked by typeck.
+//!
+//! 0.0.2 U13 (F8): `as` is a cast layer between `unary` and binary operators.
+//! `box` is special: its operand is parsed at the `cast` level (so
+//! `box 1 as string` = `box (1 as string)`), while all other prefixes
+//! (`deref`/`move`/`clone`/`-`/`!`) take a `unary` operand (so
+//! `deref b as string` = `(deref b) as string`).
 
 use crate::lexer::Span;
 use crate::lexer::TokenKind;
@@ -33,20 +40,90 @@ pub fn parse_expr(parser: &mut Parser) -> Result<Expr, ParseError> {
     parser.parse_expr_or()
 }
 
+/// Binary operator precedence levels, lowest first (SPEC.md §14,
+/// SYNTAX.ebnf v0.0.2): 0 `or`, 1 `and`, 2 equality, 3 comparison,
+/// 4 additive, 5 multiplicative. All levels are left-associative.
+const LEVEL_OR: usize = 0;
+const LEVEL_MUL: usize = 5;
+
+/// Constructor for one binary operator node.
+type BinCtor = fn(Box<Expr>, Box<Expr>) -> Expr;
+
+/// Precedence level and AST constructor of a binary operator token,
+/// or `None` if the token does not continue a binary expression.
+fn binop_level(kind: &TokenKind) -> Option<(usize, BinCtor)> {
+    let (level, ctor): (usize, BinCtor) = match kind {
+        TokenKind::Or => (LEVEL_OR, |a, b| Expr::Or(a, b)),
+        TokenKind::And => (1, |a, b| Expr::And(a, b)),
+        TokenKind::Eq => (2, |a, b| Expr::Eq(a, b)),
+        TokenKind::Ne => (2, |a, b| Expr::Ne(a, b)),
+        TokenKind::Lt => (3, |a, b| Expr::Lt(a, b)),
+        TokenKind::Gt => (3, |a, b| Expr::Gt(a, b)),
+        TokenKind::Le => (3, |a, b| Expr::Le(a, b)),
+        TokenKind::Ge => (3, |a, b| Expr::Ge(a, b)),
+        TokenKind::Plus => (4, |a, b| Expr::Add(a, b)),
+        TokenKind::Minus => (4, |a, b| Expr::Sub(a, b)),
+        TokenKind::Star => (LEVEL_MUL, |a, b| Expr::Mul(a, b)),
+        TokenKind::Slash => (LEVEL_MUL, |a, b| Expr::Div(a, b)),
+        TokenKind::Percent => (LEVEL_MUL, |a, b| Expr::Mod(a, b)),
+        _ => return None,
+    };
+    Some((level, ctor))
+}
+
 impl Parser {
     // Main entry: handles if/while/choose or falls through to assign_expr
     fn parse_expr_or(&mut self) -> Result<Expr, ParseError> {
-        match self.current_kind() {
-            TokenKind::If => self.parse_if(),
-            TokenKind::While => self.parse_while(),
-            TokenKind::Choose => self.parse_choose(),
-            _ => self.parse_assign(),
+        let head = match self.current_kind() {
+            TokenKind::If => self.parse_if()?,
+            TokenKind::While => self.parse_while()?,
+            TokenKind::Choose => self.parse_choose()?,
+            _ => return self.parse_assign(),
+        };
+
+        // Block-like heads return before operator climbing resumes, so a
+        // following `(`/`[`/`?`/binary operator continues the expression
+        // (ASI.md §4 #3: 运算符续接优先，`if c { 1 }` ⏎ `- 2` ⇒ `(if) - 2`).
+        if !crate::parser::asi::can_continue_expr(self.current_kind()) {
+            return Ok(head);
+        }
+        let expr = self.parse_postfix_suffixes(head)?;
+        self.fold_binary(expr, LEVEL_OR)
+    }
+
+    /// Parse a binary expression whose operators bind no looser than
+    /// `min_level`: descend to the tightest level, then fold operators
+    /// left-associatively. Shared by the main chain (`parse_assign`) and
+    /// post-block-head continuation (`fold_binary`), so precedence lives
+    /// in exactly one place (`binop_level`).
+    fn parse_binary_from(&mut self, min_level: usize) -> Result<Expr, ParseError> {
+        let left = if min_level > LEVEL_MUL {
+            self.parse_cast()?
+        } else {
+            self.parse_binary_from(min_level + 1)?
+        };
+        self.fold_binary(left, min_level)
+    }
+
+    /// Fold binary operators of level >= `min_level` onto an
+    /// already-parsed `left` operand.
+    fn fold_binary(&mut self, mut left: Expr, min_level: usize) -> Result<Expr, ParseError> {
+        loop {
+            let Some((level, ctor)) = binop_level(self.current_kind()) else {
+                return Ok(left);
+            };
+            if level < min_level {
+                return Ok(left);
+            }
+            self.advance();
+            let right = self.parse_binary_from(level + 1)?;
+            left = ctor(Box::new(left), Box::new(right));
         }
     }
 
     /// Parse assignment expression (right-associative).
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
-        let expr = self.parse_logic_or()?;
+        let expr = self.parse_binary_from(LEVEL_OR)?;
 
         if self.matches(&TokenKind::Assign) {
             // Assignment is right-associative: `a = b = c` → `a = (b = c)`
@@ -57,110 +134,20 @@ impl Parser {
         }
     }
 
-    /// Parse `or` expressions.
-    fn parse_logic_or(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_logic_and()?;
-
-        while self.matches(&TokenKind::Or) {
-            let right = self.parse_logic_and()?;
-            left = Expr::Or(Box::new(left), Box::new(right));
+    /// Parse cast expressions: `unary { "as" type }` (0.0.2 U13, F8).
+    ///
+    /// Sits between the binary operators (`*`/`/`/`%`) and `unary` in the
+    /// precedence chain: `as` is tighter than binary, looser than `unary`.
+    /// `box` is special: its operand is parsed at the `cast` level (so
+    /// `box 1 as string` = `box (1 as string)`).
+    fn parse_cast(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_unary()?;
+        while self.matches(&TokenKind::As) {
+            let ty = self.parse_type()?;
+            let span = Span::new(expr.span().start, self.prev_span_end());
+            expr = Expr::Cast(Box::new(expr), ty, span);
         }
-
-        Ok(left)
-    }
-
-    /// Parse `and` expressions.
-    fn parse_logic_and(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_equality()?;
-
-        while self.matches(&TokenKind::And) {
-            let right = self.parse_equality()?;
-            left = Expr::And(Box::new(left), Box::new(right));
-        }
-
-        Ok(left)
-    }
-
-    /// Parse equality expressions (`==`, `!=`).
-    fn parse_equality(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_comparison()?;
-
-        loop {
-            let op = if self.matches(&TokenKind::Eq) {
-                |a, b| Expr::Eq(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Ne) {
-                |a, b| Expr::Ne(Box::new(a), Box::new(b))
-            } else {
-                break;
-            };
-            let right = self.parse_comparison()?;
-            left = op(left, right);
-        }
-
-        Ok(left)
-    }
-
-    /// Parse comparison expressions (`<`, `>`, `<=`, `>=`).
-    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_additive()?;
-
-        loop {
-            let op = if self.matches(&TokenKind::Lt) {
-                |a, b| Expr::Lt(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Gt) {
-                |a, b| Expr::Gt(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Le) {
-                |a, b| Expr::Le(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Ge) {
-                |a, b| Expr::Ge(Box::new(a), Box::new(b))
-            } else {
-                break;
-            };
-            let right = self.parse_additive()?;
-            left = op(left, right);
-        }
-
-        Ok(left)
-    }
-
-    /// Parse addition/subtraction expressions.
-    fn parse_additive(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_multiplicative()?;
-
-        loop {
-            let op = if self.matches(&TokenKind::Plus) {
-                |a, b| Expr::Add(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Minus) {
-                |a, b| Expr::Sub(Box::new(a), Box::new(b))
-            } else {
-                break;
-            };
-            let right = self.parse_multiplicative()?;
-            left = op(left, right);
-        }
-
-        Ok(left)
-    }
-
-    /// Parse multiplication/division/modulo expressions.
-    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_unary()?;
-
-        loop {
-            let op = if self.matches(&TokenKind::Star) {
-                |a, b| Expr::Mul(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Slash) {
-                |a, b| Expr::Div(Box::new(a), Box::new(b))
-            } else if self.matches(&TokenKind::Percent) {
-                |a, b| Expr::Mod(Box::new(a), Box::new(b))
-            } else {
-                break;
-            };
-            let right = self.parse_unary()?;
-            left = op(left, right);
-        }
-
-        Ok(left)
+        Ok(expr)
     }
 
     /// Parse unary expressions.
@@ -169,6 +156,11 @@ impl Parser {
     /// `clone deref b` = `clone(deref(b))` and `box box 1` = `box(box(1))`.
     /// The parser accepts any operand form here; typeck validates that
     /// `move`/`clone` operands are legal places (U05).
+    ///
+    /// 0.0.2 U13: `box` is special — its operand is parsed at the `cast`
+    /// level (so `box 1 as string` = `box (1 as string)`). All other prefixes
+    /// (`deref`/`move`/`clone`/`-`/`!`) take a `unary` operand, so
+    /// `deref b as string` = `(deref b) as string`.
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let span = self.current().span;
 
@@ -183,26 +175,47 @@ impl Parser {
             return Ok(Expr::Not(Box::new(operand)));
         }
 
-        // 0.0.2 prefix keyword expressions. `box` reuses the `BoxType` token:
-        // type position (`box<T>`) goes through `parse_type`, expression
-        // position (`box expr`) through here — no ambiguity.
-        let ctor = match self.current_kind() {
-            TokenKind::BoxType => Expr::Box as fn(Box<Expr>, Span) -> Expr,
-            TokenKind::Deref => Expr::Deref as fn(Box<Expr>, Span) -> Expr,
-            TokenKind::Move => Expr::Move as fn(Box<Expr>, Span) -> Expr,
-            TokenKind::Clone => Expr::Clone as fn(Box<Expr>, Span) -> Expr,
-            _ => return self.parse_postfix(),
-        };
+        // 0.0.2: `box` — operand is a full cast expression (tighter binding),
+        // so `box 1 as string` = `box (1 as string)`.
+        if matches!(self.current_kind(), TokenKind::BoxType) {
+            self.advance();
+            let operand = self.parse_cast()?;
+            let span = Span::new(span.start, self.prev_span_end());
+            return Ok(Expr::Box(Box::new(operand), span));
+        }
+
+        // 0.0.2 prefix keyword expressions (non-box). `deref`/`move`/`clone`
+        // take a `unary` operand, so `deref b as string` = `(deref b) as string`.
+        if !matches!(
+            self.current_kind(),
+            TokenKind::Deref | TokenKind::Move | TokenKind::Clone
+        ) {
+            return self.parse_postfix();
+        }
+        let kind = self.current_kind().clone();
         self.advance();
         let operand = self.parse_unary()?;
-        let end = self.prev_span_end();
-        Ok(ctor(Box::new(operand), Span::new(span.start, end)))
+        let span = Span::new(span.start, self.prev_span_end());
+        let expr = match kind {
+            TokenKind::Deref => Expr::Deref(Box::new(operand), span),
+            TokenKind::Move => Expr::Move(Box::new(operand), span),
+            TokenKind::Clone => Expr::Clone(Box::new(operand), span),
+            // SAFETY: the kind was filtered by the `matches!` above, so no
+            // other TokenKind variant can reach this arm.
+            _ => unreachable!("prefix keyword was matched before advancing"),
+        };
+        Ok(expr)
     }
 
     /// Parse postfix expressions: function calls, indexing, field access, `?`.
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
+        let expr = self.parse_primary()?;
+        self.parse_postfix_suffixes(expr)
+    }
 
+    /// Attach postfix suffixes (`(`/`[`/`.`/`?`) to an already-parsed
+    /// primary or block-like head.
+    fn parse_postfix_suffixes(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
         loop {
             if self.matches(&TokenKind::LParen) {
                 // Function call
@@ -372,6 +385,10 @@ impl Parser {
         // Parse when clauses
         while self.matches(&TokenKind::When) {
             let pattern = self.parse_pattern()?;
+            // A `;` between pattern and guard/body is an ASI-pass insertion
+            // (`when Ok(v)` ⏎ `if guard {`, `If` ∈ start set): no source form
+            // puts one here, so it is always an artifact — skip it (ASI.md §4).
+            let _ = self.matches(&TokenKind::Semi);
             let guard = if self.matches(&TokenKind::If) {
                 Some(Box::new(self.parse_expr()?))
             } else {
@@ -460,10 +477,7 @@ impl Parser {
                 // matters here; typeck binds the semantics (U04). Without a
                 // following `(` they stay ordinary identifier patterns.
                 if (name == "Ok" || name == "Err")
-                    && matches!(
-                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                        Some(TokenKind::LParen)
-                    )
+                    && matches!(self.peek_kind(1), Some(TokenKind::LParen))
                 {
                     let ctor = if name == "Ok" {
                         ResultCtor::Ok

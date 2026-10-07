@@ -51,6 +51,8 @@ pub enum TypeckErrorKind {
     UnsupportedFeature { feature: String },
     /// Invariant violated (resolver guarantee broken); indicates a compiler bug.
     InternalError { message: String },
+    /// Unsupported `as` cast: 0.0.2 only allows scalar → string.
+    UnsupportedCast { from: Type, to: Type },
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -124,6 +126,16 @@ impl fmt::Display for TypeckErrorKind {
             }
             TypeckErrorKind::InternalError { message } => {
                 write!(f, "internal compiler error: {}", message)
+            }
+            TypeckErrorKind::UnsupportedCast { from, to } => {
+                write!(
+                    f,
+                    "unsupported cast: cannot cast `{}` to `{}`; \
+                     0.0.2 only supports scalar → string casts, \
+                     full conversions arrive with generics (0.1.0)",
+                    from.name(),
+                    to.name()
+                )
             }
         }
     }

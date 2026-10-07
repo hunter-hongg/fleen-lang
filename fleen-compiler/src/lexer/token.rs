@@ -100,6 +100,8 @@ pub enum TokenKind {
     Clone,
     /// `deref` keyword (0.0.2: box pointee read/write)
     Deref,
+    /// `as` keyword (0.0.2: type cast, F8 — scalar → string only in 0.0.2)
+    As,
 
     // Literals
     /// Integer literal (e.g., `42`)
@@ -140,6 +142,10 @@ pub enum TokenKind {
     Bang,
     /// `?` (0.0.2: Result propagation suffix)
     Question,
+    /// Line break (0.0.2: consumed by the ASI pass, never reaches the parser;
+    /// collapsed runs of blank lines, not emitted at file start or inside
+    /// block comments — see docs/0.0.2/ASI.md §2)
+    Newline,
     /// `.`
     Dot,
     /// `,`
@@ -203,6 +209,7 @@ impl TokenKind {
                 | TokenKind::Move
                 | TokenKind::Clone
                 | TokenKind::Deref
+                | TokenKind::As
         )
     }
 
@@ -235,6 +242,7 @@ impl TokenKind {
             TokenKind::Move => "move",
             TokenKind::Clone => "clone",
             TokenKind::Deref => "deref",
+            TokenKind::As => "as",
             _ => return None,
         })
     }
@@ -261,6 +269,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Percent => write!(f, "%"),
             TokenKind::Bang => write!(f, "!"),
             TokenKind::Question => write!(f, "?"),
+            TokenKind::Newline => write!(f, "newline"),
             TokenKind::Dot => write!(f, "."),
             TokenKind::Comma => write!(f, ","),
             TokenKind::Colon => write!(f, ":"),

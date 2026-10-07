@@ -133,6 +133,10 @@ pub enum Opcode {
     Return = 0x63,
     // 0x70–0x7F choose helpers
     BindMatch = 0x70,
+    // 0xA0–0xAF 0.0.2 extensions
+    /// Convert a scalar (int/float/bool) on the stack to a fresh owned string.
+    /// 0.0.2 U13 (F8): `e as string`.
+    ToStr = 0xA5,
 }
 
 impl Opcode {
@@ -199,6 +203,7 @@ impl Opcode {
             0x62 => Opcode::CallValue,
             0x63 => Opcode::Return,
             0x70 => Opcode::BindMatch,
+            0xA5 => Opcode::ToStr,
             _ => return None,
         })
     }

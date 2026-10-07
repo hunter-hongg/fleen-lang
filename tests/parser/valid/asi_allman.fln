@@ -1,0 +1,10 @@
+c = true
+r = if c
+{ 1 }
+else
+{ 2 };
+choose c {
+    when true
+    if r > 0 { 0 }
+    otherwise { 1 }
+}

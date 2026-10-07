@@ -22,6 +22,9 @@ pub enum RuntimeError {
     ImmutableGlobal(GlobalId),
     /// Operand types did not match the instruction (e.g. `int + float`).
     ArithTypeMismatch,
+    /// `ToStr` operand was not a scalar int/float/bool (defensive: typeck
+    /// rejects non-scalar casts before codegen).
+    CastOperandNotScalar,
     /// Integer division or modulo by zero.
     DivisionByZero,
     /// Recursion deeper than `MAX_CALL_DEPTH`.
@@ -51,6 +54,9 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "cannot assign to immutable global {}", id.0)
             }
             RuntimeError::ArithTypeMismatch => write!(f, "arithmetic type mismatch"),
+            RuntimeError::CastOperandNotScalar => {
+                write!(f, "cast operand is not a scalar (int/float/bool)")
+            }
             RuntimeError::DivisionByZero => write!(f, "division by zero"),
             RuntimeError::CallDepthExceeded => write!(f, "call depth exceeded"),
             RuntimeError::ArithmeticOverflow => write!(f, "integer overflow"),

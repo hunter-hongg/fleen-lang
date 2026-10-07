@@ -231,7 +231,8 @@ pub struct LocalId(u32);
 
 ```rust
 // 每个阶段是一个纯函数
-pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> { ... }
+pub fn asi(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>;  // 0.0.2：Lex 与 Parse 之间
+pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> { ... }  // 入口内部先跑 asi
 pub fn resolve(ast: Ast) -> Result<Hir, ResolveError> { ... }
 pub fn typeck(hir: Hir) -> Result<TypedHir, TypeckError> { ... }
 pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> { ... }
@@ -249,8 +250,9 @@ pub fn codegen(mir: Mir) -> Bytecode { ... }
 
 | 阶段 | 输入 | 输出 | 职责 |
 |------|------|------|------|
-| Lex | 源码 | Token 流 | 词法 |
-| Parse | Token 流 | AST | 语法（0.0.2 起含 ASI 判定） |
+| Lex | 源码 | Token 流 | 词法（0.0.2 起保留换行为 `Newline` token） |
+| ASI | Token 流（含 Newline） | Token 流（分号齐全，无 Newline） | 分号插入（0.0.2 新增独立 pass，`parser/asi.rs`，见 `docs/0.0.2/ASI.md`） |
+| Parse | Token 流 | AST | 语法 |
 | Resolve | AST | HIR | 名字解析、作用域 |
 | Typeck | HIR | Typed HIR | 类型推导、检查（0.0.2 起含所有权检查子遍历 `typeck/ownership.rs`，仍是同一阶段，不新增独立阶段） |
 | Lower | Typed HIR | MIR | 控制流展平 |
@@ -545,7 +547,8 @@ result = apply(add, 1, 2);
 ### 控制流
 
 > **分号说明**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI（自动分号插入）落地，
-> 分号可选（显式分号仍合法），判定规则见 `docs/DESIGN.md` §3.9。
+> 分号可选（显式分号仍合法），语义为换行敏感（同行语句拼接非法），
+> 架构与判定规则见 `docs/0.0.2/ASI.md`（摘要见 `docs/DESIGN.md` §3.9）。
 > **注意**：`func` 声明末尾无分号；函数体最后一个表达式无分号，否则返回值被丢弃。
 > **表达式语句规则**：
 > - if、while、choose 等控制流表达式作为语句使用时，0.0.1 必须加分号（0.0.2 起可省略）

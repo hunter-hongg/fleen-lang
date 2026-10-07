@@ -872,6 +872,41 @@ f() = 2;
 }
 
 #[test]
+fn error_deref_assign_undeclared() {
+    // 0.0.2 U02: `deref b = v` requires `b` to be a declared binding
+    let errs = resolve_str("deref b = 1;").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::UndeclaredVariable { .. }))
+    );
+}
+
+#[test]
+fn error_deref_assign_non_ident_target() {
+    // 0.0.2 U02: only `deref <ident> = v` is an assignment target;
+    // `deref b.c` is not (use was never assigned a binding)
+    let errs = resolve_str("b = box 1; deref b.c = 2;").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::InvalidAssignmentTarget))
+    );
+}
+
+#[test]
+fn resolve_deref_assign_target() {
+    // 0.0.2 U02: `deref b = v` resolves to AssignDeref against binding `b`
+    let hir = resolve_str("b = box 1; v = 2; deref b = v;").expect("should resolve");
+    assert_eq!(hir.items.len(), 3);
+    let fleen_compiler::resolver::hir::HirItem::Expr(
+        fleen_compiler::resolver::hir::ExprHir::AssignDeref { name, .. },
+    ) = &hir.items[2]
+    else {
+        panic!("expected AssignDeref expr");
+    };
+    assert_eq!(name, "b");
+}
+
+#[test]
 fn errors_are_collected_not_fail_fast() {
     // multiple errors reported together
     let errs = resolve_str(

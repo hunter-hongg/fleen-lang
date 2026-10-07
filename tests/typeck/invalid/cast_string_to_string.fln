@@ -1,0 +1,3 @@
+// 0.0.2 U13: identity cast is not special-cased.
+s = "hello";
+t = s as string;

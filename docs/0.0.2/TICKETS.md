@@ -1,7 +1,7 @@
 # Fleen 0.0.2 实现任务拆解
 
 > **目标**：所有权起步 —— `move` / `clone` / `box<T>` / `ref` / `?`（含 `Ok`/`Err`）/ ASI 端到端跑通，
-> 偿还 0.0.1 的 print Hack、`Rc<str>`、`span_map` 三笔债务
+> 外加临时 `as` 类型转换（U13，print 修复的前置），偿还 0.0.1 的 print Hack、`Rc<str>`、`span_map` 三笔债务
 > **依据**：`docs/0.0.2/PLAN.md`（已定稿，决策点 D1–D8 冻结）、`docs/BYTECODE.md` v0.0.2、
 > `docs/DESIGN.md` §3.8–3.9 / §8 / §10、`docs/0.0.1/TICKETS.md`（实现现状）
 > **状态**（2026-10-07）：全部待实现。规范文档已在规划阶段同步完毕，
@@ -15,8 +15,9 @@
 |------|------|------|-------|------|------|------|
 | U01 | 词法 | Lex | fleen-compiler | `lexer/` | Move/Clone/Deref/Question token | — |
 | U02 | 语法 | Parse | fleen-compiler | `parser/` | 新 AST 节点 + EBNF 对齐 | U01 |
-| U03 | F5 ASI | Parse | fleen-compiler | `parser/stmt.rs` | 分号可选（三集合判定） | U02 |
-| U04 | F4+F6 | Typeck | fleen-compiler | `typeck/` | Ok/Err 构造、Result pattern、`?`、print 修复 | U02 |
+| U03 | F5 ASI | Lex + Parse | fleen-compiler | `lexer/` + `parser/asi.rs` | 分号可选（前置 pass，换行敏感，见 ASI.md） | U02 |
+| U13 | F8 `as` 转换（临时） | 全阶段 | fleen-compiler, fleen-vm | `lexer/` `parser/` `typeck/` `lower/` `codegen/` verify `vm.rs` | `As` token、cast 层、`ToStr`（0xA5）、白名单检查 | U02（**实现顺序在 U04 前**） |
+| U04 | F4+F6 | Typeck | fleen-compiler | `typeck/` | Ok/Err 构造、Result pattern、`?`、print 修复 | U02, U13 |
 | U05 | F1 所有权 | Typeck | fleen-compiler | `typeck/ownership.rs` | is_copy + 流敏感仿射检查 | U04 |
 | U06 | 基础 | Lower | fleen-compiler | `lower/` | 新 MIR 指令 + MirInstr 携带 Span | U04, U05 |
 | U07 | 基础 | Codegen/Verify | fleen-compiler, fleen-verify | `codegen/`, `verify.rs` | 字节码 v2 + span_map 生成 + 栈效果表 | U06 |
@@ -89,19 +90,22 @@ fleen-compiler/src/parser/
 ```
 
 ### AST 新增节点
+> 实现说明（as-built）：沿用 0.0.1 既有 AST 风格——简单节点用 tuple 变体
+> （`Expr::Move(Box<Expr>, Span)`），结构化节点用命名结构体（`ExprIf` 等）。
+
 ```rust
 // 一元前缀（与 Neg/Not 同层，右结合）
-ExprMove  { place: Box<Expr>, span },   // move <place>
-ExprClone { place: Box<Expr>, span },   // clone <place>
-ExprBox   { inner: Box<Expr>, span },   // box <expr>
-ExprDeref { inner: Box<Expr>, span },   // deref <postfix>
+Expr::Move(Box<Expr>, Span),    // move <unary>，span 覆盖整个表达式
+Expr::Clone(Box<Expr>, Span),   // clone <unary>
+Expr::Box(Box<Expr>, Span),     // box <expr>
+Expr::Deref(Box<Expr>, Span),   // deref <unary>（同 - / !，操作数为一元层）
 
 // postfix（与 Call/Index/Field 同层）
-ExprQuestion { inner: Box<Expr>, span }, // <expr>?
+Expr::Question(Box<Expr>, Span), // <expr>?
 ```
 
 > **parser 只认形态，语义归 typeck**（SPEC §11：不在 parser 做类型检查）：
-> - `move` 的操作数接受任意 postfix 表达式，typeck 校验必须是 `Ident`（U05）；
+> - `move` 的操作数接受任意一元表达式，typeck 校验必须是 `Ident`（U05）；
 > - `clone` 的操作数校验为 `Ident` 或 `ExprDeref`（U05）；
 > - `box` 复用 `TokenKind::BoxType`：类型位置（`box<T>`）走既有类型解析，
 >   表达式位置（`box expr`）走一元前缀分支，二者无歧义。
@@ -137,9 +141,10 @@ unary:    [ box | deref | move | clone | - | ! ] postfix
 ### 测试
 - `tests/parser/valid/`：前缀链（`clone deref b`、`box box 1`）、`?` 链
   （`f(x)??`——嵌套 Result）、`deref b = v`、`Ok(v)`/`Err(e)` pattern、
-  `move`/`clone` 作实参 `f(move x)`
-- `tests/parser/invalid/`：悬空 `?`、`move`（无操作数）、`deref`（非 postfix）、
-  `deref b: int = v`（带类型标注）
+  `move`/`clone` 作实参 `f(move x)`、unary 操作数边界（`deref -x`、`move move x`）
+- `tests/parser/invalid/`：悬空 `?`、`move`（无操作数）、`deref`（无操作数）、
+  `deref b: int = v`（带类型标注）、`Ok()`/`Ok(v, w)`/`Ok(v`（Result pattern
+  形态错误）、`box = 1`/`ref = 1`/`move: int = 1`（保留字作绑定名）
 - 既有 parser 测试全部原样通过
 
 ### 验收
@@ -149,62 +154,77 @@ cargo test -p fleen-compiler parser
 
 ---
 
-## U03: Parse — ASI（分号可选）
+## U03: Parse — ASI（分号可选，前置 pass）
+
+> **权威设计见 `docs/0.0.2/ASI.md`**。架构：Lex → **ASI pass** → Parse，
+> 语义为**换行敏感**（语句边界在换行处判定，同行拼接非法）。
+> lexer 新增 `Newline` token；pass 消费全部 Newline、在语句边界插入显式
+> `Semi`，输出的 Token 流与 0.0.1 同构，Parse 沿用原逻辑 + 四处配套。
 
 ### 涉及文件
 ```
-fleen-compiler/src/parser/
-├── asi.rs           # 新增：三集合纯函数（可独立单测）
-├── stmt.rs          # expr_stmt / block 收尾逻辑改造
-└── tests.rs
+fleen-compiler/src/
+├── lexer/
+│   ├── token.rs           # 新增 TokenKind::Newline
+│   └── lexer_impl.rs      # 发射 Newline（折叠、文件起始不发、块注释内不发）
+└── parser/
+    ├── asi.rs             # 新增：ASI pass（纯函数）+ 三个谓词函数（可独立单测）
+    ├── mod.rs             # parse() 接 pass；绑定/const 贴 } 免分号；语句入口 guard；统一 finish
+    ├── expr.rs            # postfix 后缀提取；block-like 头续接爬升；choose pattern 后跳过插入分号
+    ├── error.rs           # 新增 ExpectedSemiOrNewStmt
+    └── tests.rs
 ```
 
 ### asi.rs（新文件，纯函数）
 ```rust
-/// 该 token 能否开启一条新语句（块起始位置用，含 `(` `-` `!`）。
+/// ASI pass：消费 Newline，在语句边界插入 Semi（见 ASI.md §3）。
+pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>;
+
+/// 该 token 能否开启一条新语句（块起始位置用，含 `(` `-` `!` `{`）。
 pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool;
 
-/// 已完成一条语句后，该 token 是否意味着"隐式结束"。
-/// 起始集 ∪ { RBrace, Eof }，但**不含** `(` `[` 与二元运算符（续接优先）。
+/// 语句完成后该 token 是否意味着"隐式结束"（插入分号）。
+/// 起始集 ∖ { LParen, Minus, LBrace } ∪ { RBrace, Eof }。
 pub(crate) fn implies_stmt_end(kind: &TokenKind) -> bool;
 
 /// 该 token 是否续接当前表达式（二元运算符 / `?` / `.` / `[` / `(`）。
 pub(crate) fn can_continue_expr(kind: &TokenKind) -> bool;
 ```
 
-### 判定规则（expr_stmt 收尾处）
+### 判定规则（换行或 EOF 处；`p` 前一 token，`n` 后一 token）
 ```text
-语句完成后：
-1. 下一 token 是 Semi            → 消费（显式分号永远合法）
-2. implies_stmt_end(t)           → 隐式结束，不消费
-3. can_continue_expr(t)          → 不结束，回到表达式解析（续接优先）
-4. 其余                          → 报 ExpectedSemiOrNewStmt { span, found }
+1. 最内层未闭合括号是 ( 或 [     → 丢弃换行（{ 内 ASI 照常生效）
+2. n 是 RBrace                   → 丢弃（永不在 } 前插）
+3. p ∉ 可结尾集                  → 丢弃（跨行续接）
+4. implies_stmt_end(n)           → 插入 Semi
+5. can_continue_expr(n) ∪ {Else, Elif, When, Otherwise, LBrace, Semi} → 丢弃（续接优先）
+6. 其余                          → 报 ExpectedSemiOrNewStmt { span, found }
 ```
 
-### 集合定义（与 `DESIGN.md` §3.9 表格逐条对应）
-| 函数 | 成员 |
-|------|------|
-| 起始集（块起始语境） | `Func Const If While Choose Import`、`Ident IntLit FloatLit StringLit True False`、`BoxType Deref Move Clone`、`Bang Minus LParen` |
-| implies_stmt_end | 起始集 **∖ {`LParen`, `Minus`}** `∪ { RBrace, Eof }`——`(` 与 `-` 同属续接集，续接优先，不可据此结束语句 |
-| 续接集 | `Plus Minus Star Slash Percent Eq Ne Lt Gt Le Ge And Or`（二元语境）、`Question Dot LBracket LParen` |
-
-> `-` 在语句完成后总是二元续接（`x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`）；
-> 要开新的负数语句须写 `;`。`(` `[` 永远续接（调用/索引）——陷阱用例进测试。
+### Parse 侧配套（ASI.md §4）
+- `parse_var_binding` / `parse_const_decl`：next 为 RBrace 时免 `;`
+- `parse_block` 尾表达式判定：Assign 形态（含 `deref b = v`）不作尾表达式
+- `parse_expr_or`：if/while/choose 头之后补后缀 + 二元续接爬升
+- `parse_program` / `parse_block` 语句入口 guard：不能起始语句 → `ExpectedSemiOrNewStmt`
+- `parse_choose`：pattern 之后跳过 pass 插入的分号（guard 可跨行）
 
 ### 实现要求
-- 改造点集中在"期望 Semi"的所有位置：`expr_stmt` 收尾、block 内语句循环；
-  `func` 声明后、块尾表达式、`when`/`otherwise` 的"无分号"规则**不变**
-- 多余分号（`;;`）的行为以 0.0.1 现有测试为基准保持不变
-- ASI 是纯 parser 行为：Token 流、AST 结构、MIR、字节码均不受影响
-  （AST 的 `has_semi` 标志字段保留，typeck/lower 不感知差异）
+- `func` 声明后、块尾表达式、`when`/`otherwise` 的"无分号"规则**不变**
+- `;;` 在第二个 `;` 处报 `ExpectedSemiOrNewStmt`（0.0.1 亦报错，基准不变）
+- 分号的有无在 AST 之后不可见：`has_semi` 字段保留，
+  pass 补齐后表达式语句恒 `true`（唯一 `false`：Assign 贴 `}`），MIR/字节码不变
+- `tokenize()` 输出新增 `Newline`（公开 API 契约变化，文档标注）
 
-### 测试（陷阱用例逐条，见 `DESIGN.md` §3.9 表）
+### 测试（陷阱用例逐条，见 `ASI.md` §5.1 表）
 - valid：`x = 1` ⏎ `y = 2`；`while { x = x + 1 }` 无分号；when/otherwise 无分号；
+  `{ x = 1 }` 绑定贴 `}`；`{ 42 }` 尾表达式；Allman 风格（`if c` ⏎ `{`）；
+  `if c { 1 }` ⏎ `else { 2 }`（跨行 if-else 合法）；`when Ok(v)` ⏎ guard 跨行；
   显式分号混合风格；0.0.1 全部 valid 用例原样通过（回归底线）
-- invalid：`x = 1` ⏎ `@`（不可续接不可起始）报 `ExpectedSemiOrNewStmt`；
-  `if c { 1 }` ⏎ `else { 2 }`（else 不续接已完结的 if 语句）
-- 专项单测：`can_start_stmt` / `implies_stmt_end` / `can_continue_expr`
-  对每个 `TokenKind` 的判定表（穷举测试）
+- invalid：`x = 1` ⏎ `)`（不可续接不可起始）报 `ExpectedSemiOrNewStmt`；
+  `x = 1 y = 2`（同行拼接）；`if c { 1 };` ⏎ `else { 2 }`（已完结 if 后的 else）；
+  `x = 1` ⏎ `{ print(1) }`（块表达式语句需前导分号）；`;;`
+- 专项单测：三个谓词函数对每个 `TokenKind` 的穷举判定表 + pass golden 用例
+- 迁移：原 `missing_semicolon*.fln` 在 EOF 插分号后翻转为合法 → 改写
 
 ### 验收
 ```
@@ -215,6 +235,9 @@ cargo test   # 0.0.1 全量回归
 ---
 
 ## U04: Typeck — Ok/Err 构造、Result pattern、`?`、print 修复
+
+> **依赖 U13**：print 修复定稿为严格 string 检查（PLAN §6）——非 string 实参
+> 报 `ArgTypeMismatch` 并提示 `as string`，配套用例依赖 `as` 已落地，先做 U13。
 
 ### 涉及文件
 ```
@@ -242,16 +265,18 @@ pub struct BuiltinSig {
 }
 
 pub const BUILTINS: &[BuiltinSig] = &[
-    // print: (printable...) -> unit；printable = {int, float, bool, string, unit}
-    BuiltinSig { name: "print", param: Variadic(PRINTABLE), ret: Type::Unit },
+    // print: (string...) -> unit；0.0.2 严格 string 检查（PLAN §6）
+    // 非 string 实参报 ArgTypeMismatch，help: `x as string`（U13）
+    BuiltinSig { name: "print", param: Variadic(&[Type::String]), ret: Type::Unit },
 ];
-// PRINTABLE = [Int, Float, Bool, String, Unit]
 ```
-- `typeck_call` 改查此表：`print(func值)` / `print(box)` / `print(Ok(..))`
-  → `ArgTypeMismatch`；元数不限（`print()` 合法）
+- `typeck_call` 改查此表：实参非 string（`print(1)` / `print(fib)` / `print(box)` /
+  `print(Ok(..))`）→ `ArgTypeMismatch`，help 提示显式 `x as string`（U13）；
+  元数不限（`print()` 合法）
 - **移除 `infer.rs` 中 `print` 的特判分支与 HACK 注释**
 - `check_builtin_print_wrong_arg` 测试拆分回正：
-  `print(1)` / `print("a", 1, true)` → Ok；`print(fib)`（函数值）→ `ArgTypeMismatch`
+  `print("a")` / `print("a", "b")` / `print(42 as string)` → Ok；
+  `print(1)` / `print(fib)`（非 string）→ `ArgTypeMismatch`
 
 ### Ok / Err 构造检查（双向检查最小实现）
 0.0.1 的推导是单向的（先推后比）；`Ok(v)`/`Err(e)` 需要上下文类型
@@ -304,9 +329,9 @@ ArgTypeMismatch { .. },                  // 复用既有（print 回正后重新
 
 ### 测试
 - valid：`div/ratio` 链（PLAN §3.4 示例逐字）、带标注绑定、`main` 返回 Result、
-  `print(1)`、`print()`、用户遮蔽 `Ok`
+  `print("x")`、`print(1 as string)`、`print()`、用户遮蔽 `Ok`
 - invalid：无上下文 `Ok(1)`、`?` 在 int main、E 不匹配、丢弃 Result、
-  `print(fib)`、Result scrutinee 不穷尽
+  `print(1)` / `print(fib)`（非 string）、Result scrutinee 不穷尽
 - **回归底线**：`check_builtin_print` 等既有 typeck 测试语义不变
 
 ### 验收
@@ -763,6 +788,7 @@ tests/e2e/valid/
 ├── ownership.fln        # move/clone/条件转移
 ├── box_demo.fln         # 分配/读写/clone 独立性/嵌套 box
 ├── ref_demo.fln         # 借用传参，原变量仍可用
+├── cast.fln             # as 转换 + print(x as string)（U13/F6）
 └── question.fln         # Ok/Err/?/choose-Result 全链路
 
 tests/e2e/invalid/
@@ -793,7 +819,7 @@ func main(): int {
             0 - 1
         }
     };
-    print(res);
+    print(res as string);
     0
 }
 ```
@@ -824,6 +850,8 @@ cargo fln tests/e2e/valid/question.fln
 - [ ] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
 - [ ] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现）
 - [ ] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修）
+- [ ] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6）
+- [ ] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13）
 - [ ] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致
 - [ ] `SPEC.md` §14 快速参考补 `?` 示例（如实现形态有出入）
 - [ ] 新增错误信息样例与实际输出比对（`UseAfterMove` 等）
@@ -844,6 +872,80 @@ cargo test && cargo doc --no-deps
 
 ---
 
+## U13: 全链 — `as` 类型转换（0.0.2 临时特性，F8）
+
+> **实现顺序**：插在 U04 之前——print 修复（严格 string 检查，PLAN §6）依赖本票，
+> 非 string 实参的报错 help 与配套用例都需要 `as string`（PLAN §3.6 / §6）。
+> **临时性**：0.0.2 白名单仅"标量 → string"，为 print 修复的最小配套；
+> 完整转换矩阵与 From-like 机制随泛型（0.1.0）再议，此定位写入 DESIGN.md。
+
+### 涉及文件
+```
+fleen-compiler/src/
+├── lexer/token.rs        # TokenKind::As（"as" 成为保留字，Breaking）
+├── lexer/lexer_impl.rs   # "as" => As + is_keyword/keyword_str/Display
+├── parser/ast.rs         # Expr::Cast(Box<Expr>, Type, Span)
+├── parser/expr.rs        # cast 层（unary 与二元之间）
+├── parser/asi.rs         # can_continue_expr 补 As（跨行续接）
+├── parser/tests.rs
+├── typeck/infer.rs       # 白名单检查 + UnsupportedCast
+├── lower/                # MirInstrKind::ToStr
+└── codegen/              # Opcode 0xA5 ToStr（1 字节）；span_map 照常携带
+
+fleen-verify/src/stack_analysis.rs   # ToStr：Δ0，min 1
+fleen-vm/src/
+├── fmt.rs               # 新：标量格式化 helper（print 与 ToStr 共用）
+└── vm.rs                # ToStr 执行
+```
+
+### 语法与优先级（与 `SYNTAX.ebnf` v0.0.2 对齐）
+```text
+cast:  unary { "as" type }        ← 新层；unary 比 as 紧，as 比二元紧（同 Rust）
+```
+- `deref b as string` = `(deref b) as string`；`1 + 2 as string` = `1 + (2 as string)`；
+  `box 1 as string` = `box (1 as string)`（前缀关键字绑定更紧）
+- ASI：`As` 加入 `can_continue_expr`——`x = 42` ⏎ `as string` 跨行续接，
+  与二元运算符同规则；同步 `ASI.md` §4 续接集一行
+- `as` 后必须是类型，走既有类型解析；`42 as`（缺类型）为 parse 错误
+
+### typeck 白名单（仅此三条，其余全拒）
+| 表达式 | 结果 |
+|--------|------|
+| `int as string` | 十进制（含负号） |
+| `float as string` | 与 print 的 float 输出一致 |
+| `bool as string` | `"true"` / `"false"` |
+
+- 其余一切（`string as string`、`int as float`、`box<T> as …`、`ref T` 操作数、
+  恒等转换）→ `UnsupportedCast { from, to }`，
+  help：0.0.2 仅支持标量到 string 的转换，完整转换随泛型版本提供
+- 结果是**新鲜 owned string**：消费位置无需 `move` / `clone`（与"RHS 是新值"一致）
+- 格式化 helper 提取到 `fleen-vm/src/fmt.rs`，print 与 `ToStr` 共用，避免两处漂移
+
+### 降载 / 字节码 / VM
+| 构造 | MIR / 字节码 |
+|------|--------------|
+| `e as string` | `<e>`; `ToStr`（0xA5，1 字节，`v → s`，Δ0 min 1） |
+
+- VM 执行：pop 标量 → `fmt` 格式化 → 压 `Value::Str`（新鲜 owned 值）
+- `as` 不引入任何隐式数值转换（0.0.2 无 `int as float`）
+
+### 测试
+- lexer：`as` token；`as` 作绑定名（`as = 1;`）进 `tests/parser/invalid/`（保留字）
+- parser valid：优先级三条（上）、`f(x) as string`、ASI 跨行续接（`x = 42` ⏎ `as string`）；
+  invalid：`42 as`（缺类型）
+- typeck valid：白名单三条 ×（绑定 / 实参 / print 就地）；
+  invalid：`1 as float`、`s as string`、`b as string`、`42 as int`（恒等）
+- verify：`ToStr` 栈深分析；vm：三条格式化输出单测（负数、浮点与 print 输出一致）
+- e2e：`tests/e2e/valid/cast.fln`（`as` + `print(x as string)` 全链路）
+
+### 验收
+```
+cargo test
+cargo fln tests/e2e/valid/cast.fln
+```
+
+---
+
 ## 依赖关系与并行化
 
 ```
@@ -851,9 +953,9 @@ U01 (Lex)
   ↓
 U02 (Parse) ──→ U03 (ASI)                    # U03 只依赖 U02，与 U04/U05 并行
   ↓
-U04 (Typeck-签名) ──→ U05 (Typeck-所有权)
-  ↓                    ↓
-U06 (MIR+Span) ←───────┘
+U13 (as 转换) → U04 (Typeck-签名) ──→ U05 (Typeck-所有权)
+                     ↓                    ↓
+U06 (MIR+Span) ←────────┘
   ↓
 U07 (Codegen/Verify)                          # U08 全程独立，可最先启动
   ↓                    ┌─────────────┐
@@ -866,8 +968,8 @@ U11 (测试) ←── U09 + U10
 U12 (收尾)
 ```
 
-- **单人串行建议顺序**：U08 → U01 → U02 → U03 → U04 → U05 → U06 → U07 → U09 → U10 → U11 → U12
-  （先还 `Rc<str>` 债，VM 基础就绪后前端一路推进）
+- **单人串行建议顺序**：U08 → U01 → U02 → U03 → U13 → U04 → U05 → U06 → U07 → U09 → U10 → U11 → U12
+  （先还 `Rc<str>` 债，VM 基础就绪后前端一路推进；U13 在 U04 之前——print 修复依赖 `as`）
 - **双人并行**：A 走前端 U01–U07，B 走 U08 → 与 A 会合于 U09，B 顺做 U10
 
 ---
@@ -892,7 +994,7 @@ cargo doc --no-deps
 | 里程碑 | 票号 | 标志 |
 |--------|------|------|
 | M1 前端 | U01–U03 | 新语法可解析；ASI 陷阱用例全绿；0.0.1 回归零变化 |
-| M2 语义 | U04–U05 | Ok/Err/`?`/print 检查完备；所有权检查器 invalid 用例全绿 |
+| M2 语义 | U13, U04–U05 | `as` 白名单 + Ok/Err/`?`/print 检查完备；所有权检查器 invalid 用例全绿 |
 | M3 后端与运行时 | U06–U09 | `question.fln` / `box_demo.fln` / `ref_demo.fln` 端到端跑通；v1 fixture 通过 |
 | M4 诊断与发布 | U10–U12 | 运行时错误带行列；文档核对完毕；0.0.2 发布 |
 
@@ -902,12 +1004,13 @@ cargo doc --no-deps
 
 - **0.0.2 仍不实现**：`struct` / `for` / 迭代器（0.0.3）、闭包、trait / 运算符重载 /
   泛型（0.1.0）、用户自定义 `Drop`、`ref` 局部/全局/返回值、借用 box 内部、
-  `addr` / `ptr` / `unsafe`（0.0.5）、错误类型转换（`E` 须完全相等）
+  `addr` / `ptr` / `unsafe`（0.0.5）、错误类型转换（`E` 须完全相等）、
+  完整 `as` 转换矩阵（`int as float` 等；0.0.2 仅标量 → string，泛型后再扩）
 - **决策冻结**：D1–D8 见 `PLAN.md` §2。实现中如需推翻某决策，先改 PLAN 与
   规范文档，再动代码——不允许代码偏离文档
 - **Breaking 变更清单**（CHANGELOG ⚠️ 小节的实现对照）：
-  owned 赋值需 `move`/`clone`；`move`/`clone`/`deref` 成为保留字；
-  `print(函数值)` 改为编译错误
+  owned 赋值需 `move`/`clone`；`move`/`clone`/`deref`/`as` 成为保留字；
+  `print` 非 string 实参（含 `print(1)`、`print(函数值)`）改为编译错误，help: `as string`
 - **v1 兼容承诺**：`.flnc` v1 模块在 0.0.2 verify/VM 上可执行（U07/U11 锁定）；
   0.0.1 源程序除 Breaking 清单三条外全部原样编译
 - **print 函数**：仍内置于 VM 宿主（`is_builtin` 机制不变）；新增的只是 typeck

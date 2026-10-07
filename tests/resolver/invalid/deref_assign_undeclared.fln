@@ -1,0 +1,2 @@
+// 0.0.2 U02: `deref b = v` requires `b` to be a declared binding.
+deref b = 1;

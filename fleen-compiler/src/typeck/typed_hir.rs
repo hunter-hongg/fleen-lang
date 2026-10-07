@@ -192,6 +192,8 @@ pub enum TypedExprHir {
     /// Unary operators
     Not(Box<TypedExprHir>),
     Neg(Box<TypedExprHir>),
+    /// `expr as string` (0.0.2 U13: type cast; result is a fresh owned string)
+    Cast(Box<TypedExprHir>, Span),
     /// Function call
     Call(Box<TypedExprHir>, Vec<TypedExprHir>, Type), // Type = return type
     /// Index access
@@ -238,6 +240,7 @@ impl TypedExprHir {
             TypedExprHir::Mod(l, _) => l.ty(),
             TypedExprHir::Not(_) => Type::Bool,
             TypedExprHir::Neg(e) => e.ty(),
+            TypedExprHir::Cast(_, _) => Type::String,
             TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
             TypedExprHir::Index(_, _) => Type::Unsupported("index".to_string()),
             TypedExprHir::Field(_, _) => Type::Unsupported("field".to_string()),
@@ -272,6 +275,7 @@ impl TypedExprHir {
             TypedExprHir::Mod(l, _) => l.span(),
             TypedExprHir::Not(e) => e.span(),
             TypedExprHir::Neg(e) => e.span(),
+            TypedExprHir::Cast(_, s) => *s,
             TypedExprHir::Call(f, _, _) => f.span(),
             TypedExprHir::Index(a, _) => a.span(),
             TypedExprHir::Field(o, _) => o.span(),
