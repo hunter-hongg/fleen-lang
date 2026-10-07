@@ -159,6 +159,39 @@ impl Parser {
         KEYWORDS.contains(&name)
     }
 
+    /// Reject a reserved keyword used as a binding name at statement start
+    /// (e.g. `move = 1;`). 0.0.2 makes `move` / `clone` / `deref` reserved
+    /// words; erroring here (instead of falling into prefix-expression
+    /// parsing) gives an actionable message instead of "expected expression".
+    fn reject_keyword_binding_name(&self) -> Result<(), ParseError> {
+        let keyword = match self.current_kind() {
+            crate::lexer::TokenKind::Move => "move",
+            crate::lexer::TokenKind::Clone => "clone",
+            crate::lexer::TokenKind::Deref => "deref",
+            crate::lexer::TokenKind::BoxType => "box",
+            crate::lexer::TokenKind::RefType => "ref",
+            _ => return Ok(()),
+        };
+        let next_starts_binding = matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(crate::lexer::TokenKind::Assign) | Some(crate::lexer::TokenKind::Colon)
+        );
+        if next_starts_binding {
+            Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: format!(
+                        "identifier (keyword `{}` cannot be used as identifier)",
+                        keyword
+                    ),
+                    found: self.current().kind.clone(),
+                },
+                span: self.current().span,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Parse the entire program.
     fn parse_program(&mut self) -> Result<Ast, ParseError> {
         // P1: Handle empty token stream (only EOF)
@@ -227,6 +260,7 @@ impl Parser {
         }
 
         // Expression statement at top level
+        self.reject_keyword_binding_name()?;
         let expr = self.parse_expr()?;
         // Per SPEC.md §14 (0.0.1): semicolons required for non-block-like
         // expressions. Block-like expressions (if/while/choose/block) can be
@@ -596,6 +630,7 @@ impl Parser {
                 }
             } else {
                 // Expression: may be statement or tail expression
+                self.reject_keyword_binding_name()?;
                 let expr = self.parse_expr()?;
 
                 if self.matches(&crate::lexer::TokenKind::Semi) {

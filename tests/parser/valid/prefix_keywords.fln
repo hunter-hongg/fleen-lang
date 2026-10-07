@@ -1,0 +1,9 @@
+// 0.0.2 U02: prefix keyword expressions — box / deref / move / clone.
+// Prefixes are right-associative and stackable (SYNTAX.ebnf v0.0.2 unary).
+
+b = box 42;
+n = deref b;
+c = clone b;
+c2 = clone deref b;
+nested = box box 1;
+m = move n;

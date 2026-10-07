@@ -1,0 +1,7 @@
+// 0.0.2 U02: move / clone as call arguments — consumption positions.
+
+func f(x: int): int = x;
+
+s = 1;
+a = f(move s);
+b = f(clone s);

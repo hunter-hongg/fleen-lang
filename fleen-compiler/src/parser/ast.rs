@@ -200,6 +200,16 @@ pub enum Expr {
     Not(Box<Expr>),
     /// Unary negation
     Neg(Box<Expr>),
+    /// `move <place>` (0.0.2: ownership transfer; place validated by typeck)
+    Move(Box<Expr>, Span),
+    /// `clone <place>` (0.0.2: deep copy; place validated by typeck)
+    Clone(Box<Expr>, Span),
+    /// `box <expr>` (0.0.2: heap allocation)
+    Box(Box<Expr>, Span),
+    /// `deref <postfix>` (0.0.2: box pointee read)
+    Deref(Box<Expr>, Span),
+    /// `<expr>?` (0.0.2: Result propagation suffix)
+    Question(Box<Expr>, Span),
     /// `func(args)`
     Call(Box<Expr>, Vec<Expr>),
     /// `arr[idx]`
@@ -242,6 +252,11 @@ impl Expr {
             | Expr::Div(l, _)
             | Expr::Mod(l, _) => l.span(),
             Expr::Not(e) | Expr::Neg(e) => e.span(),
+            Expr::Move(_, s)
+            | Expr::Clone(_, s)
+            | Expr::Box(_, s)
+            | Expr::Deref(_, s)
+            | Expr::Question(_, s) => *s,
             Expr::Call(f, _) => f.span(),
             Expr::Index(a, _) => a.span(),
             Expr::Field(o, _) => o.span(),
@@ -292,6 +307,16 @@ pub struct ChooseArm {
     pub body: Block,
 }
 
+/// Which Result constructor a `result_pattern` matches (0.0.2).
+///
+/// `Ok` / `Err` stay plain identifiers at the lexer level; the parser only
+/// recognizes the syntactic form, and typeck (U04) binds the semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultCtor {
+    Ok,
+    Err,
+}
+
 /// Pattern in a `choose` arm.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
@@ -299,6 +324,13 @@ pub enum Pattern {
     Literal(Expr),
     /// Identifier pattern (binds variable). Carries the pattern's span.
     Ident(String, Span),
+    /// `Ok(binding)` / `Err(binding)` (0.0.2: Result pattern; semantics
+    /// resolved by typeck). Carries the whole pattern's span.
+    ResultCtor {
+        ctor: ResultCtor,
+        binding: String,
+        span: Span,
+    },
 }
 
 impl Pattern {
@@ -307,6 +339,7 @@ impl Pattern {
         match self {
             Pattern::Literal(e) => e.span(),
             Pattern::Ident(_, s) => *s,
+            Pattern::ResultCtor { span, .. } => *span,
         }
     }
 }
@@ -326,6 +359,11 @@ impl fmt::Display for Expr {
             Expr::Mod(lhs, rhs) => write!(f, "({} % {})", lhs, rhs),
             Expr::Neg(e) => write!(f, "(-{})", e),
             Expr::Not(e) => write!(f, "(!{})", e),
+            Expr::Move(e, _) => write!(f, "(move {})", e),
+            Expr::Clone(e, _) => write!(f, "(clone {})", e),
+            Expr::Box(e, _) => write!(f, "(box {})", e),
+            Expr::Deref(e, _) => write!(f, "(deref {})", e),
+            Expr::Question(e, _) => write!(f, "({}?)", e),
             Expr::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
             Expr::Ne(lhs, rhs) => write!(f, "({} != {})", lhs, rhs),
             Expr::Lt(lhs, rhs) => write!(f, "({} < {})", lhs, rhs),

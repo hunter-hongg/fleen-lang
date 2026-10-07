@@ -1,0 +1,2 @@
+// 0.0.2 U02: dangling `?` — `?` is a postfix suffix, it cannot start an expression.
+q = ?;

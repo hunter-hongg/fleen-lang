@@ -120,7 +120,7 @@ impl fmt::Display for TypeckErrorKind {
                 write!(f, "cannot call value of type `{}`", ty.name())
             }
             TypeckErrorKind::UnsupportedFeature { feature } => {
-                write!(f, "{} is not supported in 0.0.1", feature)
+                write!(f, "{} is not supported yet", feature)
             }
             TypeckErrorKind::InternalError { message } => {
                 write!(f, "internal compiler error: {}", message)

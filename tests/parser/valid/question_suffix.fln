@@ -1,0 +1,9 @@
+// 0.0.2 U02: `?` postfix suffix — chains and precedence.
+// `?` binds tighter than any prefix: `deref b?` = deref(b?).
+
+func f(x: int): int = x;
+
+a = f(1)?;
+b = f(1)??;
+deref_a = a?;
+neg = -a?;

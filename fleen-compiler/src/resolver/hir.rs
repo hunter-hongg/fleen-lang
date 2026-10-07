@@ -137,6 +137,16 @@ pub enum ExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// Assignment through a box pointee: `deref b = expr` (0.0.2).
+    /// `binding_id` refers to the box variable `b`; writing the pointee does
+    /// not rebind `b` itself. Semantics are enforced by typeck (U04/U05).
+    AssignDeref {
+        name: String,
+        binding_id: BindingId,
+        rhs: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
     /// If expression
     If(ExprIfHir),
     /// While expression
@@ -160,6 +170,16 @@ pub enum ExprHir {
     /// Unary operators
     Not(Box<ExprHir>),
     Neg(Box<ExprHir>),
+    /// `move <place>` (0.0.2; span covers the whole expression)
+    Move(Box<ExprHir>, Span),
+    /// `clone <place>` (0.0.2)
+    Clone(Box<ExprHir>, Span),
+    /// `box <expr>` (0.0.2)
+    Box(Box<ExprHir>, Span),
+    /// `deref <postfix>` (0.0.2)
+    Deref(Box<ExprHir>, Span),
+    /// `<expr>?` (0.0.2 Result propagation; span covers operand and `?`)
+    Question(Box<ExprHir>, Span),
     /// Function call
     Call(Box<ExprHir>, Vec<ExprHir>),
     /// Index access
@@ -187,6 +207,7 @@ impl ExprHir {
     pub fn span(&self) -> Span {
         match self {
             ExprHir::Assign { span, .. } => *span,
+            ExprHir::AssignDeref { span, .. } => *span,
             ExprHir::If(e) => e.span,
             ExprHir::While(e) => e.span,
             ExprHir::Choose(e) => e.span,
@@ -205,6 +226,11 @@ impl ExprHir {
             ExprHir::Mod(l, _) => l.span(),
             ExprHir::Not(e) => e.span(),
             ExprHir::Neg(e) => e.span(),
+            ExprHir::Move(_, s)
+            | ExprHir::Clone(_, s)
+            | ExprHir::Box(_, s)
+            | ExprHir::Deref(_, s)
+            | ExprHir::Question(_, s) => *s,
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(a, _) => a.span(),
             ExprHir::Field(o, _) => o.span(),
@@ -260,6 +286,14 @@ pub struct ChooseArmHir {
 pub enum PatternHir {
     Literal(Box<ExprHir>),
     Ident {
+        name: String,
+        binding_id: BindingId,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `Ok(binding)` / `Err(binding)` (0.0.2; semantics checked by typeck).
+    ResultCtor {
+        ctor: ResultCtor,
         name: String,
         binding_id: BindingId,
         hir_id: HirId,

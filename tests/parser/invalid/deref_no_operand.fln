@@ -1,0 +1,2 @@
+// 0.0.2 U02: `deref` requires a postfix operand.
+y = deref;

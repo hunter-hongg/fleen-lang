@@ -76,7 +76,7 @@ mod tests {
             Item::Decl(Decl::Var(v)) => {
                 assert_eq!(v.name, "x");
                 assert_eq!(v.ty, None);
-                assert!(matches!(*v.init, Expr::Int(42, _)));
+                assert!(matches!(&*v.init, Expr::Int(42, _)));
             }
             _ => panic!("expected Var binding, got {:?}", item),
         }
@@ -91,7 +91,7 @@ mod tests {
             Item::Decl(Decl::Var(v)) => {
                 assert_eq!(v.name, "x");
                 assert_eq!(v.ty, Some(Type::Base(BaseType::Int)));
-                assert!(matches!(*v.init, Expr::Int(42, _)));
+                assert!(matches!(&*v.init, Expr::Int(42, _)));
             }
             _ => panic!("expected Var binding, got {:?}", item),
         }
@@ -327,7 +327,7 @@ mod tests {
             Item::Decl(Decl::Var(v)) => {
                 assert_eq!(v.name, "a");
                 // The init should be an Assign expression: b = 5
-                assert!(matches!(*v.init, Expr::Assign(_, _)));
+                assert!(matches!(&*v.init, Expr::Assign(_, _)));
             }
             _ => panic!("expected Var binding, got {:?}", item),
         }
@@ -891,5 +891,199 @@ func main() {
         } else {
             panic!("expected Choose expr, got {:?}", item);
         }
+    }
+
+    // ========== 0.0.2 U02: prefix keywords, `?`, Result patterns, deref assign ==========
+
+    #[test]
+    fn parse_move_expression() {
+        let ast = parse_str("y = move x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Move(inner, _) = &*v.init else {
+                    panic!("expected Move expr")
+                };
+                assert!(matches!(&**inner, Expr::Ident(n, _) if n == "x"));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_clone_deref_chain() {
+        // `clone deref b` = clone(deref(b)): prefix recursion, right-assoc
+        let ast = parse_str("y = clone deref b;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Clone(inner, _) = &*v.init else {
+                    panic!("expected Clone expr")
+                };
+                assert!(matches!(&**inner, Expr::Deref(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_box_nested() {
+        // `box box 1` = box(box(1))
+        let ast = parse_str("y = box box 1;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Box(inner, _) = &*v.init else {
+                    panic!("expected Box expr")
+                };
+                assert!(matches!(&**inner, Expr::Box(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_question_suffix_chain() {
+        // `x??` = (x?)? — postfix loops left-to-right
+        let ast = parse_str("q = x??;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Question(inner, _) = &*v.init else {
+                    panic!("expected Question expr")
+                };
+                assert!(matches!(&**inner, Expr::Question(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_question_binds_tighter_than_prefix() {
+        // `deref b?` = deref(b?): `?` is postfix, binds tighter than prefix
+        let ast = parse_str("y = deref b?;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                let Expr::Deref(inner, _) = &*v.init else {
+                    panic!("expected Deref expr")
+                };
+                assert!(matches!(&**inner, Expr::Question(_, _)));
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_prefix_expression_span_covers_keyword() {
+        // Span of a prefix expression starts at the keyword, not the operand
+        let ast = parse_str("y = move x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                if let Expr::Move(_, span) = &*v.init {
+                    let src = "y = move x;";
+                    assert_eq!(&src[span.start as usize..span.end as usize], "move x");
+                } else {
+                    panic!("expected Move expr");
+                }
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_deref_assign_target() {
+        // `deref b = v;` parses as an assignment with a Deref target
+        let ast = parse_str("deref b = v;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Assign(lhs, rhs)) => {
+                let Expr::Deref(inner, _) = &**lhs else {
+                    panic!("expected Deref target")
+                };
+                assert!(matches!(&**inner, Expr::Ident(n, _) if n == "b"));
+                assert!(matches!(&**rhs, Expr::Ident(n, _) if n == "v"));
+            }
+            other => panic!("expected Assign expr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_result_patterns() {
+        let ast = parse_str("choose r { when Ok(v) { 1 } when Err(e) { 2 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert_eq!(ch.arms.len(), 2);
+                assert!(matches!(
+                    ch.arms[0].pattern,
+                    Pattern::ResultCtor { ctor: ResultCtor::Ok, ref binding, .. } if binding == "v"
+                ));
+                assert!(matches!(
+                    ch.arms[1].pattern,
+                    Pattern::ResultCtor { ctor: ResultCtor::Err, ref binding, .. } if binding == "e"
+                ));
+            }
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_ok_err_without_paren_is_ident_pattern() {
+        // `Ok` without `(` stays an ordinary identifier pattern
+        let ast = parse_str("choose r { when Ok { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => assert!(matches!(
+                ch.arms[0].pattern,
+                Pattern::Ident(ref n, _) if n == "Ok"
+            )),
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_move_clone_as_call_args() {
+        let ast = parse_str("a = f(move x, clone y);");
+        match &ast.items[0] {
+            Item::Decl(Decl::Var(v)) => {
+                if let Expr::Call(_, args) = &*v.init {
+                    assert!(matches!(args[0], Expr::Move(_, _)));
+                    assert!(matches!(args[1], Expr::Clone(_, _)));
+                } else {
+                    panic!("expected Call expr");
+                }
+            }
+            other => panic!("expected Var binding, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reject_move_as_binding_name() {
+        // 0.0.2: `move` is reserved; using it as a binding name reports the
+        // keyword, not a generic "expected expression"
+        let err = parse_err("move = 1;");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("keyword `move`"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn reject_dangling_question() {
+        let err = parse_err("q = ?;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn reject_move_without_operand() {
+        let err = parse_err("y = move;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn reject_deref_without_operand() {
+        let err = parse_err("y = deref;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn reject_deref_assign_with_type_annotation() {
+        // `deref b` cannot carry a type annotation (DESIGN.md §3.2.1)
+        let err = parse_err("deref b: int = 2;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
 }

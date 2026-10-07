@@ -1,6 +1,6 @@
 //! Expression parsing using recursive descent + precedence climbing.
 //!
-//! Grammar (from SPEC.md §14, precedence low to high):
+//! Grammar (from SPEC.md §14 and SYNTAX.ebnf v0.0.2, precedence low to high):
 //! ```text
 //! expr        = if_expr | while_expr | choose_expr | assign_expr
 //! assign_expr   = logic_or [ "=" assign_expr ]     (right-assoc)
@@ -10,15 +10,22 @@
 //! comparison    = additive   { ("<" | ">" | "<=" | ">=") additive }
 //! additive      = multiplicative { ("+" | "-") multiplicative }
 //! multiplicative= unary      { ("*" | "/" | "%") unary }
-//! unary         = ("-" | "!") unary | postfix
-//! postfix       = primary { call | index | field }
+//! unary         = unary_prefix unary | postfix     (prefixes right-assoc)
+//! unary_prefix  = "-" | "!" | "box" | "deref" | "move" | "clone"
+//! postfix       = primary { call | index | field | "?" }
 //! primary       = literal | ident | "(" expr ")" | block | choose_result_expr
 //! ```
+//!
+//! 0.0.2: `box` / `deref` / `move` / `clone` are prefix keyword expressions at
+//! the unary level (right-associative, so `clone deref b` = `clone(deref(b))`
+//! and `box box 1` = `box(box(1))`); `?` is a postfix suffix binding tighter
+//! than any prefix (`deref b?` = `deref(b?)`). The parser only recognizes
+//! forms — operand legality (e.g. `move`'s place) is checked by typeck.
 
 use crate::lexer::Span;
 use crate::lexer::TokenKind;
 use crate::parser::Parser;
-use crate::parser::ast::{Expr, ExprChoose, ExprIf, ExprWhile, Pattern};
+use crate::parser::ast::{Expr, ExprChoose, ExprIf, ExprWhile, Pattern, ResultCtor};
 use crate::parser::error::{ParseError, ParseErrorKind};
 
 /// Parse an expression starting from the current position.
@@ -156,8 +163,15 @@ impl Parser {
         Ok(left)
     }
 
-    /// Parse unary expressions (`-expr`, `!expr`, `not expr`).
+    /// Parse unary expressions.
+    ///
+    /// Prefixes are right-associative and recurse into `parse_unary`, so
+    /// `clone deref b` = `clone(deref(b))` and `box box 1` = `box(box(1))`.
+    /// The parser accepts any operand form here; typeck validates that
+    /// `move`/`clone` operands are legal places (U05).
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current().span;
+
         if self.matches(&TokenKind::Minus) {
             let operand = self.parse_unary()?;
             return Ok(Expr::Neg(Box::new(operand)));
@@ -169,10 +183,23 @@ impl Parser {
             return Ok(Expr::Not(Box::new(operand)));
         }
 
-        self.parse_postfix()
+        // 0.0.2 prefix keyword expressions. `box` reuses the `BoxType` token:
+        // type position (`box<T>`) goes through `parse_type`, expression
+        // position (`box expr`) through here — no ambiguity.
+        let ctor = match self.current_kind() {
+            TokenKind::BoxType => Expr::Box as fn(Box<Expr>, Span) -> Expr,
+            TokenKind::Deref => Expr::Deref as fn(Box<Expr>, Span) -> Expr,
+            TokenKind::Move => Expr::Move as fn(Box<Expr>, Span) -> Expr,
+            TokenKind::Clone => Expr::Clone as fn(Box<Expr>, Span) -> Expr,
+            _ => return self.parse_postfix(),
+        };
+        self.advance();
+        let operand = self.parse_unary()?;
+        let end = self.prev_span_end();
+        Ok(ctor(Box::new(operand), Span::new(span.start, end)))
     }
 
-    /// Parse postfix expressions: function calls, indexing, field access.
+    /// Parse postfix expressions: function calls, indexing, field access, `?`.
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
 
@@ -189,6 +216,13 @@ impl Parser {
                 // Field access
                 let field = self.parse_ident()?;
                 expr = Expr::Field(Box::new(expr), field);
+            } else if self.matches(&TokenKind::Question) {
+                // 0.0.2: Result propagation suffix; binds tighter than any
+                // prefix (`deref b?` = `deref(b?)`), chains left-to-right
+                // (`f(x)??` = `(f(x)?)?`)
+                let end = self.prev_span_end();
+                let start = expr.span().start;
+                expr = Expr::Question(Box::new(expr), Span::new(start, end));
             } else {
                 break;
             }
@@ -421,6 +455,23 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 reject_neg!();
+                // 0.0.2: `Ok(ident)` / `Err(ident)` result patterns. `Ok` /
+                // `Err` are plain Ident tokens — only the syntactic form
+                // matters here; typeck binds the semantics (U04). Without a
+                // following `(` they stay ordinary identifier patterns.
+                if (name == "Ok" || name == "Err")
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::LParen)
+                    )
+                {
+                    let ctor = if name == "Ok" {
+                        ResultCtor::Ok
+                    } else {
+                        ResultCtor::Err
+                    };
+                    return self.parse_result_pattern(ctor, span);
+                }
                 let name = name.clone();
                 self.advance();
                 Pattern::Ident(name, self.prev_span())
@@ -437,5 +488,24 @@ impl Parser {
         };
 
         Ok(pat)
+    }
+
+    /// Parse `Ok(ident)` / `Err(ident)` after the constructor token is
+    /// recognized. Caller has not consumed the `Ok`/`Err` identifier yet.
+    fn parse_result_pattern(
+        &mut self,
+        ctor: ResultCtor,
+        ctor_span: Span,
+    ) -> Result<Pattern, ParseError> {
+        self.advance(); // consume `Ok` / `Err`
+        self.expect(&TokenKind::LParen, "expected `(` after `Ok`/`Err` pattern")?;
+        let binding = self.parse_ident()?;
+        self.expect(&TokenKind::RParen, "expected `)` after pattern binding")?;
+        let end = self.prev_span_end();
+        Ok(Pattern::ResultCtor {
+            ctor,
+            binding,
+            span: Span::new(ctor_span.start, end),
+        })
     }
 }

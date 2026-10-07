@@ -1,0 +1,6 @@
+// 0.0.2 U02: `deref b = v` assignment target (write a box's pointee).
+// `deref b` cannot carry a type annotation.
+
+b = box 1;
+deref b = 2;
+deref b = deref b + 1;

@@ -37,6 +37,13 @@ use std::collections::HashMap;
 /// Builtin functions available in every program (registered in the global scope).
 const BUILTINS: &[&str] = &["print"];
 
+/// Assignment target shape, split out of the AST before binding lookup.
+enum AssignTarget {
+    Ident(String),
+    /// `deref b` — write the pointee of the box held by `b`.
+    Deref(String),
+}
+
 /// Resolve names in an AST, producing a HIR.
 ///
 /// # Arguments
@@ -581,6 +588,15 @@ impl Resolver {
             }
             Expr::Not(expr) => ExprHir::Not(Box::new(self.resolve_expr(*expr)?)),
             Expr::Neg(expr) => ExprHir::Neg(Box::new(self.resolve_expr(*expr)?)),
+            // 0.0.2 prefix keyword expressions: resolved faithfully here;
+            // operand legality and semantics are typeck's job (U04/U05).
+            Expr::Move(expr, span) => ExprHir::Move(Box::new(self.resolve_expr(*expr)?), span),
+            Expr::Clone(expr, span) => ExprHir::Clone(Box::new(self.resolve_expr(*expr)?), span),
+            Expr::Box(expr, span) => ExprHir::Box(Box::new(self.resolve_expr(*expr)?), span),
+            Expr::Deref(expr, span) => ExprHir::Deref(Box::new(self.resolve_expr(*expr)?), span),
+            Expr::Question(expr, span) => {
+                ExprHir::Question(Box::new(self.resolve_expr(*expr)?), span)
+            }
             Expr::Call(func, args) => {
                 let hir_func = self.resolve_expr(*func)?;
                 let hir_args: Result<Vec<_>, _> =
@@ -606,15 +622,28 @@ impl Resolver {
         Ok(hir)
     }
 
-    /// Resolve an expression-position assignment: `x = rhs`.
+    /// Resolve an expression-position assignment: `x = rhs` or `deref b = rhs`.
     ///
     /// Expression-position `=` is assignment only — it never binds and never
     /// shadows. The target follows the same lookup as statement-position `=`
     /// (current scope, or loop body), so it can never write through a
     /// function boundary (DESIGN.md §4.2).
+    ///
+    /// 0.0.2 adds `deref b = rhs` (write a box's pointee): the target is the
+    /// box variable `b`, resolved by name. Writing the pointee does not
+    /// rebind `b`, so mutability of `b` is not required here; whether `b`
+    /// actually holds a box is typeck's business (U04/U05).
     fn resolve_assign(&mut self, lhs: Expr, rhs: Expr) -> Result<ExprHir, ()> {
-        let (lhs_name, lhs_span) = match lhs {
-            Expr::Ident(name, span) => (name, span),
+        let rhs_span = rhs.span();
+        let (target, span) = match lhs {
+            Expr::Ident(name, span) => (AssignTarget::Ident(name), span),
+            Expr::Deref(inner, span) => match *inner {
+                Expr::Ident(name, _) => (AssignTarget::Deref(name), span),
+                other => {
+                    self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
+                    return Err(());
+                }
+            },
             other => {
                 self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
                 return Err(());
@@ -623,35 +652,52 @@ impl Resolver {
 
         let rhs_hir = self.resolve_expr(rhs)?;
 
-        match self.scopes.find_assign_target(&lhs_name) {
-            None => {
-                self.add_error(
-                    ResolveErrorKind::UndeclaredVariable {
-                        name: lhs_name.clone(),
-                    },
-                    lhs_span,
-                );
-                Err(())
-            }
-            Some(binding) if !binding.mutable => {
-                self.add_error(
-                    ResolveErrorKind::AssignToImmutable {
-                        name: lhs_name.clone(),
-                    },
-                    lhs_span,
-                );
-                Err(())
-            }
-            Some(binding) => {
-                let binding_id = binding.id;
-                Ok(ExprHir::Assign {
-                    name: lhs_name,
-                    binding_id,
-                    rhs: Box::new(rhs_hir),
-                    hir_id: self.next_hir_id(),
-                    span: lhs_span,
-                })
-            }
+        match target {
+            AssignTarget::Ident(name) => match self.scopes.find_assign_target(&name) {
+                None => {
+                    self.add_error(
+                        ResolveErrorKind::UndeclaredVariable { name: name.clone() },
+                        span,
+                    );
+                    Err(())
+                }
+                Some(binding) if !binding.mutable => {
+                    self.add_error(
+                        ResolveErrorKind::AssignToImmutable { name: name.clone() },
+                        span,
+                    );
+                    Err(())
+                }
+                Some(binding) => {
+                    let binding_id = binding.id;
+                    Ok(ExprHir::Assign {
+                        name,
+                        binding_id,
+                        rhs: Box::new(rhs_hir),
+                        hir_id: self.next_hir_id(),
+                        span,
+                    })
+                }
+            },
+            AssignTarget::Deref(name) => match self.scopes.get(&name) {
+                None => {
+                    self.add_error(
+                        ResolveErrorKind::UndeclaredVariable { name: name.clone() },
+                        span,
+                    );
+                    Err(())
+                }
+                Some(binding) => {
+                    let binding_id = binding.id;
+                    Ok(ExprHir::AssignDeref {
+                        name,
+                        binding_id,
+                        rhs: Box::new(rhs_hir),
+                        hir_id: self.next_hir_id(),
+                        span: Span::new(span.start, rhs_span.end),
+                    })
+                }
+            },
         }
     }
 
@@ -780,47 +826,7 @@ impl Resolver {
                 Ok(PatternHir::Literal(Box::new(hir_expr)))
             }
             Pattern::Ident(name, span) => {
-                // Pattern binding: declares a new variable in the arm's scope.
-                // Shadow-check up to the function boundary; parameters,
-                // functions and builtins are exempt (DESIGN.md §4.3).
-                let new_mutable = true; // pattern bindings are mutable
-                if let Some(outer) = self.scopes.find_shadow_domain(&name)
-                    && outer.kind.shadow_checks()
-                    && outer.mutable != new_mutable
-                {
-                    self.add_error(
-                        ResolveErrorKind::ShadowingMutabilityMismatch {
-                            outer_mutable: outer.mutable,
-                            inner_mutable: new_mutable,
-                        },
-                        span,
-                    );
-                    return Err(());
-                }
-
-                let binding_id = self.next_binding_id();
-                let hir_id = self.next_hir_id();
-                if let Err(first) = self.scopes.declare(
-                    name.clone(),
-                    Binding {
-                        id: binding_id,
-                        kind: BindingKind::Variable,
-                        mutable: true,
-                        builtin: false,
-                        span,
-                        hir_id,
-                    },
-                ) {
-                    self.add_error(
-                        ResolveErrorKind::DuplicateBinding {
-                            name: name.clone(),
-                            first_span: first.span,
-                        },
-                        span,
-                    );
-                    return Err(());
-                }
-
+                let (binding_id, hir_id) = self.declare_pattern_binding(&name, span)?;
                 Ok(PatternHir::Ident {
                     name,
                     binding_id,
@@ -828,7 +834,73 @@ impl Resolver {
                     span,
                 })
             }
+            Pattern::ResultCtor {
+                ctor,
+                binding,
+                span,
+            } => {
+                // 0.0.2: `Ok(v)` / `Err(e)` — the parser only saw the form;
+                // the binding registers like an identifier pattern and its
+                // type (the payload T or E) is determined by typeck (U04).
+                let (binding_id, hir_id) = self.declare_pattern_binding(&binding, span)?;
+                Ok(PatternHir::ResultCtor {
+                    ctor,
+                    name: binding,
+                    binding_id,
+                    hir_id,
+                    span,
+                })
+            }
         }
+    }
+
+    /// Register a pattern binding (identifier or Result-payload binding) in
+    /// the arm's scope. Shadow-check up to the function boundary; parameters,
+    /// functions and builtins are exempt (DESIGN.md §4.3).
+    fn declare_pattern_binding(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Result<(BindingId, HirId), ()> {
+        let new_mutable = true; // pattern bindings are mutable
+        if let Some(outer) = self.scopes.find_shadow_domain(name)
+            && outer.kind.shadow_checks()
+            && outer.mutable != new_mutable
+        {
+            self.add_error(
+                ResolveErrorKind::ShadowingMutabilityMismatch {
+                    outer_mutable: outer.mutable,
+                    inner_mutable: new_mutable,
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        let binding_id = self.next_binding_id();
+        let hir_id = self.next_hir_id();
+        if let Err(first) = self.scopes.declare(
+            name.to_string(),
+            Binding {
+                id: binding_id,
+                kind: BindingKind::Variable,
+                mutable: true,
+                builtin: false,
+                span,
+                hir_id,
+            },
+        ) {
+            self.add_error(
+                ResolveErrorKind::DuplicateBinding {
+                    name: name.to_string(),
+                    first_span: first.span,
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        Ok((binding_id, hir_id))
     }
 
     /// Resolve a block in a fresh `Block` scope.

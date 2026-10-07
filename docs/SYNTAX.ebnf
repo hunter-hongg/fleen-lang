@@ -135,10 +135,13 @@ additive        = multiplicative , { ( "+" | "-" ) , multiplicative } ;
 
 multiplicative  = unary , { ( "*" | "/" | "%" ) , unary } ;
 
-unary           = [ unary_prefix ] , postfix ;
+(* 0.0.2：前缀关键字表达式，右结合、可叠加：
+   clone deref b = clone(deref(b))，box box 1 = box(box(1))。
+   move/clone/deref/box 的操作数合法性（place 约束、类型）由语义阶段校验，
+   文法只认形态。`?` 为后缀，绑定比前缀紧：deref b? = deref(b?) *)
+unary           = unary_prefix , unary
+                | postfix ;
 
-(* 0.0.2：box/deref/move/clone 为前缀关键字表达式，右结合，同 - / ! 一元层；
-   move/clone 的操作数须为合法位置（ident 或 deref b），由语义阶段校验 *)
 unary_prefix    = "-" | "!" | "box" | "deref" | "move" | "clone" ;
 
 postfix         = primary , { call_suffix | index_suffix | field_suffix | question_suffix } ;

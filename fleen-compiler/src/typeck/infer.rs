@@ -463,6 +463,17 @@ impl TypeChecker {
 
             ExprHir::Call(func, args) => self.typeck_call(*func, args),
             ExprHir::Index(arr, idx) => self.typeck_index(*arr, *idx),
+            // 0.0.2 U02: these forms parse and resolve; their semantics land
+            // with U04 (Result / `?`) and U05 (ownership). Reject explicitly
+            // so nothing reaches lower before those tickets implement them.
+            ExprHir::Move(_, span) => self.reject_unsupported("`move` expression", span),
+            ExprHir::Clone(_, span) => self.reject_unsupported("`clone` expression", span),
+            ExprHir::Box(_, span) => self.reject_unsupported("`box` expression", span),
+            ExprHir::Deref(_, span) => self.reject_unsupported("`deref` expression", span),
+            ExprHir::Question(_, span) => self.reject_unsupported("`?` operator", span),
+            ExprHir::AssignDeref { span, .. } => {
+                self.reject_unsupported("`deref b = v` assignment", span)
+            }
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             ExprHir::Block(block) => {
                 let typed_block = self.typeck_block(&block)?;
@@ -674,6 +685,17 @@ impl TypeChecker {
                     hir_id: new_hir_id,
                     span: *span,
                 })
+            }
+            PatternHir::ResultCtor { span, .. } => {
+                // 0.0.2 U02: the form parses and resolves; Result pattern
+                // semantics (payload binding types, exhaustiveness) land in U04.
+                self.add_error(
+                    TypeckErrorKind::UnsupportedFeature {
+                        feature: "`Ok`/`Err` pattern".to_string(),
+                    },
+                    *span,
+                );
+                Err(())
             }
             PatternHir::Error => Ok(TypedPatternHir::Error),
         }
@@ -900,6 +922,18 @@ impl TypeChecker {
             typed_args,
             ret_type,
         ))
+    }
+
+    /// Report a parsed-and-resolved but not-yet-supported construct.
+    /// U02 accepts the syntax; semantics arrive with U04/U05/U06.
+    fn reject_unsupported(&mut self, feature: &str, span: Span) -> Result<TypedExprHir, ()> {
+        self.add_error(
+            TypeckErrorKind::UnsupportedFeature {
+                feature: feature.to_string(),
+            },
+            span,
+        );
+        Err(())
     }
 
     /// Type check an index expression.

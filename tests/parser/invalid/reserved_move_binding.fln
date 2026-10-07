@@ -1,0 +1,3 @@
+// 0.0.2 U02: `move` is a reserved word and cannot be used as a binding name.
+// (Same for `clone` / `deref` — see reserved_clone_binding / reserved_deref_binding.)
+move = 1;

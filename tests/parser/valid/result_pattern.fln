@@ -1,0 +1,13 @@
+// 0.0.2 U02: Ok/Err result patterns in choose.
+// The parser only recognizes the form; semantics land with typeck (U04).
+
+r = 1;
+x = choose r {
+    when Ok(v) { v }
+    when Err(e) { 0 - 1 }
+};
+
+y = choose r {
+    when Ok(v) if v > 0 { v }
+    otherwise { 0 - 1 }
+};
