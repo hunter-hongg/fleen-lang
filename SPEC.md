@@ -410,13 +410,15 @@ fn parse(&self) -> Vec<Token> {
 | `test` | 测试 |
 | `chore` | 杂项 |
 
+**语言：提交信息一律使用英文**（subject、body、footer 均为英文；正文中的代码标识符与专有名词除外）。
+
 **示例：**
 ```
-feat: 支持 if/elif/else 表达式
+feat: support if/elif/else expressions
 
-- 添加 ExprIf 节点
-- 实现 parse_if
-- 添加 typeck 规则
+- Add ExprIf node
+- Implement parse_if
+- Add typeck rules
 
 Closes #12
 ```
