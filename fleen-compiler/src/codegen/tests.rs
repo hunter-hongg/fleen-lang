@@ -1,6 +1,11 @@
 use super::*;
+use crate::lexer::Span;
 use crate::lower::mir::*;
 use crate::typeck::typed_hir::Type;
+
+fn instr(kind: MirInstrKind) -> MirInstr {
+    MirInstr::new(kind, Span::new(0, 0))
+}
 
 fn main_func(blocks: Vec<MirBlock>) -> MirFunc {
     MirFunc {
@@ -30,7 +35,7 @@ fn consts_interned_and_deduplicated() {
 fn encode_single_block_function() {
     let f = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::ConstInt(42)],
+        instrs: vec![instr(MirInstrKind::ConstInt(42))],
         terminator: Terminator::Return,
     }]);
     let mir = Mir {
@@ -61,17 +66,17 @@ fn jump_targets_are_absolute_offsets() {
         blocks: vec![
             MirBlock {
                 id: BlockId(0),
-                instrs: vec![MirInstr::True],
+                instrs: vec![instr(MirInstrKind::True)],
                 terminator: Terminator::JumpIfFalse(BlockId(2)),
             },
             MirBlock {
                 id: BlockId(1),
-                instrs: vec![MirInstr::ConstInt(1)],
+                instrs: vec![instr(MirInstrKind::ConstInt(1))],
                 terminator: Terminator::Return,
             },
             MirBlock {
                 id: BlockId(2),
-                instrs: vec![MirInstr::ConstInt(2)],
+                instrs: vec![instr(MirInstrKind::ConstInt(2))],
                 terminator: Terminator::Return,
             },
         ],
@@ -99,7 +104,7 @@ fn jump_targets_are_absolute_offsets() {
 fn entry_is_init_when_globals_present() {
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::ConstInt(7)],
+        instrs: vec![instr(MirInstrKind::ConstInt(7))],
         terminator: Terminator::Return,
     }]);
     let g = MirGlobal {
@@ -107,7 +112,7 @@ fn entry_is_init_when_globals_present() {
         name: "g".to_string(),
         mutable: false,
         ty: Type::Int,
-        init: vec![MirInstr::ConstInt(7)],
+        init: vec![instr(MirInstrKind::ConstInt(7))],
     };
     let mir = Mir {
         funcs: vec![main],
@@ -149,7 +154,7 @@ fn builtin_keeps_placeholder_body() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }],
         is_builtin: true,
@@ -163,7 +168,7 @@ fn builtin_keeps_placeholder_body() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }],
         is_builtin: false,
@@ -185,42 +190,45 @@ fn builtin_keeps_placeholder_body() {
 /// fixed operand width. Guards the `mir_opcode` table and `operand_len`.
 #[test]
 fn all_instructions_encode_with_expected_opcode_and_width() {
-    use crate::lower::mir::MirInstr::*;
     let cases: Vec<(MirInstr, Opcode, usize)> = vec![
-        (ConstInt(1), Opcode::Const, 4),
-        (ConstFloat(1.5), Opcode::Const, 4),
-        (ConstStr("s".into()), Opcode::Const, 4),
-        (True, Opcode::True, 0),
-        (False, Opcode::False, 0),
-        (Unit, Opcode::Unit, 0),
-        (Pop, Opcode::Pop, 0),
-        (Dup, Opcode::Dup, 0),
-        (LoadLocal(3), Opcode::LoadLocal, 2),
-        (StoreLocal(3), Opcode::StoreLocal, 2),
-        (LoadGlobal(2), Opcode::LoadGlobal, 2),
-        (StoreGlobal(2), Opcode::StoreGlobal, 2),
-        (IAdd, Opcode::IAdd, 0),
-        (ISub, Opcode::ISub, 0),
-        (IMul, Opcode::IMul, 0),
-        (IDiv, Opcode::IDiv, 0),
-        (IMod, Opcode::IMod, 0),
-        (FAdd, Opcode::FAdd, 0),
-        (FSub, Opcode::FSub, 0),
-        (FMul, Opcode::FMul, 0),
-        (FDiv, Opcode::FDiv, 0),
-        (Eq, Opcode::Eq, 0),
-        (Ne, Opcode::Ne, 0),
-        (Lt, Opcode::Lt, 0),
-        (Gt, Opcode::Gt, 0),
-        (Le, Opcode::Le, 0),
-        (Ge, Opcode::Ge, 0),
-        (Not, Opcode::Not, 0),
-        (NegI, Opcode::NegI, 0),
-        (NegF, Opcode::NegF, 0),
-        (Call(FuncId(1)), Opcode::Call, 2),
-        (LoadFunc(FuncId(1)), Opcode::LoadFunc, 2),
-        (CallValue(2), Opcode::CallValue, 1),
-        (BindMatch(1), Opcode::BindMatch, 2),
+        (instr(MirInstrKind::ConstInt(1)), Opcode::Const, 4),
+        (instr(MirInstrKind::ConstFloat(1.5)), Opcode::Const, 4),
+        (instr(MirInstrKind::ConstStr("s".into())), Opcode::Const, 4),
+        (instr(MirInstrKind::True), Opcode::True, 0),
+        (instr(MirInstrKind::False), Opcode::False, 0),
+        (instr(MirInstrKind::Unit), Opcode::Unit, 0),
+        (instr(MirInstrKind::Pop), Opcode::Pop, 0),
+        (instr(MirInstrKind::Dup), Opcode::Dup, 0),
+        (instr(MirInstrKind::LoadLocal(3)), Opcode::LoadLocal, 2),
+        (instr(MirInstrKind::StoreLocal(3)), Opcode::StoreLocal, 2),
+        (instr(MirInstrKind::LoadGlobal(2)), Opcode::LoadGlobal, 2),
+        (instr(MirInstrKind::StoreGlobal(2)), Opcode::StoreGlobal, 2),
+        (instr(MirInstrKind::IAdd), Opcode::IAdd, 0),
+        (instr(MirInstrKind::ISub), Opcode::ISub, 0),
+        (instr(MirInstrKind::IMul), Opcode::IMul, 0),
+        (instr(MirInstrKind::IDiv), Opcode::IDiv, 0),
+        (instr(MirInstrKind::IMod), Opcode::IMod, 0),
+        (instr(MirInstrKind::FAdd), Opcode::FAdd, 0),
+        (instr(MirInstrKind::FSub), Opcode::FSub, 0),
+        (instr(MirInstrKind::FMul), Opcode::FMul, 0),
+        (instr(MirInstrKind::FDiv), Opcode::FDiv, 0),
+        (instr(MirInstrKind::Eq), Opcode::Eq, 0),
+        (instr(MirInstrKind::Ne), Opcode::Ne, 0),
+        (instr(MirInstrKind::Lt), Opcode::Lt, 0),
+        (instr(MirInstrKind::Gt), Opcode::Gt, 0),
+        (instr(MirInstrKind::Le), Opcode::Le, 0),
+        (instr(MirInstrKind::Ge), Opcode::Ge, 0),
+        (instr(MirInstrKind::Not), Opcode::Not, 0),
+        (instr(MirInstrKind::NegI), Opcode::NegI, 0),
+        (instr(MirInstrKind::NegF), Opcode::NegF, 0),
+        (instr(MirInstrKind::Call(FuncId(1))), Opcode::Call, 2),
+        (
+            instr(MirInstrKind::LoadFunc(FuncId(1))),
+            Opcode::LoadFunc,
+            2,
+        ),
+        (instr(MirInstrKind::CallValue(2)), Opcode::CallValue, 1),
+        (instr(MirInstrKind::BindMatch(1)), Opcode::BindMatch, 2),
     ];
     for (instr, expected_op, operand_len) in cases {
         let f = main_func(vec![MirBlock {
@@ -251,10 +259,10 @@ fn float_and_str_constants_load() {
     let f = main_func(vec![MirBlock {
         id: BlockId(0),
         instrs: vec![
-            MirInstr::ConstFloat(2.5),
-            MirInstr::ConstStr("hello".into()),
-            MirInstr::Pop,
-            MirInstr::Pop,
+            instr(MirInstrKind::ConstFloat(2.5)),
+            instr(MirInstrKind::ConstStr("hello".into())),
+            instr(MirInstrKind::Pop),
+            instr(MirInstrKind::Pop),
         ],
         terminator: Terminator::Return,
     }]);
@@ -303,17 +311,17 @@ fn jump_and_jump_if_true_targets_resolve() {
         blocks: vec![
             MirBlock {
                 id: BlockId(0),
-                instrs: vec![MirInstr::True],
+                instrs: vec![instr(MirInstrKind::True)],
                 terminator: Terminator::JumpIfTrue(BlockId(2)),
             },
             MirBlock {
                 id: BlockId(1),
-                instrs: vec![MirInstr::ConstInt(1)],
+                instrs: vec![instr(MirInstrKind::ConstInt(1))],
                 terminator: Terminator::Return,
             },
             MirBlock {
                 id: BlockId(2),
-                instrs: vec![MirInstr::ConstInt(2)],
+                instrs: vec![instr(MirInstrKind::ConstInt(2))],
                 terminator: Terminator::Jump(BlockId(1)),
             },
         ],
@@ -346,17 +354,17 @@ fn backward_jump_offsets_resolve() {
         blocks: vec![
             MirBlock {
                 id: BlockId(0),
-                instrs: vec![MirInstr::False],
+                instrs: vec![instr(MirInstrKind::False)],
                 terminator: Terminator::JumpIfFalse(BlockId(2)),
             },
             MirBlock {
                 id: BlockId(1),
-                instrs: vec![MirInstr::ConstInt(9)],
+                instrs: vec![instr(MirInstrKind::ConstInt(9))],
                 terminator: Terminator::Jump(BlockId(0)), // back edge
             },
             MirBlock {
                 id: BlockId(2),
-                instrs: vec![MirInstr::ConstInt(0)],
+                instrs: vec![instr(MirInstrKind::ConstInt(0))],
                 terminator: Terminator::Return,
             },
         ],
@@ -397,7 +405,7 @@ fn bad_jump_target_is_error() {
 fn call_with_overflowing_func_id_is_error() {
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::Call(FuncId(u32::from(u16::MAX) + 1))],
+        instrs: vec![instr(MirInstrKind::Call(FuncId(u32::from(u16::MAX) + 1)))],
         terminator: Terminator::Return,
     }]);
     let r = codegen(Mir {
@@ -414,7 +422,7 @@ fn call_with_overflowing_func_id_is_error() {
 fn constants_deduped_across_functions() {
     let a = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::ConstInt(7)],
+        instrs: vec![instr(MirInstrKind::ConstInt(7))],
         terminator: Terminator::Return,
     }]);
     let b = MirFunc {
@@ -425,7 +433,7 @@ fn constants_deduped_across_functions() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::ConstInt(7)],
+            instrs: vec![instr(MirInstrKind::ConstInt(7))],
             terminator: Terminator::Return,
         }],
         is_builtin: false,
@@ -448,7 +456,7 @@ fn constants_deduped_across_functions() {
 fn init_func_emits_globals_in_order_and_calls_main() {
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::ConstInt(0)],
+        instrs: vec![instr(MirInstrKind::ConstInt(0))],
         terminator: Terminator::Return,
     }]);
     let g1 = MirGlobal {
@@ -456,14 +464,14 @@ fn init_func_emits_globals_in_order_and_calls_main() {
         name: "a".into(),
         mutable: true,
         ty: Type::Int,
-        init: vec![MirInstr::ConstInt(1)],
+        init: vec![instr(MirInstrKind::ConstInt(1))],
     };
     let g2 = MirGlobal {
         global_id: GlobalId(1),
         name: "b".into(),
         mutable: false,
         ty: Type::Int,
-        init: vec![MirInstr::ConstInt(2)],
+        init: vec![instr(MirInstrKind::ConstInt(2))],
     };
     let module = codegen(Mir {
         funcs: vec![main],
@@ -497,7 +505,7 @@ fn init_func_emits_globals_in_order_and_calls_main() {
 fn empty_globals_gives_empty_global_table_and_main_entry() {
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::Unit],
+        instrs: vec![instr(MirInstrKind::Unit)],
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
@@ -517,10 +525,10 @@ fn flnc_round_trip() {
             let mut f = main_func(vec![MirBlock {
                 id: BlockId(0),
                 instrs: vec![
-                    MirInstr::ConstStr("hi".into()),
-                    MirInstr::ConstFloat(1.25),
-                    MirInstr::Pop,
-                    MirInstr::Pop,
+                    instr(MirInstrKind::ConstStr("hi".into())),
+                    instr(MirInstrKind::ConstFloat(1.25)),
+                    instr(MirInstrKind::Pop),
+                    instr(MirInstrKind::Pop),
                 ],
                 terminator: Terminator::Return,
             }]);
@@ -533,7 +541,7 @@ fn flnc_round_trip() {
             name: "g".into(),
             mutable: true,
             ty: Type::Int,
-            init: vec![MirInstr::ConstInt(7)],
+            init: vec![instr(MirInstrKind::ConstInt(7))],
         }],
     })
     .expect("codegen");
@@ -547,7 +555,7 @@ fn flnc_rejects_bad_magic_and_trailing_bytes() {
     let module = codegen(Mir {
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }])],
         globals: vec![],
@@ -568,7 +576,7 @@ fn sample_module() -> Bytecode {
     codegen(Mir {
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }])],
         globals: vec![],
@@ -667,7 +675,7 @@ fn flnc_round_trip_builtin_and_empty_module() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }],
         is_builtin: true,
@@ -681,7 +689,7 @@ fn flnc_round_trip_builtin_and_empty_module() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }],
         is_builtin: false,
@@ -707,7 +715,7 @@ fn func_params_and_locals_propagate() {
         entry: BlockId(0),
         blocks: vec![MirBlock {
             id: BlockId(0),
-            instrs: vec![MirInstr::Unit],
+            instrs: vec![instr(MirInstrKind::Unit)],
             terminator: Terminator::Return,
         }],
         is_builtin: false,

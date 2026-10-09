@@ -1,7 +1,7 @@
 //! Encode MIR instructions into the byte stream (two-pass label resolution).
 
 use super::bytecode::*;
-use crate::lower::mir::{MirFunc, MirInstr, Terminator};
+use crate::lower::mir::{MirFunc, MirInstr, MirInstrKind, Terminator};
 
 /// Bytecode assembly for one function.
 pub struct Encoder {
@@ -54,29 +54,29 @@ impl Encoder {
     }
 
     fn emit_instr(&mut self, instr: &MirInstr, pool: &mut ConstPool) -> Result<(), CodegenError> {
-        let op = mir_opcode(instr);
+        let op = mir_opcode(&instr.kind)?;
         self.emit_opcode(op);
-        match instr {
-            MirInstr::ConstInt(v) => {
+        match &instr.kind {
+            MirInstrKind::ConstInt(v) => {
                 let id = pool.intern(Const::Int(*v));
                 self.emit_u32(id.0);
             }
-            MirInstr::ConstFloat(v) => {
+            MirInstrKind::ConstFloat(v) => {
                 let id = pool.intern(Const::Float(*v));
                 self.emit_u32(id.0);
             }
-            MirInstr::ConstStr(s) => {
+            MirInstrKind::ConstStr(s) => {
                 let id = pool.intern(Const::Str(s.clone().into_boxed_str()));
                 self.emit_u32(id.0);
             }
-            MirInstr::LoadLocal(slot) => self.emit_u16(*slot),
-            MirInstr::StoreLocal(slot) => self.emit_u16(*slot),
-            MirInstr::LoadGlobal(gid) => self.emit_u16(*gid),
-            MirInstr::StoreGlobal(gid) => self.emit_u16(*gid),
-            MirInstr::Call(fid) => self.emit_u16(fid_u16(*fid)?),
-            MirInstr::LoadFunc(fid) => self.emit_u16(fid_u16(*fid)?),
-            MirInstr::CallValue(argc) => self.emit_u8(*argc),
-            MirInstr::BindMatch(slot) => self.emit_u16(*slot),
+            MirInstrKind::LoadLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::StoreLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::LoadGlobal(gid) => self.emit_u16(*gid),
+            MirInstrKind::StoreGlobal(gid) => self.emit_u16(*gid),
+            MirInstrKind::Call(fid) => self.emit_u16(fid_u16(*fid)?),
+            MirInstrKind::LoadFunc(fid) => self.emit_u16(fid_u16(*fid)?),
+            MirInstrKind::CallValue(argc) => self.emit_u8(*argc),
+            MirInstrKind::BindMatch(slot) => self.emit_u16(*slot),
             _ => {}
         }
         Ok(())
@@ -114,47 +114,62 @@ impl ConstPool {
 }
 
 /// Single source of truth: MIR instruction → its bytecode opcode.
-fn mir_opcode(instr: &MirInstr) -> Opcode {
-    match instr {
-        MirInstr::ConstInt(..) | MirInstr::ConstFloat(..) | MirInstr::ConstStr(..) => Opcode::Const,
-        MirInstr::True => Opcode::True,
-        MirInstr::False => Opcode::False,
-        MirInstr::Unit => Opcode::Unit,
-        MirInstr::Pop => Opcode::Pop,
-        MirInstr::Dup => Opcode::Dup,
-        MirInstr::LoadLocal(..) => Opcode::LoadLocal,
-        MirInstr::StoreLocal(..) => Opcode::StoreLocal,
-        MirInstr::LoadGlobal(..) => Opcode::LoadGlobal,
-        MirInstr::StoreGlobal(..) => Opcode::StoreGlobal,
-        MirInstr::IAdd => Opcode::IAdd,
-        MirInstr::ISub => Opcode::ISub,
-        MirInstr::IMul => Opcode::IMul,
-        MirInstr::IDiv => Opcode::IDiv,
-        MirInstr::IMod => Opcode::IMod,
-        MirInstr::FAdd => Opcode::FAdd,
-        MirInstr::FSub => Opcode::FSub,
-        MirInstr::FMul => Opcode::FMul,
-        MirInstr::FDiv => Opcode::FDiv,
-        MirInstr::Eq => Opcode::Eq,
-        MirInstr::Ne => Opcode::Ne,
-        MirInstr::Lt => Opcode::Lt,
-        MirInstr::Gt => Opcode::Gt,
-        MirInstr::Le => Opcode::Le,
-        MirInstr::Ge => Opcode::Ge,
-        MirInstr::Not => Opcode::Not,
-        MirInstr::NegI => Opcode::NegI,
-        MirInstr::NegF => Opcode::NegF,
-        MirInstr::Call(..) => Opcode::Call,
-        MirInstr::LoadFunc(..) => Opcode::LoadFunc,
-        MirInstr::CallValue(..) => Opcode::CallValue,
-        MirInstr::BindMatch(..) => Opcode::BindMatch,
-        MirInstr::ToStr => Opcode::ToStr,
-    }
+///
+/// Returns `Err` for the 0.0.2 (U06) instructions that belong to the v2
+/// bytecode; those opcodes (0x80–0xA4) are owned by U07 and are not encodable
+/// in the v1 module yet.
+fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
+    Ok(match kind {
+        MirInstrKind::ConstInt(..) | MirInstrKind::ConstFloat(..) | MirInstrKind::ConstStr(..) => {
+            Opcode::Const
+        }
+        MirInstrKind::True => Opcode::True,
+        MirInstrKind::False => Opcode::False,
+        MirInstrKind::Unit => Opcode::Unit,
+        MirInstrKind::Pop => Opcode::Pop,
+        MirInstrKind::Dup => Opcode::Dup,
+        MirInstrKind::LoadLocal(..) => Opcode::LoadLocal,
+        MirInstrKind::StoreLocal(..) => Opcode::StoreLocal,
+        MirInstrKind::LoadGlobal(..) => Opcode::LoadGlobal,
+        MirInstrKind::StoreGlobal(..) => Opcode::StoreGlobal,
+        MirInstrKind::IAdd => Opcode::IAdd,
+        MirInstrKind::ISub => Opcode::ISub,
+        MirInstrKind::IMul => Opcode::IMul,
+        MirInstrKind::IDiv => Opcode::IDiv,
+        MirInstrKind::IMod => Opcode::IMod,
+        MirInstrKind::FAdd => Opcode::FAdd,
+        MirInstrKind::FSub => Opcode::FSub,
+        MirInstrKind::FMul => Opcode::FMul,
+        MirInstrKind::FDiv => Opcode::FDiv,
+        MirInstrKind::Eq => Opcode::Eq,
+        MirInstrKind::Ne => Opcode::Ne,
+        MirInstrKind::Lt => Opcode::Lt,
+        MirInstrKind::Gt => Opcode::Gt,
+        MirInstrKind::Le => Opcode::Le,
+        MirInstrKind::Ge => Opcode::Ge,
+        MirInstrKind::Not => Opcode::Not,
+        MirInstrKind::NegI => Opcode::NegI,
+        MirInstrKind::NegF => Opcode::NegF,
+        MirInstrKind::Call(..) => Opcode::Call,
+        MirInstrKind::LoadFunc(..) => Opcode::LoadFunc,
+        MirInstrKind::CallValue(..) => Opcode::CallValue,
+        MirInstrKind::BindMatch(..) => Opcode::BindMatch,
+        MirInstrKind::ToStr => Opcode::ToStr,
+        // 0.0.2 U06: the v2 instructions have no v1 opcode. Lower emits them,
+        // but codegen must fail loudly rather than mis-assign a v1 opcode.
+        // U07 assigns 0x80–0xA4 and wires these up.
+        _ => {
+            return Err(CodegenError {
+                message: "v2 instruction (0.0.2) requires bytecode v2 (U07); not yet encodable"
+                    .to_string(),
+            });
+        }
+    })
 }
 
 /// Opcode size of a MIR instruction (for offset pre-computation).
-fn instr_size(instr: &MirInstr) -> usize {
-    mir_opcode(instr).instr_len()
+fn instr_size(instr: &MirInstr) -> Result<usize, CodegenError> {
+    Ok(mir_opcode(&instr.kind)?.instr_len())
 }
 
 fn terminator_size(t: Terminator) -> usize {
@@ -175,7 +190,10 @@ pub fn encode_func(func: &MirFunc, pool: &mut ConstPool) -> Result<Box<[u8]>, Co
     let mut pos = 0usize;
     for b in &func.blocks {
         offsets.push(pos);
-        pos += b.instrs.iter().map(instr_size).sum::<usize>() + terminator_size(b.terminator);
+        for instr in &b.instrs {
+            pos += instr_size(instr)?;
+        }
+        pos += terminator_size(b.terminator);
     }
     let block_offset = |id: crate::lower::mir::BlockId| -> Result<u16, CodegenError> {
         offsets

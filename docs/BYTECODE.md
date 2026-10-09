@@ -580,6 +580,7 @@ StoreLocal q
 Jump        L_cont
 L_err:
 UnwrapErr             ; r → e
+PackErr               ; e → err(e)
 Return                ; 提前返回 Err（函数级）
 L_cont:
 ```

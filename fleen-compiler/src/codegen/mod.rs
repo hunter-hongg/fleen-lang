@@ -13,7 +13,8 @@ pub use bytecode::{
 pub use encoder::{CodegenError, ConstPool, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
 
-use crate::lower::mir::{Mir, MirInstr};
+use crate::lexer::Span;
+use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 
 /// Lower MIR into a bytecode module.
 ///
@@ -68,12 +69,16 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
     } else {
         let init_id = FuncId(functions.len() as u32);
         let init_name = pool.intern(Const::Str("__init__".into()));
+        let dummy_span = Span::new(0, 0);
         let mut instrs: Vec<MirInstr> = Vec::new();
         for g in &globals {
             instrs.extend(g.init.iter().cloned());
-            instrs.push(MirInstr::StoreGlobal(g.global_id.0 as u16));
+            instrs.push(MirInstr::new(
+                MirInstrKind::StoreGlobal(g.global_id.0 as u16),
+                dummy_span,
+            ));
         }
-        instrs.push(MirInstr::Call(main_id));
+        instrs.push(MirInstr::new(MirInstrKind::Call(main_id), dummy_span));
         let init_func = crate::lower::mir::MirFunc {
             func_id: init_id,
             name: "__init__".to_string(),

@@ -41,7 +41,7 @@ func fib(n: int): int {
     assert_eq!(fib.locals, 1);
     let ins = flat(fib);
     // sanity: Recursion call present, Return terminator in last block
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::Call(_))));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::Call(_))));
     assert!(fib.blocks.iter().all(|b| matches!(
         b.terminator,
         Terminator::Return
@@ -66,7 +66,7 @@ func f(): int {
     // Both the binding and the reassignment write slot 0.
     let stores = ins
         .iter()
-        .filter(|i| matches!(i, MirInstr::StoreLocal(0)))
+        .filter(|i| matches!(i.kind, MirInstrKind::StoreLocal(0)))
         .count();
     assert_eq!(stores, 2);
     assert_eq!(f.locals, 1);
@@ -103,8 +103,8 @@ func f(): int {
     let mir = lower_src(src);
     let f = find_func(&mir, "f");
     let ins = flat(f);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::Lt)));
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::IAdd)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::Lt)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::IAdd)));
     // while terminates with Unit + jumps back
     assert!(
         f.blocks
@@ -127,10 +127,13 @@ func f(value: int): string {
     let mir = lower_src(src);
     let f = find_func(&mir, "f");
     let ins = flat(f);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::Eq)));
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::Gt)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::Eq)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::Gt)));
     // bind-match for the guard variable slot 1
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::BindMatch(1))));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::BindMatch(1)))
+    );
 }
 
 #[test]
@@ -162,7 +165,10 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
     let mir = lower_src(src);
     let apply = find_func(&mir, "apply");
     let ins = flat(apply);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::CallValue(2))));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CallValue(2)))
+    );
     let add = find_func(&mir, "add");
     // direct call inside... add itself doesn't call; check Call exists in apply? apply uses indirect.
     assert!(
@@ -179,7 +185,7 @@ fn lower_single_expr_func() {
     assert_eq!(add.params, 2);
     assert_eq!(add.locals, 2);
     let ins = flat(add);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::IAdd)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::IAdd)));
     assert!(matches!(
         add.blocks.last().unwrap().terminator,
         Terminator::Return
@@ -205,7 +211,7 @@ func f(): int {
     let mir = lower_src(src);
     let f = find_func(&mir, "f");
     let ins = flat(f);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::Pop)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::Pop)));
 }
 
 #[test]
@@ -222,10 +228,22 @@ func add(a: int, b: int): int {
     // params occupy slots 0..2; the local `c` must get slot 2.
     assert_eq!(f.locals, 3);
     let ins = flat(f);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::LoadLocal(0))));
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::LoadLocal(1))));
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::StoreLocal(2))));
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::LoadLocal(2))));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::LoadLocal(0)))
+    );
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::LoadLocal(1)))
+    );
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::StoreLocal(2)))
+    );
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::LoadLocal(2)))
+    );
 }
 
 #[test]
@@ -244,7 +262,10 @@ func f(value: int): string {
     let mir = lower_src(src);
     let f = find_func(&mir, "f");
     let ins = flat(f);
-    let eq_count = ins.iter().filter(|i| matches!(i, MirInstr::Eq)).count();
+    let eq_count = ins
+        .iter()
+        .filter(|i| matches!(i.kind, MirInstrKind::Eq))
+        .count();
     assert_eq!(eq_count, 2);
     let false_jumps = f
         .blocks
@@ -286,7 +307,7 @@ func f(): int {
         exit_block
             .instrs
             .iter()
-            .any(|i| matches!(i, MirInstr::LoadLocal(_)))
+            .any(|i| matches!(i.kind, MirInstrKind::LoadLocal(_)))
     );
 }
 
@@ -302,14 +323,23 @@ func f(): int = LIMIT;
     let limit = &mir.globals[0];
     assert_eq!(limit.name, "LIMIT");
     assert!(!limit.mutable);
-    assert!(matches!(limit.init.as_slice(), [MirInstr::ConstInt(10)]));
+    assert!(matches!(
+        limit.init.as_slice(),
+        [MirInstr {
+            kind: MirInstrKind::ConstInt(10),
+            ..
+        }]
+    ));
     let x = &mir.globals[1];
     assert_eq!(x.name, "x");
     assert!(x.mutable);
     // f's body loads the global rather than using a local slot.
     let f = find_func(&mir, "f");
     let ins = flat(f);
-    assert!(ins.iter().any(|i| matches!(i, MirInstr::LoadGlobal(0))));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::LoadGlobal(0)))
+    );
 }
 
 #[test]
@@ -335,15 +365,13 @@ func f(): int {
         .find(|b| {
             b.instrs
                 .iter()
-                .any(|i| matches!(i, MirInstr::StoreLocal(1)))
+                .any(|i| matches!(i.kind, MirInstrKind::StoreLocal(1)))
         })
         .expect("inner shadow block should store to slot 1");
-    assert!(
-        inner
-            .instrs
-            .iter()
-            .all(|i| !matches!(i, MirInstr::LoadLocal(0) | MirInstr::StoreLocal(0)))
-    );
+    assert!(inner.instrs.iter().all(|i| !matches!(
+        i.kind,
+        MirInstrKind::LoadLocal(0) | MirInstrKind::StoreLocal(0)
+    )));
 }
 
 #[test]
@@ -365,7 +393,7 @@ func f(a: bool, b: bool): int {
         let has_body_const = b
             .instrs
             .iter()
-            .any(|i| matches!(i, MirInstr::ConstInt(1..=3)));
+            .any(|i| matches!(i.kind, MirInstrKind::ConstInt(1..=3)));
         if has_body_const {
             match b.terminator {
                 Terminator::Jump(t) => targets.push(t),
@@ -375,6 +403,174 @@ func f(a: bool, b: bool): int {
     }
     assert_eq!(targets.len(), 3);
     assert!(targets.iter().all(|t| *t == targets[0]));
+}
+
+#[test]
+fn lower_box_and_deref_read() {
+    // `box e` → eval e; AllocBox. `deref b` → LoadLocal(b); DerefBox.
+    let src = r#"
+func f(): int {
+    b = box 42;
+    n = deref b;
+    n
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::AllocBox)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::DerefBox)));
+}
+
+#[test]
+fn lower_deref_assign() {
+    // `deref b = 7`: [b]; [7]; StoreDerefBox; Unit — one value left on stack.
+    let src = r#"
+func f() {
+    b = box 42;
+    deref b = 7;
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    assert!(f.blocks.iter().any(|b| {
+        b.instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::StoreDerefBox))
+    }));
+}
+
+#[test]
+fn lower_move_access_emits_move_local() {
+    let src = r#"
+func f(s: string): string {
+    t = move s;
+    t
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    // `move s` transfers `s` into `t` → MoveLocal. The tail `t` returns by
+    // value, so it too is a MoveLocal (implicit transfer), not a LoadLocal.
+    let moves = ins
+        .iter()
+        .filter(|i| matches!(i.kind, MirInstrKind::MoveLocal(_)))
+        .count();
+    assert!(moves >= 1);
+}
+
+#[test]
+fn lower_clone_access_emits_clone_local() {
+    let src = r#"
+func f(s: string): string {
+    t = clone s;
+    t
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CloneLocal(_)))
+    );
+}
+
+#[test]
+fn lower_question_emits_unwrap_and_pack_err() {
+    let src = r#"
+func main(): Result<int, string> {
+    r: Result<int, string> = Err("boom");
+    n = r?;
+    Ok(n)
+}
+"#;
+    let mir = lower_src(src);
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::IsErr)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::UnwrapOk)));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::UnwrapErr))
+    );
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::PackErr)));
+    let err_block = main.blocks.iter().find(|b| {
+        b.instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::UnwrapErr))
+    });
+    assert!(err_block.is_some_and(|b| matches!(b.terminator, Terminator::Return)));
+}
+
+#[test]
+fn lower_result_ctor_emits_pack() {
+    let src = r#"
+func okf(): Result<int, string> { Ok(42) }
+func errf(): Result<int, string> { Err("no") }
+"#;
+    let mir = lower_src(src);
+    assert!(
+        flat(find_func(&mir, "okf"))
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PackOk))
+    );
+    assert!(
+        flat(find_func(&mir, "errf"))
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PackErr))
+    );
+}
+
+#[test]
+fn lower_choose_result_emits_unwrap_branches() {
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+        when Err(e) { 0 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::IsErr)));
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::UnwrapOk)));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::UnwrapErr))
+    );
+}
+
+#[test]
+fn lower_global_owned_init_uses_clone_global() {
+    // Global `box` init lowers to AllocBox; reading an owned (string) global
+    // with `clone` lowers to CloneGlobal. (Deref of a global box is a Copy
+    // access → LoadGlobal, per the Access model.)
+    let src = r#"
+s = "hi";
+g = box 1;
+func f(): string {
+    t = clone s;
+    t
+}
+"#;
+    let mir = lower_src(src);
+    let g = &mir.globals[1];
+    assert!(
+        g.init
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::AllocBox))
+    );
+    let f = find_func(&mir, "f");
+    assert!(
+        flat(f)
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CloneGlobal(_)))
+    );
 }
 
 #[test]
@@ -398,7 +594,7 @@ func f(value: int): string {
         .find(|b| {
             b.instrs
                 .iter()
-                .any(|i| matches!(i, MirInstr::ConstStr(s) if s == "other"))
+                .any(|i| matches!(&i.kind, MirInstrKind::ConstStr(s) if s.as_str() == "other"))
         })
         .expect("otherwise body block should exist");
     // Some conditional jump from an earlier arm must target this block.
@@ -414,38 +610,54 @@ func f(value: int): string {
 
 /// Net stack effect of a single instruction (args popped, result pushed).
 fn stack_delta(i: &MirInstr, func_params: &std::collections::HashMap<FuncId, u16>) -> i64 {
-    match i {
-        MirInstr::ConstInt(_)
-        | MirInstr::ConstFloat(_)
-        | MirInstr::ConstStr(_)
-        | MirInstr::True
-        | MirInstr::False
-        | MirInstr::Unit => 1,
-        MirInstr::Dup => 1,
-        MirInstr::Pop => -1,
-        MirInstr::LoadLocal(_) | MirInstr::LoadGlobal(_) | MirInstr::LoadFunc(_) => 1,
-        MirInstr::StoreLocal(_) | MirInstr::StoreGlobal(_) => -1,
-        MirInstr::IAdd
-        | MirInstr::ISub
-        | MirInstr::IMul
-        | MirInstr::IDiv
-        | MirInstr::IMod
-        | MirInstr::FAdd
-        | MirInstr::FSub
-        | MirInstr::FMul
-        | MirInstr::FDiv
-        | MirInstr::Eq
-        | MirInstr::Ne
-        | MirInstr::Lt
-        | MirInstr::Gt
-        | MirInstr::Le
-        | MirInstr::Ge => -1,
-        MirInstr::Not | MirInstr::NegI | MirInstr::NegF => 0,
-        MirInstr::BindMatch(_) => 0,
+    match &i.kind {
+        MirInstrKind::ConstInt(_)
+        | MirInstrKind::ConstFloat(_)
+        | MirInstrKind::ConstStr(_)
+        | MirInstrKind::True
+        | MirInstrKind::False
+        | MirInstrKind::Unit => 1,
+        MirInstrKind::Dup | MirInstrKind::DupDeep => 1,
+        MirInstrKind::Pop => -1,
+        MirInstrKind::LoadLocal(_)
+        | MirInstrKind::LoadGlobal(_)
+        | MirInstrKind::LoadFunc(_)
+        | MirInstrKind::MoveLocal(_)
+        | MirInstrKind::CloneLocal(_)
+        | MirInstrKind::CloneGlobal(_)
+        | MirInstrKind::DerefBox
+        | MirInstrKind::MakeRefLocal(_) => 1,
+        MirInstrKind::StoreLocal(_)
+        | MirInstrKind::StoreGlobal(_)
+        | MirInstrKind::StoreDerefBox => -1,
+        MirInstrKind::IAdd
+        | MirInstrKind::ISub
+        | MirInstrKind::IMul
+        | MirInstrKind::IDiv
+        | MirInstrKind::IMod
+        | MirInstrKind::FAdd
+        | MirInstrKind::FSub
+        | MirInstrKind::FMul
+        | MirInstrKind::FDiv
+        | MirInstrKind::Eq
+        | MirInstrKind::Ne
+        | MirInstrKind::Lt
+        | MirInstrKind::Gt
+        | MirInstrKind::Le
+        | MirInstrKind::Ge => -1,
+        MirInstrKind::Not | MirInstrKind::NegI | MirInstrKind::NegF => 0,
+        MirInstrKind::BindMatch(_) => 0,
         // 0.0.2 U13: ToStr pops a scalar and pushes a string (Δ0).
-        MirInstr::ToStr => 0,
-        MirInstr::Call(fid) => 1 - func_params[fid] as i64,
-        MirInstr::CallValue(argc) => -(*argc as i64),
+        MirInstrKind::ToStr => 0,
+        MirInstrKind::Call(fid) => 1 - func_params[fid] as i64,
+        MirInstrKind::CallValue(argc) => -(*argc as i64),
+        // 0.0.2 U06: ownership / Result instructions.
+        MirInstrKind::AllocBox => 0,  // v → b
+        MirInstrKind::PackOk => 0,    // v → ok(v)
+        MirInstrKind::PackErr => 0,   // v → err(v)
+        MirInstrKind::IsErr => 0,     // result → bool
+        MirInstrKind::UnwrapOk => 0,  // result → v
+        MirInstrKind::UnwrapErr => 0, // result → e
     }
 }
 

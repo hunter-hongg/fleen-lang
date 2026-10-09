@@ -746,6 +746,17 @@ func main(): int {
 - **无需借用检查器**：句柄只存活于一次调用——被借槽位调用期间不被改写
   （调用方挂起）、句柄无法逃逸（不能赋值/存储/返回）→ 没有悬垂的可能
 
+### 10.5 0.0.2 U06 实现说明（lower 端限制）
+
+- **result `choose` 的守卫**：`when Ok(x) if <guard>` 形式的守卫延后到 U07/U09。
+  U06 仅支持无守卫的 `when Ok(..)` / `when Err(..)` 臂（typeck 仍允许守卫，
+  lower 报 `UnsupportedFeature`）。无通配/`otherwise` 臂：缺 Ok 或缺 Err 臂
+  报 `ChooseResultNeedsOkErrArms`。
+- **ref 实参为全局时**：借用必须指向局部槽位。U06 在为**函数体内**调用传全局
+  ref 实参时，用临时槽 `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` 承接；
+  **全局初始化器**（`lower_global_init`）没有可借用其槽位的帧，故含 ref 实参
+  的全局初始化调用直接报 `RefArgInGlobalInit`（typeck 通过、lower 拒绝）。
+
 ---
 
 ## 11. 模块与导入

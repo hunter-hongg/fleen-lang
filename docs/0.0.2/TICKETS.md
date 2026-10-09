@@ -4,8 +4,12 @@
 > 外加临时 `as` 类型转换（U13，print 修复的前置），偿还 0.0.1 的 print Hack、`Rc<str>`、`span_map` 三笔债务
 > **依据**：`docs/0.0.2/PLAN.md`（已定稿，决策点 D1–D8 冻结）、`docs/BYTECODE.md` v0.0.2、
 > `docs/DESIGN.md` §3.8–3.9 / §8 / §10、`docs/0.0.1/TICKETS.md`（实现现状）
-> **状态**（2026-10-07）：全部待实现。规范文档已在规划阶段同步完毕，
-> U12 仅剩实现后的收尾（版本号、正式 CHANGELOG、Hack 清空）。
+> **状态**（2026-10-09）：U01–U06、U13 已完成（commits a0138a9, 30da6ef, 363deda +
+> U06 实现）。U06 在 `lower/` 落地：MirInstr 携带 Span、13 个新 MIR 指令、box/deref/
+> move/clone/`?`/Ok/Err/Result-choose 降载、ref 实参（全局走临时槽）、全局 ref 实参
+> 拒绝（`RefArgInGlobalInit`）、Result-choose 守卫延后 U07。codegen 对 v2 指令报
+> `CodegenError`（U07 分配 0x80–0xA4）。
+> 规范文档已在规划阶段同步完毕，U12 仅剩实现后的收尾（版本号、正式 CHANGELOG、Hack 清空）。
 
 ---
 

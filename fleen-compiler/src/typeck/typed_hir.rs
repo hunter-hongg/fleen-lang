@@ -99,12 +99,17 @@ impl Type {
 /// - `Copy` — plain slot load: Copy types, `ref` parameters, and boxes
 ///   loaded through `deref` (the box itself stays in its slot).
 /// - `Move` — `move x`, or an implicit transfer at a value-producing tail
-///   position (function/block/branch tail, `box e` inner, `Ok/Err` payload).
+///   position (function/block/branch tail, `box e` inner).
 /// - `Clone` — `clone x`, and any read-only use of an owned value
 ///   (comparisons, `print`, ...): the value is deep-copied, slot untouched.
 ///
 /// Owned *global* bindings are annotated `Clone` too: lower rewrites them
 /// to `CloneGlobal` (reads never disturb the global).
+///
+/// Note: `Ok`/`Err` payloads are **not** implicit-move positions; they are
+/// walked as read-only (producer=false) by the ownership checker, so a bare
+/// owned local in `Ok(x)` is auto-cloned. This matches the bytecode lowering
+/// where the payload is cloned into the Result via PackOk/PackErr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     /// Plain slot load (Copy semantics).

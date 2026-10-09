@@ -53,6 +53,13 @@ impl SlotAlloc {
     pub fn total(&self) -> u16 {
         self.next
     }
+
+    /// Allocate a fresh temporary slot (for global ref arguments, 0.0.2 U06).
+    pub fn fresh(&mut self) -> u16 {
+        let slot = self.next;
+        self.next += 1;
+        slot
+    }
 }
 
 /// Walk a function body collecting every local binding (declarations and
