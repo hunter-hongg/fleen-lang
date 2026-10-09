@@ -26,7 +26,7 @@ fn hello_fln_compiles_to_bytecode() {
         fleen_compiler::codegen::Const::Str(s) => assert_eq!(&**s, "main"),
         other => panic!("unexpected entry name {other:?}"),
     }
-    assert_eq!(module.version, 1);
+    assert_eq!(module.version, 2);
     assert!(!module.functions.is_empty());
     // Every function body must end with Return.
     for f in &module.functions {

@@ -640,10 +640,17 @@ v1 模块在 0.0.2 VM/verify 上继续可执行。
 
 | 指令 | Δdepth | 最小执行前深度 |
 |------|--------|----------------|
-| `AllocBox` / `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` | +1 | 1 / 0 / 0 / 0 / 0 |
+| `AllocBox` | **0**（`v → b`：值被消耗并替换为 box） | 1 |
+| `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` | +1 | 0 / 0 / 0 / 0 |
 | `DerefBox` / `DupDeep` | +1 | 1 |
 | `StoreDerefBox` | -2 | 2 |
 | `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` / `ToStr` | 0 | 1 |
+
+> **U07 勘误**：本表原先把 `AllocBox` 与 `MakeRefLocal` 等同列为 `+1`，
+> 但 `box e` 的降载是 `<e>; AllocBox`——`AllocBox` 必须把栈上的值**替换**
+> 成 box（净 0），否则 `box e` 之后每个表达式的栈深都会多算 1。
+> 该错误由 U07 的"编译产物必须过 verify"全链测试发现，已按
+> `v → b` 修正（BYTECODE.md §8 同步勘误）。
 
 ### 5.3 Value 表示（替换 `Rc<str>`，偿还 BYTECODE.md §3.2 临时决策）
 

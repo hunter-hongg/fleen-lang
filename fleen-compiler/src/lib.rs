@@ -72,7 +72,7 @@ impl std::error::Error for CompileError {}
 /// # 示例
 /// ```
 /// let module = fleen_compiler::compile("func main(): int = 42").unwrap();
-/// assert_eq!(module.version, 1);
+/// assert_eq!(module.version, 2);
 /// ```
 pub fn compile(source: &str) -> Result<codegen::Bytecode, CompileError> {
     let tokens = lexer::tokenize(source).map_err(CompileError::Lex)?;

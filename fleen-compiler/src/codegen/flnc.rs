@@ -3,7 +3,13 @@
 use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
-const VERSION: u16 = 1;
+
+/// Versions this reader accepts: 0.0.1 (v1) and 0.0.2 (v2) modules.
+///
+/// v2 adds instructions and fills `span_map`; the field order and widths of
+/// every existing table are unchanged (BYTECODE.md §9), so a v1 file reads
+/// unmodified.
+const READ_VERSIONS: [u16; 2] = [1, 2];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +76,9 @@ impl<'a> R<'a> {
 }
 
 /// Serialize a module to the `.flnc` byte format.
+///
+/// Writes `module.version` verbatim, so a reader that round-trips a module
+/// preserves its version.
 pub fn to_bytes(m: &Module) -> Vec<u8> {
     let mut w = W(Vec::new());
     w.bytes(MAGIC);
@@ -128,7 +137,7 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
         return Err(FlncError("bad magic".into()));
     }
     let version = r.u16()?;
-    if version != VERSION {
+    if !READ_VERSIONS.contains(&version) {
         return Err(FlncError(format!("unsupported version {version}")));
     }
 

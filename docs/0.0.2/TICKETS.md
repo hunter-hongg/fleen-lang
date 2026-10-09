@@ -4,11 +4,17 @@
 > 外加临时 `as` 类型转换（U13，print 修复的前置），偿还 0.0.1 的 print Hack、`Rc<str>`、`span_map` 三笔债务
 > **依据**：`docs/0.0.2/PLAN.md`（已定稿，决策点 D1–D8 冻结）、`docs/BYTECODE.md` v0.0.2、
 > `docs/DESIGN.md` §3.8–3.9 / §8 / §10、`docs/0.0.1/TICKETS.md`（实现现状）
-> **状态**（2026-10-09）：U01–U06、U13 已完成（commits a0138a9, 30da6ef, 363deda +
-> U06 实现）。U06 在 `lower/` 落地：MirInstr 携带 Span、13 个新 MIR 指令、box/deref/
-> move/clone/`?`/Ok/Err/Result-choose 降载、ref 实参（全局走临时槽）、全局 ref 实参
-> 拒绝（`RefArgInGlobalInit`）、Result-choose 守卫延后 U07。codegen 对 v2 指令报
-> `CodegenError`（U07 分配 0x80–0xA4）。
+> **状态**（2026-10-10）：U01–U07、U13 已完成。U06 在 `lower/` 落地：MirInstr 携带
+> Span、13 个新 MIR 指令、box/deref/move/clone/`?`/Ok/Err/Result-choose 降载、ref 实参
+> （全局走临时槽）、全局 ref 实参拒绝（`RefArgInGlobalInit`）。
+> U07 在 `codegen/` + `fleen-verify` 落地：13 条 v2 指令编码（0x80–0xA4）、`Module.version = 2`、
+> `span_map` 逐指令生成、`flnc` 接受 `{1,2}`、verify 栈效果表 + slot/gid 校验 + 版本门。
+> **U07 期间的发现**（详见 U07 节"实现说明"）：`AllocBox` 的栈效果应为 `v → b`（净 0），
+> PLAN §5.2 / BYTECODE.md §8 原表写成 `+1` 是笔误，已勘误；v2 指令在 v1 模块中由
+> `V2OpcodeInV1Module` 显式拒绝（不是"自然成立"）；VM 侧需通配 opcode 分支 + 版本门放开
+> `{1,2}`，否则 `Opcode` 新增变体使 fleen-vm 编译失败。
+> **Result-choose 的 guard / `otherwise`**：U07 决定**继续延后**（见 U07 节"范围决定"），
+> 随 U09 或独立票做通用臂链重写。
 > 规范文档已在规划阶段同步完毕，U12 仅剩实现后的收尾（版本号、正式 CHANGELOG、Hack 清空）。
 
 ---
@@ -545,18 +551,24 @@ cargo test -p fleen-compiler lower
 
 ## U07: Codegen / Verify — 字节码 v2
 
+> **状态**：已完成（2026-10-10）。规范勘误与实现说明见本节末尾。
+
 ### 涉及文件
 ```
 fleen-compiler/src/codegen/
-├── bytecode.rs      # Opcode 新增 + Module.version
-├── encoder.rs       # 编码 + span_map 生成
+├── bytecode.rs      # Opcode 新增 + Module.version + V2_OPCODE_BASE
+├── encoder.rs       # 编码 + span_map 生成（EncodedFunc）
 ├── flnc.rs          # version 接受 {1, 2}
 └── tests.rs
 
 fleen-verify/src/
-├── verify.rs        # 新指令校验规则
-├── stack_analysis.rs # Δdepth 表
+├── verify.rs        # 新指令校验规则 + 版本门 + slot/gid 校验
+├── stack_analysis.rs # Δdepth 表（经 stack_effect 提供）
 └── tests.rs
+
+# 票面外但必须同步改动（否则编译不过 / e2e 全红）：
+fleen-vm/src/vm.rs          # `Opcode` match 加通配分支；版本门放开 {1, 2}
+fleen-compiler/src/lexer/token.rs  # Span::SYNTHETIC（span_map 契约）
 ```
 
 ### Opcode（bytecode.rs，与 `BYTECODE.md` §5.9–5.11 逐字节一致）
@@ -580,35 +592,77 @@ UnwrapErr     = 0xA4,
 ```
 - 操作数宽度：`MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` =
   u16（指令 3 字节）；其余 1 字节
-- `Module.version` 写 `2`；`flnc::from_bytes` 接受 `{1, 2}`（v1 旧文件可读），
-  `to_bytes` 写 2
+- `Module.version` 写 `2`（`codegen::MODULE_VERSION`）；`flnc::from_bytes` 接受
+  `{1, 2}`（v1 旧文件可读），`to_bytes` 原样写 `m.version`
+- 导出 `V2_OPCODE_BASE = 0x80`：v1 编号全部小于它、v2 全部不小于它，
+  verify 用它做版本门
 
 ### span_map 生成（encoder.rs）
-- 两遍编码已存在（第一遍指令+占位标签，第二遍解析偏移）：第一遍同时记录
-  每条指令的 `(待定 offset, span)`，第二遍回填 offset，产出
-  `SpanEntry { offset, start, end }`（`BYTECODE.md` §2）
+- `encode_func` 返回 `EncodedFunc { code, span_map }`（不再只回字节）；
+  第二遍发射时顺序记录 `(code.len(), span)`，offset 天然精确
+- **契约**（写入 BYTECODE.md §2）：只覆盖 MIR 指令；terminator 无 span 不产生条目；
+  合成胶水指令用 `Span::SYNTHETIC` 不产生条目；builtin 占位体 span_map 恒空；
+  `offset == VM 出错时的 frame.ip`；查不到 offset = 无源码位置（消费方退化）
+- `emit_instr` 返回实际写入字节数并 `debug_assert_eq!` 其等于
+  `Opcode::instr_len()`——防止 operand 表与发射代码漂移（漂移会静默错位
+  jump 偏移与 span_map 偏移）
 - 0.0.1 产物的 `span_map` 恒为空——序列化格式不变，仅从"留空"变"填充"
 
 ### verify.rs / stack_analysis.rs
-- `stack_effect()` 增补（`BYTECODE.md` §8 表）：
-  - `AllocBox` / `DerefBox` / `DupDeep`：Δ+1，min 1
+- `stack_effect()` 增补（`BYTECODE.md` §8 表，已勘误 `AllocBox`）：
+  - `AllocBox`：**Δ0**（`v → b`），min 1
   - `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal`：Δ+1，min 0
+  - `DerefBox` / `DupDeep`：Δ+1，min 1
   - `StoreDerefBox`：Δ−2，min 2
-  - `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr`：Δ0，min 1
+  - `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` / `ToStr`：Δ0，min 1
 - slot 校验：`MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot < `locals`
   （与 `LoadLocal` 同规则）；`CloneGlobal` 的 gid < globals 表长
-- 版本门：v2 指令出现在 version=1 模块 → 既有 `BadOpcode` 自然成立；
-  version=2 模块走全量同一套校验
+- 版本门：v2 指令出现在 version=1 模块 → **显式** `V2OpcodeInV1Module`
+  （一次比较）；version=2 模块走全量同一套校验
 
 ### 测试
-- codegen：13 条新指令的编码字节逐一断言；span_map 非空且 offset 落在指令边界
-- verify：对每个新指令构造合法/畸形（栈不匹配、slot 越界）模块
-- 兼容：v1 模块（fixture，见 U11）verify PASS、执行输出不变
+- codegen：13 条 v2 指令的编号/宽度逐一断言（含 `from_byte` 往返、预留位未知）、
+  u16 操作数小端往返、jump 偏移按 3 字节指令宽推进、span_map 五条
+  （真实 span 入表/合成 span 跳过/terminator 无条目/builtin 空表/`__init__`
+  只留初始化器 span）、flnc `{1,2}` 往返
+- verify：每个新指令的合法/畸形模块（栈不匹配、slot 越界、gid 越界）、
+  v1 模块回归、v2-in-v1 拒绝、**编译产物必须过 verify 的全链 smoke**
+  （覆盖 move/clone/box/deref/ref 实参/`?`/Result-choose/`as` 全部降载路径）
+- 兼容：v1 模块（memory 形态）verify PASS；二进制 fixture 属 U11
+
+### 实现说明（U07 落地时发现，均为规范勘误或接缝修正）
+1. **`AllocBox` 栈效果勘误**：PLAN §5.2 / BYTECODE.md §8 原表把 `AllocBox` 与
+   `DupDeep` 同行写成 `+1`，但降载 `<e>; AllocBox` 要求它**替换**栈顶值（净 0）。
+   Lower 的深度表本来就是 0；verify 按 `+1` 会让 `box e` 之后所有深度多算 1。
+   由"编译产物必须过 verify"全链测试发现，已按 `v → b` 修正并双向勘误文档。
+2. **版本门不是"自然成立"**：`from_byte` 注册 0x80–0xA4 后，v1 模块里的这些字节
+   也能解码，`BadOpcode` 不会触发。要规则成立必须显式比较，已实现为
+   `V2OpcodeInV1Module`。
+3. **票面外的 VM 改动不可避免**：`Opcode` 新增 13 个变体后，`fleen-vm/src/vm.rs`
+   的 `match opcode` 无通配分支会**编译失败**；且 `run()` 的 `version != 1` 门
+   会让一切新编译的 v2 模块拒绝执行（e2e 全红）。最小修复：加
+   `_ => Err(RuntimeError::InvalidOpcode(op))` 通配分支 + 版本门放开 `{1,2}`，
+   v2 指令的**执行**留给 U09（届时表现为 `invalid opcode 0x91` 之类的硬错误，
+   而非静默no-op）。
+4. **span_map offset 契约**：VM `step()` 只在成功路径末尾回写 `frame.ip`，
+   出错时 `ip` 仍指向失败指令首字节。故契约为"`offset == 出错时的 `frame.ip`"，
+   U10 按此查表（TICKETS U10 原稿写的 `frame.ip - 1` 会差一，已在此更正）。
+
+### 范围决定：Result-choose 的 guard / `otherwise` 继续延后
+- 现状（U06 as-built + 工作区改动）：`otherwise`、字面量臂、带 guard 的臂在
+  `lower` 层报 `UnsupportedFeature`；穷尽性规则为"guard 臂不计入"。
+- 本票**不实现**：要把 Result-choose 从"Ok/Err 双臂、无兜底块"重构成
+  **通用臂链 + no-match 兜底**（guard 失败必须能落到后续臂），并处理 guard 前的
+  payload 保留（`DupDeep`）。工作量接近半张票且属 lower 形态变更，超出本票
+  codegen/verify 范围。
+- 决策：**延后到 U09 或独立票**；在此之前 lower 保持拒绝，U11 需为
+  "guard / otherwise" 各补一条 invalid 用例锁死该行为。
 
 ### 验收
 ```
 cargo test -p fleen-compiler codegen
 cargo test -p fleen-verify
+cargo test   # 0.0.1 全量回归（fib.fln / cast.fln 逐字节不变）
 ```
 
 ---
@@ -663,6 +717,13 @@ grep -rn "Rc<" src/ | wc -l   # = 0
 ---
 
 ## U09: VM — 新指令执行与入口 Err
+
+> **U07 遗留（本票必须处理）**：`Opcode` 现有 13 个 v2 变体只被编码、尚未执行——
+> `vm.rs` 对它们返回 `RuntimeError::InvalidOpcode`。本票把该通配分支替换为
+> 真实实现。已知受影响路径：**owned 局部变量作 `print` 实参**（D3 只读使用 →
+> `CloneLocal`），例如 `examples/hello.fln` 的 `print(result)`；
+> U07 之后这类程序报 `invalid opcode 0x92` 属预期，不是 U07 回归。
+> 另有 `move` 尾表达式（`MoveLocal` 0x91）、box/deref、`?` 等同样待实现。
 
 ### 涉及文件
 ```

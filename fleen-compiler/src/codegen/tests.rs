@@ -43,7 +43,7 @@ fn encode_single_block_function() {
         globals: vec![],
     };
     let module = codegen(mir).expect("codegen");
-    assert_eq!(module.version, 1);
+    assert_eq!(module.version, 2);
     assert_eq!(module.entry, FuncId(0));
     let code = &module.functions[0].code;
     // Const <id0> ; Return
@@ -229,6 +229,25 @@ fn all_instructions_encode_with_expected_opcode_and_width() {
         ),
         (instr(MirInstrKind::CallValue(2)), Opcode::CallValue, 1),
         (instr(MirInstrKind::BindMatch(1)), Opcode::BindMatch, 2),
+        (instr(MirInstrKind::ToStr), Opcode::ToStr, 0),
+        // 0.0.2 U07: v2 instructions.
+        (instr(MirInstrKind::AllocBox), Opcode::AllocBox, 0),
+        (instr(MirInstrKind::DerefBox), Opcode::DerefBox, 0),
+        (instr(MirInstrKind::StoreDerefBox), Opcode::StoreDerefBox, 0),
+        (
+            instr(MirInstrKind::MakeRefLocal(1)),
+            Opcode::MakeRefLocal,
+            2,
+        ),
+        (instr(MirInstrKind::DupDeep), Opcode::DupDeep, 0),
+        (instr(MirInstrKind::MoveLocal(1)), Opcode::MoveLocal, 2),
+        (instr(MirInstrKind::CloneLocal(1)), Opcode::CloneLocal, 2),
+        (instr(MirInstrKind::CloneGlobal(1)), Opcode::CloneGlobal, 2),
+        (instr(MirInstrKind::PackOk), Opcode::PackOk, 0),
+        (instr(MirInstrKind::PackErr), Opcode::PackErr, 0),
+        (instr(MirInstrKind::IsErr), Opcode::IsErr, 0),
+        (instr(MirInstrKind::UnwrapOk), Opcode::UnwrapOk, 0),
+        (instr(MirInstrKind::UnwrapErr), Opcode::UnwrapErr, 0),
     ];
     for (instr, expected_op, operand_len) in cases {
         let f = main_func(vec![MirBlock {
@@ -592,6 +611,22 @@ fn flnc_rejects_bad_version() {
 }
 
 #[test]
+fn flnc_accepts_v1_modules() {
+    // A 0.0.1-shaped module (version word 1, empty span_map — the layout is
+    // identical apart from the version) must still load (BYTECODE.md §9/§10).
+    // U11 additionally keeps a real 0.0.1-built `.flnc` fixture.
+    let mut v1 = sample_module();
+    v1.version = 1;
+    for f in &mut v1.functions {
+        f.span_map = Box::new([]);
+    }
+    let back =
+        crate::codegen::from_bytes(&crate::codegen::to_bytes(&v1)).expect("v1 module must load");
+    assert_eq!(back, v1);
+    assert_eq!(back.version, 1);
+}
+
+#[test]
 fn flnc_rejects_truncated_input() {
     let b = crate::codegen::to_bytes(&sample_module());
     // Every strict prefix must fail (never panic, never Ok).
@@ -728,5 +763,278 @@ fn func_params_and_locals_propagate() {
     .expect("codegen");
     assert_eq!(module.functions[0].params, 2);
     assert_eq!(module.functions[0].locals, 5);
-    assert!(module.functions[0].span_map.is_empty());
+    // The single `Unit` instruction carries the test helper's span, so the
+    // span map has exactly that one entry (synthetic spans are skipped).
+    assert_eq!(module.functions[0].span_map.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U07: v2 instruction encoding and span_map generation
+// ---------------------------------------------------------------------------
+
+/// A `main` with an explicit `locals` count for slot-operand instructions.
+fn main_func_locals(locals: u16, blocks: Vec<MirBlock>) -> MirFunc {
+    MirFunc {
+        locals,
+        ..main_func(blocks)
+    }
+}
+
+#[test]
+fn v2_opcode_bytes_match_the_numbering_plan() {
+    // The 0x80–0x83 / 0x90–0x93 / 0xA0–0xA5 ranges from BYTECODE.md §4.2.
+    assert_eq!(Opcode::AllocBox as u8, 0x80);
+    assert_eq!(Opcode::DerefBox as u8, 0x81);
+    assert_eq!(Opcode::StoreDerefBox as u8, 0x82);
+    assert_eq!(Opcode::MakeRefLocal as u8, 0x83);
+    assert_eq!(Opcode::DupDeep as u8, 0x90);
+    assert_eq!(Opcode::MoveLocal as u8, 0x91);
+    assert_eq!(Opcode::CloneLocal as u8, 0x92);
+    assert_eq!(Opcode::CloneGlobal as u8, 0x93);
+    assert_eq!(Opcode::PackOk as u8, 0xA0);
+    assert_eq!(Opcode::PackErr as u8, 0xA1);
+    assert_eq!(Opcode::IsErr as u8, 0xA2);
+    assert_eq!(Opcode::UnwrapOk as u8, 0xA3);
+    assert_eq!(Opcode::UnwrapErr as u8, 0xA4);
+    assert_eq!(Opcode::ToStr as u8, 0xA5);
+
+    // Round trip through `from_byte` keeps every v2 opcode decodable.
+    for op in [
+        Opcode::AllocBox,
+        Opcode::DerefBox,
+        Opcode::StoreDerefBox,
+        Opcode::MakeRefLocal,
+        Opcode::DupDeep,
+        Opcode::MoveLocal,
+        Opcode::CloneLocal,
+        Opcode::CloneGlobal,
+        Opcode::PackOk,
+        Opcode::PackErr,
+        Opcode::IsErr,
+        Opcode::UnwrapOk,
+        Opcode::UnwrapErr,
+        Opcode::ToStr,
+    ] {
+        assert_eq!(Opcode::from_byte(op as u8), Some(op));
+    }
+
+    // Reserved slots stay unknown.
+    assert_eq!(Opcode::from_byte(0x84), None);
+    assert_eq!(Opcode::from_byte(0xA6), None);
+}
+
+#[test]
+fn v2_slot_operands_round_trip_le_u16() {
+    let f = main_func_locals(
+        3,
+        vec![MirBlock {
+            id: BlockId(0),
+            instrs: vec![
+                MirInstr::new(MirInstrKind::CloneGlobal(2), Span::new(0, 1)),
+                MirInstr::new(MirInstrKind::MoveLocal(1), Span::new(0, 1)),
+                MirInstr::new(MirInstrKind::CloneLocal(0), Span::new(0, 1)),
+                MirInstr::new(MirInstrKind::MakeRefLocal(1), Span::new(0, 1)),
+            ],
+            terminator: Terminator::Return,
+        }],
+    );
+    let module = codegen(Mir {
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let code = &module.functions[0].code;
+    assert_eq!(code[0], Opcode::CloneGlobal as u8);
+    assert_eq!(&code[1..3], &2u16.to_le_bytes());
+    assert_eq!(code[3], Opcode::MoveLocal as u8);
+    assert_eq!(&code[4..6], &1u16.to_le_bytes());
+    assert_eq!(code[6], Opcode::CloneLocal as u8);
+    assert_eq!(&code[7..9], &0u16.to_le_bytes());
+    assert_eq!(code[9], Opcode::MakeRefLocal as u8);
+    assert_eq!(&code[10..12], &1u16.to_le_bytes());
+    assert_eq!(code.len(), 13, "4 x 3-byte instructions + Return");
+}
+
+#[test]
+fn jump_offsets_account_for_v2_instruction_widths() {
+    // block0: MoveLocal 0 (3 B); JumpIfFalse -> block1 (3 B)
+    // block1: Return (1 B) → the target must be byte 6, not 5.
+    let f = main_func_locals(
+        1,
+        vec![
+            MirBlock {
+                id: BlockId(0),
+                instrs: vec![MirInstr::new(MirInstrKind::MoveLocal(0), Span::new(0, 1))],
+                terminator: Terminator::JumpIfFalse(BlockId(1)),
+            },
+            MirBlock {
+                id: BlockId(1),
+                instrs: vec![],
+                terminator: Terminator::Return,
+            },
+        ],
+    );
+    let module = codegen(Mir {
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let code = &module.functions[0].code;
+    assert_eq!(code[0], Opcode::MoveLocal as u8);
+    assert_eq!(code[3], Opcode::JumpIfFalse as u8);
+    assert_eq!(u16::from_le_bytes([code[4], code[5]]), 6);
+    assert_eq!(code[6], Opcode::Return as u8);
+}
+
+#[test]
+fn span_map_records_instruction_offsets_and_real_spans() {
+    // Const 7 (5 B, span [0,7)); MoveLocal 0 (3 B, span [10,20)); Return
+    // (terminators carry no span → no entry).
+    let f = main_func_locals(
+        1,
+        vec![MirBlock {
+            id: BlockId(0),
+            instrs: vec![
+                MirInstr::new(MirInstrKind::ConstInt(7), Span::new(0, 7)),
+                MirInstr::new(MirInstrKind::MoveLocal(0), Span::new(10, 20)),
+            ],
+            terminator: Terminator::Return,
+        }],
+    );
+    let module = codegen(Mir {
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let func = &module.functions[0];
+    let entries: Vec<(u32, u32, u32)> = func
+        .span_map
+        .iter()
+        .map(|e| (e.offset, e.start, e.end))
+        .collect();
+    assert_eq!(entries, vec![(0, 0, 7), (5, 10, 20)]);
+    // Each offset really is the instruction's opcode byte.
+    assert_eq!(func.code[0], Opcode::Const as u8);
+    assert_eq!(func.code[5], Opcode::MoveLocal as u8);
+    assert_eq!(&func.code[6..8], &0u16.to_le_bytes());
+}
+
+#[test]
+fn span_map_skips_synthetic_spans() {
+    // Only the instruction with a real span is mapped.
+    let f = main_func(vec![MirBlock {
+        id: BlockId(0),
+        instrs: vec![
+            MirInstr::new(MirInstrKind::Unit, Span::SYNTHETIC),
+            MirInstr::new(MirInstrKind::ConstInt(1), Span::new(3, 9)),
+            MirInstr::new(MirInstrKind::Pop, Span::SYNTHETIC),
+        ],
+        terminator: Terminator::Return,
+    }]);
+    let module = codegen(Mir {
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let func = &module.functions[0];
+    let entries: Vec<(u32, u32, u32)> = func
+        .span_map
+        .iter()
+        .map(|e| (e.offset, e.start, e.end))
+        .collect();
+    // Unit (1 B) occupies offset 0, so the mapped instruction starts at 1.
+    assert_eq!(entries, vec![(1, 3, 9)]);
+}
+
+#[test]
+fn builtin_span_map_stays_empty() {
+    // Builtins run host-side; their placeholder body has no source location.
+    let print = MirFunc {
+        func_id: FuncId(0),
+        name: "print".to_string(),
+        params: 1,
+        locals: 1,
+        entry: BlockId(0),
+        blocks: vec![MirBlock {
+            id: BlockId(0),
+            instrs: vec![],
+            terminator: Terminator::Return,
+        }],
+        is_builtin: true,
+        ret_type: Type::Unit,
+    };
+    let main = main_func(vec![MirBlock {
+        id: BlockId(0),
+        instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(0, 1))],
+        terminator: Terminator::Return,
+    }]);
+    let module = codegen(Mir {
+        funcs: vec![main, print],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let print_fn = module
+        .functions
+        .iter()
+        .find(|f| f.is_builtin)
+        .expect("builtin function");
+    assert!(print_fn.span_map.is_empty());
+}
+
+#[test]
+fn init_func_span_map_keeps_initializer_spans_only() {
+    // A global initialized with `2 + 3` keeps the initializer's spans; the
+    // synthesized `StoreGlobal` / `Call main` glue is synthetic and absent.
+    let init = vec![
+        MirInstr::new(MirInstrKind::ConstInt(2), Span::new(0, 1)),
+        MirInstr::new(MirInstrKind::ConstInt(3), Span::new(4, 5)),
+        MirInstr::new(MirInstrKind::IAdd, Span::new(0, 5)),
+    ];
+    let g = MirGlobal {
+        global_id: GlobalId(0),
+        name: "g".to_string(),
+        mutable: true,
+        ty: Type::Int,
+        init,
+    };
+    let main = main_func(vec![MirBlock {
+        id: BlockId(0),
+        instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(20, 25))],
+        terminator: Terminator::Return,
+    }]);
+    let module = codegen(Mir {
+        funcs: vec![main],
+        globals: vec![g],
+    })
+    .expect("codegen");
+
+    let init_fn = &module.functions[module.entry.0 as usize];
+    let name = &module.constants[init_fn.name.0 as usize];
+    assert!(matches!(name, Const::Str(s) if &**s == "__init__"));
+    let entries: Vec<(u32, u32, u32)> = init_fn
+        .span_map
+        .iter()
+        .map(|e| (e.offset, e.start, e.end))
+        .collect();
+    // Three initializer instructions (5 + 5 + 1 bytes); the StoreGlobal and
+    // Call glue are synthetic, and `Return` is a terminator.
+    assert_eq!(entries, vec![(0, 0, 1), (5, 4, 5), (10, 0, 5)]);
+}
+
+#[test]
+fn span_map_survives_flnc_round_trip() {
+    let f = main_func(vec![MirBlock {
+        id: BlockId(0),
+        instrs: vec![MirInstr::new(MirInstrKind::ConstInt(7), Span::new(2, 6))],
+        terminator: Terminator::Return,
+    }]);
+    let module = codegen(Mir {
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    assert!(!module.functions[0].span_map.is_empty());
+    let back = crate::codegen::from_bytes(&crate::codegen::to_bytes(&module)).expect("rt");
+    assert_eq!(module, back);
+    assert_eq!(back.functions[0].span_map.len(), 1);
 }

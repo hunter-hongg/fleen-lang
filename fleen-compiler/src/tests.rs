@@ -5,7 +5,7 @@ use super::{CompileError, compile};
 #[test]
 fn compiles_valid_source() {
     let module = compile("func main(): int = 42").unwrap();
-    assert_eq!(module.version, 1);
+    assert_eq!(module.version, 2);
     assert!(module.functions.iter().any(|f| f.params == 0));
 }
 

@@ -46,11 +46,20 @@ impl std::hash::Hash for Const {
     }
 }
 
-/// Span → source position map entry (0.0.1: never generated).
+/// Span → source position map entry.
+///
+/// Generated per instruction by codegen since 0.0.2 (U07); the binary
+/// layout was reserved in 0.0.1 (§9) and is unchanged. Instructions whose
+/// MIR span is [`Span::SYNTHETIC`](crate::lexer::Span::SYNTHETIC) (synthesized
+/// glue with no source location) and block terminators carry **no** entry —
+/// consumers must treat a missing offset as "no known location".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanEntry {
+    /// Instruction start byte offset, relative to the function's `code`.
     pub offset: u32,
+    /// Source start byte offset.
     pub start: u32,
+    /// Source end byte offset (exclusive).
     pub end: u32,
 }
 
@@ -133,14 +142,42 @@ pub enum Opcode {
     Return = 0x63,
     // 0x70–0x7F choose helpers
     BindMatch = 0x70,
-    // 0xA0–0xAF 0.0.2 extensions
+    // 0x80–0x83 box / ref (0.0.2 U07, §5.9)
+    AllocBox = 0x80,
+    DerefBox = 0x81,
+    StoreDerefBox = 0x82,
+    MakeRefLocal = 0x83,
+    // 0x90–0x93 move / clone (0.0.2 U07, §5.10)
+    DupDeep = 0x90,
+    MoveLocal = 0x91,
+    CloneLocal = 0x92,
+    CloneGlobal = 0x93,
+    // 0xA0–0xA4 Result / error handling (0.0.2 U07, §5.11)
+    PackOk = 0xA0,
+    PackErr = 0xA1,
+    IsErr = 0xA2,
+    UnwrapOk = 0xA3,
+    UnwrapErr = 0xA4,
+    // 0xA5+ further 0.0.2 extensions
     /// Convert a scalar (int/float/bool) on the stack to a fresh owned string.
     /// 0.0.2 U13 (F8): `e as string`.
     ToStr = 0xA5,
 }
 
+/// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
+///
+/// Every v1 opcode is below this and every v2 opcode at or above it, which
+/// lets `fleen-verify` reject v2 instructions in a v1 module with one
+/// comparison (BYTECODE.md §4.2 / §10).
+pub const V2_OPCODE_BASE: u8 = 0x80;
+
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
+    ///
+    /// `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` carry a
+    /// `u16` operand (3-byte instruction); every other v2 instruction is
+    /// operand-less. This table and [`Encoder::emit_instr`](crate::codegen::encoder::Encoder)
+    /// must agree — `emit_instr` asserts it.
     pub fn operand_len(self) -> usize {
         match self {
             Opcode::Const => 4,
@@ -153,7 +190,11 @@ impl Opcode {
             | Opcode::JumpIfTrue
             | Opcode::Call
             | Opcode::LoadFunc
-            | Opcode::BindMatch => 2,
+            | Opcode::BindMatch
+            | Opcode::MakeRefLocal
+            | Opcode::MoveLocal
+            | Opcode::CloneLocal
+            | Opcode::CloneGlobal => 2,
             Opcode::CallValue => 1,
             _ => 0,
         }
@@ -203,6 +244,19 @@ impl Opcode {
             0x62 => Opcode::CallValue,
             0x63 => Opcode::Return,
             0x70 => Opcode::BindMatch,
+            0x80 => Opcode::AllocBox,
+            0x81 => Opcode::DerefBox,
+            0x82 => Opcode::StoreDerefBox,
+            0x83 => Opcode::MakeRefLocal,
+            0x90 => Opcode::DupDeep,
+            0x91 => Opcode::MoveLocal,
+            0x92 => Opcode::CloneLocal,
+            0x93 => Opcode::CloneGlobal,
+            0xA0 => Opcode::PackOk,
+            0xA1 => Opcode::PackErr,
+            0xA2 => Opcode::IsErr,
+            0xA3 => Opcode::UnwrapOk,
+            0xA4 => Opcode::UnwrapErr,
             0xA5 => Opcode::ToStr,
             _ => return None,
         })

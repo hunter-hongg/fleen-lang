@@ -41,7 +41,7 @@ Execute (Bytecode → 结果)  VM 解释执行
 
 ```rust
 pub struct Module {
-    pub version: u16,          // 字节码版本，当前 1
+    pub version: u16,          // 字节码版本：0.0.2 写入 2，读取接受 {1, 2}
     pub constants: Vec<Const>, // 常量池
     pub functions: Vec<Func>,  // 函数表
     pub globals: Vec<Global>,  // 全局变量表
@@ -105,13 +105,24 @@ pub struct Func {
 > pub struct SpanEntry {
 >     pub offset: u32,  // 指令起始字节偏移（相对函数 code）
 >     pub start: u32,   // 源码起始字节偏移
->     pub end: u32,     // 源码结束字节偏移
+>     pub end: u32,     // 源码结束字节偏移（不含）
 > }
 > ```
 >
 > 0.0.1 决定暂不生成（留空 `Box::new([])`）。0.0.2 起 codegen 逐指令填充
-> `span_map`（数据来源：MIR 指令携带的 Span），供运行时错误诊断使用；
-> 读取端对空表与非空表都必须接受。
+> `span_map`（数据来源：MIR 指令携带的 Span），供运行时错误诊断使用。
+>
+> **条目规则（0.0.2 U07 定契约）**：
+>
+> - 只覆盖 **MIR 指令**；块终结符（`Return` / `Jump` / `JumpIf*`）在 MIR 层
+>   没有 span，**不产生条目**；
+> - codegen 合成的胶水指令（`__init__` 里的 `StoreGlobal` / `Call main`）
+>   使用 `Span::SYNTHETIC`，**不产生条目**；
+> - `is_builtin` 函数的占位体无源码对应，`span_map` 恒为空；
+> - `offset` 即该指令的操作码字节位置，与 VM 出错时的 `frame.ip` 同义
+>   （U10 按 `frame.ip` 查表）；读取端对空表与非空表都必须接受；
+> - **查不到 offset = 没有源码位置**：消费方退化为"函数名 + 指令偏移"，
+>   不得假设表覆盖每条指令。
 
 规则：
 - **内置函数用 `is_builtin: true` 标记**，不靠函数名判断：语言允许用户遮蔽内建名（如自定义 `func print`），仅凭名字无法区分宿主内置与用户函数。
@@ -246,7 +257,8 @@ pub enum RuntimeError {
 0x90–0x93  move / clone（0.0.2，§5.10）
 0x94–0x9F  预留
 0xA0–0xA4  Result / 错误处理（0.0.2，§5.11）
-0xA5–0xFF  预留
+0xA5       `as` 转换 `ToStr`（0.0.2 U13，F8 §3.6）
+0xA6–0xFF  预留
 ```
 
 ---
@@ -613,9 +625,11 @@ L_end:
 规则：
 - `Ok`/`Err` 臂的 payload 由 `UnwrapOk`/`UnwrapErr` **转移**后 `StoreLocal` 绑定，
   无需 `BindMatch`（被匹配值已被消耗，不再参与比较链）
-- 带 guard（`when Ok(x) if x > 0`）时，codegen 需在 guard 求值前保留 payload
-  可回退（实现期确定具体序列，验收标准：语义等价 + verify 通过）
-- 穷尽性由 `typeck` 检查：`Ok` + `Err` 两臂齐即穷尽
+- 带 guard（`when Ok(x) if x > 0`）时，lower 需在 guard 求值前保留 payload
+  供后续臂使用（实现期确定具体序列，验收标准：语义等价 + verify 通过）。
+  注意：guard 臂不计入穷尽性（DESIGN §10.5），故必须另有**无 guard 的重复**
+  `Ok` / `Err` 臂或 `otherwise` 兜底，否则 typeck 报 `ChooseNotExhaustive`。
+- 穷尽性由 `typeck` 检查：**无 guard** 的 `Ok` + `Err` 两臂齐即穷尽
 
 ---
 
@@ -688,8 +702,11 @@ Return
   - 每条指令执行前的栈深 ≥ 该指令所需最小栈深
 - [ ] `StoreGlobal` 的目标全部 `mutable: true`，**唯一例外**：入口函数（全局初始化的 `__init__`）中对全局的初始化写（用于给 `const` 全局赋初值）
 - [ ] 常量池无重复项
-- [ ] 每个函数 `locals >= params`，且所有 `LoadLocal` / `StoreLocal` 的 slot 操作数 < `locals`
-  （0.0.2 起 `MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot 同规则）
+- [ ] 每个函数 `locals >= params`，且所有 `LoadLocal` / `StoreLocal` / `BindMatch` /
+      `MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot 操作数 < `locals`；
+      `CloneGlobal` 的 gid 在全局表范围内（0.0.2 U07）
+- [ ] **v2 指令不得出现在 version=1 模块**：v1 编号全部 < 0x80，v2 全部 ≥ 0x80
+      （§4.2），因此一次比较即可判定（verify 的 `V2OpcodeInV1Module`）
 
 ### 每指令栈深效果（Δdepth）
 
@@ -708,11 +725,18 @@ Return
 | `Call` | 1 - p（p 为被调函数 `params` 数） | p |
 | `CallValue` | -(argc + 1) + 1 = -argc | argc + 1 |
 | `BindMatch` | 0 | 1 |
-| `AllocBox` / `DerefBox` / `DupDeep` | +1 | 1 |
+| `AllocBox` | **0**（`v → b`：值被消耗并替换为 box） | 1 |
+| `DerefBox` / `DupDeep` | +1 | 1 |
 | `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` | +1 | 0 |
 | `StoreDerefBox` | -2 | 2 |
 | `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` | 0 | 1 |
+| `ToStr` | 0（`v → s`） | 1 |
 | `Return` | 视为路径终止 | 1（返回值在栈顶） |
+
+> **U07 勘误**：`AllocBox` 的净效果是 **0**（`v → b`，值被装箱替换），
+> 与 §5.9 的栈效果列和 Lower 的深度表一致；规划期把它与 `DupDeep` 同行
+> 写成 `+1` 是笔误，会让 verify 把 `box e` 之后的所有深度算错 1。
+> 该不一致由 U07 的"编译产物必须过 verify"全链测试发现并修正。
 
 规则：
 - `Call` 的最小深度为被调函数的 `params` 个数；被调函数的返回值一定压栈，故净效果 `1 - params`。
@@ -736,7 +760,7 @@ Return
 | 字段 | 宽度 | 值 |
 |------|------|-----|
 | magic | 4 B | `"FLNC"`（0x46 0x4C 0x4E 0x43） |
-| version | u16 | 字节码版本，当前 `1` |
+| version | u16 | 字节码版本：0.0.2 编译器写入 `2`，读取端接受 `{1, 2}` |
 
 ### 常量池
 
@@ -791,7 +815,7 @@ Return
 | 字节码版本 | 对应语言版本 | 内容 |
 |-----------|-------------|------|
 | 1 | 0.0.1 | 本文档定义的指令集 |
-| 2 | 0.0.2 | + 所有权指令 `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal`（0x80–0x83）、`DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal`（0x90–0x93）、Result 指令（0xA0–0xA4）；`span_map` 开始填充（§5.9–5.11、§2） |
+| 2 | 0.0.2 | + 所有权指令 `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal`（0x80–0x83）、`DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal`（0x90–0x93）、Result 指令（0xA0–0xA4）、`ToStr`（0xA5，`as` 转换）；`span_map` 开始填充（§5.9–5.11、§2） |
 | 3 | 0.0.3 | + `struct` / 数组指令 |
 
 规则：

@@ -1,6 +1,6 @@
 //! Static verification of bytecode modules (BYTECODE.md §8).
 
-use fleen_compiler::codegen::{Const, Func, FuncId, Module, Opcode};
+use fleen_compiler::codegen::{Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE};
 
 /// A verification failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,11 @@ pub enum VerifyError {
         pc: usize,
         slot: u16,
         locals: u16,
+    },
+    /// A v2 instruction (opcode >= 0x80) appears in a version-1 module.
+    V2OpcodeInV1Module {
+        pc: usize,
+        byte: u8,
     },
     /// Entry function id out of range.
     BadEntry {
@@ -175,6 +180,12 @@ impl std::fmt::Display for VerifyError {
                 write!(
                     f,
                     "local slot {slot} at pc {pc} out of range (locals = {locals})"
+                )
+            }
+            Self::V2OpcodeInV1Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v2, module is v1"
                 )
             }
             Self::BadEntry { entry } => write!(f, "entry function id {entry} out of range"),
@@ -301,6 +312,24 @@ pub fn stack_effect(
         | Opcode::Le
         | Opcode::Ge => (-1, 2),
         Opcode::Not | Opcode::NegI | Opcode::NegF => (0, 1),
+        // 0.0.2 U07: box / ref (BYTECODE.md §5.9).
+        // `AllocBox` is `v → b`: the value is consumed and replaced by the
+        // box, so its net effect is 0 — not +1 as the §8 draft table said.
+        Opcode::AllocBox => (0, 1),       // v → b
+        Opcode::DerefBox => (1, 1),       // b → b v
+        Opcode::StoreDerefBox => (-2, 2), // b v →
+        Opcode::MakeRefLocal => (1, 0),   // → ref
+        // 0.0.2 U07: move / clone (BYTECODE.md §5.10).
+        Opcode::DupDeep => (1, 1),     // v → v v
+        Opcode::MoveLocal => (1, 0),   // → v
+        Opcode::CloneLocal => (1, 0),  // → v
+        Opcode::CloneGlobal => (1, 0), // → v
+        // 0.0.2 U07: Result / error handling (BYTECODE.md §5.11).
+        Opcode::PackOk => (0, 1),    // v → ok(v)
+        Opcode::PackErr => (0, 1),   // v → err(e)
+        Opcode::IsErr => (0, 1),     // r → bool
+        Opcode::UnwrapOk => (0, 1),  // r → v
+        Opcode::UnwrapErr => (0, 1), // r → e
         // 0.0.2 U13: ToStr pops a scalar and pushes a fresh string (Δ0, min 1).
         Opcode::ToStr => (0, 1),
         Opcode::Jump => (0, 0),
@@ -354,6 +383,15 @@ fn walk_function(
     let is_boundary = |t: usize| boundaries.binary_search(&t).is_ok();
 
     for d in &at {
+        // Version gate: v1 opcode numbers are all below V2_OPCODE_BASE and v2
+        // ones at or above it (BYTECODE.md §4.2), so a single comparison keeps
+        // v2 instructions out of v1 modules.
+        if module.version < 2 && (d.opcode as u8) >= V2_OPCODE_BASE {
+            return Err(VerifyError::V2OpcodeInV1Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
         match d.opcode {
             Opcode::Const => {
                 let idx = const_index(code, d)?;
@@ -391,7 +429,23 @@ fn walk_function(
                     });
                 }
             }
-            Opcode::LoadLocal | Opcode::StoreLocal | Opcode::BindMatch => {
+            // 0.0.2 U07: `CloneGlobal` is a read, so only the index range is
+            // checked (BYTECODE.md §5.10).
+            Opcode::CloneGlobal => {
+                let idx = global_index(code, d)?;
+                if idx as usize >= module.globals.len() {
+                    return Err(VerifyError::GlobalIndexOutOfRange {
+                        pc: d.pc,
+                        index: idx,
+                    });
+                }
+            }
+            Opcode::LoadLocal
+            | Opcode::StoreLocal
+            | Opcode::BindMatch
+            | Opcode::MakeRefLocal
+            | Opcode::MoveLocal
+            | Opcode::CloneLocal => {
                 let slot = slot_index(code, d)?;
                 if slot >= func.locals {
                     return Err(VerifyError::LocalSlotOutOfRange {

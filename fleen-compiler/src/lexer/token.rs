@@ -27,6 +27,24 @@ impl Span {
         Self { start, end }
     }
 
+    /// Sentinel span for synthesized code that has no source location
+    /// (e.g. the glue instructions codegen builds around a synthesized
+    /// `__init__`).
+    ///
+    /// `u32::MAX` cannot be a real byte offset in a source file, so this
+    /// is distinguishable from every parser-produced span. Consumers that
+    /// map positions back to text must skip such spans rather than render
+    /// them.
+    pub const SYNTHETIC: Span = Span {
+        start: u32::MAX,
+        end: u32::MAX,
+    };
+
+    /// True for [`Span::SYNTHETIC`] — a span with no source location.
+    pub fn is_synthetic(&self) -> bool {
+        self.start == u32::MAX
+    }
+
     pub fn len(&self) -> u32 {
         self.end - self.start
     }

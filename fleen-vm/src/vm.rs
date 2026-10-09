@@ -41,8 +41,12 @@ impl Vm {
     }
 
     /// Run the module's `entry` function to completion.
+    ///
+    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2); a v2 module whose
+    /// instructions this VM does not implement yet fails per instruction with
+    /// [`RuntimeError::InvalidOpcode`] (see `step`).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
-        if self.module.version != 1 {
+        if !matches!(self.module.version, 1 | 2) {
             return Err(RuntimeError::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -409,6 +413,12 @@ impl Vm {
                 let s = fmt_scalar(&v).ok_or(RuntimeError::CastOperandNotScalar)?;
                 self.stack.push(Value::Str(Rc::from(s.as_str())));
             }
+            // 0.0.2 U07: the v2 opcodes (0x80–0xA4) are *encoded* by codegen
+            // from U07 on, but they are only *executed* from U09 on. Until
+            // then they must fail loudly rather than fall through as a no-op
+            // — a silent no-op would corrupt every depth invariant the
+            // verifier reasons about.
+            _ => return Err(RuntimeError::InvalidOpcode(op)),
         }
         self.frames
             .last_mut()

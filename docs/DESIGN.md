@@ -748,10 +748,17 @@ func main(): int {
 
 ### 10.5 0.0.2 U06 实现说明（lower 端限制）
 
-- **result `choose` 的守卫**：`when Ok(x) if <guard>` 形式的守卫延后到 U07/U09。
-  U06 仅支持无守卫的 `when Ok(..)` / `when Err(..)` 臂（typeck 仍允许守卫，
-  lower 报 `UnsupportedFeature`）。无通配/`otherwise` 臂：缺 Ok 或缺 Err 臂
-  报 `ChooseResultNeedsOkErrArms`。
+- **result `choose` 的守卫**：带 `if <guard>` 的臂**不计入穷尽性**——与 Bool
+  scrutinee 同一条规则：guard 运行时可能为假，无法覆盖其模式。因此
+  `when Ok(v) if g {…}` + `when Err(e) {…}` 被 typeck 判为缺少 Ok 臂而拒绝
+  （`ChooseNotExhaustive { missing_patterns: ["Ok"] }`）。要写 guard，必须另配
+  一个**无 guard 的重复** `Ok` / `Err` 臂，或用 `otherwise` 兜底。守卫臂与
+  `otherwise` 的**降载延后到 U09 / 独立票**（U07 决定维持延后，见
+  `docs/0.0.2/TICKETS.md` U07「范围决定」）：需要把 Result-choose 从
+  "Ok/Err 双臂、无兜底块"重构成通用臂链 + no-match 兜底，并在 guard 求值前
+  保留 payload。在此之前 U06/U07 的 lower 只降载无守卫的 `when Ok(..)` /
+  `when Err(..)` 臂，遇到 guard 或 `otherwise` 报 `UnsupportedFeature`
+  （`ChooseResultNeedsOkErrArms` 是 typeck 门后的防御性检查）。
 - **ref 实参为全局时**：借用必须指向局部槽位。U06 在为**函数体内**调用传全局
   ref 实参时，用临时槽 `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` 承接；
   **全局初始化器**（`lower_global_init`）没有可借用其槽位的帧，故含 ref 实参

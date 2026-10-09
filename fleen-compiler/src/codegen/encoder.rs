@@ -3,9 +3,23 @@
 use super::bytecode::*;
 use crate::lower::mir::{MirFunc, MirInstr, MirInstrKind, Terminator};
 
+/// Output of encoding one function: the instruction bytes plus the
+/// instruction-offset → source-span map (0.0.2 U07, BYTECODE.md §2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncodedFunc {
+    /// Encoded instruction bytes.
+    pub code: Box<[u8]>,
+    /// One entry per instruction that has a real (non-synthetic) span,
+    /// ordered by `offset`.
+    pub span_map: Box<[SpanEntry]>,
+}
+
 /// Bytecode assembly for one function.
 pub struct Encoder {
     code: Vec<u8>,
+    /// `(instruction offset, span)` pairs collected while emitting; the
+    /// offset is final because emission is strictly sequential.
+    spans: Vec<SpanEntry>,
 }
 
 /// Lowering error surfaced by codegen (invariant violations from Lower).
@@ -30,11 +44,17 @@ impl Default for Encoder {
 
 impl Encoder {
     pub fn new() -> Self {
-        Encoder { code: Vec::new() }
+        Encoder {
+            code: Vec::new(),
+            spans: Vec::new(),
+        }
     }
 
-    pub fn finish(self) -> Box<[u8]> {
-        self.code.into_boxed_slice()
+    pub fn finish(self) -> EncodedFunc {
+        EncodedFunc {
+            code: self.code.into_boxed_slice(),
+            span_map: self.spans.into_boxed_slice(),
+        }
     }
 
     fn emit_opcode(&mut self, op: Opcode) {
@@ -53,8 +73,32 @@ impl Encoder {
         self.code.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn emit_instr(&mut self, instr: &MirInstr, pool: &mut ConstPool) -> Result<(), CodegenError> {
+    /// Record `span` for the instruction that starts at `offset`, unless the
+    /// span is synthetic (no source location).
+    fn record_span(&mut self, offset: usize, span: crate::lexer::Span) {
+        if span.is_synthetic() {
+            return;
+        }
+        self.spans.push(SpanEntry {
+            offset: offset as u32,
+            start: span.start,
+            end: span.end,
+        });
+    }
+
+    /// Emit one instruction and return how many bytes it wrote.
+    ///
+    /// The returned length must equal [`Opcode::instr_len`]; the assertion
+    /// below is what keeps the two independent size computations (operand
+    /// table vs. emission code) from drifting apart — a drift would
+    /// silently corrupt both jump offsets and `span_map` offsets.
+    fn emit_instr(
+        &mut self,
+        instr: &MirInstr,
+        pool: &mut ConstPool,
+    ) -> Result<usize, CodegenError> {
         let op = mir_opcode(&instr.kind)?;
+        let before = self.code.len();
         self.emit_opcode(op);
         match &instr.kind {
             MirInstrKind::ConstInt(v) => {
@@ -77,9 +121,21 @@ impl Encoder {
             MirInstrKind::LoadFunc(fid) => self.emit_u16(fid_u16(*fid)?),
             MirInstrKind::CallValue(argc) => self.emit_u8(*argc),
             MirInstrKind::BindMatch(slot) => self.emit_u16(*slot),
+            // 0.0.2 U07: the four slot/global-operand instructions.
+            MirInstrKind::MoveLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::CloneLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::CloneGlobal(gid) => self.emit_u16(*gid),
+            MirInstrKind::MakeRefLocal(slot) => self.emit_u16(*slot),
             _ => {}
         }
-        Ok(())
+        let written = self.code.len() - before;
+        debug_assert_eq!(
+            written,
+            op.instr_len(),
+            "emitted {written} bytes for {op:?}, Opcode::instr_len says {}",
+            op.instr_len()
+        );
+        Ok(written)
     }
 }
 
@@ -114,10 +170,6 @@ impl ConstPool {
 }
 
 /// Single source of truth: MIR instruction → its bytecode opcode.
-///
-/// Returns `Err` for the 0.0.2 (U06) instructions that belong to the v2
-/// bytecode; those opcodes (0x80–0xA4) are owned by U07 and are not encodable
-/// in the v1 module yet.
 fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
     Ok(match kind {
         MirInstrKind::ConstInt(..) | MirInstrKind::ConstFloat(..) | MirInstrKind::ConstStr(..) => {
@@ -128,10 +180,14 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::Unit => Opcode::Unit,
         MirInstrKind::Pop => Opcode::Pop,
         MirInstrKind::Dup => Opcode::Dup,
+        MirInstrKind::DupDeep => Opcode::DupDeep,
         MirInstrKind::LoadLocal(..) => Opcode::LoadLocal,
         MirInstrKind::StoreLocal(..) => Opcode::StoreLocal,
         MirInstrKind::LoadGlobal(..) => Opcode::LoadGlobal,
         MirInstrKind::StoreGlobal(..) => Opcode::StoreGlobal,
+        MirInstrKind::MoveLocal(..) => Opcode::MoveLocal,
+        MirInstrKind::CloneLocal(..) => Opcode::CloneLocal,
+        MirInstrKind::CloneGlobal(..) => Opcode::CloneGlobal,
         MirInstrKind::IAdd => Opcode::IAdd,
         MirInstrKind::ISub => Opcode::ISub,
         MirInstrKind::IMul => Opcode::IMul,
@@ -155,15 +211,16 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::CallValue(..) => Opcode::CallValue,
         MirInstrKind::BindMatch(..) => Opcode::BindMatch,
         MirInstrKind::ToStr => Opcode::ToStr,
-        // 0.0.2 U06: the v2 instructions have no v1 opcode. Lower emits them,
-        // but codegen must fail loudly rather than mis-assign a v1 opcode.
-        // U07 assigns 0x80–0xA4 and wires these up.
-        _ => {
-            return Err(CodegenError {
-                message: "v2 instruction (0.0.2) requires bytecode v2 (U07); not yet encodable"
-                    .to_string(),
-            });
-        }
+        // 0.0.2 U06/U07: ownership & Result instructions (bytecode v2).
+        MirInstrKind::AllocBox => Opcode::AllocBox,
+        MirInstrKind::DerefBox => Opcode::DerefBox,
+        MirInstrKind::StoreDerefBox => Opcode::StoreDerefBox,
+        MirInstrKind::MakeRefLocal(..) => Opcode::MakeRefLocal,
+        MirInstrKind::PackOk => Opcode::PackOk,
+        MirInstrKind::PackErr => Opcode::PackErr,
+        MirInstrKind::IsErr => Opcode::IsErr,
+        MirInstrKind::UnwrapOk => Opcode::UnwrapOk,
+        MirInstrKind::UnwrapErr => Opcode::UnwrapErr,
     })
 }
 
@@ -184,7 +241,10 @@ fn terminator_size(t: Terminator) -> usize {
 /// Encode a function body. Blocks are emitted in `func.blocks` order so the
 /// untaken edge of a conditional jump falls through to the next block
 /// (BYTECODE.md §6.3). Jump targets become absolute byte offsets.
-pub fn encode_func(func: &MirFunc, pool: &mut ConstPool) -> Result<Box<[u8]>, CodegenError> {
+///
+/// The second pass records one `SpanEntry` per instruction with a real span;
+/// block terminators (`Return` / jumps) carry none and are skipped.
+pub fn encode_func(func: &MirFunc, pool: &mut ConstPool) -> Result<EncodedFunc, CodegenError> {
     // Pass 1: byte offset at which each block starts.
     let mut offsets = Vec::with_capacity(func.blocks.len());
     let mut pos = 0usize;
@@ -200,7 +260,9 @@ pub fn encode_func(func: &MirFunc, pool: &mut ConstPool) -> Result<Box<[u8]>, Co
             .get(id.0 as usize)
             .and_then(|&o| u16::try_from(o).ok())
             .ok_or_else(|| CodegenError {
-                message: format!("bad jump target {id}"),
+                message: format!(
+                    "bad jump target {id} (function body may exceed the u16 jump range)"
+                ),
             })
     };
 
@@ -208,7 +270,9 @@ pub fn encode_func(func: &MirFunc, pool: &mut ConstPool) -> Result<Box<[u8]>, Co
     let mut enc = Encoder::new();
     for b in &func.blocks {
         for instr in &b.instrs {
+            let at = enc.code.len();
             enc.emit_instr(instr, pool)?;
+            enc.record_span(at, instr.span);
         }
         match b.terminator {
             Terminator::Return => enc.emit_opcode(Opcode::Return),
