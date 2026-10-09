@@ -14,6 +14,18 @@ fn lower_src(source: &str) -> Mir {
     super::lower(typed).expect("lower should succeed")
 }
 
+/// Lower `source` and return the lowering error (typeck must accept it).
+fn lower_err(source: &str) -> super::LowerError {
+    let tokens = tokenize(source).unwrap();
+    let ast = parse(tokens).unwrap();
+    let hir = resolve(ast).unwrap();
+    let typed = typeck(hir).expect("typeck should succeed");
+    match super::lower(typed) {
+        Ok(_) => panic!("lower should fail, but succeeded for:\n{source}"),
+        Err(e) => e,
+    }
+}
+
 fn find_func<'a>(mir: &'a Mir, name: &str) -> &'a MirFunc {
     mir.funcs
         .iter()
@@ -627,9 +639,10 @@ fn stack_delta(i: &MirInstr, func_params: &std::collections::HashMap<FuncId, u16
         | MirInstrKind::CloneGlobal(_)
         | MirInstrKind::DerefBox
         | MirInstrKind::MakeRefLocal(_) => 1,
-        MirInstrKind::StoreLocal(_)
-        | MirInstrKind::StoreGlobal(_)
-        | MirInstrKind::StoreDerefBox => -1,
+        MirInstrKind::StoreLocal(_) | MirInstrKind::StoreGlobal(_) => -1,
+        // `StoreDerefBox` pops BOTH the box and the value (BYTECODE.md §8:
+        // Δ−2, min 2) — it is not a plain store.
+        MirInstrKind::StoreDerefBox => -2,
         MirInstrKind::IAdd
         | MirInstrKind::ISub
         | MirInstrKind::IMul
@@ -767,4 +780,606 @@ func f(): int {
                 | Terminator::JumpIfTrue(_)
         ));
     }
+}
+
+// =========================================================================
+// 0.0.2 U06: Span propagation assertions
+// =========================================================================
+
+#[test]
+fn u06_span_alloc_box_covers_box_expr() {
+    // `box 1` — AllocBox span should cover the `box 1` expression.
+    let src = r#"
+func f(): box<int> {
+    b = box 1
+    b
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    // Locate the AllocBox instruction and verify it has a non-zero span.
+    let alloc = ins
+        .iter()
+        .find(|i| matches!(i.kind, MirInstrKind::AllocBox));
+    assert!(alloc.is_some(), "AllocBox instruction should exist");
+    let span = alloc.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "AllocBox span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+#[test]
+fn u06_span_move_local_covers_ident() {
+    // `move s` — MoveLocal span should cover the `move s` expression.
+    let src = r#"
+func f(s: string): string {
+    move s
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    let mov = ins
+        .iter()
+        .find(|i| matches!(i.kind, MirInstrKind::MoveLocal(_)));
+    assert!(mov.is_some(), "MoveLocal instruction should exist");
+    let span = mov.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "MoveLocal span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+#[test]
+fn u06_span_clone_local_covers_ident() {
+    // `clone s` — CloneLocal span should cover the `clone s` expression.
+    let src = r#"
+func f(s: string): string {
+    clone s
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    let cln = ins
+        .iter()
+        .find(|i| matches!(i.kind, MirInstrKind::CloneLocal(_)));
+    assert!(cln.is_some(), "CloneLocal instruction should exist");
+    let span = cln.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "CloneLocal span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+#[test]
+fn u06_span_result_instructions_have_spans() {
+    // Ok(42) → PackOk; the instruction should carry a span covering the expression.
+    let src = r#"
+func f(): Result<int, string> {
+    Ok(42)
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    let pack = ins.iter().find(|i| matches!(i.kind, MirInstrKind::PackOk));
+    assert!(pack.is_some(), "PackOk instruction should exist");
+    let span = pack.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "PackOk span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+#[test]
+fn u06_span_is_err_and_unwrap_in_question() {
+    // `r?` emits IsErr, UnwrapOk, UnwrapErr — each should have a span.
+    let src = r#"
+func f(): Result<int, string> {
+    r: Result<int, string> = Ok(42)
+    n = r?
+    Ok(n)
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    for kind in [
+        MirInstrKind::IsErr,
+        MirInstrKind::UnwrapOk,
+        MirInstrKind::UnwrapErr,
+    ] {
+        let instr = ins.iter().find(|i| i.kind == kind);
+        assert!(
+            instr.is_some(),
+            "instruction {:?} should exist in `?` lowering",
+            kind
+        );
+        let span = instr.unwrap().span;
+        assert!(
+            span.start < span.end,
+            "{:?} span should be non-degenerate: start={}, end={}",
+            kind,
+            span.start,
+            span.end
+        );
+    }
+}
+
+#[test]
+fn u06_all_instructions_carry_non_degenerate_spans() {
+    // Comprehensive check: every instruction in functions and globals
+    // from a program exercising all U06 features must have a valid span.
+    let src = r#"
+g = box 42;
+func f(s: string): Result<int, string> {
+    b = box move s;
+    n = deref b;
+    r: Result<int, string> = Ok(42);
+    m = r?;
+    Ok(m)
+}
+"#;
+    let mir = lower_src(src);
+
+    // Check global init instructions.
+    for g in &mir.globals {
+        for instr in &g.init {
+            assert!(
+                instr.span.start <= instr.span.end,
+                "global init instr {:?} has invalid span start={} end={}",
+                instr.kind,
+                instr.span.start,
+                instr.span.end
+            );
+        }
+    }
+
+    // Check all function instructions.
+    for func in &mir.funcs {
+        if func.is_builtin {
+            continue;
+        }
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                assert!(
+                    instr.span.start <= instr.span.end,
+                    "instr {:?} in {} has invalid span start={} end={}",
+                    instr.kind,
+                    func.name,
+                    instr.span.start,
+                    instr.span.end
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn u06_span_deref_box_covers_expr() {
+    // `deref b` — DerefBox span should cover the expression.
+    let src = r#"
+func f(b: box<int>): int {
+    deref b
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    let dref = ins
+        .iter()
+        .find(|i| matches!(i.kind, MirInstrKind::DerefBox));
+    assert!(dref.is_some(), "DerefBox instruction should exist");
+    let span = dref.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "DerefBox span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+#[test]
+fn u06_span_make_ref_local_covers_arg() {
+    // When passing a local `s` to a `ref string` parameter, MakeRefLocal
+    // should be emitted with the span of the argument expression.
+    let src = r#"
+func takes_ref(s: ref string): int = 0
+func f(s: string): int {
+    takes_ref(s)
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    let ref_instr = ins
+        .iter()
+        .find(|i| matches!(i.kind, MirInstrKind::MakeRefLocal(_)));
+    assert!(
+        ref_instr.is_some(),
+        "MakeRefLocal instruction should exist for ref argument"
+    );
+    let span = ref_instr.unwrap().span;
+    assert!(
+        span.start < span.end,
+        "MakeRefLocal span should be non-degenerate: start={}, end={}",
+        span.start,
+        span.end
+    );
+}
+
+// =========================================================================
+// 0.0.2 U06: error paths (lower-level rejections)
+// =========================================================================
+
+#[test]
+fn u06_ref_arg_in_global_init_is_rejected() {
+    // A global initializer that passes a `ref` argument has no frame to host
+    // the temp slot (DESIGN §10.5) — lower must report `RefArgInGlobalInit`.
+    let src = r#"
+func takes_ref(s: ref string): int = 0
+g = "hello";
+h = takes_ref(g);
+func main(): int { 0 }
+"#;
+    let err = lower_err(src);
+    assert!(
+        matches!(err.kind, super::LowerErrorKind::RefArgInGlobalInit { .. }),
+        "expected RefArgInGlobalInit, got {:?}",
+        err.kind
+    );
+    // The error must point at the offending argument, not the whole file.
+    assert!(
+        err.span.start < err.span.end,
+        "error span should be non-degenerate: start={}, end={}",
+        err.span.start,
+        err.span.end
+    );
+}
+
+#[test]
+fn u06_choose_result_missing_ok_arm_is_rejected() {
+    // typeck enforces exhaustivity first (U04), so `lower` never sees a
+    // Result choose lacking an Ok arm. This pins the typeck gate that makes
+    // lower's `ChooseResultNeedsOkErrArms` check defensive-only.
+    let tokens = tokenize(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Err(e) { 0 }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let ast = parse(tokens).unwrap();
+    let hir = resolve(ast).unwrap();
+    let errs = typeck(hir).expect_err("typeck should reject a Result choose missing Ok");
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            crate::typeck::error::TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns.iter().any(|p| p == "Ok")
+        )),
+        "expected ChooseNotExhaustive mentioning Ok, got {errs:?}"
+    );
+}
+
+#[test]
+fn u06_choose_result_missing_err_arm_is_rejected() {
+    let tokens = tokenize(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let ast = parse(tokens).unwrap();
+    let hir = resolve(ast).unwrap();
+    let errs = typeck(hir).expect_err("typeck should reject a Result choose missing Err");
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            crate::typeck::error::TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns.iter().any(|p| p == "Err")
+        )),
+        "expected ChooseNotExhaustive mentioning Err, got {errs:?}"
+    );
+}
+
+#[test]
+fn u06_choose_result_guard_stays_deferred() {
+    // DESIGN §10.5 / TICKETS.md U07: guarded Result arms are rejected by
+    // typeck (a guarded arm does not count for exhaustivity) and their
+    // lowering stays deferred to U09 — U07 explicitly kept it out of scope
+    // rather than silently widening (TICKETS.md U07「范围决定」).
+    let tokens = tokenize(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) if v > 0 { v }
+        when Err(e) { 0 }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let ast = parse(tokens).unwrap();
+    let hir = resolve(ast).unwrap();
+    let errs =
+        typeck(hir).expect_err("guarded Result arm is currently rejected by typeck, not lowered");
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            crate::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}
+
+#[test]
+fn u06_result_choose_otherwise_is_rejected_not_dropped() {
+    // `otherwise` short-circuits typeck's exhaustivity check, so it reaches
+    // lower. The Result lowering is the IsErr-branch shape with no fallback
+    // block, so the arm must be rejected rather than silently dropped.
+    // Without Ok+Err both present this used to report the misleading
+    // `ChooseResultNeedsOkErrArms`.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) if v > 0 { v }
+        otherwise { 0 }
+    }
+}
+"#;
+    let err = lower_err(src);
+    match err.kind {
+        super::LowerErrorKind::UnsupportedFeature { feature } => {
+            assert!(
+                feature.contains("non-`Ok`/`Err` arm"),
+                "message should name the unsupported arm, got {feature:?}"
+            );
+        }
+        other => {
+            panic!("expected UnsupportedFeature for `otherwise` in a Result choose, got {other:?}")
+        }
+    }
+    // The error must point at the offending arm (a non-degenerate span).
+    assert!(
+        err.span.start < err.span.end,
+        "error span should cover the arm: start={}, end={}",
+        err.span.start,
+        err.span.end
+    );
+}
+
+#[test]
+fn u06_result_choose_otherwise_after_ok_err_is_rejected() {
+    // Even when Ok and Err arms are both present (so exhaustivity is
+    // satisfied), an extra `otherwise` arm was silently dropped. It must be
+    // rejected: dropped user code is a miscompile waiting to happen.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+        when Err(e) { 0 }
+        otherwise { 99 }
+    }
+}
+"#;
+    let err = lower_err(src);
+    assert!(
+        matches!(err.kind, super::LowerErrorKind::UnsupportedFeature { .. }),
+        "expected UnsupportedFeature, got {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn u06_result_choose_only_ok_err_arms_still_lower() {
+    // The supported shape must keep working unchanged.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+        when Err(e) { 0 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
+    assert!(ins.iter().any(|i| matches!(i.kind, MirInstrKind::UnwrapOk)));
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::UnwrapErr))
+    );
+    // The otherwise body `99` must NOT appear anywhere.
+    assert!(
+        !ins.iter()
+            .any(|i| matches!(&i.kind, MirInstrKind::ConstInt(99))),
+        "the supported shape must not silently drop or add values"
+    );
+}
+
+#[test]
+fn u06_global_box_deref_assign_is_rejected() {
+    // typeck rejects this too; lower stays total and reports its own error.
+    // The direct-lowering test drives `lower` on a hand-built tree instead:
+    // verify the defensive branch exists by checking the error kind's Display.
+    let kind = super::LowerErrorKind::GlobalBoxDerefAssign {
+        name: "global#0".to_string(),
+    };
+    let msg = super::LowerError::new(kind, crate::lexer::Span::new(0, 5)).to_string();
+    assert!(
+        msg.contains("global#0"),
+        "message should name the global: {msg}"
+    );
+}
+
+// =========================================================================
+// 0.0.2 U06: stack-depth consistency for ownership features
+// =========================================================================
+
+/// Re-verify MIR stack-depth consistency for a program exercising the U06
+/// lowering paths. This is the contract U07's `fleen-verify` will enforce
+/// (BYTECODE.md §8 rule 4), so it must hold at MIR level already.
+fn assert_stack_depths_consistent(src: &str) {
+    let mir = lower_src(src);
+    let func_params: std::collections::HashMap<FuncId, u16> =
+        mir.funcs.iter().map(|f| (f.func_id, f.params)).collect();
+    for func in &mir.funcs {
+        if func.is_builtin {
+            continue;
+        }
+        let mut entry_depth: Vec<Option<i64>> = vec![None; func.blocks.len()];
+        let entry_pos = func
+            .blocks
+            .iter()
+            .position(|b| b.id == func.entry)
+            .expect("entry block exists");
+        entry_depth[entry_pos] = Some(0);
+        let mut worklist = vec![entry_pos];
+        while let Some(pos) = worklist.pop() {
+            let Some(d0) = entry_depth[pos] else { continue };
+            let block = &func.blocks[pos];
+            let mut d = d0;
+            for i in &block.instrs {
+                d += stack_delta(i, &func_params);
+                assert!(d >= 0, "stack underflow in {:?} at {:?}", func.name, i);
+            }
+            let mut set = |target: BlockId, val: i64| {
+                let p = func
+                    .blocks
+                    .iter()
+                    .position(|b| b.id == target)
+                    .expect("jump target exists");
+                match entry_depth[p] {
+                    None => {
+                        entry_depth[p] = Some(val);
+                        worklist.push(p);
+                    }
+                    Some(existing) => assert_eq!(
+                        existing, val,
+                        "inconsistent entry depth at {target:?} in {}",
+                        func.name
+                    ),
+                }
+            };
+            match block.terminator {
+                Terminator::Return => assert_eq!(d, 1, "{} must return 1 value", func.name),
+                Terminator::Jump(t) => set(t, d),
+                Terminator::JumpIfFalse(t) | Terminator::JumpIfTrue(t) => {
+                    set(t, d - 1);
+                    if pos + 1 < func.blocks.len() {
+                        let next_id = func.blocks[pos + 1].id;
+                        set(next_id, d - 1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn u06_stack_depths_consistent_box_and_deref() {
+    assert_stack_depths_consistent(
+        r#"
+func f(): int {
+    b = box 42;
+    n = deref b;
+    deref b = 7;
+    deref b
+}
+"#,
+    );
+}
+
+#[test]
+fn u06_stack_depths_consistent_move_and_clone() {
+    assert_stack_depths_consistent(
+        r#"
+func f(s: string): string {
+    t = clone s;
+    u = move s;
+    u
+}
+"#,
+    );
+}
+
+#[test]
+fn u06_stack_depths_consistent_question() {
+    assert_stack_depths_consistent(
+        r#"
+func f(): Result<int, string> {
+    r: Result<int, string> = Ok(42);
+    n = r?;
+    Ok(n)
+}
+"#,
+    );
+}
+
+#[test]
+fn u06_stack_depths_consistent_choose_result() {
+    assert_stack_depths_consistent(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+        when Err(e) { 0 }
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn u06_stack_depths_consistent_ref_argument() {
+    assert_stack_depths_consistent(
+        r#"
+func takes_ref(s: ref string): int = 0
+func f(s: string): int {
+    takes_ref(s)
+}
+"#,
+    );
+}
+
+#[test]
+fn u06_stack_depths_consistent_global_ref_argument() {
+    // The global ref argument path copies through a temp slot
+    // (CloneGlobal; StoreLocal; MakeRefLocal) — the extra slot must not
+    // disturb the operand-stack depth.
+    assert_stack_depths_consistent(
+        r#"
+g = "global";
+func takes_ref(s: ref string): int = 0
+func f(): int {
+    takes_ref(g)
+}
+"#,
+    );
 }

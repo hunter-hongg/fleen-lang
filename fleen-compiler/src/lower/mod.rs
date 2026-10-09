@@ -417,6 +417,17 @@ fn lower_global_init(
     Ok(())
 }
 
+/// Source span of a `choose` arm: the pattern's span when it has one,
+/// otherwise the arm body's (only `TypedPatternHir::Error` carries none,
+/// and that only appears in error-recovery trees).
+fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
+    match &arm.pattern {
+        TypedPatternHir::Literal(lit) => lit.span(),
+        TypedPatternHir::Ident { span, .. } | TypedPatternHir::ResultCtor { span, .. } => *span,
+        TypedPatternHir::Error => arm.body.span,
+    }
+}
+
 /// Per-function lowering context.
 struct FnBodyCx<'a> {
     lcx: &'a mut LowerCtx,
@@ -566,10 +577,10 @@ impl<'a> FnBodyCx<'a> {
                                     ));
                                 }
                                 Access::Move => {
-                                    // Defensive: typeck rejects MoveOutOfGlobal.
+                                    // Defensive: typeck rejects moving owned globals.
                                     return Err(LowerError::new(
                                         LowerErrorKind::UnsupportedFeature {
-                                            feature: "move of global (typeck should reject)",
+                                            feature: "move out of owned global",
                                         },
                                         *span,
                                     ));
@@ -781,6 +792,16 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Deref(inner, span) => {
                 self.lower_expr_into(fb, inner)?;
                 fb.emit(MirInstr::new(MirInstrKind::DerefBox, *span));
+                // `DerefBox` is `b → b v` (BYTECODE.md §5.9): the box stays on
+                // the stack and the pointee copy is pushed on top, so a bare
+                // read leaves TWO values where an expression must leave one.
+                // Park the copy in a temp slot, drop the box, then reload the
+                // copy. This keeps `DerefBox`'s frozen stack effect (Δ+1) and
+                // still yields exactly one value.
+                let tmp = self.fresh_temp();
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(tmp), *span));
+                fb.emit(MirInstr::new(MirInstrKind::Pop, *span));
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(tmp), *span));
             }
             // 0.0.2 U06: deref assignment.
             TypedExprHir::AssignDeref {
@@ -1118,13 +1139,30 @@ impl<'a> FnBodyCx<'a> {
     /// Lower a `choose` on a Result scrutinee (0.0.2 U06).
     ///
     /// Layout follows BYTECODE.md §6.8.
-    /// Only `when Ok(..)` and `when Err(..)` arms are allowed (no wildcard).
-    /// Guards are deferred to U07/U09 (full semantics require payload preservation).
+    /// Only `when Ok(..)` and `when Err(..)` arms are supported: the lowering is
+    /// the `IsErr`-then-branch shape with no fallback block, so `otherwise`
+    /// (parsed as a wildcard `Ident` pattern) or any literal pattern cannot be
+    /// represented and is rejected up front rather than silently dropped.
+    /// Guards on Ok/Err arms are deferred to U07/U09.
     fn lower_choose_result(
         &mut self,
         fb: &mut FnBuilder,
         e: &TypedExprChooseHir,
     ) -> Result<(), LowerError> {
+        // Reject arms the branch shape cannot express. typeck lets `otherwise`
+        // through (it short-circuits the exhaustivity check), so without this
+        // guard the arm's body would be dropped on the floor.
+        for arm in &e.arms {
+            if !matches!(&arm.pattern, TypedPatternHir::ResultCtor { .. }) {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "non-`Ok`/`Err` arm in a Result `choose` (deferred to U07)",
+                    },
+                    choose_arm_span(arm),
+                ));
+            }
+        }
+
         self.lower_expr_into(fb, &e.scrutinee)?;
         // Dup/DupDeep based on scrutinee type (owned → DupDeep).
         let dup_kind = if e.scrutinee.ty().is_owned() {
