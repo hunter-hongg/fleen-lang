@@ -1,0 +1,4 @@
+func go() {
+    b = box 42;
+    c = move deref b;
+}

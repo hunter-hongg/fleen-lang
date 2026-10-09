@@ -52,7 +52,8 @@ pub struct LowerError {
 /// Kinds of lowering errors.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LowerErrorKind {
-    /// A feature that the parser/typeck accept but 0.0.1 cannot lower.
+    /// A feature that the parser/typeck accept but the current lower stage
+    /// cannot lower yet (e.g. pending U06 bytecode support).
     UnsupportedFeature { feature: &'static str },
     /// A global initializer with control flow (if/while/choose/block).
     ComplexGlobalInit,
@@ -74,7 +75,7 @@ impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             LowerErrorKind::UnsupportedFeature { feature } => {
-                write!(f, "unsupported feature in 0.0.1: {feature}")
+                write!(f, "unsupported feature: {feature}")
             }
             LowerErrorKind::ComplexGlobalInit => {
                 write!(f, "global initializer must be a simple expression")
@@ -657,6 +658,51 @@ impl<'a> FnBodyCx<'a> {
                 self.lower_expr_into(fb, inner)?;
                 fb.emit(MirInstr::ToStr);
             }
+            // 0.0.2 U04: typeck accepts `?` and Result constructors; their
+            // bytecode lowering (Result instruction group) lands with U06.
+            TypedExprHir::Question { .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "`?` operator lowering",
+                    },
+                    expr.span(),
+                ));
+            }
+            TypedExprHir::ResultCtor { .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "Ok/Err constructor lowering",
+                    },
+                    expr.span(),
+                ));
+            }
+            // 0.0.2 U05: typeck accepts the ownership forms; their bytecode
+            // lowering (AllocBox / DerefBox / StoreDerefBox instruction
+            // group) lands with U06.
+            TypedExprHir::Box(_, _) => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "`box` expression lowering",
+                    },
+                    expr.span(),
+                ));
+            }
+            TypedExprHir::Deref(_, _) => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "`deref` expression lowering",
+                    },
+                    expr.span(),
+                ));
+            }
+            TypedExprHir::AssignDeref { .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "`deref b = v` lowering",
+                    },
+                    expr.span(),
+                ));
+            }
             TypedExprHir::Index(..) => {
                 return Err(LowerError::new(
                     LowerErrorKind::UnsupportedFeature { feature: "index" },
@@ -793,6 +839,16 @@ impl<'a> FnBodyCx<'a> {
                             body_jumps.push(fb.jump_later());
                         }
                     }
+                }
+                // 0.0.2 U04: typeck accepts Ok/Err patterns; their lowering
+                // (Result match instructions) lands with U06.
+                TypedPatternHir::ResultCtor { span, .. } => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "Ok/Err pattern lowering",
+                        },
+                        *span,
+                    ));
                 }
                 TypedPatternHir::Error => {}
             }

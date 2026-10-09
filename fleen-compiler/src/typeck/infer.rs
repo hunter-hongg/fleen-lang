@@ -7,14 +7,16 @@ use crate::lexer::Span;
 use crate::parser::ast::{self, *};
 use crate::resolver::hir::*;
 use crate::resolver::scope::{Binding, BindingKind, ScopeStack};
+use crate::typeck::builtins::{BuiltinParam, find_builtin};
 use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
-    Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir, TypedDeclHir, TypedExprChooseHir,
-    TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir,
-    TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir, TypedVarBindingHir,
+    Access, Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir, TypedDeclHir,
+    TypedExprChooseHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir,
+    TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir,
+    TypedVarBindingHir,
 };
-use crate::typeck::unify::{as_func_type, unify, unify_arg, unify_assign};
-use std::collections::HashMap;
+use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
+use std::collections::{HashMap, HashSet};
 
 /// Convert `ast::Type` to `typed_hir::Type`.
 fn convert_type(ty: &ast::Type) -> Type {
@@ -47,8 +49,20 @@ pub struct TypeChecker {
     /// Counter for generating unique binding IDs.
     /// Function signatures collected in forward pass.
     func_signatures: HashMap<String, (Vec<Type>, Type)>,
+    /// Names of user-declared functions, used to distinguish shadowed
+    /// builtins (`print`, `Ok`, `Err`) from the real builtins.
+    user_func_names: HashSet<String>,
+    /// Declared return type of each function currently being checked
+    /// (innermost last); `None` = function has no return annotation.
+    /// Needed by `?`, whose legality depends on the enclosing function's
+    /// return type — information that the `expected` thread cannot carry.
+    fn_ret_stack: Vec<Option<Type>>,
     /// Binding ID to type mapping.
     binding_types: HashMap<BindingId, Type>,
+    /// Binding IDs of top-level (global) variables/consts. 0.0.2 U05: owned
+    /// globals are read as deep copies and may never be moved — ownership
+    /// checks key off this set.
+    global_ids: HashSet<BindingId>,
 }
 
 impl TypeChecker {
@@ -58,7 +72,10 @@ impl TypeChecker {
             scopes: ScopeStack::new(),
             errors: Vec::new(),
             func_signatures: HashMap::new(),
+            user_func_names: HashSet::new(),
+            fn_ret_stack: Vec::new(),
             binding_types: HashMap::new(),
+            global_ids: HashSet::new(),
         }
     }
 
@@ -68,10 +85,23 @@ impl TypeChecker {
     }
 
     /// Register builtin functions.
+    ///
+    /// Seeds `func_signatures` so that a bare builtin identifier (e.g. `print`
+    /// passed as a value) has a function type. `Ok`/`Err` are not registered
+    /// here: their type depends on context, so calls are recognized by name in
+    /// `typeck_call` (unless shadowed by a user function, §4.3).
     fn register_builtins(&mut self) {
-        // print: (string) -> unit
-        let print_sig = (vec![Type::String], Type::Unit);
-        self.func_signatures.insert("print".to_string(), print_sig);
+        for sig in crate::typeck::builtins::BUILTINS {
+            // Variadic builtins get their element type as the single
+            // parameter for value-position lookup; call checking uses the
+            // table's real (variadic) shape.
+            let params: Vec<Type> = match sig.param {
+                BuiltinParam::Fixed(params) => params.to_vec(),
+                BuiltinParam::Variadic(elem) => elem.to_vec(),
+            };
+            self.func_signatures
+                .insert(sig.name.to_string(), (params, sig.ret.clone()));
+        }
     }
 
     /// Collect function signatures in a forward pass.
@@ -87,6 +117,7 @@ impl TypeChecker {
                     .unwrap_or(Type::Unit);
                 self.func_signatures
                     .insert(func.name.clone(), (param_types, ret_type));
+                self.user_func_names.insert(func.name.clone());
             }
         }
     }
@@ -95,6 +126,7 @@ impl TypeChecker {
     pub fn typeck(mut self, hir: Hir) -> Result<TypedHir, Vec<TypeckError>> {
         self.register_builtins();
         self.collect_func_signatures(&hir);
+        self.collect_global_ids(&hir);
 
         let mut typed_items = Vec::new();
         for item in hir.items {
@@ -113,12 +145,29 @@ impl TypeChecker {
         })
     }
 
+    /// 0.0.2 U05: record the binding IDs of top-level variables and consts.
+    /// Owned globals are read as deep copies and may never be moved; the
+    /// ownership checks key off this set.
+    fn collect_global_ids(&mut self, hir: &Hir) {
+        for item in &hir.items {
+            match item {
+                HirItem::Decl(DeclHir::Var(v)) => {
+                    self.global_ids.insert(v.binding_id);
+                }
+                HirItem::Decl(DeclHir::Const(c)) => {
+                    self.global_ids.insert(c.binding_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Type check a top-level item.
     fn typeck_item(&mut self, item: HirItem) -> Result<TypedHirItem, ()> {
         match item {
             HirItem::Import(import) => Ok(TypedHirItem::Import(import)),
             HirItem::Decl(decl) => Ok(TypedHirItem::Decl(self.typeck_decl(decl)?)),
-            HirItem::Expr(expr) => Ok(TypedHirItem::Expr(self.typeck_expr(expr)?)),
+            HirItem::Expr(expr) => Ok(TypedHirItem::Expr(self.typeck_expr(expr, None)?)),
         }
     }
 
@@ -167,37 +216,16 @@ impl TypeChecker {
             });
         }
 
-        // Type check body
-        let typed_body = match &func.body {
-            FuncBodyHir::SingleExpr(expr) => {
-                let typed_expr = self.typeck_expr((**expr).clone())?;
-                // Check return type: an omitted annotation means `unit`.
-                let expected_ret = func
-                    .ret_type
-                    .as_ref()
-                    .map(convert_type)
-                    .unwrap_or(Type::Unit);
-                if let Err(e) = unify(&expected_ret, &typed_expr.ty(), typed_expr.span()) {
-                    self.add_error(e.kind, e.span);
-                    return Err(());
-                }
-                TypedFuncBodyHir::SingleExpr(Box::new(typed_expr))
-            }
-            FuncBodyHir::Block(block) => {
-                let typed_block = self.typeck_block(block)?;
-                // Check return type: an omitted annotation means `unit`.
-                let expected_ret = func
-                    .ret_type
-                    .as_ref()
-                    .map(convert_type)
-                    .unwrap_or(Type::Unit);
-                if let Err(e) = unify(&expected_ret, &typed_block.ty, typed_block.span) {
-                    self.add_error(e.kind, e.span);
-                    return Err(());
-                }
-                TypedFuncBodyHir::Block(typed_block)
-            }
-        };
+        // Return type: `None` means the function has no annotation (unit).
+        let ret_ty: Option<Type> = func.ret_type.as_ref().map(convert_type);
+
+        // The declared return type drives both the `expected` thread into the
+        // body (Ok/Err constructors) and the `?` legality check, which needs
+        // it even in positions `expected` cannot reach.
+        self.fn_ret_stack.push(ret_ty.clone());
+        let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
+        self.fn_ret_stack.pop();
+        let typed_body = body_result?;
 
         // Exit function scope
         self.scopes.exit_scope();
@@ -212,12 +240,44 @@ impl TypeChecker {
         })
     }
 
+    /// Type check a function body against the declared return type.
+    fn typeck_func_body(
+        &mut self,
+        body: &FuncBodyHir,
+        ret_ty: Option<&Type>,
+    ) -> Result<TypedFuncBodyHir, ()> {
+        match body {
+            FuncBodyHir::SingleExpr(expr) => {
+                let typed_expr = self.typeck_expr((**expr).clone(), ret_ty)?;
+                // Check return type: an omitted annotation means `unit`.
+                let expected_ret = ret_ty.cloned().unwrap_or(Type::Unit);
+                // `ref T` is a distinct type (PLAN §3.3.3): a borrow does not
+                // flow out as `T` — the value must be `clone`d explicitly.
+                if let Err(e) = unify(&expected_ret, &typed_expr.ty(), typed_expr.span()) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
+                }
+                Ok(TypedFuncBodyHir::SingleExpr(Box::new(typed_expr)))
+            }
+            FuncBodyHir::Block(block) => {
+                let typed_block = self.typeck_block(block, ret_ty)?;
+                // Check return type: an omitted annotation means `unit`.
+                let expected_ret = ret_ty.cloned().unwrap_or(Type::Unit);
+                if let Err(e) = unify(&expected_ret, &typed_block.ty, typed_block.span) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
+                }
+                Ok(TypedFuncBodyHir::Block(typed_block))
+            }
+        }
+    }
+
     /// Type check a variable binding.
     fn typeck_var_binding(&mut self, var: VarBindingHir) -> Result<TypedVarBindingHir, ()> {
-        let typed_init = self.typeck_expr(*var.init)?;
-
-        // Check type annotation if present
         let typed_ty = var.ty.as_ref().map(convert_type);
+        // Annotated bindings pass their type down so `Ok`/`Err` in the
+        // initializer can infer (D6, path 2 of the expected thread).
+        let typed_init = self.typeck_expr(*var.init, typed_ty.as_ref())?;
         if let Some(ref annotated_ty) = typed_ty
             && let Err(e) = unify(annotated_ty, &typed_init.ty(), typed_init.span())
         {
@@ -227,7 +287,9 @@ impl TypeChecker {
 
         // Check if this is an assignment (binding_id already in binding_types)
         if let Some(existing_type) = self.binding_types.get(&var.binding_id) {
-            // This is an assignment, not a new binding
+            // This is an assignment, not a new binding. `ref T` is a
+            // distinct type (PLAN §3.3.3): a borrow does not assign to a
+            // value binding — write `x = clone s` instead.
             if let Err(e) = unify_assign(existing_type, &typed_init.ty(), typed_init.span()) {
                 self.add_error(e.kind, e.span);
                 return Err(());
@@ -262,6 +324,11 @@ impl TypeChecker {
         let var_type = typed_ty.clone().unwrap_or_else(|| typed_init.ty());
         self.binding_types.insert(binding_id, var_type);
 
+        // 0.0.2 U05: a bare owned local on a new binding's RHS must
+        // transfer explicitly — `y = move x` / `y = clone x` (PLAN §3.1.3
+        // rule 2). Fresh values (literals, call results, ...) are fine.
+        self.reject_bare_owned_arg(&typed_init, typed_init.span())?;
+
         Ok(TypedVarBindingHir {
             name: var.name,
             ty: typed_ty,
@@ -274,10 +341,9 @@ impl TypeChecker {
 
     /// Type check a const declaration.
     fn typeck_const_decl(&mut self, c: ConstDeclHir) -> Result<TypedConstDeclHir, ()> {
-        let typed_init = self.typeck_expr(*c.init)?;
-
-        // Check type annotation if present
         let typed_ty = c.ty.as_ref().map(convert_type);
+        // Same expected thread as `typeck_var_binding` (D6, path 2).
+        let typed_init = self.typeck_expr(*c.init, typed_ty.as_ref())?;
         if let Some(ref annotated_ty) = typed_ty
             && let Err(e) = unify(annotated_ty, &typed_init.ty(), typed_init.span())
         {
@@ -317,7 +383,15 @@ impl TypeChecker {
     }
 
     /// Type check a block.
-    fn typeck_block(&mut self, block: &BlockHir) -> Result<TypedBlockHir, ()> {
+    ///
+    /// `expected` is the context type for the block's tail expression only
+    /// (function return type or binding annotation); statements never
+    /// inherit it.
+    fn typeck_block(
+        &mut self,
+        block: &BlockHir,
+        expected: Option<&Type>,
+    ) -> Result<TypedBlockHir, ()> {
         self.scopes.enter_block_scope();
 
         let mut typed_stmts = Vec::new();
@@ -329,7 +403,7 @@ impl TypeChecker {
         }
 
         let typed_tail = match &block.tail_expr {
-            Some(expr) => Some(Box::new(self.typeck_expr((**expr).clone())?)),
+            Some(expr) => Some(Box::new(self.typeck_expr((**expr).clone(), expected)?)),
             None => None,
         };
 
@@ -355,7 +429,18 @@ impl TypeChecker {
         match stmt {
             StmtHir::Decl(decl) => Ok(TypedStmtHir::Decl(self.typeck_decl(decl.clone())?)),
             StmtHir::Expr(expr, has_semi) => {
-                let typed_expr = self.typeck_expr((**expr).clone())?;
+                let typed_expr = self.typeck_expr((**expr).clone(), None)?;
+                // A statement's value is discarded; a `Result` may not be
+                // silently dropped (0.0.2's only must-handle rule).
+                if let Type::Result(_, _) = typed_expr.ty() {
+                    self.add_error(
+                        TypeckErrorKind::UnhandledResult {
+                            ty: typed_expr.ty(),
+                        },
+                        typed_expr.span(),
+                    );
+                    return Err(());
+                }
                 Ok(TypedStmtHir::Expr(Box::new(typed_expr), *has_semi))
             }
             StmtHir::Error => Ok(TypedStmtHir::Error),
@@ -363,7 +448,12 @@ impl TypeChecker {
     }
 
     /// Type check an expression.
-    fn typeck_expr(&mut self, expr: ExprHir) -> Result<TypedExprHir, ()> {
+    ///
+    /// `expected` is a *hint*, not a constraint: it flows only into value
+    /// positions where a `Result` constructor can infer from it (function
+    /// bodies / branch tails / block tails, annotated binding initializers).
+    /// It never replaces the "branches must agree" and operand checks.
+    fn typeck_expr(&mut self, expr: ExprHir, expected: Option<&Type>) -> Result<TypedExprHir, ()> {
         match expr {
             ExprHir::Int(n, span) => Ok(TypedExprHir::Int(n, span)),
             ExprHir::Float(f, span) => Ok(TypedExprHir::Float(f, span)),
@@ -377,10 +467,14 @@ impl TypeChecker {
                 span,
             } => {
                 let ty = self.lookup_type(&name, span)?;
+                // `Access::Copy` is the default; the ownership pass (U05)
+                // upgrades bare owned reads to `Clone` and implicit
+                // tail-position transfers to `Move`.
                 Ok(TypedExprHir::Ident {
                     name,
                     binding_id,
                     ty,
+                    access: Access::Copy,
                     hir_id,
                     span,
                 })
@@ -393,13 +487,17 @@ impl TypeChecker {
                 hir_id,
                 span,
             } => {
-                let typed_rhs = self.typeck_expr(*rhs)?;
+                let typed_rhs = self.typeck_expr(*rhs, None)?;
                 let var_type = self.lookup_type(&name, span)?;
 
                 if let Err(e) = unify_assign(&var_type, &typed_rhs.ty(), typed_rhs.span()) {
                     self.add_error(e.kind, e.span);
                     return Err(());
                 }
+
+                // 0.0.2 U05: a bare owned local value in binding/assignment
+                // RHS position must transfer ownership explicitly.
+                self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
 
                 Ok(TypedExprHir::Assign {
                     name,
@@ -411,9 +509,9 @@ impl TypeChecker {
                 })
             }
 
-            ExprHir::If(if_expr) => self.typeck_if_expr(if_expr),
+            ExprHir::If(if_expr) => self.typeck_if_expr(if_expr, expected),
             ExprHir::While(while_expr) => self.typeck_while_expr(while_expr),
-            ExprHir::Choose(choose_expr) => self.typeck_choose_expr(choose_expr),
+            ExprHir::Choose(choose_expr) => self.typeck_choose_expr(choose_expr, expected),
 
             ExprHir::Or(lhs, rhs) => self.typeck_binary_op(*lhs, *rhs, "or", Type::Bool),
             ExprHir::And(lhs, rhs) => self.typeck_binary_op(*lhs, *rhs, "and", Type::Bool),
@@ -430,7 +528,7 @@ impl TypeChecker {
             ExprHir::Mod(lhs, rhs) => self.typeck_arith_op(*lhs, *rhs, "%"),
 
             ExprHir::Not(expr) => {
-                let typed_expr = self.typeck_expr(*expr)?;
+                let typed_expr = self.typeck_expr(*expr, None)?;
                 if !matches!(typed_expr.ty(), Type::Bool) {
                     self.add_error(
                         TypeckErrorKind::InvalidOperand {
@@ -445,7 +543,7 @@ impl TypeChecker {
             }
 
             ExprHir::Neg(expr) => {
-                let typed_expr = self.typeck_expr(*expr)?;
+                let typed_expr = self.typeck_expr(*expr, None)?;
                 match typed_expr.ty() {
                     Type::Int | Type::Float => Ok(TypedExprHir::Neg(Box::new(typed_expr))),
                     _ => {
@@ -461,32 +559,44 @@ impl TypeChecker {
                 }
             }
 
-            ExprHir::Call(func, args) => self.typeck_call(*func, args),
+            ExprHir::Call(func, args) => self.typeck_call(*func, args, expected),
             ExprHir::Index(arr, idx) => self.typeck_index(*arr, *idx),
-            // 0.0.2 U02: these forms parse and resolve; their semantics land
-            // with U04 (Result / `?`) and U05 (ownership). Reject explicitly
-            // so nothing reaches lower before those tickets implement them.
-            ExprHir::Move(_, span) => self.reject_unsupported("`move` expression", span),
-            ExprHir::Clone(_, span) => self.reject_unsupported("`clone` expression", span),
-            ExprHir::Box(_, span) => self.reject_unsupported("`box` expression", span),
-            ExprHir::Deref(_, span) => self.reject_unsupported("`deref` expression", span),
+            // 0.0.2 U05: ownership expressions — validated here; the
+            // flow-sensitive move analysis runs afterwards in
+            // `ownership.rs` over the produced TypedHir.
+            ExprHir::Move(inner, span) => self.typeck_move(*inner, span),
+            ExprHir::Clone(inner, span) => self.typeck_clone(*inner, span),
+            ExprHir::Box(inner, span) => self.typeck_box(*inner, span),
+            ExprHir::Deref(inner, span) => self.typeck_deref(*inner, span),
             // 0.0.2 U13: `as` cast — whitelist: only scalar (int/float/bool) → string.
             ExprHir::Cast(inner, ty, span) => self.typeck_cast(*inner, ty, span),
-            ExprHir::Question(_, span) => self.reject_unsupported("`?` operator", span),
-            ExprHir::AssignDeref { name, span, .. } => {
-                self.reject_unsupported(&format!("`deref {name} = v` assignment"), span)
-            }
+            // 0.0.2 U04: `?` Result propagation.
+            ExprHir::Question(operand, span) => self.typeck_question(*operand, span),
+            ExprHir::AssignDeref {
+                name,
+                binding_id,
+                rhs,
+                hir_id,
+                span,
+            } => self.typeck_assign_deref(name, binding_id, *rhs, hir_id, span),
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             ExprHir::Block(block) => {
-                let typed_block = self.typeck_block(&block)?;
+                let typed_block = self.typeck_block(&block, expected)?;
                 Ok(TypedExprHir::Block(typed_block))
             }
         }
     }
 
     /// Type check an if expression.
-    fn typeck_if_expr(&mut self, if_expr: ExprIfHir) -> Result<TypedExprHir, ()> {
-        let typed_cond = self.typeck_expr(*if_expr.condition)?;
+    ///
+    /// `expected` flows into every branch's tail so `Ok`/`Err` constructors
+    /// can infer there (function body context); the condition never sees it.
+    fn typeck_if_expr(
+        &mut self,
+        if_expr: ExprIfHir,
+        expected: Option<&Type>,
+    ) -> Result<TypedExprHir, ()> {
+        let typed_cond = self.typeck_expr(*if_expr.condition, None)?;
 
         // Condition must be Bool
         if !matches!(typed_cond.ty(), Type::Bool) {
@@ -499,11 +609,11 @@ impl TypeChecker {
             return Err(());
         }
 
-        let typed_then = self.typeck_block(&if_expr.then_branch)?;
+        let typed_then = self.typeck_block(&if_expr.then_branch, expected)?;
 
         let mut typed_elifs = Vec::new();
         for (cond, block) in &if_expr.elif_branches {
-            let typed_cond = self.typeck_expr((**cond).clone())?;
+            let typed_cond = self.typeck_expr((**cond).clone(), None)?;
             if !matches!(typed_cond.ty(), Type::Bool) {
                 self.add_error(
                     TypeckErrorKind::ConditionNotBool {
@@ -513,12 +623,12 @@ impl TypeChecker {
                 );
                 return Err(());
             }
-            let typed_block = self.typeck_block(block)?;
+            let typed_block = self.typeck_block(block, expected)?;
             typed_elifs.push((Box::new(typed_cond), typed_block));
         }
 
         let typed_else = match &if_expr.else_branch {
-            Some(block) => Some(self.typeck_block(block)?),
+            Some(block) => Some(self.typeck_block(block, expected)?),
             None => None,
         };
 
@@ -550,7 +660,7 @@ impl TypeChecker {
 
     /// Type check a while expression.
     fn typeck_while_expr(&mut self, while_expr: ExprWhileHir) -> Result<TypedExprHir, ()> {
-        let typed_cond = self.typeck_expr(*while_expr.condition)?;
+        let typed_cond = self.typeck_expr(*while_expr.condition, None)?;
 
         // Condition must be Bool
         if !matches!(typed_cond.ty(), Type::Bool) {
@@ -563,7 +673,9 @@ impl TypeChecker {
             return Err(());
         }
 
-        let typed_body = self.typeck_block(&while_expr.body)?;
+        // The body's value is discarded (while evaluates to unit), so the
+        // body never inherits the outer expected type.
+        let typed_body = self.typeck_block(&while_expr.body, None)?;
 
         Ok(TypedExprHir::While(TypedExprWhileHir {
             condition: Box::new(typed_cond),
@@ -575,9 +687,20 @@ impl TypeChecker {
     }
 
     /// Type check a choose expression.
-    fn typeck_choose_expr(&mut self, choose_expr: ExprChooseHir) -> Result<TypedExprHir, ()> {
-        let typed_scrutinee = self.typeck_expr(*choose_expr.scrutinee)?;
+    ///
+    /// `expected` flows into each arm body's tail (function body context);
+    /// the scrutinee never sees it.
+    fn typeck_choose_expr(
+        &mut self,
+        choose_expr: ExprChooseHir,
+        expected: Option<&Type>,
+    ) -> Result<TypedExprHir, ()> {
+        let typed_scrutinee = self.typeck_expr(*choose_expr.scrutinee, None)?;
         let scrutinee_type = typed_scrutinee.ty().clone();
+        // 0.0.2 U05 (D7): a `choose` scrutinee is a consuming position —
+        // a bare owned local must be written `move x` / `clone x` (the
+        // `Err(e)` / `Ok(v)` pattern bindings then receive the value).
+        self.reject_bare_owned_arg(&typed_scrutinee, typed_scrutinee.span())?;
 
         let mut typed_arms = Vec::new();
         for arm in &choose_expr.arms {
@@ -587,7 +710,7 @@ impl TypeChecker {
 
             let typed_guard = match &arm.guard {
                 Some(guard) => {
-                    let typed_guard = self.typeck_expr((**guard).clone())?;
+                    let typed_guard = self.typeck_expr((**guard).clone(), None)?;
                     if !matches!(typed_guard.ty(), Type::Bool) {
                         self.add_error(
                             TypeckErrorKind::ConditionNotBool {
@@ -602,7 +725,7 @@ impl TypeChecker {
                 None => None,
             };
 
-            let typed_body = self.typeck_block(&arm.body)?;
+            let typed_body = self.typeck_block(&arm.body, expected)?;
 
             self.scopes.exit_scope();
 
@@ -648,7 +771,7 @@ impl TypeChecker {
     ) -> Result<TypedPatternHir, ()> {
         match pattern {
             PatternHir::Literal(expr) => {
-                let typed_expr = self.typeck_expr((**expr).clone())?;
+                let typed_expr = self.typeck_expr((**expr).clone(), None)?;
                 if let Err(e) = unify(scrutinee_type, &typed_expr.ty(), typed_expr.span()) {
                     self.add_error(e.kind, e.span);
                     return Err(());
@@ -688,20 +811,58 @@ impl TypeChecker {
                     span: *span,
                 })
             }
-            PatternHir::ResultCtor { ctor, span, .. } => {
-                // 0.0.2 U02: the form parses and resolves; Result pattern
-                // semantics (payload binding types, exhaustiveness) land in U04.
+            PatternHir::ResultCtor {
+                ctor,
+                name,
+                binding_id: pat_binding_id,
+                hir_id: pat_hir_id,
+                span,
+            } => {
                 let ctor_name = match ctor {
                     ast::ResultCtor::Ok => "Ok",
                     ast::ResultCtor::Err => "Err",
                 };
-                self.add_error(
-                    TypeckErrorKind::UnsupportedFeature {
-                        feature: format!("`{ctor_name}` pattern"),
+                let payload_ty = match (ctor, as_result_type(scrutinee_type)) {
+                    (ast::ResultCtor::Ok, Some((t, _))) => t.clone(),
+                    (ast::ResultCtor::Err, Some((_, e))) => e.clone(),
+                    (_, None) => {
+                        // Ok/Err patterns only match a Result scrutinee.
+                        self.add_error(
+                            TypeckErrorKind::PatternTypeMismatch {
+                                pattern: ctor_name,
+                                found: scrutinee_type.clone(),
+                            },
+                            *span,
+                        );
+                        return Err(());
+                    }
+                };
+                // The payload binding registers like an identifier pattern
+                // (its type is T or E). The binding is a *move* (D7); the
+                // transfer is registered by the ownership checker (U05).
+                let new_binding_id = *pat_binding_id;
+                let new_hir_id = *pat_hir_id;
+                let _ = self.scopes.declare(
+                    name.clone(),
+                    Binding {
+                        id: new_binding_id,
+                        kind: BindingKind::Variable,
+                        mutable: true,
+                        builtin: false,
+                        span: *span,
+                        hir_id: new_hir_id,
                     },
-                    *span,
                 );
-                Err(())
+                self.binding_types
+                    .insert(new_binding_id, payload_ty.clone());
+                Ok(TypedPatternHir::ResultCtor {
+                    ctor: *ctor,
+                    name: name.clone(),
+                    binding_id: new_binding_id,
+                    ty: payload_ty,
+                    hir_id: new_hir_id,
+                    span: *span,
+                })
             }
             PatternHir::Error => Ok(TypedPatternHir::Error),
         }
@@ -760,9 +921,49 @@ impl TypeChecker {
             return Ok(());
         }
 
-        // All other scrutinee types (Int, Float, String, Result, ...) are
-        // not enumerable, and 0.0.1 has no `Ok`/`Err` pattern syntax,
-        // so `otherwise` is required.
+        // `Result<T, E>`: `Ok` + `Err` arms together are exhaustive; each
+        // alone is not (guarded arms never count, per the Bool case above).
+        if matches!(scrutinee_type, Type::Result(_, _)) {
+            let has_ok = count(&|arm| {
+                matches!(
+                    &arm.pattern,
+                    TypedPatternHir::ResultCtor {
+                        ctor: ast::ResultCtor::Ok,
+                        ..
+                    }
+                )
+            });
+            let has_err = count(&|arm| {
+                matches!(
+                    &arm.pattern,
+                    TypedPatternHir::ResultCtor {
+                        ctor: ast::ResultCtor::Err,
+                        ..
+                    }
+                )
+            });
+            if !has_ok || !has_err {
+                let mut missing = Vec::new();
+                if !has_ok {
+                    missing.push("Ok".to_string());
+                }
+                if !has_err {
+                    missing.push("Err".to_string());
+                }
+                self.add_error(
+                    TypeckErrorKind::ChooseNotExhaustive {
+                        scrutinee_type: scrutinee_type.clone(),
+                        missing_patterns: missing,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            return Ok(());
+        }
+
+        // All other scrutinee types (Int, Float, String, ...) are
+        // not enumerable, so `otherwise` is required.
         self.add_error(
             TypeckErrorKind::ChooseNotExhaustive {
                 scrutinee_type: scrutinee_type.clone(),
@@ -781,8 +982,8 @@ impl TypeChecker {
         op: &str,
         _result_type: Type,
     ) -> Result<TypedExprHir, ()> {
-        let typed_lhs = self.typeck_expr(lhs)?;
-        let typed_rhs = self.typeck_expr(rhs)?;
+        let typed_lhs = self.typeck_expr(lhs, None)?;
+        let typed_rhs = self.typeck_expr(rhs, None)?;
 
         // Both operands must have the same type
         if let Err(e) = unify(&typed_lhs.ty(), &typed_rhs.ty(), typed_rhs.span()) {
@@ -818,8 +1019,8 @@ impl TypeChecker {
         rhs: ExprHir,
         op: &str,
     ) -> Result<TypedExprHir, ()> {
-        let typed_lhs = self.typeck_expr(lhs)?;
-        let typed_rhs = self.typeck_expr(rhs)?;
+        let typed_lhs = self.typeck_expr(lhs, None)?;
+        let typed_rhs = self.typeck_expr(rhs, None)?;
 
         // Both operands must have the same type
         if let Err(e) = unify(&typed_lhs.ty(), &typed_rhs.ty(), typed_rhs.span()) {
@@ -864,28 +1065,43 @@ impl TypeChecker {
     }
 
     /// Type check a function call.
-    fn typeck_call(&mut self, func: ExprHir, args: Vec<ExprHir>) -> Result<TypedExprHir, ()> {
-        // HACK (0.0.1): `print` accepts any argument types and arity.
-        // The builtin is declared as `(string) -> unit`, but DESIGN.md's
-        // Fibonacci example needs `print(fib(x))` on ints. A proper
-        // variadic/polymorphic builtin (e.g. traits or `any` per-arg
-        // coercion) is required in 0.0.2; do not extend this special case.
+    ///
+    /// `expected` applies only when the call is a `Result` constructor
+    /// (`Ok(...)` / `Err(...)` inferring from context, D6); ordinary calls
+    /// take their type from the callee's signature.
+    fn typeck_call(
+        &mut self,
+        func: ExprHir,
+        args: Vec<ExprHir>,
+        expected: Option<&Type>,
+    ) -> Result<TypedExprHir, ()> {
+        // `Ok(...)` / `Err(...)`: builtin Result constructors (PLAN §3.4.1),
+        // recognized by name unless the user shadowed them with their own
+        // function or binding (§4.3 — same mechanism as `print`).
         if let ExprHir::Ident { ref name, .. } = func
-            && name == "print"
+            && (name == "Ok" || name == "Err")
+            && !self.user_func_names.contains(name)
+            && self.scopes.get(name).is_none()
         {
-            let mut typed_args = Vec::new();
-            for arg in args {
-                typed_args.push(self.typeck_expr(arg)?);
-            }
-            let typed_func = self.typeck_expr(func)?;
-            return Ok(TypedExprHir::Call(
-                Box::new(typed_func),
-                typed_args,
-                Type::Unit,
-            ));
+            let ctor = if name == "Ok" {
+                ast::ResultCtor::Ok
+            } else {
+                ast::ResultCtor::Err
+            };
+            return self.typeck_result_ctor(ctor, args, func.span(), expected);
         }
 
-        let typed_func = self.typeck_expr(func)?;
+        // Builtin functions, checked against the signature table (PLAN §6).
+        // Skipped when a user declaration shadows the builtin name.
+        if let ExprHir::Ident { ref name, .. } = func
+            && !self.user_func_names.contains(name)
+            && self.scopes.get(name).is_none()
+            && let Some(sig) = find_builtin(name)
+        {
+            return self.typeck_builtin_call(sig, func, args);
+        }
+
+        let typed_func = self.typeck_expr(func, None)?;
         let func_type = typed_func.ty().clone();
 
         // Check if it's a function type
@@ -915,10 +1131,32 @@ impl TypeChecker {
         // Check argument types
         let mut typed_args = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
-            let typed_arg = self.typeck_expr(arg)?;
-            if let Err(e) = unify_arg(&param_types[i], &typed_arg.ty(), i, typed_arg.span()) {
+            let typed_arg = self.typeck_expr(arg, None)?;
+            if let Err(e) =
+                Self::unify_arg_ref_aware(&param_types[i], &typed_arg.ty(), i, typed_arg.span())
+            {
                 self.add_error(e.kind, e.span);
                 return Err(());
+            }
+            // 0.0.2 U05: a `ref` parameter borrows the argument — it must not
+            // receive a `move`. An owned parameter *consumes* the argument —
+            // a bare owned local must be wrapped in `move` / `clone` there.
+            match &param_types[i] {
+                Type::Ref(_) => {
+                    if let TypedExprHir::Ident { name, access, .. } = &typed_arg
+                        && *access == Access::Move
+                    {
+                        self.add_error(
+                            TypeckErrorKind::BorrowArgWithMove { name: name.clone() },
+                            typed_arg.span(),
+                        );
+                        return Err(());
+                    }
+                }
+                param if param.is_owned() => {
+                    self.reject_bare_owned_arg(&typed_arg, typed_arg.span())?;
+                }
+                _ => {}
             }
             typed_args.push(typed_arg);
         }
@@ -930,22 +1168,438 @@ impl TypeChecker {
         ))
     }
 
-    /// Report a parsed-and-resolved but not-yet-supported construct.
-    /// U02 accepts the syntax; semantics arrive with U04/U05/U06.
-    fn reject_unsupported(&mut self, feature: &str, span: Span) -> Result<TypedExprHir, ()> {
-        self.add_error(
-            TypeckErrorKind::UnsupportedFeature {
-                feature: feature.to_string(),
-            },
+    /// Check a builtin call against its table signature (`builtins.rs`).
+    fn typeck_builtin_call(
+        &mut self,
+        sig: &crate::typeck::builtins::BuiltinSig,
+        func: ExprHir,
+        args: Vec<ExprHir>,
+    ) -> Result<TypedExprHir, ()> {
+        let typed_func = self.typeck_expr(func, None)?;
+
+        let allowed: &[Type] = match sig.param {
+            BuiltinParam::Fixed(params) => {
+                if args.len() != params.len() {
+                    self.add_error(
+                        TypeckErrorKind::ArityMismatch {
+                            expected: params.len(),
+                            found: args.len(),
+                        },
+                        typed_func.span(),
+                    );
+                    return Err(());
+                }
+                params
+            }
+            BuiltinParam::Variadic(elem) => elem,
+        };
+
+        let mut typed_args = Vec::new();
+        for (i, arg) in args.into_iter().enumerate() {
+            let typed_arg = self.typeck_expr(arg, None)?;
+            // Fixed: the expected type is the i-th parameter. Variadic: any
+            // of the element types — report the mismatch against the first
+            // (single-element sets cover the only builtin today).
+            let expected_ty = match sig.param {
+                BuiltinParam::Fixed(params) => params[i].clone(),
+                BuiltinParam::Variadic(elem) => elem.first().cloned().unwrap_or(Type::Unit),
+            };
+            // A `ref T` parameter value reads as `T` (PLAN §3.3).
+            let found_ty = typed_arg.ty();
+            let found_val = Self::effective_value(&found_ty);
+            if !allowed.contains(found_val) {
+                self.add_error(
+                    TypeckErrorKind::ArgTypeMismatch {
+                        index: i,
+                        expected: expected_ty,
+                        found: found_val.clone(),
+                    },
+                    typed_arg.span(),
+                );
+                return Err(());
+            }
+            typed_args.push(typed_arg);
+        }
+
+        Ok(TypedExprHir::Call(
+            Box::new(typed_func),
+            typed_args,
+            sig.ret.clone(),
+        ))
+    }
+
+    /// Check a `Ok(...)` / `Err(...)` constructor call (PLAN §3.4.1, D6).
+    ///
+    /// The constructor's type comes from context: the expected `Result<T, E>`
+    /// determines which payload slot (`T` for `Ok`, `E` for `Err`) the
+    /// argument must satisfy. Without a `Result` context the constructor
+    /// cannot be typed at all.
+    fn typeck_result_ctor(
+        &mut self,
+        ctor: ast::ResultCtor,
+        args: Vec<ExprHir>,
+        span: Span,
+        expected: Option<&Type>,
+    ) -> Result<TypedExprHir, ()> {
+        let ctor_name = if ctor == ast::ResultCtor::Ok {
+            "Ok"
+        } else {
+            "Err"
+        };
+
+        // Exactly one payload argument.
+        if args.len() != 1 {
+            self.add_error(
+                TypeckErrorKind::ArityMismatch {
+                    expected: 1,
+                    found: args.len(),
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        // Payload slot is selected by the constructor and the context type.
+        let Some(ctx) = expected.and_then(|ty| as_result_type(ty)) else {
+            // No context (or a non-Result context): the constructor cannot
+            // be typed — require an annotation (D6).
+            self.add_error(
+                TypeckErrorKind::CannotInferResultType { ctor: ctor_name },
+                span,
+            );
+            return Err(());
+        };
+        let payload_ty = if ctor == ast::ResultCtor::Ok {
+            ctx.0.clone()
+        } else {
+            ctx.1.clone()
+        };
+
+        let mut args = args;
+        let arg = args.swap_remove(0);
+        let arg_span = arg.span();
+        let typed_value = self.typeck_expr(arg, Some(&payload_ty))?;
+        if let Err(e) = unify_arg(&payload_ty, &typed_value.ty(), 0, arg_span) {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        // The payload is *moved into* the Result value (D7).
+        self.reject_bare_owned_arg(&typed_value, arg_span)?;
+
+        let full_ty = Type::Result(Box::new(ctx.0.clone()), Box::new(ctx.1.clone()));
+        Ok(TypedExprHir::ResultCtor {
+            ctor,
+            value: Box::new(typed_value),
+            ty: full_ty,
             span,
-        );
-        Err(())
+        })
+    }
+
+    /// Check a `expr?` Result propagation expression (PLAN §3.4.3, D6).
+    fn typeck_question(&mut self, operand: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let typed_operand = self.typeck_expr(operand, None)?;
+
+        // The operand itself must be a Result.
+        let operand_ty = typed_operand.ty();
+        let Some((t, e)) = as_result_type(&operand_ty) else {
+            self.add_error(
+                TypeckErrorKind::QuestionOnNonResult {
+                    found: typed_operand.ty(),
+                },
+                span,
+            );
+            return Err(());
+        };
+
+        // `?` may only appear where the enclosing function's declared return
+        // type is `Result<T2, E>` with the *same* error type (D6; 0.0.2 has
+        // no error-type conversion). Outside any function the check fails
+        // the same way — there is no return type to propagate to.
+        match self.fn_ret_stack.last().and_then(|rt| rt.as_ref()) {
+            Some(Type::Result(_, fn_e)) => {
+                if **fn_e != *e {
+                    self.add_error(
+                        TypeckErrorKind::QuestionTypeMismatch {
+                            expected: (**fn_e).clone(),
+                            found: e.clone(),
+                        },
+                        span,
+                    );
+                    return Err(());
+                }
+            }
+            _ => {
+                self.add_error(TypeckErrorKind::QuestionOutsideResultFn, span);
+                return Err(());
+            }
+        }
+
+        Ok(TypedExprHir::Question {
+            operand: Box::new(typed_operand),
+            ty: t.clone(),
+            span,
+        })
+    }
+
+    /// 0.0.2 U05 (PLAN §3.1.3 rule 2): a *bare* owned local value in a
+    /// consuming position (binding/assignment RHS, argument, `choose`
+    /// scrutinee, `box` inner, `Ok`/`Err` payload) must transfer ownership
+    /// explicitly via `move` / `clone`. Reports `OwnedArgRequiresMove`.
+    ///
+    /// A bare `ref T` parameter value is caught too: it borrows, so a
+    /// consuming position must copy it out (`clone s`).
+    ///
+    /// Passes silently for: Copy values, `move`/`clone` wrappers, owned
+    /// *globals* (reads are deep copies, D5), fresh values (literals, call
+    /// results, ...).
+    fn reject_bare_owned_arg(&mut self, expr: &TypedExprHir, span: Span) -> Result<(), ()> {
+        if let TypedExprHir::Ident {
+            name,
+            binding_id,
+            ty,
+            access,
+            ..
+        } = expr
+            && *access == Access::Copy
+            && (ty.is_owned() || matches!(ty, Type::Ref(_)))
+            && !self.global_ids.contains(binding_id)
+        {
+            self.add_error(
+                TypeckErrorKind::OwnedArgRequiresMove {
+                    name: name.clone(),
+                    ty: Self::effective_value(ty).clone(),
+                },
+                span,
+            );
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// 0.0.2 U05: type check `move <place>` (PLAN §3.1.2).
+    ///
+    /// The operand must be a local variable (or a `deref` place, which is
+    /// rejected by name): Copy types make `move` meaningless, owned globals
+    /// and `ref` parameters cannot be moved. `move x` folds into
+    /// `Ident { access: Move }` — the transfer itself is registered by the
+    /// flow-sensitive ownership pass.
+    fn typeck_move(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        match inner {
+            ExprHir::Ident {
+                name,
+                binding_id,
+                hir_id,
+                span: ident_span,
+            } => {
+                let ty = self.lookup_type(&name, ident_span)?;
+                if ty.is_copy() {
+                    self.add_error(
+                        TypeckErrorKind::MoveOfCopyType {
+                            name: name.clone(),
+                            ty: ty.clone(),
+                        },
+                        ident_span,
+                    );
+                    return Err(());
+                }
+                if self.global_ids.contains(&binding_id) {
+                    self.add_error(TypeckErrorKind::MoveOutOfGlobal { name }, ident_span);
+                    return Err(());
+                }
+                if matches!(ty, Type::Ref(_)) {
+                    self.add_error(TypeckErrorKind::MoveOfBorrowed { name }, ident_span);
+                    return Err(());
+                }
+                Ok(TypedExprHir::Ident {
+                    name,
+                    binding_id,
+                    ty,
+                    access: Access::Move,
+                    hir_id,
+                    span: ident_span,
+                })
+            }
+            ExprHir::Deref(_, _) => {
+                // The box keeps its unique ownership; the pointee can only
+                // be copied out (`clone deref b`).
+                self.add_error(TypeckErrorKind::MoveOutOfBox, span);
+                Err(())
+            }
+            _ => {
+                self.add_error(TypeckErrorKind::InvalidClonePlace, span);
+                Err(())
+            }
+        }
+    }
+
+    /// 0.0.2 U05: type check `clone <place>` (PLAN §3.1.2, §3.3.1).
+    ///
+    /// The operand is a local variable or a box pointee (`clone deref b`).
+    /// A `clone` never empties a slot: for owned values and `ref`
+    /// parameters the result carries `Access::Clone`. `clone s` of a
+    /// `ref T` parameter yields the *value type* `T` — an owned copy that
+    /// leaves the borrow (PLAN §3.3.1). Copy values are plain reads.
+    fn typeck_clone(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        match inner {
+            ExprHir::Ident {
+                name,
+                binding_id,
+                hir_id,
+                span: ident_span,
+            } => {
+                let ty = self.lookup_type(&name, ident_span)?;
+                // `ref T` clones to an owned `T` (the value leaves the
+                // borrow); every other type keeps its declared type.
+                let value_ty = match ty {
+                    Type::Ref(inner_ty) => *inner_ty,
+                    other => other,
+                };
+                let access = if value_ty.is_copy() {
+                    Access::Copy
+                } else {
+                    Access::Clone
+                };
+                Ok(TypedExprHir::Ident {
+                    name,
+                    binding_id,
+                    ty: value_ty,
+                    access,
+                    hir_id,
+                    span: ident_span,
+                })
+            }
+            ExprHir::Deref(box_expr, _) => self.typeck_deref(*box_expr, span),
+            _ => {
+                self.add_error(TypeckErrorKind::InvalidClonePlace, span);
+                Err(())
+            }
+        }
+    }
+
+    /// 0.0.2 U05: type check `box <expr>` (PLAN §3.2.1).
+    ///
+    /// The inner value is *consumed* into the fresh allocation, so a bare
+    /// owned local must be written `move` / `clone` there as well.
+    fn typeck_box(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let typed_inner = self.typeck_expr(inner, None)?;
+        self.reject_bare_owned_arg(&typed_inner, typed_inner.span())?;
+        Ok(TypedExprHir::Box(Box::new(typed_inner), span))
+    }
+
+    /// 0.0.2 U05: type check `deref <box>` (PLAN §3.2.1).
+    ///
+    /// Reads the pointee as a copy; the box itself stays in its slot. The
+    /// operand must be a variable holding a `box<T>` value.
+    fn typeck_deref(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let typed_inner = self.typeck_expr(inner, None)?;
+        let TypedExprHir::Ident { ty, .. } = &typed_inner else {
+            self.add_error(
+                TypeckErrorKind::InvalidOperand {
+                    op: "deref".to_string(),
+                    ty: typed_inner.ty().clone(),
+                },
+                span,
+            );
+            return Err(());
+        };
+        match ty {
+            Type::Box(_) => Ok(TypedExprHir::Deref(Box::new(typed_inner), span)),
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "deref".to_string(),
+                        ty: other.clone(),
+                    },
+                    typed_inner.span(),
+                );
+                Err(())
+            }
+        }
+    }
+
+    /// 0.0.2 U05: type check `deref <b> = <expr>` (PLAN §3.2.1).
+    ///
+    /// The target must be a *local* `box<T>` binding: through a global the
+    /// write would only reach a deep copy of the global, so it is rejected
+    /// as `DerefAssignOfGlobalBox` (0.0.2 limit, DESIGN §10.3 / U12).
+    /// The pointee is replaced — a bare owned RHS must transfer explicitly.
+    fn typeck_assign_deref(
+        &mut self,
+        name: String,
+        binding_id: BindingId,
+        rhs: ExprHir,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let target_ty = self.lookup_type(&name, span)?;
+        let pointee_ty = match target_ty {
+            Type::Box(pointee) => *pointee,
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "deref =".to_string(),
+                        ty: other,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+        };
+
+        if self.global_ids.contains(&binding_id) {
+            self.add_error(TypeckErrorKind::DerefAssignOfGlobalBox, span);
+            return Err(());
+        }
+
+        let typed_rhs = self.typeck_expr(rhs, None)?;
+        if let Err(e) = unify_assign(&pointee_ty, &typed_rhs.ty(), typed_rhs.span()) {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
+
+        Ok(TypedExprHir::AssignDeref {
+            name,
+            binding_id,
+            rhs: Box::new(typed_rhs),
+            ty: Type::Unit,
+            hir_id,
+            span,
+        })
+    }
+
+    /// 0.0.2 U05: argument unification that understands `ref` parameters —
+    /// a `ref T` parameter accepts a value of type `T` (a local variable
+    /// passed by borrow; lowering emits `MakeRefLocal`, U06).
+    fn unify_arg_ref_aware(
+        expected: &Type,
+        found: &Type,
+        index: usize,
+        span: Span,
+    ) -> Result<(), TypeckError> {
+        let found_value = Self::effective_value(found);
+        match expected {
+            Type::Ref(inner) if inner.as_ref() == found_value => Ok(()),
+            _ => unify_arg(expected, found_value, index, span),
+        }
+    }
+
+    /// 0.0.2 U05 (PLAN §3.3.1): the value type of a `ref T` place. A
+    /// borrow forwards as a `ref T` argument (handle flow, zero copy), and
+    /// read-only builtin arguments accept the borrowed value — but the
+    /// coercion is *not* applied to assignments, returns, or owned
+    /// parameters: `ref T ≠ T` is strict there (write `clone s`).
+    fn effective_value(ty: &Type) -> &Type {
+        match ty {
+            Type::Ref(inner) => inner,
+            other => other,
+        }
     }
 
     /// Type check an index expression.
     fn typeck_index(&mut self, arr: ExprHir, idx: ExprHir) -> Result<TypedExprHir, ()> {
-        let typed_arr = self.typeck_expr(arr)?;
-        let typed_idx = self.typeck_expr(idx)?;
+        let typed_arr = self.typeck_expr(arr, None)?;
+        let typed_idx = self.typeck_expr(idx, None)?;
 
         // Index must be Int
         if let Err(e) = unify(&Type::Int, &typed_idx.ty(), typed_idx.span()) {
@@ -979,7 +1633,7 @@ impl TypeChecker {
 
     /// Type check a field access.
     fn typeck_field(&mut self, obj: ExprHir, _field: String) -> Result<TypedExprHir, ()> {
-        let typed_obj = self.typeck_expr(obj)?;
+        let typed_obj = self.typeck_expr(obj, None)?;
 
         // Structs/fields are parsed but not supported in 0.0.1.
         self.add_error(
@@ -1001,7 +1655,7 @@ impl TypeChecker {
         target: ast::Type,
         span: Span,
     ) -> Result<TypedExprHir, ()> {
-        let typed_inner = self.typeck_expr(inner)?;
+        let typed_inner = self.typeck_expr(inner, None)?;
         let target_ty = convert_type(&target);
 
         // 0.0.2 whitelist: only int/float/bool → string.

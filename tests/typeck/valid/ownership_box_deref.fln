@@ -1,0 +1,10 @@
+func go() {
+    b = box 42;
+    n = deref b;
+    deref b = n + 1;
+    c = clone b;
+    s = box "heap";
+    w = clone deref s;
+    const frozen: int = deref c;
+    print(w);
+}

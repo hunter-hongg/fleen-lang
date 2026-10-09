@@ -1,0 +1,8 @@
+func f(s: ref string) {
+    print(s);
+}
+
+func go() {
+    a = "x";
+    f(move a);
+}

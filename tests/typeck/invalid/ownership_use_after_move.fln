@@ -1,0 +1,5 @@
+func go() {
+    s = "a";
+    t = move s;
+    u = move s;
+}

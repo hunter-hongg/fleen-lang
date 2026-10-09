@@ -1,0 +1,4 @@
+func go() {
+    x = "a";
+    x = move x;
+}

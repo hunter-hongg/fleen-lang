@@ -323,7 +323,7 @@ QuestionOnNonResult { found },
 QuestionTypeMismatch { expected, found },
 CannotInferResultType { ctor },          // ctor: Ok | Err
 UnhandledResult { ty },
-PatternTypeMismatch { expected, found },
+PatternTypeMismatch { pattern, found },
 ArgTypeMismatch { .. },                  // 复用既有（print 回正后重新可用）
 ```
 

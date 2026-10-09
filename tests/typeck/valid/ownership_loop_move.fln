@@ -1,0 +1,8 @@
+func drain() {
+    i = 0;
+    msg = "loop";
+    while i < 1 {
+        out = move msg;
+        i = i + 1;
+    };
+}

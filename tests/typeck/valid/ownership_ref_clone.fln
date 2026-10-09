@@ -1,0 +1,3 @@
+func copy_out(s: ref string): string {
+    clone s
+}

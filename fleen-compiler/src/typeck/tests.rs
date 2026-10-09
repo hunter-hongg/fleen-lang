@@ -411,12 +411,335 @@ fn check_builtin_print() {
     assert_eq!(only_expr_ty(&hir), Type::Unit);
 }
 
-// HACK: 0.0.1 放宽了 `print` 的类型检查（接受任意参数），见 infer.rs。
-// 0.0.2 恢复后此测试应回退为期望 ArgTypeMismatch。
+// 0.0.2 (F6): `print` has a real signature `(string...) -> unit` again —
+// strict string checking with variadic arity (PLAN §6).
+#[test]
+fn check_builtin_print_variadic_strings() {
+    compile_ok("print(\"a\", \"b\");");
+    compile_ok("print();");
+    compile_ok("print(42 as string);");
+}
+
 #[test]
 fn check_builtin_print_wrong_arg() {
-    let hir = compile_ok("print(1);");
-    assert_eq!(only_expr_ty(&hir), Type::Unit);
+    let errs = compile_err("print(1);");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_builtin_print_function_value_rejected() {
+    let errs = compile_err("func fib(n: int): int = n\nprint(fib);");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch, got {errs:?}"
+    );
+}
+
+// ========== Result: Ok/Err Constructors (0.0.2 U04, PLAN §3.4.1/D6) ==========
+
+#[test]
+fn check_result_ctor_in_annotated_binding() {
+    let hir = compile_ok("res: Result<int, string> = Ok(42);");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn check_result_ctor_payload_checked() {
+    let errs = compile_err("res: Result<int, string> = Ok(\"x\");");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_result_ctor_no_context_rejected() {
+    let errs = compile_err("Ok(1);");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::CannotInferResultType { .. })),
+        "expected CannotInferResultType, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_result_ctor_no_context_in_func_rejected() {
+    let errs = compile_err("func f(): int { Ok(1) }");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::CannotInferResultType { .. })),
+        "expected CannotInferResultType, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_result_ctor_arity() {
+    let errs = compile_err("res: Result<int, string> = Ok();");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArityMismatch { .. })),
+        "expected ArityMismatch, got {errs:?}"
+    );
+    let errs = compile_err("res: Result<int, string> = Ok(1, 2);");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArityMismatch { .. })),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_result_ctor_nested_expected_thread() {
+    // The payload itself is a Result in expected position: the inner `Ok(1)`
+    // must infer through the expected-type thread.
+    compile_ok("r: Result<Result<int, string>, string> = Ok(Ok(1));");
+}
+
+#[test]
+fn check_div_example_from_plan() {
+    // PLAN §3.4.1 example: Ok/Err in function body tails infer from the
+    // declared Result return type (expected thread, path 1).
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+"#;
+    compile_ok(source);
+}
+
+#[test]
+fn check_user_shadows_ok() {
+    // §4.3: a user function named `Ok` shadows the builtin constructor;
+    // the call is then checked as an ordinary call.
+    let source = "func Ok(x: int): int = x + 1\nOk(3);";
+    let hir = compile_ok(source);
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn check_local_binding_shadows_ok() {
+    // §4.3: a local binding named `Ok` also shadows the builtin
+    // constructor; the call is then an ordinary call of that binding.
+    let source = "Ok = 42;\nx = Ok;";
+    let hir = compile_ok(source);
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn check_param_shadows_ok() {
+    // §4.3: a parameter named `Ok` shadows the builtin constructor
+    // inside the function body.
+    let source = "func f(Ok: int): int = Ok + 1\nf(1);";
+    let hir = compile_ok(source);
+    assert_eq!(hir.items.len(), 2);
+}
+
+// ========== Result: `?` Propagation (0.0.2 U04, PLAN §3.4.3/D6) ==========
+
+#[test]
+fn check_question_chain_from_plan() {
+    // PLAN §3.4.3 ratio example, verbatim semantics.
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+func ratio(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;
+    r = div(q, 2)?;
+    Ok(r)
+}
+"#;
+    compile_ok(source);
+}
+
+#[test]
+fn check_question_on_non_result() {
+    let errs = compile_err("func f(): Result<int, string> = 1?");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::QuestionOnNonResult { .. })),
+        "expected QuestionOnNonResult, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_question_outside_result_fn() {
+    let errs =
+        compile_err("func g(): Result<int, string> { Err(\"x\") }\nfunc main(): int { g()?; 0 }");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::QuestionOutsideResultFn)),
+        "expected QuestionOutsideResultFn, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_question_error_type_mismatch() {
+    let errs = compile_err(
+        "func g(): Result<int, string> { Err(\"x\") }\nfunc f(): Result<int, int> { q = g()?; Ok(q) }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::QuestionTypeMismatch { .. })),
+        "expected QuestionTypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_question_in_main_with_result_ret() {
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+func main(): Result<int, string> {
+    q = div(10, 2)?;
+    Ok(q)
+}
+"#;
+    compile_ok(source);
+}
+
+// ========== Result: choose patterns (0.0.2 U04, PLAN §3.4.2/D7) ==========
+
+#[test]
+fn check_choose_result_pattern_exhaustive() {
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+res = choose div(10, 2) {
+    when Ok(v) { v }
+    when Err(e) {
+        print("error: ", e);
+        0 - 1
+    }
+};
+"#;
+    let hir = compile_ok(source);
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn check_choose_result_pattern_payload_typed() {
+    // `v` binds as the Ok payload (int): `v + 1` typechecks, `v and true` doesn't.
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+r = choose div(10, 2) { when Ok(v) { v + 1 } when Err(e) { 0 - 1 } };
+"#;
+    compile_ok(source);
+    let errs = compile_err(
+        "func div(a: int, b: int): Result<int, string> { if b == 0 { Err(\"x\") } else { Ok(a / b) } }\nr = choose div(10, 2) { when Ok(v) { v and true } when Err(e) { 0 - 1 } };",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::TypeMismatch { .. })),
+        "expected TypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_choose_result_pattern_not_exhaustive() {
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+r = choose div(10, 2) { when Ok(v) { v } };
+"#;
+    let errs = compile_err(source);
+    assert!(
+        err_kinds(&errs).iter().any(
+            |k| matches!(k, TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns.iter().any(|m| m == "Err"))
+        ),
+        "expected ChooseNotExhaustive missing `Err`, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_choose_result_guarded_arm_does_not_cover() {
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+r = choose div(10, 2) { when Ok(v) if v > 0 { v } when Err(e) { 0 - 1 } };
+"#;
+    let errs = compile_err(source);
+    assert!(
+        err_kinds(&errs).iter().any(
+            |k| matches!(k, TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns.iter().any(|m| m == "Ok"))
+        ),
+        "expected ChooseNotExhaustive missing `Ok`, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_choose_result_pattern_on_non_result_scrutinee() {
+    let errs = compile_err("choose 1 { when Ok(v) { 1 } otherwise { 0 } };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PatternTypeMismatch { .. })),
+        "expected PatternTypeMismatch, got {errs:?}"
+    );
+}
+
+// ========== Result: UnhandledResult (0.0.2 U04, PLAN §3.4.3) ==========
+
+#[test]
+fn check_unhandled_result_rejected() {
+    let errs = compile_err(
+        "func div(a: int, b: int): Result<int, string> { if b == 0 { Err(\"x\") } else { Ok(a / b) } }\nfunc main(): int { div(10, 2); 0 }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UnhandledResult { .. })),
+        "expected UnhandledResult, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_question_statement_is_handled() {
+    // `div(10, 2)?;` unwraps to int before the statement is discarded —
+    // no UnhandledResult.
+    let source = r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") }
+    else { Ok(a / b) }
+}
+func main(): Result<int, string> {
+    div(10, 2)?;
+    Ok(0)
+}
+"#;
+    compile_ok(source);
 }
 
 // ========== Variable Binding Tests ==========
@@ -604,4 +927,307 @@ fn type_is_func() {
     let func = Type::Func(vec![], Box::new(Type::Unit));
     assert!(func.is_func());
     assert!(!Type::Int.is_func());
+}
+
+// ========== 0.0.2 U05: type classification (is_copy / is_owned) ==========
+
+#[test]
+fn is_copy_exhaustive() {
+    assert!(Type::Int.is_copy());
+    assert!(Type::Float.is_copy());
+    assert!(Type::Bool.is_copy());
+    assert!(Type::Unit.is_copy());
+    assert!(Type::Func(vec![Type::Int], Box::new(Type::Unit)).is_copy());
+    assert!(Type::Result(Box::new(Type::Int), Box::new(Type::Bool)).is_copy());
+    // owned components
+    assert!(!Type::String.is_copy());
+    assert!(!Type::Box(Box::new(Type::Int)).is_copy());
+    assert!(!Type::Array(Box::new(Type::Int)).is_copy());
+    assert!(!Type::Ref(Box::new(Type::Int)).is_copy());
+    assert!(!Type::Unsupported("x".to_string()).is_copy());
+    assert!(!Type::Result(Box::new(Type::String), Box::new(Type::Int)).is_copy());
+}
+
+#[test]
+fn is_owned_exhaustive() {
+    assert!(Type::String.is_owned());
+    assert!(Type::Box(Box::new(Type::Int)).is_owned());
+    assert!(Type::Result(Box::new(Type::String), Box::new(Type::Int)).is_owned());
+    assert!(
+        Type::Result(
+            Box::new(Type::Int),
+            Box::new(Type::Box(Box::new(Type::Int)))
+        )
+        .is_owned()
+    );
+    // copy / neutral components
+    assert!(!Type::Int.is_owned());
+    assert!(!Type::Float.is_owned());
+    assert!(!Type::Bool.is_owned());
+    assert!(!Type::Unit.is_owned());
+    assert!(!Type::Func(vec![], Box::new(Type::Int)).is_owned());
+    assert!(!Type::Array(Box::new(Type::Int)).is_owned());
+    assert!(!Type::Ref(Box::new(Type::Int)).is_owned());
+    assert!(!Type::Unsupported("x".to_string()).is_owned());
+    assert!(!Type::Result(Box::new(Type::Int), Box::new(Type::Bool)).is_owned());
+}
+
+// ========== 0.0.2 U05: ownership — valid programs ==========
+
+#[test]
+fn ownership_move_clone_basic() {
+    // Top-level bindings are globals (never moved); the real transfer rules
+    // play out on locals.
+    compile_ok("func go() {\n    s = \"hello\";\n    t = move s;\n    u = clone t;\n}");
+}
+
+#[test]
+fn ownership_clone_does_not_consume() {
+    // `clone` leaves the slot live: the value is still usable afterwards.
+    compile_ok("func go() {\n    s = \"hello\";\n    u = clone s;\n    t = move s;\n}");
+}
+
+#[test]
+fn ownership_if_branch_transfer_no_use_after() {
+    // Conditional transfer (PLAN §3.1.3 rule 3): each branch moves its own
+    // value; using neither afterwards is fine.
+    compile_ok(
+        "func pick(c: bool, a: string, b: string): string {\n    if c { a }\n    else { b }\n}",
+    );
+}
+
+#[test]
+fn ownership_owned_global_read() {
+    // Owned globals read as deep copies (D5) — producer tails included.
+    compile_ok("const greeting = \"hi\";\nfunc show(): string {\n    greeting\n}");
+}
+
+#[test]
+fn ownership_clone_global() {
+    compile_ok("const msg = \"hi\";\nf = clone msg;");
+}
+
+#[test]
+fn ownership_move_in_loop_no_use_after() {
+    // A move inside a `while` body is legal when the value is not read
+    // after the loop (exit state is merely `MaybeMoved`).
+    compile_ok(
+        "func drain() {\n    i = 0;\n    msg = \"loop\";\n    while i < 1 {\n        out = move msg;\n        i = i + 1;\n    };\n}",
+    );
+}
+
+#[test]
+fn ownership_const_move_at_tail() {
+    // `const` bindings can be moved at a producing tail (PLAN §3.1.3 rule 6).
+    compile_ok("func get(): string {\n    const s = \"hi\";\n    s\n}");
+}
+
+#[test]
+fn ownership_box_deref_roundtrip() {
+    compile_ok(
+        "func go() {\n    b = box 42;\n    n = deref b;\n    deref b = n + 1;\n    c = clone b;\n    s = box \"heap\";\n    w = clone deref s;\n}",
+    );
+}
+
+#[test]
+fn ownership_ref_param_read() {
+    // `ref` parameter used read-only (PLAN §3.3.1, DESIGN §10.4 example).
+    compile_ok("func shout(s: ref string): int {\n    print(s);\n    42\n}");
+}
+
+#[test]
+fn ownership_ref_param_clone() {
+    // `clone s` of a `ref T` parameter yields an owned `T` (PLAN §3.3.1).
+    compile_ok("func copy_out(s: ref string): string {\n    clone s\n}");
+}
+
+#[test]
+fn ownership_ref_handle_flow() {
+    // A borrow forwards to the next `ref` parameter (handle flow, zero copy).
+    compile_ok(
+        "func inner(s: ref string): int {\n    print(s);\n    0\n}\nfunc outer(t: ref string) {\n    inner(t);\n}",
+    );
+}
+
+#[test]
+fn ownership_ref_param_borrow_from_local() {
+    compile_ok(
+        "func show(s: ref string) {\n    print(s);\n}\nname = \"fleen\";\nshow(name);\nshow(name);",
+    );
+}
+
+// ========== 0.0.2 U05: ownership — one failure per rule ==========
+
+#[test]
+fn ownership_use_after_move() {
+    let errs = compile_err("func go() {\n    s = \"a\";\n    t = move s;\n    u = move s;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UseAfterMove { .. })),
+        "expected UseAfterMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_maybe_moved_after_branch() {
+    // `s` moves in one branch only → any later use is `MaybeMoved`.
+    let errs = compile_err(
+        "func go() {\n    s = \"a\";\n    t = \"b\";\n    r = if true { move s }\n    else { move t };\n    print(clone s);\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MaybeMovedAfterBranch { .. })),
+        "expected MaybeMovedAfterBranch, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_assign_to_moved() {
+    let errs = compile_err("func go() {\n    x = \"a\";\n    x = move x;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::AssignToMoved { .. })),
+        "expected AssignToMoved, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_move_of_copy_type() {
+    let errs = compile_err("func go() {\n    n = 42;\n    m = move n;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MoveOfCopyType { .. })),
+        "expected MoveOfCopyType, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_move_out_of_box() {
+    let errs = compile_err("func go() {\n    b = box 42;\n    c = move deref b;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MoveOutOfBox)),
+        "expected MoveOutOfBox, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_move_out_of_global() {
+    let errs = compile_err("g = \"hi\";\nh = move g;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MoveOutOfGlobal { .. })),
+        "expected MoveOutOfGlobal, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_move_of_borrowed() {
+    let errs = compile_err("func f(s: ref string) {\n    move s;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MoveOfBorrowed { .. })),
+        "expected MoveOfBorrowed, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_invalid_clone_place() {
+    let errs = compile_err("x = clone 42;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidClonePlace)),
+        "expected InvalidClonePlace, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_owned_arg_requires_move() {
+    // A bare owned local in a consuming position (binding RHS) needs
+    // `move` / `clone` (PLAN §3.1.3 rule 2).
+    let errs = compile_err("func go() {\n    s = \"a\";\n    t = s;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_borrow_arg_with_move() {
+    let errs = compile_err(
+        "func f(s: ref string) {\n    print(s);\n}\nfunc go() {\n    a = \"x\";\n    f(move a);\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::BorrowArgWithMove { .. })),
+        "expected BorrowArgWithMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_deref_assign_of_global_box() {
+    let errs = compile_err("g = box 42;\nderef g = 1;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::DerefAssignOfGlobalBox)),
+        "expected DerefAssignOfGlobalBox, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_deref_invalid_operand() {
+    let errs = compile_err("n = 42;\nx = deref n;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { .. })),
+        "expected InvalidOperand, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_deref_assign_invalid_operand() {
+    let errs = compile_err("n = 42;\nderef n = 1;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { .. })),
+        "expected InvalidOperand, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_while_back_edge_guard() {
+    // The guard reads an owned local the body may move → back-edge use is
+    // `MaybeMovedAfterBranch` (PLAN §3.1.3, conservative `while` rule).
+    let errs = compile_err(
+        "func ready(s: ref string): bool {\n    false\n}\nfunc go() {\n    i = 0;\n    s = \"a\";\n    while ready(s) {\n        t = move s;\n        i = i + 1;\n    }\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MaybeMovedAfterBranch { .. })),
+        "expected MaybeMovedAfterBranch, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_state_does_not_cross_function_boundary() {
+    // Rule 8: a move inside a nested function is invisible to the outer
+    // scope — the outer use stays legal.
+    compile_ok(
+        "func outer() {\n    s = \"a\";\n    func inner() {\n        t = move s;\n    }\n    u = move s;\n}",
+    );
 }

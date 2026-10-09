@@ -1453,3 +1453,67 @@ fn resolver_invalid_files() {
     }
     assert!(checked > 0, "no invalid test files found");
 }
+
+// ========== 0.0.2 U05: `ref` is restricted to parameter position ==========
+
+fn resolve_err_kinds(src: &str) -> Vec<ResolveErrorKind> {
+    let tokens = tokenize(src).expect("lexer should succeed");
+    let ast = parse(tokens).expect("parser should succeed");
+    resolve(ast)
+        .expect_err("resolve should fail")
+        .into_iter()
+        .map(|e| e.kind)
+        .collect()
+}
+
+#[test]
+fn resolve_ref_param_ok() {
+    // `ref T` is only allowed in parameter position (PLAN §3.3.1).
+    let hir = resolve_str("func shout(s: ref string): int {\n    print(s);\n    42\n}")
+        .expect("should resolve");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn resolve_ref_param_nested_rejected() {
+    let kinds = resolve_err_kinds("func f(s: ref ref int) {\n}");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::RefNotAllowedHere { .. })),
+        "expected RefNotAllowedHere, got {kinds:?}"
+    );
+}
+
+#[test]
+fn resolve_ref_local_var_rejected() {
+    let kinds = resolve_err_kinds("func go() {\n    x: ref int = 1;\n}");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::RefNotAllowedHere { .. })),
+        "expected RefNotAllowedHere, got {kinds:?}"
+    );
+}
+
+#[test]
+fn resolve_ref_global_var_rejected() {
+    let kinds = resolve_err_kinds("g: ref int = 1;");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::RefNotAllowedHere { .. })),
+        "expected RefNotAllowedHere, got {kinds:?}"
+    );
+}
+
+#[test]
+fn resolve_ref_return_rejected() {
+    let kinds = resolve_err_kinds("func f(): ref int {\n    1\n}");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::RefNotAllowedHere { .. })),
+        "expected RefNotAllowedHere, got {kinds:?}"
+    );
+}

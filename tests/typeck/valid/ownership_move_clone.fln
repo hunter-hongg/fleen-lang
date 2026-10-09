@@ -1,0 +1,5 @@
+func go() {
+    s = "hello";
+    t = move s;
+    u = clone t;
+}

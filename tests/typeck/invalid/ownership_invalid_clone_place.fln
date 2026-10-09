@@ -1,0 +1,3 @@
+func go() {
+    x = clone 42;
+}

@@ -8,8 +8,10 @@
 //! - **Choose exhaustiveness**: must have `otherwise` or cover all cases (Bool, Result)
 //! - **Function calls**: argument types must match parameter types
 
+pub mod builtins;
 pub mod error;
 pub mod infer;
+pub mod ownership;
 pub mod typed_hir;
 pub mod unify;
 
@@ -23,6 +25,9 @@ use typed_hir::TypedHir;
 
 /// Type check a HIR program, producing a Typed HIR.
 ///
+/// Runs type inference, then the flow-sensitive ownership pass (0.0.2 U05),
+/// which fills in every `Ident`'s `Access` and reports move errors.
+///
 /// # Arguments
 /// - `hir`: The HIR from the resolver.
 ///
@@ -30,5 +35,10 @@ use typed_hir::TypedHir;
 /// - `Ok(TypedHir)`: Type checking successful, all types inferred.
 /// - `Err(Vec<TypeckError>)`: Type errors (collected, not fail-fast).
 pub fn typeck(hir: Hir) -> Result<TypedHir, Vec<TypeckError>> {
-    TypeChecker::new().typeck(hir)
+    let mut typed = TypeChecker::new().typeck(hir)?;
+    let ownership_errors = ownership::check_ownership(&mut typed);
+    if !ownership_errors.is_empty() {
+        return Err(ownership_errors);
+    }
+    Ok(typed)
 }

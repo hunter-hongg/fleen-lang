@@ -1,0 +1,4 @@
+func pick(c: bool, a: string, b: string): string {
+    if c { a }
+    else { b }
+}

@@ -53,6 +53,63 @@ pub enum TypeckErrorKind {
     InternalError { message: String },
     /// Unsupported `as` cast: 0.0.2 only allows scalar → string.
     UnsupportedCast { from: Type, to: Type },
+    /// `?` used in a function that does not return `Result<T, E>` (D6).
+    QuestionOutsideResultFn,
+    /// `?` applied to a non-Result operand.
+    QuestionOnNonResult { found: Type },
+    /// `?` operand's error type differs from the function's error type (D6:
+    /// exact equality; no error-type conversion in 0.0.2).
+    QuestionTypeMismatch { expected: Type, found: Type },
+    /// `Ok(...)` / `Err(...)` with no context type to infer from (D6).
+    CannotInferResultType { ctor: &'static str },
+    /// A statement discards a `Result` value (Result may not be silently
+    /// dropped — bind it, handle it with `choose`, or propagate with `?`).
+    UnhandledResult { ty: Type },
+    /// `Ok`/`Err` pattern used on a non-Result scrutinee.
+    PatternTypeMismatch { pattern: &'static str, found: Type },
+    // ---- 0.0.2 U05: ownership error family ----
+    /// Use of a binding whose owned value was definitely moved earlier.
+    UseAfterMove {
+        name: String,
+        use_span: Span,
+        moved_span: Span,
+    },
+    /// Use of a binding that may be moved on some control-flow paths
+    /// (branch join, loop back edge / exit).
+    MaybeMovedAfterBranch {
+        name: String,
+        use_span: Span,
+        moved_spans: Vec<Span>,
+    },
+    /// Assignment to a binding whose owned value was moved.
+    /// Deliberately distinct from "undefined": the binding exists, but
+    /// its slot was emptied by a move (DESIGN §10.2 rule 5/6).
+    AssignToMoved { name: String },
+    /// `move x` where `x` is a Copy type: moving is meaningless.
+    MoveOfCopyType { name: String, ty: Type },
+    /// `move deref b`: the box's unique ownership must not be broken by
+    /// reading out its pointee.
+    MoveOutOfBox,
+    /// `move g` where `g` is an owned global: globals are read (cloned),
+    /// never moved.
+    MoveOutOfGlobal { name: String },
+    /// `move s` where `s` is a `ref` parameter: borrowed values cannot be
+    /// moved out.
+    MoveOfBorrowed { name: String },
+    /// The operand of `move` / `clone` is not a valid place: only a
+    /// variable (or `deref <box>` for `clone`) may be moved/cloned.
+    InvalidClonePlace,
+    /// A bare owned value in a consuming position (binding/assignment RHS,
+    /// argument, `choose` scrutinee, `box` inner, `Ok`/`Err` payload):
+    /// ownership transfer must be explicit.
+    OwnedArgRequiresMove { name: String, ty: Type },
+    /// `move x` passed where a `ref T` parameter borrows: a borrow must not
+    /// consume the value.
+    BorrowArgWithMove { name: String },
+    /// `deref g = v` where `g` is an owned global box: globals are read as
+    /// deep copies, so the write could only reach a copy (0.0.2 limit;
+    /// see DESIGN §10.3 / U12).
+    DerefAssignOfGlobalBox,
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -135,6 +192,140 @@ impl fmt::Display for TypeckErrorKind {
                      full conversions arrive with generics (0.1.0)",
                     from.name(),
                     to.name()
+                )
+            }
+            TypeckErrorKind::QuestionOutsideResultFn => {
+                write!(
+                    f,
+                    "`?` can only be used in a function that returns `Result<T, E>`; \
+                     help: change the function's return type to `Result<_, E>`, \
+                     or handle the Result explicitly with `choose`"
+                )
+            }
+            TypeckErrorKind::QuestionOnNonResult { found } => {
+                write!(
+                    f,
+                    "`?` applies to a `Result<T, E>` value, found `{}`",
+                    found.name()
+                )
+            }
+            TypeckErrorKind::QuestionTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "`?` propagates error type `{}` but the function returns \
+                     `Result<_, {}>`; help: error types must match exactly \
+                     in 0.0.2 (no error-type conversion)",
+                    found.name(),
+                    expected.name()
+                )
+            }
+            TypeckErrorKind::CannotInferResultType { ctor } => {
+                write!(
+                    f,
+                    "cannot infer the type of `{ctor}(...)`: Result constructors \
+                     take their type from context; help: add a type annotation, \
+                     e.g. `res: Result<int, string> = {ctor}(…);`"
+                )
+            }
+            TypeckErrorKind::UnhandledResult { ty } => {
+                write!(
+                    f,
+                    "Result value `{}` is discarded; help: bind it, handle it \
+                     with `choose`, or propagate it with `?`",
+                    ty.name()
+                )
+            }
+            TypeckErrorKind::PatternTypeMismatch { pattern, found } => {
+                write!(
+                    f,
+                    "`{pattern}` pattern requires a `Result<T, E>` scrutinee, \
+                     found `{}`",
+                    found.name()
+                )
+            }
+            TypeckErrorKind::UseAfterMove { name, .. } => {
+                write!(
+                    f,
+                    "use of moved value `{name}`; the value was transferred \
+                     earlier — help: clone it if you need it twice, \
+                     e.g. `clone {name}`"
+                )
+            }
+            TypeckErrorKind::MaybeMovedAfterBranch { name, .. } => {
+                write!(
+                    f,
+                    "`{name}` may be moved in one of the branches; help: \
+                     write `clone {name}` in the branch that moves it, or \
+                     at the use site"
+                )
+            }
+            TypeckErrorKind::AssignToMoved { name } => {
+                write!(
+                    f,
+                    "cannot assign to moved value `{name}`; the binding \
+                     still exists but its value was transferred — \
+                     help: rebind with a fresh value or remove the earlier `move`"
+                )
+            }
+            TypeckErrorKind::MoveOfCopyType { name, ty } => {
+                write!(
+                    f,
+                    "`{name}` is `{}` (a Copy type): `move` is meaningless \
+                     — help: drop the `move` keyword",
+                    ty.name()
+                )
+            }
+            TypeckErrorKind::MoveOutOfBox => {
+                write!(
+                    f,
+                    "cannot move out of a box's pointee — help: \
+                     use `clone deref b` to copy the pointee"
+                )
+            }
+            TypeckErrorKind::MoveOutOfGlobal { name } => {
+                write!(
+                    f,
+                    "cannot move out of global `{name}` — globals are \
+                     read by value — help: use `clone {name}`"
+                )
+            }
+            TypeckErrorKind::MoveOfBorrowed { name } => {
+                write!(
+                    f,
+                    "cannot move out of borrowed value `{name}` (`ref` \
+                     parameter) — help: the caller must pass an owned \
+                     value with `move`"
+                )
+            }
+            TypeckErrorKind::InvalidClonePlace => {
+                write!(
+                    f,
+                    "`move` / `clone` operand must be a variable \
+                     (`move x`) or a box pointee (`clone deref b`)"
+                )
+            }
+            TypeckErrorKind::OwnedArgRequiresMove { name, ty } => {
+                write!(
+                    f,
+                    "cannot use owned value `{name}` (`{}`) without \
+                     transferring ownership — help: transfer it: `move {name}`, \
+                     or copy it: `clone {name}`",
+                    ty.name()
+                )
+            }
+            TypeckErrorKind::BorrowArgWithMove { name } => {
+                write!(
+                    f,
+                    "`ref` parameter borrows `{name}` but the argument \
+                     transfers it — help: pass `{name}` without `move`"
+                )
+            }
+            TypeckErrorKind::DerefAssignOfGlobalBox => {
+                write!(
+                    f,
+                    "cannot assign through a global box: the global is read \
+                     as a deep copy, so the write would only reach the copy \
+                     (0.0.2 limit — see DESIGN §10.3)"
                 )
             }
         }

@@ -9,7 +9,7 @@ func main(): int {
     const limit = 10;
 
     while x < limit {
-        print(fib(x));
+        print(fib(x) as string);
         x = x + 1;
     }
 

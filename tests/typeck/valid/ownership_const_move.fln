@@ -1,0 +1,4 @@
+func go(): string {
+    const s = "hi";
+    s
+}

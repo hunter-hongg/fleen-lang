@@ -1,0 +1,4 @@
+func go() {
+    n = 42;
+    m = move n;
+}

@@ -1,0 +1,3 @@
+func go() {
+    x: ref int = 1;
+}

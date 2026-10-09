@@ -223,6 +223,13 @@ impl ScopeStack {
             .any(|s| s.kind == ScopeKind::Loop)
     }
 
+    /// Whether the current position is inside any function body (top-level
+    /// items see `false`). 0.0.2 U05: distinguishes local from global
+    /// type-annotation positions for `ref` checks.
+    pub fn in_function(&self) -> bool {
+        !self.function_stack.is_empty()
+    }
+
     /// Find the nearest *shadow-domain* binding (`Variable` or `Parameter`)
     /// up to the function boundary. Used for shadow mutability checks and
     /// for loop-body assignment targets.

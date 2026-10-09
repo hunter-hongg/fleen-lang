@@ -1,0 +1,12 @@
+func ready(s: ref string): bool {
+    false
+}
+
+func go() {
+    i = 0;
+    s = "a";
+    while ready(s) {
+        t = move s;
+        i = i + 1;
+    };
+}

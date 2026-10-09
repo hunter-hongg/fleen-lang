@@ -5,6 +5,7 @@
 //! by the lowering and codegen stages.
 
 use crate::lexer::Span;
+use crate::parser::ast::ResultCtor;
 use crate::resolver::hir::*;
 
 /// A type in the Fleen type system (0.0.1).
@@ -64,6 +65,59 @@ impl Type {
     pub fn is_func(&self) -> bool {
         matches!(self, Type::Func(_, _))
     }
+
+    /// Check if this type is a Copy type (0.0.2, DESIGN §10.1):
+    /// `int`, `float`, `bool`, `unit`, function values, and `Result<T, E>`
+    /// whose two payload types are themselves Copy.
+    ///
+    /// Copy values are consumed freely; ownership rules (U05) never apply
+    /// to them, so `move`/`clone` keywords are rejected on Copy types.
+    pub fn is_copy(&self) -> bool {
+        match self {
+            Type::Int | Type::Float | Type::Bool | Type::Unit => true,
+            Type::Func(_, _) => true,
+            Type::Result(t, e) => t.is_copy() && e.is_copy(),
+            Type::String | Type::Box(_) | Type::Array(_) | Type::Ref(_) | Type::Unsupported(_) => {
+                false
+            }
+        }
+    }
+
+    /// Check if this type owns heap data that a binding can *move* (0.0.2):
+    /// `string`, `box<_>`, and `Result<T, E>` containing an owned payload.
+    ///
+    /// Disjoint from `is_copy`: a type is exactly one of copy / owned /
+    /// borrowed (`ref _`), which is what the ownership checker keys on.
+    pub fn is_owned(&self) -> bool {
+        match self {
+            Type::String | Type::Box(_) => true,
+            Type::Result(t, e) => t.is_owned() || e.is_owned(),
+            _ => false,
+        }
+    }
+}
+
+/// The ownership access form of a single `Ident` use (0.0.2 U05).
+///
+/// Filled in by the ownership checker (`typeck/ownership.rs`); the lowering
+/// stage (U06) picks `MoveLocal` / `CloneLocal` / `LoadLocal` from it:
+/// - `Copy` — plain slot load: Copy types, `ref` parameters, and boxes
+///   loaded through `deref` (the box itself stays in its slot).
+/// - `Move` — `move x`, or an implicit transfer at a value-producing tail
+///   position (function/block/branch tail, `box e` inner, `Ok/Err` payload).
+/// - `Clone` — `clone x`, and any read-only use of an owned value
+///   (comparisons, `print`, ...): the value is deep-copied, slot untouched.
+///
+/// Owned *global* bindings are annotated `Clone` too: lower rewrites them
+/// to `CloneGlobal` (reads never disturb the global).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Plain slot load (Copy semantics).
+    Copy,
+    /// `move x`: consumes the slot; the binding is moved-from.
+    Move,
+    /// `clone x` / read-only owned use: deep copy, slot untouched.
+    Clone,
 }
 
 /// Typed HIR program.
@@ -194,6 +248,35 @@ pub enum TypedExprHir {
     Neg(Box<TypedExprHir>),
     /// `expr as string` (0.0.2 U13: type cast; result is a fresh owned string)
     Cast(Box<TypedExprHir>, Span),
+    /// `expr?` (0.0.2 U04: Result propagation; `ty` is the unwrapped payload `T`)
+    Question {
+        operand: Box<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
+    /// `Ok(value)` / `Err(value)` constructor (0.0.2 U04; `ty` is the full
+    /// `Result<T, E>`; `value` is the payload moved into the Result)
+    ResultCtor {
+        ctor: ResultCtor,
+        value: Box<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
+    /// `box <expr>` (0.0.2 U05/U06: heap allocation; type is `Box<inner>`)
+    Box(Box<TypedExprHir>, Span),
+    /// `deref <box>` (0.0.2 U05/U06: read the pointee copy; type is the
+    /// pointee type, the box itself is untouched)
+    Deref(Box<TypedExprHir>, Span),
+    /// `deref <b> = <expr>` (0.0.2 U05: write a box's pointee; replaces the
+    /// pointee, old value released; the box binding itself is untouched)
+    AssignDeref {
+        name: String,
+        binding_id: BindingId,
+        rhs: Box<TypedExprHir>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
     /// Function call
     Call(Box<TypedExprHir>, Vec<TypedExprHir>, Type), // Type = return type
     /// Index access
@@ -205,11 +288,12 @@ pub enum TypedExprHir {
     Float(f64, Span),
     Bool(bool, Span),
     Str(String, Span),
-    /// Identifier
+    /// Identifier (0.0.2: `access` records this use's ownership form)
     Ident {
         name: String,
         binding_id: BindingId,
         ty: Type,
+        access: Access,
         hir_id: HirId,
         span: Span,
     },
@@ -241,6 +325,16 @@ impl TypedExprHir {
             TypedExprHir::Not(_) => Type::Bool,
             TypedExprHir::Neg(e) => e.ty(),
             TypedExprHir::Cast(_, _) => Type::String,
+            TypedExprHir::Question { ty, .. } => ty.clone(),
+            TypedExprHir::ResultCtor { ty, .. } => ty.clone(),
+            TypedExprHir::Box(inner, _) => Type::Box(Box::new(inner.ty())),
+            TypedExprHir::Deref(inner, _) => match inner.ty() {
+                // typeck guarantees the deref operand is a `box<T>` (U05);
+                // the fallback keeps `ty()` total for error-recovery trees.
+                Type::Box(pointee) => *pointee,
+                other => other,
+            },
+            TypedExprHir::AssignDeref { .. } => Type::Unit,
             TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
             TypedExprHir::Index(_, _) => Type::Unsupported("index".to_string()),
             TypedExprHir::Field(_, _) => Type::Unsupported("field".to_string()),
@@ -276,6 +370,10 @@ impl TypedExprHir {
             TypedExprHir::Not(e) => e.span(),
             TypedExprHir::Neg(e) => e.span(),
             TypedExprHir::Cast(_, s) => *s,
+            TypedExprHir::Question { span, .. } => *span,
+            TypedExprHir::ResultCtor { span, .. } => *span,
+            TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) => *s,
+            TypedExprHir::AssignDeref { span, .. } => *span,
             TypedExprHir::Call(f, _, _) => f.span(),
             TypedExprHir::Index(a, _) => a.span(),
             TypedExprHir::Field(o, _) => o.span(),
@@ -334,6 +432,16 @@ pub struct TypedChooseArmHir {
 pub enum TypedPatternHir {
     Literal(Box<TypedExprHir>),
     Ident {
+        name: String,
+        binding_id: BindingId,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `Ok(v)` / `Err(e)` (0.0.2 U04): binds the payload `v: T` / `e: E`
+    /// of a `Result<T, E>` scrutinee; the binding is a move (D7).
+    ResultCtor {
+        ctor: ResultCtor,
         name: String,
         binding_id: BindingId,
         ty: Type,

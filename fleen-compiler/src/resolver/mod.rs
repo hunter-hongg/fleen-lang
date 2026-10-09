@@ -35,7 +35,25 @@ use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
 
 /// Builtin functions available in every program (registered in the global scope).
-const BUILTINS: &[&str] = &["print"];
+///
+/// `print` is the only builtin *function*. `Ok`/`Err` are builtin Result
+/// constructors: they resolve like functions here (shadowable, §4.3), while
+/// typeck gives them their context-dependent semantics (0.0.2 U04, PLAN §3.4.1).
+const BUILTINS: &[&str] = &["print", "Ok", "Err"];
+
+/// Whether a type mentions `ref` anywhere in its structure (0.0.2 U05):
+/// `ref T` is legal only as the *outer* type of a function parameter
+/// (DESIGN §10.4), and never nested (`ref ref T`, `ref` inside composite
+/// types).
+fn type_contains_ref(ty: &Type) -> bool {
+    match ty {
+        Type::Ref(_) => true,
+        Type::Array(el) | Type::Box(el) => type_contains_ref(el),
+        Type::Result(ok, err) => type_contains_ref(ok) || type_contains_ref(err),
+        Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
+        Type::Base(_) => false,
+    }
+}
 
 /// Assignment target shape, split out of the AST before binding lookup.
 enum AssignTarget {
@@ -217,6 +235,43 @@ impl Resolver {
         func: FuncDecl,
         global_funcs: &HashMap<String, BindingId>,
     ) -> Result<FuncDeclHir, ()> {
+        // 0.0.2 U05 (DESIGN §10.4): `ref` is legal only as the *outer* type
+        // of a function parameter. Return types, and any nested or embedded
+        // `ref`, are rejected here so no `ref` type ever reaches typeck.
+        let mut ref_error = false;
+        if let Some(ret) = &func.ret_type
+            && type_contains_ref(ret)
+        {
+            self.add_error(
+                ResolveErrorKind::RefNotAllowedHere {
+                    context: "return type",
+                },
+                func.span,
+            );
+            ref_error = true;
+        }
+        for param in &func.params {
+            // `ref T` is fine when T itself is not a ref; any other
+            // occurrence of `ref` (nested `ref ref T`, `ref` inside
+            // composites, non-ref positions) is rejected.
+            let allowed = match &param.ty {
+                Type::Ref(inner) => !type_contains_ref(inner),
+                _ => !type_contains_ref(&param.ty),
+            };
+            if !allowed {
+                self.add_error(
+                    ResolveErrorKind::RefNotAllowedHere {
+                        context: "function parameter",
+                    },
+                    param.span,
+                );
+                ref_error = true;
+            }
+        }
+        if ref_error {
+            return Err(());
+        }
+
         let predeclared = global_funcs.get(&func.name).copied();
         let binding_id = match predeclared {
             Some(id) => id,
@@ -353,6 +408,24 @@ impl Resolver {
         let init = self.resolve_expr(*var.init)?;
         let hir_id = self.next_hir_id();
 
+        // 0.0.2 U05: `ref` annotations are forbidden on variables (DESIGN
+        // §10.4); only function parameters may be borrows.
+        if let Some(ty) = &var.ty
+            && type_contains_ref(ty)
+        {
+            self.add_error(
+                ResolveErrorKind::RefNotAllowedHere {
+                    context: if self.scopes.in_function() {
+                        "local variable type"
+                    } else {
+                        "global variable type"
+                    },
+                },
+                var.span,
+            );
+            return Err(());
+        }
+
         // Assignment to an existing binding visible at this position.
         if let Some(target) = self.scopes.find_assign_target(&var.name) {
             let (existing_id, mutable, kind) = (target.id, target.mutable, target.kind);
@@ -449,6 +522,23 @@ impl Resolver {
         // Resolve the initializer WITHOUT the new binding in scope.
         let init = self.resolve_expr(*c.init)?;
         let hir_id = self.next_hir_id();
+
+        // 0.0.2 U05: same `ref` restriction as variable annotations.
+        if let Some(ty) = &c.ty
+            && type_contains_ref(ty)
+        {
+            self.add_error(
+                ResolveErrorKind::RefNotAllowedHere {
+                    context: if self.scopes.in_function() {
+                        "local const type"
+                    } else {
+                        "global const type"
+                    },
+                },
+                c.span,
+            );
+            return Err(());
+        }
 
         // `const` on a name already bound in the same scope is always an error
         // (DESIGN.md §3.5: mutable → const and const → const are both ❌).

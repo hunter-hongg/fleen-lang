@@ -1,0 +1,7 @@
+func go() {
+    s = "a";
+    t = "b";
+    r = if true { move s }
+    else { move t };
+    print(clone s);
+}

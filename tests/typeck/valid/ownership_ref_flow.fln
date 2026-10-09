@@ -1,0 +1,12 @@
+func inner(s: ref string): int {
+    print(s);
+    0
+}
+
+func outer(t: ref string) {
+    inner(t);
+    inner(t);
+}
+
+name = "fleen";
+outer(name);

@@ -11,10 +11,10 @@ func main(): int {
     const limit = 10
     sum = 0
     while x < limit {
-        print(fib(x))
+        print(fib(x) as string)
         sum = sum + fib(x)
         x = x + 1
     }
-    print(sum)
+    print(sum as string)
     0
 }

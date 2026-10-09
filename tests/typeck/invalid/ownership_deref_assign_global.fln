@@ -1,0 +1,2 @@
+g = box 42;
+deref g = 1;

@@ -1,0 +1,12 @@
+func shout(s: ref string): int {
+    print(s);
+    42
+}
+
+func use_it(t: ref int): int {
+    t
+}
+
+name = "fleen";
+n = shout(name);
+n = use_it(7);

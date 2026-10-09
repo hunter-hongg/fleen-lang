@@ -123,6 +123,9 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
                     TypedPatternHir::Ident { binding_id, .. } => {
                         alloc.slot_for(*binding_id);
                     }
+                    TypedPatternHir::ResultCtor { binding_id, .. } => {
+                        alloc.slot_for(*binding_id);
+                    }
                     TypedPatternHir::Error => {}
                 }
                 if let Some(guard) = &arm.guard {
@@ -151,6 +154,16 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
         }
         TypedExprHir::Not(e) | TypedExprHir::Neg(e) => collect_expr(alloc, e),
         TypedExprHir::Cast(e, _) => collect_expr(alloc, e),
+        TypedExprHir::Question { operand, .. } => collect_expr(alloc, operand),
+        TypedExprHir::ResultCtor { value, .. } => collect_expr(alloc, value),
+        TypedExprHir::Box(inner, _) => collect_expr(alloc, inner),
+        TypedExprHir::Deref(inner, _) => collect_expr(alloc, inner),
+        TypedExprHir::AssignDeref {
+            rhs, binding_id, ..
+        } => {
+            collect_expr(alloc, rhs);
+            alloc.slot_for(*binding_id);
+        }
         TypedExprHir::Call(f, args, _) => {
             collect_expr(alloc, f);
             for arg in args {

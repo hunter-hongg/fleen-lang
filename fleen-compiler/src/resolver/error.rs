@@ -37,6 +37,11 @@ pub enum ResolveErrorKind {
     /// re-binding, duplicate `func`, duplicate parameters, ...).
     /// Carries the first declaration's span for diagnostics.
     DuplicateBinding { name: String, first_span: Span },
+    /// `ref T` used in a type position other than a function parameter
+    /// (0.0.2 U05, DESIGN §10.4): locals, globals, return types, nested
+    /// `ref ref T`, or inside composite types. `context` names the offending
+    /// position; the error's span points at the type annotation.
+    RefNotAllowedHere { context: &'static str },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -75,6 +80,15 @@ impl fmt::Display for ResolveErrorKind {
             }
             ResolveErrorKind::DuplicateBinding { name, .. } => {
                 write!(f, "duplicate declaration of `{}` in same scope", name)
+            }
+            ResolveErrorKind::RefNotAllowedHere { context } => {
+                write!(
+                    f,
+                    "`ref` type is not allowed in {context}: borrows are \
+                     only accepted as function parameters (`func f(x: ref T)`, \
+                     0.0.2); locals, globals and return types must own their \
+                     values"
+                )
             }
         }
     }

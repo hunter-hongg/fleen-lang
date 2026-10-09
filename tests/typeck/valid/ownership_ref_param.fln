@@ -1,0 +1,4 @@
+func shout(s: ref string): int {
+    print(s);
+    42
+}
