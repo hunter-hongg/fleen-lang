@@ -42,6 +42,11 @@ pub enum ResolveErrorKind {
     /// `ref ref T`, or inside composite types. `context` names the offending
     /// position; the error's span points at the type annotation.
     RefNotAllowedHere { context: &'static str },
+    /// A new binding re-declares the name of a `ref` parameter in scope
+    /// (0.0.2 U05, DESIGN §10.4): borrows are read-only, so `s = …` at a
+    /// ref parameter would silently shadow the borrow instead of writing
+    /// through it — flagged rather than shadowed.
+    AssignToRefParam { name: String },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -88,6 +93,14 @@ impl fmt::Display for ResolveErrorKind {
                      only accepted as function parameters (`func f(x: ref T)`, \
                      0.0.2); locals, globals and return types must own their \
                      values"
+                )
+            }
+            ResolveErrorKind::AssignToRefParam { name } => {
+                write!(
+                    f,
+                    "cannot assign to `ref` parameter `{name}` — a borrow is \
+                     read-only; help: the `ref` parameter shadows the caller's \
+                     value, rebind a fresh local with a different name instead"
                 )
             }
         }

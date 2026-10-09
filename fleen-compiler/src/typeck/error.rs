@@ -27,8 +27,6 @@ pub enum TypeckErrorKind {
         scrutinee_type: Type,
         missing_patterns: Vec<String>,
     },
-    /// Unsupported type for codegen.
-    UnsupportedType { ty: Type },
     /// Invalid operand type for operator.
     InvalidOperand { op: String, ty: Type },
     /// Function call argument count mismatch.
@@ -47,7 +45,7 @@ pub enum TypeckErrorKind {
     UndefinedVariable { name: String },
     /// Expression is not callable as a function.
     NotCallable { ty: Type },
-    /// Feature parsed but not supported in 0.0.1.
+    /// Feature parsed but not supported in 0.0.2.
     UnsupportedFeature { feature: String },
     /// Invariant violated (resolver guarantee broken); indicates a compiler bug.
     InternalError { message: String },
@@ -106,6 +104,12 @@ pub enum TypeckErrorKind {
     /// `move x` passed where a `ref T` parameter borrows: a borrow must not
     /// consume the value.
     BorrowArgWithMove { name: String },
+    /// `deref b` passed where a `ref T` parameter borrows: 0.0.2 cannot
+    /// borrow a box's pointee (DESIGN §10.4).
+    BorrowOfBoxInterior,
+    /// A temporary (not a variable) passed where a `ref T` parameter
+    /// borrows: a borrow handle needs a slot to point at.
+    RefArgNotAVariable,
     /// `deref g = v` where `g` is an owned global box: globals are read as
     /// deep copies, so the write could only reach a copy (0.0.2 limit;
     /// see DESIGN §10.3 / U12).
@@ -134,15 +138,30 @@ impl fmt::Display for TypeckErrorKind {
                     missing_patterns.join(", ")
                 )
             }
-            TypeckErrorKind::UnsupportedType { ty } => {
-                write!(f, "type `{}` is not supported in 0.0.1", ty.name())
-            }
             TypeckErrorKind::InvalidOperand { op, ty } => {
                 write!(
                     f,
                     "invalid operand type `{}` for operator `{}`",
                     ty.name(),
                     op
+                )
+            }
+            TypeckErrorKind::BorrowOfBoxInterior => {
+                write!(
+                    f,
+                    "cannot borrow a box's pointee (`deref b` passed to a \
+                     `ref` parameter) — 0.0.2 borrows only variables; help: \
+                     copy the pointee out first (`t = clone deref b;`) or \
+                     pass the box's owner"
+                )
+            }
+            TypeckErrorKind::RefArgNotAVariable => {
+                write!(
+                    f,
+                    "a `ref` parameter needs a variable to borrow (a local, \
+                     a global, or another `ref` parameter) — a temporary \
+                     value has no slot to point at; help: bind it to a \
+                     variable first"
                 )
             }
             TypeckErrorKind::ArityMismatch { expected, found } => {
@@ -246,9 +265,8 @@ impl fmt::Display for TypeckErrorKind {
             TypeckErrorKind::UseAfterMove { name, .. } => {
                 write!(
                     f,
-                    "use of moved value `{name}`; the value was transferred \
-                     earlier — help: clone it if you need it twice, \
-                     e.g. `clone {name}`"
+                    "use of moved value `{name}`; help: clone the value if \
+                     you still need it: `t = clone {name};`"
                 )
             }
             TypeckErrorKind::MaybeMovedAfterBranch { name, .. } => {

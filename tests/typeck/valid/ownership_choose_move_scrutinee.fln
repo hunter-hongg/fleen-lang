@@ -1,0 +1,11 @@
+// Test: a choose scrutinee may be moved explicitly (DESIGN §10.2 D7)
+// the scrutinee is a consuming position: `choose move s` transfers once,
+// and no arm observes the moved value.
+func go() {
+    s = "abc";
+    r = choose move s {
+        when "abc" { 1 }
+        otherwise { 0 }
+    };
+    print(r as string);
+}

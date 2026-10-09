@@ -1,0 +1,12 @@
+// Test: choose scrutinee moved on one arm then used on another (DESIGN §10.2 rule 3)
+// `when true { a }` consumes `a` on that path; the later `print(a)` sees a
+// value that is only maybe-moved: MaybeMovedAfterBranch.
+func go(c: bool) {
+    a = "a";
+    b = "b";
+    r = choose c {
+        when true { a }
+        otherwise { b }
+    };
+    print(a);
+}

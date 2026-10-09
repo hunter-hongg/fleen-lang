@@ -1,0 +1,6 @@
+// Test: a `ref` parameter is read-only (DESIGN.md 10.4)
+// `s = "x"` would shadow the borrow with a fresh local, so it is an
+// AssignToRefParam error instead of a silent shadow.
+func f(s: ref string) {
+    s = "x";
+}

@@ -80,6 +80,10 @@ pub struct Binding {
     /// Built-in (e.g. `print`): not an assignment target, exempt from
     /// shadow-mutability checks, and overwritable by user declarations.
     pub builtin: bool,
+    /// Parameter declared as `ref T` (0.0.2 U05, DESIGN §10.4): the binding
+    /// is a read-only borrow, so a new `x = …` at this name is flagged as
+    /// `AssignToRefParam` instead of silently shadowing the borrow.
+    pub ref_param: bool,
     pub span: Span,
     pub hir_id: HirId,
 }

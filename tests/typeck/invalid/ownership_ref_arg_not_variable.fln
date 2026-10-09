@@ -1,0 +1,11 @@
+// Test: a `ref` parameter must receive a variable, not a fresh copy (DESIGN §10.4)
+// `f(clone t)` rejects: RefArgNotAVariable — the callee must read the caller's
+// binding, not an anonymous clone.
+func f(s: ref string) {
+    print(s);
+}
+
+func go() {
+    t = "x";
+    f(clone t);
+}

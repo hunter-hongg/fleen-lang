@@ -922,13 +922,6 @@ fn type_is_numeric() {
     assert!(!Type::String.is_numeric());
 }
 
-#[test]
-fn type_is_func() {
-    let func = Type::Func(vec![], Box::new(Type::Unit));
-    assert!(func.is_func());
-    assert!(!Type::Int.is_func());
-}
-
 // ========== 0.0.2 U05: type classification (is_copy / is_owned) ==========
 
 #[test]
@@ -1229,5 +1222,240 @@ fn ownership_state_does_not_cross_function_boundary() {
     // scope — the outer use stays legal.
     compile_ok(
         "func outer() {\n    s = \"a\";\n    func inner() {\n        t = move s;\n    }\n    u = move s;\n}",
+    );
+}
+
+// ========== 0.0.2 U05: `ref` parameter discipline (DESIGN §10.4) ==========
+
+#[test]
+fn ownership_borrow_of_box_interior() {
+    // `deref b` is not a variable: 0.0.2 cannot borrow a box's pointee
+    // (DESIGN §10.4).
+    let errs = compile_err(
+        "func show(s: ref string) {\n    print(s);\n}\nb = box \"hi\";\nshow(deref b);",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::BorrowOfBoxInterior)),
+        "expected BorrowOfBoxInterior, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_ref_arg_not_a_variable() {
+    // A `ref` argument must be a variable (local, global, or another `ref`
+    // parameter) — a temporary has no slot to point at (DESIGN §10.4).
+    let errs = compile_err("func show(s: ref string) {\n    print(s);\n}\nshow(\"lit\");");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::RefArgNotAVariable)),
+        "expected RefArgNotAVariable, got {errs:?}"
+    );
+
+    // `clone s` yields a fresh value, not a place: rejected too.
+    let errs = compile_err(
+        "func show(s: ref string) {\n    print(s);\n}\nfunc go() {\n    s = \"a\";\n    show(clone s);\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::RefArgNotAVariable)),
+        "expected RefArgNotAVariable, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_ref_arg_local_and_global_ok() {
+    // The supported cases: a local and a global borrowed by a `ref` param.
+    compile_ok(
+        "func show(s: ref string) {\n    print(s);\n}\nname = \"fleen\";\nshow(name);\nfunc go() {\n    local = \"a\";\n    show(local);\n    show(name);\n}",
+    );
+}
+
+// ========== 0.0.2 U05: consuming positions (rule 2) across all call sites ==========
+
+#[test]
+fn ownership_choose_scrutinee_bare_owned() {
+    // A `choose` scrutinee is a consuming position (D7): bare owned → error,
+    // `move`/`clone` wrappers are fine.
+    let errs = compile_err(
+        "func go() {\n    s = \"abc\";\n    r = choose s {\n        when \"abc\" { 1 }\n        otherwise { 0 }\n    };\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_choose_scrutinee_move() {
+    compile_ok(
+        "func go() {\n    s = \"abc\";\n    r = choose move s {\n        when \"abc\" { 1 }\n        otherwise { 0 }\n    };\n    print(r as string);\n}",
+    );
+}
+
+#[test]
+fn ownership_maybe_moved_via_choose() {
+    // A branch tail of `choose` transfers conditionally: a later use is
+    // `MaybeMovedAfterBranch` (DESIGN §10.2 rule 3).
+    let errs = compile_err(
+        "func go(c: bool) {\n    a = \"a\";\n    b = \"b\";\n    r = choose c {\n        when true { a }\n        otherwise { b }\n    };\n    print(a);\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MaybeMovedAfterBranch { .. })),
+        "expected MaybeMovedAfterBranch, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_owned_arg_in_call() {
+    // A bare owned local passed to an *owned* parameter needs `move`/`clone`.
+    let errs = compile_err(
+        "func take(s: string) {\n    print(s);\n}\nfunc go() {\n    s = \"a\";\n    take(s);\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_box_inner_bare_owned() {
+    // The inner value of `box` is consumed into the allocation.
+    let errs = compile_err("func go() {\n    s = \"a\";\n    b = box s;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn ownership_box_inner_explicit_transfer_ok() {
+    compile_ok("func go() {\n    s = \"a\";\n    b = box move s;\n    c = box \"fresh\";\n}");
+}
+
+#[test]
+fn ownership_result_payload_bare_owned() {
+    // The payload of `Ok`/`Err` is moved into the Result (D7).
+    let errs = compile_err("func go() {\n    s = \"a\";\n    res: Result<string, int> = Ok(s);\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+// ========== 0.0.2 U05: `Access` annotations (contract for lowering, U06) ==========
+
+/// The function item of a single-item typed program.
+fn only_func(hir: &TypedHir) -> &TypedFuncDeclHir {
+    match &hir.items[0] {
+        TypedHirItem::Decl(TypedDeclHir::Func(f)) => f,
+        other => panic!("expected function item, got {other:?}"),
+    }
+}
+
+#[test]
+fn ownership_access_read_clone_for_owned_local() {
+    // Read-only use of an owned local auto-clones (D3): the slot is
+    // untouched, so a later `move` stays legal.
+    let hir = compile_ok("func go() {\n    s = \"a\";\n    print(s);\n    t = move s;\n}");
+    let f = only_func(&hir);
+    let TypedFuncBodyHir::Block(b) = &f.body else {
+        panic!("expected block body");
+    };
+    let TypedStmtHir::Expr(call, _) = &b.stmts[1] else {
+        panic!("expected print statement");
+    };
+    let TypedExprHir::Call(_, args, _) = &**call else {
+        panic!("expected call");
+    };
+    let TypedExprHir::Ident { access, .. } = &args[0] else {
+        panic!("expected identifier argument");
+    };
+    assert_eq!(*access, Access::Clone);
+}
+
+#[test]
+fn ownership_access_move_explicit() {
+    let hir = compile_ok("func go() {\n    s = \"a\";\n    t = move s;\n}");
+    let f = only_func(&hir);
+    let TypedFuncBodyHir::Block(b) = &f.body else {
+        panic!("expected block body");
+    };
+    let TypedStmtHir::Decl(TypedDeclHir::Var(v)) = &b.stmts[1] else {
+        panic!("expected binding statement");
+    };
+    let TypedExprHir::Ident { access, .. } = &*v.init else {
+        panic!("expected identifier RHS");
+    };
+    assert_eq!(*access, Access::Move);
+}
+
+#[test]
+fn ownership_access_tail_implicit_move() {
+    // The value-producing tail of a function transfers implicitly: the
+    // bare owned local there is annotated `Move` (DESIGN §10.2 rule 3).
+    let hir = compile_ok("func go(): string {\n    s = \"a\";\n    s\n}");
+    let f = only_func(&hir);
+    let TypedFuncBodyHir::Block(b) = &f.body else {
+        panic!("expected block body");
+    };
+    let TypedExprHir::Ident { access, .. } = &**b.tail_expr.as_ref().expect("tail expr") else {
+        panic!("expected identifier tail");
+    };
+    assert_eq!(*access, Access::Move);
+}
+
+#[test]
+fn ownership_access_deref_loads_box_not_pointee() {
+    // `deref b` keeps a plain load of the box slot (lowering emits
+    // `LoadLocal`/`CloneGlobal` + `DerefBox`), never a clone of the box.
+    let hir = compile_ok("func go(): int {\n    b = box 42;\n    deref b\n}");
+    let f = only_func(&hir);
+    let TypedFuncBodyHir::Block(b) = &f.body else {
+        panic!("expected block body");
+    };
+    let TypedExprHir::Deref(inner, _) = &**b.tail_expr.as_ref().expect("tail expr") else {
+        panic!("expected deref tail");
+    };
+    let TypedExprHir::Ident { access, .. } = &**inner else {
+        panic!("expected box identifier");
+    };
+    assert_eq!(*access, Access::Copy);
+}
+
+// ========== 0.0.2 U05: statement-position tails (DESIGN §10.2 rule 3) ==========
+
+#[test]
+fn ownership_stmt_block_tail_produces() {
+    // A statement-position block still *produces* its tail value (the
+    // value is then discarded): the owned local transfers out and the
+    // program is fine as long as nothing uses it afterwards.
+    compile_ok("func go() {\n    s = \"a\";\n    { s };\n}");
+}
+
+#[test]
+fn ownership_stmt_block_tail_use_after() {
+    // …but using the value after the discarded tail reports
+    // `UseAfterMove` (the conservative, Rust-consistent reading of
+    // DESIGN §10.2 rule 3).
+    let errs = compile_err("func go() {\n    s = \"a\";\n    { s };\n    print(s);\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UseAfterMove { .. })),
+        "expected UseAfterMove, got {errs:?}"
     );
 }

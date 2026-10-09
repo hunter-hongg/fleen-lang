@@ -152,6 +152,7 @@ impl Resolver {
                     kind: BindingKind::Builtin,
                     mutable: false,
                     builtin: true,
+                    ref_param: false,
                     span: Span::new(0, 0), // builtins have no source span
                     hir_id: HirId(0),
                 },
@@ -171,6 +172,7 @@ impl Resolver {
                     kind: BindingKind::Function,
                     mutable: false, // function names are immutable bindings
                     builtin: false,
+                    ref_param: false,
                     span: func_decl.span,
                     hir_id: HirId(0), // placeholder, filled when the body resolves
                 };
@@ -282,6 +284,7 @@ impl Resolver {
                     kind: BindingKind::Function,
                     mutable: false,
                     builtin: false,
+                    ref_param: false,
                     span: func.span,
                     hir_id: HirId(0),
                 };
@@ -339,6 +342,10 @@ impl Resolver {
                 kind: BindingKind::Parameter,
                 mutable: false, // parameters are immutable in 0.0.1
                 builtin: false,
+                // 0.0.2 U05 (DESIGN §10.4): `ref T` parameters are
+                // read-only borrows; re-declaring the name is flagged as
+                // `AssignToRefParam` in `resolve_var_binding`.
+                ref_param: matches!(param.ty, Type::Ref(_)),
                 span: param.span,
                 hir_id,
             };
@@ -468,6 +475,23 @@ impl Resolver {
             });
         }
 
+        // 0.0.2 U05 (DESIGN §10.4): a `ref` parameter is a read-only
+        // borrow. Because parameters are immutable, `s = …` at a ref
+        // parameter `s` would otherwise become a *new binding* that
+        // silently shadows the borrow — the user most likely meant to
+        // write through it. Flag it instead of shadowing.
+        if let Some(outer) = self.scopes.find_shadow_domain(&var.name)
+            && outer.ref_param
+        {
+            self.add_error(
+                ResolveErrorKind::AssignToRefParam {
+                    name: var.name.clone(),
+                },
+                var.span,
+            );
+            return Err(());
+        }
+
         // New binding. If it shadows an outer name, mutability must match
         // (DESIGN.md §4.3); parameters, functions and builtins are exempt.
         let new_mutable = true; // plain bindings are mutable
@@ -493,6 +517,7 @@ impl Resolver {
                 kind: BindingKind::Variable,
                 mutable: true,
                 builtin: false,
+                ref_param: false,
                 span: var.span,
                 hir_id,
             },
@@ -580,6 +605,7 @@ impl Resolver {
                 kind: BindingKind::Const,
                 mutable: false,
                 builtin: false,
+                ref_param: false,
                 span: c.span,
                 hir_id,
             },
@@ -945,12 +971,27 @@ impl Resolver {
     /// Register a pattern binding (identifier or Result-payload binding) in
     /// the arm's scope. Shadow-check up to the function boundary; parameters,
     /// functions and builtins are exempt (DESIGN.md §4.3).
+    ///
+    /// A `ref` parameter is not merely exempt — re-declaring its name is an
+    /// `AssignToRefParam` error (0.0.2 U05, DESIGN §10.4), mirroring the
+    /// `s = …` shadow case in `resolve_var_binding`.
     fn declare_pattern_binding(
         &mut self,
         name: &str,
         span: Span,
     ) -> Result<(BindingId, HirId), ()> {
         let new_mutable = true; // pattern bindings are mutable
+        if let Some(outer) = self.scopes.find_shadow_domain(name)
+            && outer.ref_param
+        {
+            self.add_error(
+                ResolveErrorKind::AssignToRefParam {
+                    name: name.to_string(),
+                },
+                span,
+            );
+            return Err(());
+        }
         if let Some(outer) = self.scopes.find_shadow_domain(name)
             && outer.kind.shadow_checks()
             && outer.mutable != new_mutable
@@ -974,6 +1015,7 @@ impl Resolver {
                 kind: BindingKind::Variable,
                 mutable: true,
                 builtin: false,
+                ref_param: false,
                 span,
                 hir_id,
             },

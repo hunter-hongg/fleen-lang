@@ -1517,3 +1517,42 @@ fn resolve_ref_return_rejected() {
         "expected RefNotAllowedHere, got {kinds:?}"
     );
 }
+
+// --- ref parameters are read-only: re-declaring the name is an error ---
+
+#[test]
+fn resolve_ref_param_rebind_rejected() {
+    // `s = "x"` at a `ref` parameter `s`: parameters are immutable, so the
+    // resolver would shadow the borrow with a fresh local. DESIGN §10.4
+    // forbids assigning to a borrow, so flag it instead (0.0.2 U05).
+    let kinds = resolve_err_kinds("func f(s: ref string) {\n    s = \"x\";\n}");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::AssignToRefParam { .. })),
+        "expected AssignToRefParam, got {kinds:?}"
+    );
+}
+
+#[test]
+fn resolve_ref_param_pattern_shadow_rejected() {
+    // A `when s …` pattern binding shadows the borrow the same way.
+    let kinds = resolve_err_kinds(
+        "func f(s: ref string) {\n    choose s {\n        when s { print(s) }\n        otherwise { print(\"x\") }\n    };\n}",
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::AssignToRefParam { .. })),
+        "expected AssignToRefParam, got {kinds:?}"
+    );
+}
+
+#[test]
+fn resolve_non_ref_param_rebind_ok() {
+    // Non-`ref` parameters keep the documented shadow semantics
+    // (DESIGN.md §4.3): `x = 2; x` is a fresh local (see the valid fixture
+    // `param_shadow_in_body.fln`).
+    let hir = resolve_str("func f(x: int): int { x = 2; x }").expect("should resolve");
+    assert_eq!(hir.items.len(), 1);
+}

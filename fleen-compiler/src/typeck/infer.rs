@@ -201,6 +201,7 @@ impl TypeChecker {
                     kind: BindingKind::Parameter,
                     mutable: false,
                     builtin: false,
+                    ref_param: matches!(param_type, Type::Ref(_)),
                     span: param.span,
                     hir_id,
                 },
@@ -315,6 +316,7 @@ impl TypeChecker {
                 kind: BindingKind::Variable,
                 mutable: true,
                 builtin: false,
+                ref_param: false,
                 span: var.span,
                 hir_id,
             },
@@ -363,6 +365,7 @@ impl TypeChecker {
                 kind: BindingKind::Const,
                 mutable: false,
                 builtin: false,
+                ref_param: false,
                 span: c.span,
                 hir_id,
             },
@@ -796,6 +799,7 @@ impl TypeChecker {
                         kind: BindingKind::Variable,
                         mutable: true,
                         builtin: false,
+                        ref_param: false,
                         span: *span,
                         hir_id: new_hir_id,
                     },
@@ -849,6 +853,7 @@ impl TypeChecker {
                         kind: BindingKind::Variable,
                         mutable: true,
                         builtin: false,
+                        ref_param: false,
                         span: *span,
                         hir_id: new_hir_id,
                     },
@@ -1040,7 +1045,7 @@ impl TypeChecker {
             return Err(());
         }
 
-        // `%` is only defined for Int in 0.0.1 (BYTECODE.md defines IMod,
+        // `%` is only defined for Int in 0.0.2 (BYTECODE.md defines IMod,
         // no FMod). Reject float operands here instead of failing later
         // in `lower`.
         if op == "%" && matches!(typed_lhs.ty(), Type::Float) {
@@ -1139,18 +1144,38 @@ impl TypeChecker {
                 return Err(());
             }
             // 0.0.2 U05: a `ref` parameter borrows the argument — it must not
-            // receive a `move`. An owned parameter *consumes* the argument —
-            // a bare owned local must be wrapped in `move` / `clone` there.
+            // receive a `move` (DESIGN §10.4). A borrow handle points at a
+            // slot, so the argument must be a *variable* (local, global, or
+            // another `ref` parameter): no box pointee, no temporary.
             match &param_types[i] {
                 Type::Ref(_) => {
-                    if let TypedExprHir::Ident { name, access, .. } = &typed_arg
-                        && *access == Access::Move
-                    {
-                        self.add_error(
-                            TypeckErrorKind::BorrowArgWithMove { name: name.clone() },
-                            typed_arg.span(),
-                        );
-                        return Err(());
+                    match &typed_arg {
+                        TypedExprHir::Deref(..) => {
+                            self.add_error(TypeckErrorKind::BorrowOfBoxInterior, typed_arg.span());
+                            return Err(());
+                        }
+                        TypedExprHir::Ident { name, access, .. } => {
+                            if *access == Access::Move {
+                                self.add_error(
+                                    TypeckErrorKind::BorrowArgWithMove { name: name.clone() },
+                                    typed_arg.span(),
+                                );
+                                return Err(());
+                            }
+                            // `clone s` yields a fresh value, not a place: a
+                            // borrow has no slot to point at.
+                            if *access == Access::Clone {
+                                self.add_error(
+                                    TypeckErrorKind::RefArgNotAVariable,
+                                    typed_arg.span(),
+                                );
+                                return Err(());
+                            }
+                        }
+                        _ => {
+                            self.add_error(TypeckErrorKind::RefArgNotAVariable, typed_arg.span());
+                            return Err(());
+                        }
                     }
                 }
                 param if param.is_owned() => {
@@ -1607,7 +1632,7 @@ impl TypeChecker {
             return Err(());
         }
 
-        // Arrays are parsed but not supported in 0.0.1.
+        // Arrays are parsed but not supported in 0.0.2.
         match typed_arr.ty() {
             Type::Array(_) => {
                 self.add_error(
@@ -1635,7 +1660,7 @@ impl TypeChecker {
     fn typeck_field(&mut self, obj: ExprHir, _field: String) -> Result<TypedExprHir, ()> {
         let typed_obj = self.typeck_expr(obj, None)?;
 
-        // Structs/fields are parsed but not supported in 0.0.1.
+        // Structs/fields are parsed but not supported in 0.0.2.
         self.add_error(
             TypeckErrorKind::UnsupportedFeature {
                 feature: "field access".to_string(),

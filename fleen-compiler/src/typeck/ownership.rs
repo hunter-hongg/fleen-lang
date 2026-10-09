@@ -284,6 +284,8 @@ impl<'a> Cx<'a> {
             // Loading a box does not move it: the box binding stays in its
             // slot, so the load is a plain read even for owned boxes —
             // `deref` must not clone (deep-copy) the box itself.
+            // The operand is a plain identifier in well-formed trees
+            // (typeck requires one); keep the walk total regardless.
             TypedExprHir::Deref(inner, _) => {
                 if let TypedExprHir::Ident {
                     name,
@@ -301,8 +303,6 @@ impl<'a> Cx<'a> {
                         *access = Access::Copy;
                     }
                 } else {
-                    // Unreachable (typeck requires an identifier operand);
-                    // keep the walk total for error-recovery trees.
                     self.walk_expr(inner, false);
                 }
             }
@@ -368,8 +368,8 @@ impl<'a> Cx<'a> {
                 }
             }
             TypedExprHir::Index(a, b) => {
-                // Unreachable as expressions (typeck rejects them); keep
-                // the walk total for error-recovery trees.
+                // Index expressions are rejected by typeck, so they cannot
+                // appear in a well-formed tree; keep the walk total.
                 self.walk_expr(a, false);
                 self.walk_expr(b, false);
             }
@@ -445,7 +445,11 @@ impl<'a> Cx<'a> {
     }
 
     /// An `if` expression: each branch derives from the pre-`if` snapshot;
-    /// the join is per-binding (`merge_exits`).
+    /// the join is per-binding (`merge_exits`). A branch tail is a
+    /// producing position whether the `if` itself is a value or a
+    /// statement: the tail value "flows out" the branch and is discarded
+    /// at a statement boundary, so a bare owned tail transfers there too
+    /// (DESIGN §10.2 rule 3).
     fn walk_if(&mut self, e: &mut TypedExprIfHir) {
         self.walk_expr(&mut e.condition, false);
 

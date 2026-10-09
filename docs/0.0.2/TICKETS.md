@@ -847,14 +847,14 @@ cargo fln tests/e2e/valid/question.fln
 ## U12: 收尾 — 文档核对、版本与发布
 
 ### 文档核对（规划期已同步，实现后核对差异）
-- [ ] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
+- [x] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
 - [ ] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现）
 - [ ] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修）
 - [ ] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6）
 - [ ] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13）
 - [ ] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致
 - [ ] `SPEC.md` §14 快速参考补 `?` 示例（如实现形态有出入）
-- [ ] 新增错误信息样例与实际输出比对（`UseAfterMove` 等）
+- [x] 新增错误信息样例与实际输出比对（`UseAfterMove` 等）
 
 ### 版本与发布
 - [ ] 三个 crate `Cargo.toml` 版本 → `0.0.2`

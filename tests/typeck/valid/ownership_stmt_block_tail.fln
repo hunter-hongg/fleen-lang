@@ -1,0 +1,9 @@
+// Test: statement-position block/if tails still produce a value that is
+// dropped (conservative producer semantics, DESIGN §10.2). The tail value
+// is neither observed nor used after the statement, so this is legal.
+func go() {
+    {
+        "hello"
+    };
+    if true { "yes" } else { "no" };
+}

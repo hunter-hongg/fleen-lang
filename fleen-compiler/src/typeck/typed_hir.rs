@@ -8,7 +8,7 @@ use crate::lexer::Span;
 use crate::parser::ast::ResultCtor;
 use crate::resolver::hir::*;
 
-/// A type in the Fleen type system (0.0.1).
+/// A type in the Fleen type system (0.0.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     /// 64-bit integer.
@@ -25,11 +25,11 @@ pub enum Type {
     Func(Vec<Type>, Box<Type>),
     /// Result type: Result[T, E].
     Result(Box<Type>, Box<Type>),
-    /// Array type (parsed but unsupported in 0.0.1 codegen).
+    /// Array type (parsed but unsupported in 0.0.2 codegen).
     Array(Box<Type>),
-    /// Box type (parsed but unsupported in 0.0.1 codegen).
+    /// Box type (0.0.2: typeck-supported ownership; lowering lands in U06).
     Box(Box<Type>),
-    /// Ref type (parsed but unsupported in 0.0.1 codegen).
+    /// Ref type (0.0.2: typeck-supported read-only borrow; lowering in U06).
     Ref(Box<Type>),
     /// Unsupported type (for features not yet implemented).
     Unsupported(String),
@@ -59,11 +59,6 @@ impl Type {
     /// Check if this type is a numeric type (Int or Float).
     pub fn is_numeric(&self) -> bool {
         matches!(self, Type::Int | Type::Float)
-    }
-
-    /// Check if this type is a function type.
-    pub fn is_func(&self) -> bool {
-        matches!(self, Type::Func(_, _))
     }
 
     /// Check if this type is a Copy type (0.0.2, DESIGN §10.1):

@@ -1,0 +1,10 @@
+// Test: 0.0.2 cannot borrow a box's pointee (DESIGN §10.4)
+// `deref b` as a `ref T` argument is rejected: BorrowOfBoxInterior.
+func f(s: ref string) {
+    print(s);
+}
+
+func go() {
+    b = box "hi";
+    f(deref b);
+}
