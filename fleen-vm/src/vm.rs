@@ -1,7 +1,5 @@
 //! Core interpreter loop.
 
-use std::rc::Rc;
-
 use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
 
 use crate::error::RuntimeError;
@@ -52,15 +50,22 @@ impl Vm {
         let entry = self.module.entry;
         self.call(entry, 0)?;
         // No globals/`__init__` path pushes extra frames; run until empty.
+        // A top-level `Return` leaves its value on the stack (the `Return`
+        // dispatch pushes it back), so the pop below yields the module
+        // result.
         loop {
             if self.frames.is_empty() {
+                // The entry frame starts at stack base 0 and `Return`
+                // truncates to the frame's base before pushing its value
+                // back, so after unwinding nothing but the module result
+                // (if any) can remain.
+                debug_assert!(
+                    self.stack.len() <= 1,
+                    "stray operands left on the stack after unwinding"
+                );
                 return Ok(self.stack.pop().unwrap_or(Value::Unit));
             }
-            match self.step()? {
-                Step::Continue => {}
-                Step::Returned(v) if self.frames.is_empty() => return Ok(v),
-                Step::Returned(_) => {}
-            }
+            self.step()?;
         }
     }
 
@@ -149,7 +154,7 @@ impl Vm {
         }
     }
 
-    fn step(&mut self) -> Result<Step, RuntimeError> {
+    fn step(&mut self) -> Result<(), RuntimeError> {
         let frame = *self.frames.last().ok_or(RuntimeError::StackUnderflow)?;
         let func = &self.module.functions[frame.func.0 as usize];
         let code = &func.code;
@@ -189,7 +194,7 @@ impl Vm {
                 let v = match self.module.constants.get(id) {
                     Some(Const::Int(v)) => Value::Int(*v),
                     Some(Const::Float(v)) => Value::Float(*v),
-                    Some(Const::Str(s)) => Value::Str(Rc::from(s.as_ref())),
+                    Some(Const::Str(s)) => Value::Str(Box::from(s.as_ref())),
                     None => {
                         return Err(RuntimeError::ConstOutOfRange(
                             fleen_compiler::codegen::ConstId(id as u32),
@@ -354,7 +359,7 @@ impl Vm {
                     .ok_or(RuntimeError::StackUnderflow)?
                     .ip = ip;
                 self.call(fid, params)?;
-                return Ok(Step::Continue);
+                return Ok(());
             }
             Opcode::LoadFunc => {
                 let s = take!(2);
@@ -379,7 +384,7 @@ impl Vm {
                             .ok_or(RuntimeError::StackUnderflow)?
                             .ip = ip;
                         self.call(fid, argc)?;
-                        return Ok(Step::Continue);
+                        return Ok(());
                     }
                     _ => return Err(RuntimeError::ArithTypeMismatch),
                 }
@@ -388,8 +393,13 @@ impl Vm {
                 let ret = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
                 let done = self.frames.pop().ok_or(RuntimeError::StackUnderflow)?;
                 self.stack.truncate(done.stack_base);
-                self.stack.push(ret.clone());
-                return Ok(Step::Returned(ret));
+                // Move the return value back onto the caller's stack. Under
+                // exclusive ownership (`Str`/`Boxed`/`Ok`/`Err` are not
+                // reference counted) cloning here would deep-copy every
+                // returned value; the module result is read by `run` from
+                // the stack after the last frame unwinds.
+                self.stack.push(ret);
+                return Ok(());
             }
             Opcode::BindMatch => {
                 let s = take!(2);
@@ -411,7 +421,7 @@ impl Vm {
             Opcode::ToStr => {
                 let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
                 let s = fmt_scalar(&v).ok_or(RuntimeError::CastOperandNotScalar)?;
-                self.stack.push(Value::Str(Rc::from(s.as_str())));
+                self.stack.push(Value::Str(s.as_str().into()));
             }
             // 0.0.2 U07: the v2 opcodes (0x80–0xA4) are *encoded* by codegen
             // from U07 on, but they are only *executed* from U09 on. Until
@@ -424,7 +434,7 @@ impl Vm {
             .last_mut()
             .ok_or(RuntimeError::StackUnderflow)?
             .ip = ip;
-        Ok(Step::Continue)
+        Ok(())
     }
 
     fn checked_target(&self, fid: FuncId, target: usize) -> Result<usize, RuntimeError> {
@@ -494,10 +504,4 @@ impl Vm {
         self.stack.push(Value::Bool(f(r)));
         Ok(())
     }
-}
-
-/// Outcome of one interpreter step.
-enum Step {
-    Continue,
-    Returned(Value),
 }

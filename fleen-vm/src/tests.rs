@@ -295,3 +295,81 @@ fn v2_opcode_fails_loudly_until_u09() {
     };
     assert_eq!(Vm::new(m).run(), Err(RuntimeError::UnsupportedVersion(3)));
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U08: Value ownership representation (BYTECODE.md §3.2). Strings are
+// exclusively owned now; `Boxed`/`Ref`/`Ok`/`Err` are defined ahead of U09's
+// instruction dispatch, which is the only place that can produce them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn value_display_new_variants() {
+    // `Boxed` prints the inner value; `Ref` is opaque; Result payloads are
+    // wrapped in `Ok(...)` / `Err(...)` (TICKETS U08).
+    assert_eq!(Value::Boxed(Box::new(Value::Int(3))).to_string(), "3");
+    assert_eq!(Value::Ref { base: 0, slot: 1 }.to_string(), "<ref>");
+    assert_eq!(Value::Ok(Box::new(Value::Int(1))).to_string(), "Ok(1)");
+    assert_eq!(
+        Value::Err(Box::new(Value::Str("boom".into()))).to_string(),
+        "Err(boom)"
+    );
+}
+
+#[test]
+fn value_partial_eq_and_clone_semantics() {
+    // `Str` still compares by content under `Box<str>` — the switch from
+    // shared-reference strings must not change v1 equality behavior.
+    assert_eq!(Value::Str("a".into()), Value::Str("a".into()));
+    // `Boxed` compares the inner value (Rust `Box: PartialEq`), matching
+    // the `Eq` semantics specified in BYTECODE.md §3.2.
+    assert_eq!(
+        Value::Boxed(Box::new(Value::Int(1))),
+        Value::Boxed(Box::new(Value::Int(1)))
+    );
+    // Nested boxes clone deeply and stay structurally equal (mutation paths
+    // such as `StoreDerefBox` arrive with U09; this pins the derive
+    // behavior the `Eq` instruction will build on).
+    let nested = Value::Boxed(Box::new(Value::Boxed(Box::new(Value::Str("deep".into())))));
+    assert_eq!(nested, nested.clone());
+}
+
+#[test]
+fn reserved_error_display_messages() {
+    // U08 pre-reserves these two variants for U09's dispatch; pin their
+    // user-facing text so a wording change is a deliberate act. The
+    // `ResultMismatch` message stays variant-symmetric: U09 fires it for
+    // `UnwrapErr` on `Ok` too.
+    assert_eq!(
+        RuntimeError::ResultMismatch.to_string(),
+        "unwrap opcode applied to mismatched Result variant"
+    );
+    assert_eq!(
+        RuntimeError::BorrowOutOfRange.to_string(),
+        "borrow handle out of range"
+    );
+}
+
+#[test]
+fn string_return_through_call() {
+    // Strings now flow through `Return` under exclusive ownership; the old
+    // return plumbing cloned the value on every call, which would have
+    // become a hidden deep copy. Behavior is unchanged — this pins it.
+    let f = func(
+        enc(&[(Opcode::Const, u32b(1)), (Opcode::Return, vec![])]),
+        0,
+        0,
+    );
+    let main = func(
+        enc(&[(Opcode::Call, u16b(1)), (Opcode::Return, vec![])]),
+        0,
+        0,
+    );
+    let m = Module {
+        version: 1,
+        constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+        functions: vec![main, f],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("hi".into()));
+}

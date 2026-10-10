@@ -40,6 +40,14 @@ pub enum RuntimeError {
     BadJumpTarget,
     /// Module header version this VM cannot execute.
     UnsupportedVersion(u16),
+    /// `UnwrapOk` hit an `Err` value or `UnwrapErr` hit an `Ok` value
+    /// (defensive: typeck routes each payload through the matching
+    /// arm / unwrap opcode before codegen).
+    ResultMismatch,
+    /// A borrow handle pointed outside the live operand stack (defensive:
+    /// handles only reference lower frames that outlive them). Reserved for
+    /// U09's `MakeRefLocal` and handle dereference.
+    BorrowOutOfRange,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -64,6 +72,10 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::UnknownBuiltin(name) => write!(f, "unknown builtin: {name}"),
             RuntimeError::BadJumpTarget => write!(f, "bad jump target"),
             RuntimeError::UnsupportedVersion(v) => write!(f, "unsupported module version {v}"),
+            RuntimeError::ResultMismatch => {
+                write!(f, "unwrap opcode applied to mismatched Result variant")
+            }
+            RuntimeError::BorrowOutOfRange => write!(f, "borrow handle out of range"),
         }
     }
 }
