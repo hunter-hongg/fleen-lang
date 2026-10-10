@@ -655,3 +655,255 @@ func main(): int {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U07 review: remaining per-instruction coverage + regression cases
+// ---------------------------------------------------------------------------
+
+/// Minimum-encoded shape of a function body: `Const Int(k); Return`.
+fn const_int_body(code: &mut Vec<u8>, const_idx: u32) {
+    code.push(CONST_INT);
+    code.extend_from_slice(&u32le(const_idx));
+    code.push(RETURN);
+}
+
+#[test]
+fn empty_function_body_is_rejected() {
+    // Regression: an empty body used to slip past `walk_function` (no
+    // instruction to fall off the end of) and then panic inside the stack
+    // analysis. It must be a verification failure instead (SPEC §4: no
+    // panic on malformed input).
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 0, vec![])],
+        vec![],
+        0,
+    );
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::EmptyFunctionBody { func: 0 })
+    );
+}
+
+#[test]
+fn empty_function_body_from_bytes_is_rejected() {
+    // Same regression, driven through the `.flnc` decode path: a
+    // well-formed file with a zero-length function body must fail
+    // verification, not abort. This is the shape of the input that used
+    // to crash both the `fleen-verify` CLI and `fleen-vm`.
+    let mut b = Vec::new();
+    b.extend_from_slice(b"FLNC");
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes()); // constants
+    b.extend_from_slice(b"\x02");
+    b.extend_from_slice(&4u32.to_le_bytes());
+    b.extend_from_slice(b"main");
+    b.extend_from_slice(&1u32.to_le_bytes()); // functions
+    b.extend_from_slice(&0u32.to_le_bytes()); // name
+    b.extend_from_slice(&0u16.to_le_bytes()); // params
+    b.extend_from_slice(&0u16.to_le_bytes()); // locals
+    b.push(0); // is_builtin
+    b.extend_from_slice(&0u32.to_le_bytes()); // code_len = 0
+    b.extend_from_slice(&0u32.to_le_bytes()); // span_map_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // globals
+    b.extend_from_slice(&0u32.to_le_bytes()); // entry
+    let m = fleen_compiler::codegen::from_bytes(&b).expect("well-formed bytes");
+    assert!(m.functions[0].code.is_empty());
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::EmptyFunctionBody { func: 0 })
+    );
+}
+
+#[test]
+fn alloc_box_replaces_the_top_value_net_zero() {
+    // `box e` lowers to `Const; AllocBox` where AllocBox *replaces* the
+    // value (net 0, min 1) — not a push (+1). This module is well-formed
+    // only under the U07-corrected table: with the old `+1` the Return
+    // would see depth 2 and fail.
+    let mut code = Vec::new();
+    const_int_body(&mut code, 1);
+    code.push(ALLOC_BOX);
+    code.push(RETURN);
+    let m = module(
+        vec![Const::Str("main".into()), Const::Int(1)],
+        vec![func(ConstId(0), 0, 0, code)],
+        vec![],
+        0,
+    );
+    assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn alloc_box_needs_a_value() {
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 0, vec![ALLOC_BOX, RETURN])],
+        vec![],
+        0,
+    );
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0
+        })
+    );
+}
+
+#[test]
+fn deref_box_reads_the_pointee_and_keeps_the_box() {
+    // `Const; AllocBox; DerefBox` → depths 1 → 1 → 2; drop the copy, the
+    // box remains the return value.
+    let mut code = Vec::new();
+    code.extend_from_slice(&[CONST_INT]);
+    code.extend_from_slice(&u32le(1));
+    code.push(ALLOC_BOX);
+    code.push(Opcode::DerefBox as u8);
+    code.push(POP);
+    code.push(RETURN);
+    let m = module(
+        vec![Const::Str("main".into()), Const::Int(1)],
+        vec![func(ConstId(0), 0, 0, code)],
+        vec![],
+        0,
+    );
+    assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn deref_box_needs_a_box_on_the_stack() {
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 0, vec![Opcode::DerefBox as u8, RETURN])],
+        vec![],
+        0,
+    );
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0
+        })
+    );
+}
+
+#[test]
+fn dup_deep_needs_a_value() {
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 0, vec![DUP_DEEP, RETURN])],
+        vec![],
+        0,
+    );
+    assert_eq!(
+        crate::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0
+        })
+    );
+}
+
+#[test]
+fn valid_make_ref_local_pushes_a_handle() {
+    // MakeRefLocal is Δ+1, min 0: it may run on an empty operand stack.
+    let mut code = Vec::new();
+    code.push(MAKE_REF_LOCAL);
+    code.extend_from_slice(&u16le(0));
+    code.push(RETURN);
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 1, code)],
+        vec![],
+        0,
+    );
+    assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn result_constructors_and_observers_preserve_depth() {
+    // Every Result instruction is Δ0, min 1: a depth-1 value survives all
+    // of them in a row; the `DupDeep` bumps to 2 and one `Pop` brings it
+    // back before `Return`.
+    let mut code = Vec::new();
+    code.extend_from_slice(&[CONST_INT]);
+    code.extend_from_slice(&u32le(1));
+    for op in [PACK_OK, DUP_DEEP, IS_ERR, UNWRAP_OK, UNWRAP_ERR, PACK_ERR] {
+        code.push(op);
+    }
+    code.push(POP);
+    code.push(RETURN);
+    let m = module(
+        vec![Const::Str("main".into()), Const::Int(1)],
+        vec![func(ConstId(0), 0, 0, code)],
+        vec![],
+        0,
+    );
+    assert!(crate::verify(&m).is_ok(), "{:?}", crate::verify(&m));
+}
+
+#[test]
+fn truncated_v2_operand_is_rejected() {
+    // A 3-byte slot instruction cut off after one operand byte is
+    // `TruncatedInstruction`, not a mis-decode of the next byte.
+    let m = module(
+        vec![Const::Str("main".into())],
+        vec![func(ConstId(0), 0, 1, vec![MOVE_LOCAL, 0])],
+        vec![],
+        0,
+    );
+    assert!(matches!(
+        crate::verify(&m),
+        Err(VerifyError::TruncatedInstruction { pc: 0 })
+    ));
+}
+
+#[test]
+fn v2_in_v1_module_rejection_covers_every_v2_byte() {
+    // The version gate is `opcode >= V2_OPCODE_BASE`; every v2 opcode in a
+    // v1 module must trip it (decoding alone cannot catch it, since
+    // `from_byte` knows all v2 numbers).
+    for op in [
+        ALLOC_BOX,
+        Opcode::DerefBox as u8,
+        STORE_DEREF_BOX,
+        MAKE_REF_LOCAL,
+        DUP_DEEP,
+        MOVE_LOCAL,
+        CLONE_LOCAL,
+        CLONE_GLOBAL,
+        PACK_OK,
+        PACK_ERR,
+        IS_ERR,
+        UNWRAP_OK,
+        UNWRAP_ERR,
+        TO_STR,
+    ] {
+        // The v2 byte sits at pc 5, after a well-formed `Const;`. The four
+        // slot/global opcodes carry a u16 operand; the jump-checks never
+        // run, but a well-formed instruction body keeps the shape honest.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[CONST_INT]);
+        body.extend_from_slice(&u32le(1));
+        body.push(op);
+        if matches!(op, MAKE_REF_LOCAL | MOVE_LOCAL | CLONE_LOCAL | CLONE_GLOBAL) {
+            body.extend_from_slice(&u16le(0));
+        }
+        body.push(RETURN);
+        let m = module_v1(
+            vec![Const::Str("main".into()), Const::Int(42)],
+            vec![func(ConstId(0), 0, 0, body)],
+            vec![],
+            0,
+        );
+        assert_eq!(
+            crate::verify(&m),
+            Err(VerifyError::V2OpcodeInV1Module { pc: 5, byte: op }),
+            "opcode 0x{op:02x} in a v1 module must be rejected"
+        );
+    }
+}

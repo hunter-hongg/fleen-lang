@@ -88,6 +88,15 @@ pub enum VerifyError {
         pc: usize,
         byte: u8,
     },
+    /// A function body contains no instructions at all, so it has no
+    /// `Return` and falls off the end of the function (BYTECODE.md §8).
+    ///
+    /// Rejected here rather than left to the stack analysis: an empty body
+    /// would leave it with an empty instruction table while it still starts
+    /// a worklist at pc 0.
+    EmptyFunctionBody {
+        func: usize,
+    },
     /// Entry function id out of range.
     BadEntry {
         entry: u32,
@@ -187,6 +196,9 @@ impl std::fmt::Display for VerifyError {
                     f,
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v2, module is v1"
                 )
+            }
+            Self::EmptyFunctionBody { func } => {
+                write!(f, "function {func} has an empty body: no Return")
             }
             Self::BadEntry { entry } => write!(f, "entry function id {entry} out of range"),
         }
@@ -354,8 +366,8 @@ pub fn stack_effect(
 
 /// Walk every instruction in `code` (structural decode from 0).
 ///
-/// Returns the list of decoded instructions. Fails on bad opcodes,
-/// truncation, trailing garbage, or a jump target that is out of
+/// Returns the list of decoded instructions. Fails on an empty body, bad
+/// opcodes, truncation, trailing garbage, or a jump target that is out of
 /// range / not on an instruction boundary. Also validates operand
 /// index ranges and local slot bounds.
 fn walk_function(
@@ -368,6 +380,9 @@ fn walk_function(
         return Err(VerifyError::LocalsLessThanParams { func: func_idx });
     }
     let code = &func.code;
+    if code.is_empty() {
+        return Err(VerifyError::EmptyFunctionBody { func: func_idx });
+    }
     let mut at = Vec::new();
     let mut boundaries = Vec::new();
     let mut pc = 0;

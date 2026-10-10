@@ -944,14 +944,11 @@ x = 44;              // 改的是哪个？
 | 0.0.5 | `unsafe` / `trusted` |
 | 0.1.0 | 泛型 / 运算符重载 |
 
-### 已知 Hack（0.0.2 修复方案已定）
+### 已知 Hack
 
-- **`print` 类型检查被放宽**（0.0.1 现状）：typeck 中 `print` 的签名仍是
-  `(string) -> unit`，但 `typeck_call` 对 `print` 特判，跳过参数类型检查
-  （任意类型、任意元数），`check_builtin_print_wrong_arg` 测试暂期望编译通过。
-  0.0.2 修复方案已定稿（`docs/0.0.2/PLAN.md` §6）：内建签名表 +
-  `printable` 集合（int/float/bool/string/unit），恢复严格检查；
-  实现落地后本节清空。
+无。（0.0.1 的 `print` 特判已在 0.0.2 U04/U13 移除：`print` 获得真实签名
+`(string...) -> unit`，内建签名表见 `fleen-compiler/src/typeck/builtins.rs`，
+非 string 实参报 `ArgTypeMismatch` 并提示 `as string`。）
 
 ---
 

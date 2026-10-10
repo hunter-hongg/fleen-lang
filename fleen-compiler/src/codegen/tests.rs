@@ -1038,3 +1038,60 @@ fn span_map_survives_flnc_round_trip() {
     assert_eq!(module, back);
     assert_eq!(back.functions[0].span_map.len(), 1);
 }
+
+#[test]
+fn flnc_rejects_oversized_table_lengths() {
+    // Table lengths come straight out of an untrusted file. They must be
+    // clamped against the remaining input: `Vec::with_capacity(n)` with a
+    // hostile `n` aborts the process on allocation failure instead of
+    // returning `Err` (SPEC §4 / §11 — malformed input is never a panic).
+    //
+    // Every length field of every table is exercised, each with
+    // `u32::MAX` and nothing after it.
+    let header = |extra: &[u8]| {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"FLNC");
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(extra);
+        b
+    };
+    let big = u32::MAX.to_le_bytes();
+
+    // constants_len: every constant is at least 1 byte (its tag).
+    assert!(crate::codegen::from_bytes(&header(&big)).is_err());
+
+    // functions_len: 0 constants, then a hostile function count.
+    let mut b = header(&0u32.to_le_bytes());
+    b.extend_from_slice(&big);
+    assert!(crate::codegen::from_bytes(&b).is_err());
+
+    // span_map_len: one well-formed empty function body, hostile map count.
+    let mut b = header(&1u32.to_le_bytes());
+    b.extend_from_slice(b"\x02"); // const tag = Str
+    b.extend_from_slice(&4u32.to_le_bytes());
+    b.extend_from_slice(b"main");
+    b.extend_from_slice(&1u32.to_le_bytes()); // functions_len = 1
+    b.extend_from_slice(&0u32.to_le_bytes()); // name = ConstId 0
+    b.extend_from_slice(&0u16.to_le_bytes()); // params
+    b.extend_from_slice(&0u16.to_le_bytes()); // locals
+    b.push(0); // is_builtin
+    b.extend_from_slice(&0u32.to_le_bytes()); // code_len
+    b.extend_from_slice(&big); // span_map_len
+    assert!(crate::codegen::from_bytes(&b).is_err());
+
+    // globals_len: same prefix with an empty span map, then entry is
+    // missing entirely after the hostile count.
+    let mut b = header(&1u32.to_le_bytes());
+    b.extend_from_slice(b"\x02");
+    b.extend_from_slice(&4u32.to_le_bytes());
+    b.extend_from_slice(b"main");
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.push(0);
+    b.extend_from_slice(&0u32.to_le_bytes()); // code_len
+    b.extend_from_slice(&0u32.to_le_bytes()); // span_map_len
+    b.extend_from_slice(&big); // globals_len
+    assert!(crate::codegen::from_bytes(&b).is_err());
+}

@@ -13,9 +13,14 @@
 > PLAN §5.2 / BYTECODE.md §8 原表写成 `+1` 是笔误，已勘误；v2 指令在 v1 模块中由
 > `V2OpcodeInV1Module` 显式拒绝（不是"自然成立"）；VM 侧需通配 opcode 分支 + 版本门放开
 > `{1,2}`，否则 `Opcode` 新增变体使 fleen-vm 编译失败。
+> **U07 审查加固**（实现说明第 5–6 条）：修掉 0.0.1 起遗留的两处畸形输入缺陷——
+> verify 空函数体 panic（改报 `EmptyFunctionBody`）与 `flnc` 解码无界预分配
+> （改 `capacity_hint` 钳制）；补 VM `InvalidOpcode` 锁定测试与 verify 逐指令
+> 合法/畸形用例。
 > **Result-choose 的 guard / `otherwise`**：U07 决定**继续延后**（见 U07 节"范围决定"），
 > 随 U09 或独立票做通用臂链重写。
-> 规范文档已在规划阶段同步完毕，U12 仅剩实现后的收尾（版本号、正式 CHANGELOG、Hack 清空）。
+> 规范文档已在规划阶段同步完毕，U12 仅剩实现后的收尾（版本号、正式 CHANGELOG）；
+> `DESIGN.md` §18 Hack 清空已于 U07 审查时提前完成（见 U12 勾选）。
 
 ---
 
@@ -646,7 +651,23 @@ UnwrapErr     = 0xA4,
    而非静默no-op）。
 4. **span_map offset 契约**：VM `step()` 只在成功路径末尾回写 `frame.ip`，
    出错时 `ip` 仍指向失败指令首字节。故契约为"`offset == 出错时的 `frame.ip`"，
-   U10 按此查表（TICKETS U10 原稿写的 `frame.ip - 1` 会差一，已在此更正）。
+   U10 按此查表（原稿写的 `frame.ip - 1` 已更正，本条与 U10 设计一致）。
+ 5. **审查发现：verify 对空函数体 panic（0.0.1 既有）**：`walk_function` 对
+    零长 `code` 直接通过（没有指令，也就没有"掉出函数底"的指令可报），随后
+    `stack_analysis` 以空指令表从 pc 0 起步，`by_pc[0]` 越界 panic。
+    `fleen-verify` CLI 与 `fleen-vm` 的 `.flnc` 路径都会崩（exit 101）。
+    已修：`walk_function` 新增 `EmptyFunctionBody` 校验（空体即无 `Return`，
+    正是 §8"每条路径以 Return 结束"的违例），`analyze` 的索引改 `.get()`
+    兜底。回归用例：`empty_function_body_is_rejected`（内存构造）与
+    `empty_function_body_from_bytes_is_rejected`（`.flnc` 解码全链）。
+ 6. **审查发现：`flnc::from_bytes` 对不可信长度预分配 → OOM abort（0.0.1 既有）**：
+    四个表长度字段（constants/functions/span_map/globals）直接来自文件，
+    原来 `Vec::with_capacity(n)` 在"数据是否足够"校验之前执行；
+    `n = 0xFFFFFFFF` 时分配失败直接 abort（≈51–275 GB），违反
+    "畸形输入永不 panic"（SPEC §4/§11，e2e 已有 corrupt-bytecode 契约）。
+    已修：`R::capacity_hint(count, min_elem)` 按剩余字节数钳制容量
+    （有效文件预分配粒度不变，超大长度降级为截断错误）。
+    回归用例：`flnc_rejects_oversized_table_lengths`。
 
 ### 范围决定：Result-choose 的 guard / `otherwise` 继续延后
 - 现状（U06 as-built + 工作区改动）：`otherwise`、字面量臂、带 guard 的臂在
@@ -720,8 +741,9 @@ grep -rn "Rc<" src/ | wc -l   # = 0
 
 > **U07 遗留（本票必须处理）**：`Opcode` 现有 13 个 v2 变体只被编码、尚未执行——
 > `vm.rs` 对它们返回 `RuntimeError::InvalidOpcode`。本票把该通配分支替换为
-> 真实实现。已知受影响路径：**owned 局部变量作 `print` 实参**（D3 只读使用 →
-> `CloneLocal`），例如 `examples/hello.fln` 的 `print(result)`；
+> 真实实现。已知受影响路径：**owned 局部/全局变量作 `print` 实参**（D3 只读使用 →
+> `CloneLocal` / `CloneGlobal`），例如 verify 全链 smoke 源码里的 `print(u)`
+> （`u = clone t` 之后的 owned 局部）；
 > U07 之后这类程序报 `invalid opcode 0x92` 属预期，不是 U07 回归。
 > 另有 `move` 尾表达式（`MoveLocal` 0x91）、box/deref、`?` 等同样待实现。
 
@@ -808,7 +830,7 @@ fleen-vm/src/
 /// 源码字节偏移 → (1-based line, 1-based col)；O(n) 单遍扫描，错误路径专用。
 pub fn line_col(source: &str, offset: u32) -> (u32, u32);
 ```
-- `RuntimeError` 增加 `span: Option<(u32, u32)>`：出错时按 `frame.ip - 1` 查
+- `RuntimeError` 增加 `span: Option<(u32, u32)>`：出错时按 `frame.ip` 查
   当前函数 `span_map`（`offset` 单调，二分或线性），构造 `(start, end)`
 - CLI 输出（`.fln` 一站式模式持有源码）：
   ```console
@@ -914,7 +936,7 @@ cargo fln tests/e2e/valid/question.fln
 ### 文档核对（规划期已同步，实现后核对差异）
 - [x] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
 - [ ] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现）
-- [ ] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修）
+- [x] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修；于 U07 审查时提前完成）
 - [ ] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6）
 - [ ] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13）
 - [ ] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致

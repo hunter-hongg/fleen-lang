@@ -70,6 +70,23 @@ impl<'a> R<'a> {
     fn u64(&mut self) -> Result<u64, FlncError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
+
+    /// Capacity hint for a table of `count` elements whose minimum encoded
+    /// size is `min_elem` bytes.
+    ///
+    /// `count` comes straight out of an untrusted file, so it can name far
+    /// more elements than the file could ever hold. `Vec::with_capacity`
+    /// allocates up front and **aborts the process** when the allocation
+    /// fails, so a hostile `.flnc` would otherwise OOM-kill the reader
+    /// instead of being rejected. Clamping to what the remaining bytes can
+    /// actually encode keeps the hint useful (valid files still preallocate
+    /// exactly once) and makes any oversized count fail as a truncation
+    /// error.
+    fn capacity_hint(&self, count: usize, min_elem: usize) -> usize {
+        let remaining = self.buf.len().saturating_sub(self.pos);
+        let min_elem = min_elem.max(1);
+        count.min(remaining / min_elem)
+    }
     fn i64(&mut self) -> Result<i64, FlncError> {
         Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
@@ -142,7 +159,8 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
     }
 
     let nc = r.u32()? as usize;
-    let mut constants = Vec::with_capacity(nc);
+    // Smallest possible constant is a 1-byte tag.
+    let mut constants = Vec::with_capacity(r.capacity_hint(nc, 1));
     for _ in 0..nc {
         match r.u8()? {
             0 => constants.push(Const::Int(r.i64()?)),
@@ -159,7 +177,8 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
     }
 
     let nf = r.u32()? as usize;
-    let mut functions = Vec::with_capacity(nf);
+    // Smallest function entry is 4 + 2 + 2 + 1 + 4 + 4 = 17 bytes.
+    let mut functions = Vec::with_capacity(r.capacity_hint(nf, 17));
     for _ in 0..nf {
         let name = ConstId(r.u32()?);
         if name.0 as usize >= nc {
@@ -175,7 +194,8 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
         let code_len = r.u32()? as usize;
         let code = r.take(code_len)?.to_vec().into_boxed_slice();
         let ns = r.u32()? as usize;
-        let mut span_map = Vec::with_capacity(ns);
+        // Each span entry is 3 u32s = 12 bytes.
+        let mut span_map = Vec::with_capacity(r.capacity_hint(ns, 12));
         for _ in 0..ns {
             span_map.push(SpanEntry {
                 offset: r.u32()?,
@@ -194,7 +214,8 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
     }
 
     let ng = r.u32()? as usize;
-    let mut globals = Vec::with_capacity(ng);
+    // Smallest global entry is 4 + 1 = 5 bytes.
+    let mut globals = Vec::with_capacity(r.capacity_hint(ng, 5));
     for _ in 0..ng {
         let name = ConstId(r.u32()?);
         if name.0 as usize >= nc {

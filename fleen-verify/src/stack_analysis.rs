@@ -32,8 +32,14 @@ pub fn analyze(
 
     while let Some(pc) = worklist.pop() {
         let current = depth_at[pc].ok_or(VerifyError::TruncatedInstruction { pc })?;
-        // 不变量：worklist 中的 pc 必来自结构解码结果 `at`。
-        let d = *by_pc[pc].ok_or(VerifyError::TruncatedInstruction { pc })?;
+        // 不变量：worklist 中的 pc 必来自结构解码结果 `at`。用 `.get()` 取而非索引，
+        // 使 `at` 与 code 不一致时（或 code 为空、`at` 为空而 pc 0 已入栈）返回
+        // 错误而不是 panic。
+        let d = *by_pc
+            .get(pc)
+            .copied()
+            .flatten()
+            .ok_or(VerifyError::TruncatedInstruction { pc })?;
         let (delta, min_depth) = stack_effect(code, &d, &module.functions)?;
 
         if current < min_depth {

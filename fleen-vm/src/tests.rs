@@ -210,3 +210,88 @@ fn immutable_global_rejected() {
         RuntimeError::ImmutableGlobal(fleen_compiler::codegen::GlobalId(0))
     );
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U07: v2 opcodes are *encoded* (U07) but not *executed* (U09).
+// These tests lock that behavior so the catch-all cannot silently regress.
+// ---------------------------------------------------------------------------
+
+fn v2_module(code: Box<[u8]>) -> Module {
+    Module {
+        version: 2,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(code, 0, 0)],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn v2_opcode_fails_loudly_until_u09() {
+    // A v2 module whose body contains only v1 instructions still runs:
+    // `run` accepts module versions {1, 2}.
+    let m = v2_module(enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]));
+    assert_eq!(Vm::new(m).run(), Ok(Value::Unit));
+
+    // The first v2 opcode encountered must fail with `InvalidOpcode`
+    // (not a silent no-op, which would corrupt the depth invariants
+    // `fleen-verify` reasons about). U09 replaces these with real dispatch.
+    for (op, byte) in [
+        (Opcode::AllocBox, 0x80u8),
+        (Opcode::DerefBox, 0x81),
+        (Opcode::StoreDerefBox, 0x82),
+        (Opcode::MakeRefLocal, 0x83),
+        (Opcode::DupDeep, 0x90),
+        (Opcode::MoveLocal, 0x91),
+        (Opcode::CloneLocal, 0x92),
+        (Opcode::CloneGlobal, 0x93),
+        (Opcode::PackOk, 0xA0),
+        (Opcode::PackErr, 0xA1),
+        (Opcode::IsErr, 0xA2),
+        (Opcode::UnwrapOk, 0xA3),
+        (Opcode::UnwrapErr, 0xA4),
+    ] {
+        // The u16 operand only exists on the four slot/global opcodes;
+        // either way the dispatch fails before an operand is read.
+        let operand = if matches!(
+            op,
+            Opcode::MakeRefLocal | Opcode::MoveLocal | Opcode::CloneLocal | Opcode::CloneGlobal
+        ) {
+            u16b(0)
+        } else {
+            Vec::new()
+        };
+        let m = v2_module(enc(&[(op, operand), (Opcode::Return, vec![])]));
+        assert_eq!(
+            Vm::new(m).run(),
+            Err(RuntimeError::InvalidOpcode(byte)),
+            "opcode 0x{byte:02x} must fail with InvalidOpcode until U09"
+        );
+    }
+
+    // `ToStr` is U13 and *is* executed, so it is not part of the
+    // fail-loudly set.
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(7)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::ToStr, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert!(matches!(Vm::new(m).run(), Ok(Value::Str(_))));
+
+    // Unknown module versions are rejected before execution.
+    let m = Module {
+        version: 3,
+        ..v2_module(enc(&[(Opcode::Return, vec![])]))
+    };
+    assert_eq!(Vm::new(m).run(), Err(RuntimeError::UnsupportedVersion(3)));
+}

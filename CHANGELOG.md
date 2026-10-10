@@ -26,7 +26,11 @@
   0x80–0x93）与 Result 指令（0xA0–0xA4）；v1 模块向后兼容
 - `Value::Str(Rc<str>)` → `Str(Box<str>)`（所有权表示，偿还 0.0.1 临时决策）
 - `span_map` 生成 + 运行时错误携带源码位置（`.fln` 模式显示行列）
-- `print` 内建真实签名（`printable` 集合），移除 typeck 特判（0.0.1 已知 Hack）
+- `print` 内建真实签名（可变元 string；非 string 实参报 `ArgTypeMismatch`
+  并提示 `as string`），移除 typeck 特判（0.0.1 已知 Hack）
+- 安全性修复：`.flnc` 解码器不再对恶意表长度做无界预分配（0.0.1 起
+  超大长度会触发进程 abort，现降级为解码错误）；verify 拒绝空函数体
+  模块（0.0.1 起曾 panic，现报 `EmptyFunctionBody`）
 
 ### ⚠️ Breaking（规划）
 
