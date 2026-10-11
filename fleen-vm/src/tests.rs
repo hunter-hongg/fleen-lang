@@ -1,6 +1,7 @@
 //! Unit tests for the VM: hand-written bytecode modules.
 
-use super::error::RuntimeError;
+use super::diag::line_col;
+use super::error::{RuntimeError, RuntimeErrorKind};
 use super::value::Value;
 use super::vm::Vm;
 use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode};
@@ -94,7 +95,10 @@ fn division_by_zero() {
         constants: vec![Const::Int(1), Const::Int(0)],
         ..m
     };
-    assert_eq!(Vm::new(m).run().unwrap_err(), RuntimeError::DivisionByZero);
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::DivisionByZero
+    );
 }
 
 #[test]
@@ -206,8 +210,8 @@ fn immutable_global_rejected() {
         entry: FuncId(0),
     };
     assert_eq!(
-        Vm::new(m).run().unwrap_err(),
-        RuntimeError::ImmutableGlobal(fleen_compiler::codegen::GlobalId(0))
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ImmutableGlobal(fleen_compiler::codegen::GlobalId(0))
     );
 }
 
@@ -258,7 +262,10 @@ fn v2_module_gate() {
         version: 3,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
-    assert_eq!(Vm::new(m).run(), Err(RuntimeError::UnsupportedVersion(3)));
+    assert_eq!(
+        Vm::new(m).run(),
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(3)))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +692,10 @@ fn unwrap_mismatch_is_defensive_error() {
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
-    assert_eq!(Vm::new(m).run().unwrap_err(), RuntimeError::ResultMismatch);
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ResultMismatch
+    );
 
     let err_then_unwrap_ok = enc(&[
         (Opcode::Const, u32b(1)),
@@ -698,7 +708,10 @@ fn unwrap_mismatch_is_defensive_error() {
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
-    assert_eq!(Vm::new(m).run().unwrap_err(), RuntimeError::ResultMismatch);
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ResultMismatch
+    );
 }
 
 #[test]
@@ -769,8 +782,8 @@ fn borrow_out_of_range_is_defensive() {
         entry: FuncId(0),
     };
     assert_eq!(
-        Vm::new(m).run().unwrap_err(),
-        RuntimeError::BorrowOutOfRange
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::BorrowOutOfRange
     );
 }
 
@@ -902,8 +915,8 @@ fn handle_discipline_enforced_at_runtime() {
             entry: FuncId(0),
         };
         assert_eq!(
-            Vm::new(m).run().unwrap_err(),
-            RuntimeError::BorrowOutOfRange,
+            Vm::new(m).run().unwrap_err().kind,
+            RuntimeErrorKind::BorrowOutOfRange,
             "{name} on a borrow handle must fail loudly"
         );
     }
@@ -953,11 +966,11 @@ fn reserved_error_display_messages() {
     // `ResultMismatch` message stays variant-symmetric: U09 fires it for
     // `UnwrapErr` on `Ok` too.
     assert_eq!(
-        RuntimeError::ResultMismatch.to_string(),
+        RuntimeError::new(RuntimeErrorKind::ResultMismatch).to_string(),
         "unwrap opcode applied to mismatched Result variant"
     );
     assert_eq!(
-        RuntimeError::BorrowOutOfRange.to_string(),
+        RuntimeError::new(RuntimeErrorKind::BorrowOutOfRange).to_string(),
         "borrow handle out of range"
     );
 }
@@ -985,4 +998,89 @@ fn string_return_through_call() {
         entry: FuncId(0),
     };
     assert_eq!(Vm::new(m).run().unwrap(), Value::Str("hi".into()));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U10: diagnostics — runtime errors carry source location.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_error_carries_source_span() {
+    let src = "func main(): int {\n    a = 1;\n    b = 0;\n    q = a / b;\n    q\n}\n";
+    let err = Vm::new(fleen_compiler::compile(src).unwrap())
+        .run()
+        .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::DivisionByZero);
+    let (start, end) = err.span.expect("span_map must supply a span");
+    // Binary expression AST nodes carry no span of their own (`Expr::span`
+    // delegates to the lhs), so the `IDiv` instruction records `a`, not the
+    // whole `a / b`. Widening that span is a compiler-side change (TICKETS
+    // U10 implementation notes); this pins today's contract so widening it
+    // later is a deliberate act.
+    assert_eq!(&src[start as usize..end as usize], "a");
+    // 1-based line/column of the span start (`a` of `a / b` on line 4).
+    assert_eq!(line_col(src, start), (4, 9));
+    assert_eq!(err.func.as_deref(), Some("main"));
+    assert!(err.pc.is_some());
+}
+
+#[test]
+fn call_path_error_span_points_at_call_site() {
+    // `CallDepthExceeded` surfaces before the callee's frame is pushed, so
+    // the location comes from the caller's frame: the deepest recursive
+    // call site, not the callee's body.
+    let src = concat!(
+        "func f(n: int): int {\n",
+        "    if n <= 0 { 0 } else { f(n - 1) }\n",
+        "}\n",
+        "func main(): int {\n",
+        "    f(100000)\n",
+        "}\n",
+    );
+    let err = Vm::new(fleen_compiler::compile(src).unwrap())
+        .run()
+        .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::CallDepthExceeded);
+    let (start, end) = err.span.expect("span attached");
+    // Same lhs-span convention as `runtime_error_carries_source_span`: the
+    // `Call` instruction records the callee expression's head, here `f`.
+    assert_eq!(&src[start as usize..end as usize], "f");
+    assert_eq!(err.func.as_deref(), Some("f"));
+}
+
+#[test]
+fn error_without_span_map_entries_degrades() {
+    // Hand-written v1-style module (empty span_map): no span, but the
+    // function name and pc are still attached and nothing panics.
+    let m = module_with_entry(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::Const, u32b(2)),
+        (Opcode::IDiv, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        // Const 0 stays the function's name so `func` can be attached.
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(0)],
+        ..m
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::DivisionByZero);
+    assert_eq!(err.span, None);
+    assert_eq!(err.func.as_deref(), Some("main"));
+    // The failing `IDiv` sits at offset 10 (two 5-byte `Const` instructions).
+    assert_eq!(err.pc, Some(10));
+}
+
+#[test]
+fn unsupported_version_has_no_location() {
+    // No frame is ever pushed, so no location can be attached.
+    let m = Module {
+        version: 3,
+        ..v2_module(enc(&[(Opcode::Return, vec![])]))
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(
+        err,
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(3))
+    );
 }

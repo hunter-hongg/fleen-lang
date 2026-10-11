@@ -10,6 +10,8 @@ use std::{env, fs, path::Path, process};
 
 use fleen_compiler::codegen::Module;
 
+use fleen_vm::diag::locate;
+use fleen_vm::error::RuntimeError;
 use fleen_vm::value::Value;
 use fleen_vm::vm::Vm;
 
@@ -33,7 +35,7 @@ fn main() {
     }
     let path = Path::new(&args[1]);
 
-    let module = match load_module(path) {
+    let (module, source) = match load_module(path) {
         Ok(m) => m,
         Err(LoadError::Io(e)) => {
             eprintln!("Error reading {}: {}", path.display(), e);
@@ -74,23 +76,90 @@ fn main() {
         // discarded).
         Ok(_) => {}
         Err(e) => {
-            eprintln!("Runtime error: {e}");
+            report_runtime_error(path, source.as_deref(), &e);
             process::exit(1);
         }
     }
 }
 
 /// Load a module from `.fln` source (full pipeline) or `.flnc` bytes.
-fn load_module(path: &Path) -> Result<Module, LoadError> {
+///
+/// Returns the module plus the original source text when the input was
+/// `.fln` — the source is what lets runtime errors be rendered with a
+/// file/line/column location (0.0.2 U10).
+fn load_module(path: &Path) -> Result<(Module, Option<String>), LoadError> {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("fln") => {
             let source = fs::read_to_string(path).map_err(LoadError::Io)?;
-            fleen_compiler::compile(&source).map_err(LoadError::Compile)
+            let module = fleen_compiler::compile(&source).map_err(LoadError::Compile)?;
+            Ok((module, Some(source)))
         }
         Some("flnc") => {
             let bytes = fs::read(path).map_err(LoadError::Io)?;
-            fleen_compiler::codegen::from_bytes(&bytes).map_err(LoadError::Decode)
+            let module = fleen_compiler::codegen::from_bytes(&bytes).map_err(LoadError::Decode)?;
+            Ok((module, None))
         }
         _ => Err(LoadError::Usage),
     }
+}
+
+/// Print a runtime error, with a source location when possible (0.0.2 U10).
+///
+/// With the source text and a span (the `.fln` path) the error renders
+/// rustc-style, e.g.:
+///
+/// ```text
+/// runtime error: division by zero
+///   --> crash.fln:5:9
+///    |
+///  5 |     q = a / b;
+///    |         ^^^^^
+/// ```
+///
+/// Without a location — `.flnc` execution (no source), or a module with no
+/// `span_map` entries (v1 bytecode) — the report degenerates to the message
+/// plus, when known, the function and instruction offset:
+/// `runtime error: … (in `div`, pc 0x12)`.
+fn report_runtime_error(path: &Path, source: Option<&str>, e: &RuntimeError) {
+    if let (Some(src), Some((start, end))) = (source, e.span)
+        && (start as usize) < src.len()
+        && end <= src.len() as u32
+    {
+        let file = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        eprintln!("runtime error: {e}");
+        eprintln!("{}", render_location(&file, src, (start, end)));
+        return;
+    }
+    let suffix = match (&e.func, e.pc) {
+        (Some(f), Some(pc)) => format!(" (in `{f}`, pc 0x{pc:x})"),
+        _ => String::new(),
+    };
+    eprintln!("runtime error: {e}{suffix}");
+}
+
+/// Render the `-->`/source-line/caret block for a span inside `source`.
+fn render_location(file: &str, source: &str, span: (u32, u32)) -> String {
+    let (line, col, text) = locate(source, span.0);
+    // A span may cross a newline (multi-line expression); only the first
+    // line is shown, so the caret run stops at its end. `\r` never renders.
+    let text = text.trim_end_matches('\r');
+    let num = line.to_string();
+    let bar = " ".repeat(num.len() + 2);
+    let caret_end = (span.1 as usize).min(source.len());
+    let carets = source[span.0 as usize..caret_end]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|&c| c != '\r')
+        .count()
+        .max(1);
+    format!(
+        "  --> {file}:{line}:{col}\n{bar}|\n {num} | {text}\n{bar}| {}{}",
+        " ".repeat(col as usize - 1),
+        "^".repeat(carets),
+    )
 }

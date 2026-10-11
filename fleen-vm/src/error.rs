@@ -2,12 +2,12 @@
 
 use fleen_compiler::codegen::{ConstId, FuncId, GlobalId};
 
-/// Errors raised while executing bytecode.
+/// The specific failure behind a [`RuntimeError`].
 ///
 /// These are never catchable from Fleen code; a runtime error aborts
 /// execution of the module and is reported to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeError {
+pub enum RuntimeErrorKind {
     /// Operand stack underflowed.
     StackUnderflow,
     /// Encountered a byte that is not a known opcode.
@@ -50,33 +50,83 @@ pub enum RuntimeError {
     BorrowOutOfRange,
 }
 
-impl std::fmt::Display for RuntimeError {
+impl std::fmt::Display for RuntimeErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuntimeError::StackUnderflow => write!(f, "stack underflow"),
-            RuntimeError::InvalidOpcode(b) => write!(f, "invalid opcode 0x{b:02x}"),
-            RuntimeError::ConstOutOfRange(id) => write!(f, "const id {} out of range", id.0),
-            RuntimeError::FuncOutOfRange(id) => write!(f, "func id {} out of range", id.0),
-            RuntimeError::GlobalOutOfRange(id) => write!(f, "global id {} out of range", id.0),
-            RuntimeError::ImmutableGlobal(id) => {
+            RuntimeErrorKind::StackUnderflow => write!(f, "stack underflow"),
+            RuntimeErrorKind::InvalidOpcode(b) => write!(f, "invalid opcode 0x{b:02x}"),
+            RuntimeErrorKind::ConstOutOfRange(id) => write!(f, "const id {} out of range", id.0),
+            RuntimeErrorKind::FuncOutOfRange(id) => write!(f, "func id {} out of range", id.0),
+            RuntimeErrorKind::GlobalOutOfRange(id) => write!(f, "global id {} out of range", id.0),
+            RuntimeErrorKind::ImmutableGlobal(id) => {
                 write!(f, "cannot assign to immutable global {}", id.0)
             }
-            RuntimeError::ArithTypeMismatch => write!(f, "arithmetic type mismatch"),
-            RuntimeError::CastOperandNotScalar => {
+            RuntimeErrorKind::ArithTypeMismatch => write!(f, "arithmetic type mismatch"),
+            RuntimeErrorKind::CastOperandNotScalar => {
                 write!(f, "cast operand is not a scalar (int/float/bool)")
             }
-            RuntimeError::DivisionByZero => write!(f, "division by zero"),
-            RuntimeError::CallDepthExceeded => write!(f, "call depth exceeded"),
-            RuntimeError::ArithmeticOverflow => write!(f, "integer overflow"),
-            RuntimeError::StackShape => write!(f, "stack shape violation"),
-            RuntimeError::UnknownBuiltin(name) => write!(f, "unknown builtin: {name}"),
-            RuntimeError::BadJumpTarget => write!(f, "bad jump target"),
-            RuntimeError::UnsupportedVersion(v) => write!(f, "unsupported module version {v}"),
-            RuntimeError::ResultMismatch => {
+            RuntimeErrorKind::DivisionByZero => write!(f, "division by zero"),
+            RuntimeErrorKind::CallDepthExceeded => write!(f, "call depth exceeded"),
+            RuntimeErrorKind::ArithmeticOverflow => write!(f, "integer overflow"),
+            RuntimeErrorKind::StackShape => write!(f, "stack shape violation"),
+            RuntimeErrorKind::UnknownBuiltin(name) => write!(f, "unknown builtin: {name}"),
+            RuntimeErrorKind::BadJumpTarget => write!(f, "bad jump target"),
+            RuntimeErrorKind::UnsupportedVersion(v) => write!(f, "unsupported module version {v}"),
+            RuntimeErrorKind::ResultMismatch => {
                 write!(f, "unwrap opcode applied to mismatched Result variant")
             }
-            RuntimeError::BorrowOutOfRange => write!(f, "borrow handle out of range"),
+            RuntimeErrorKind::BorrowOutOfRange => write!(f, "borrow handle out of range"),
         }
+    }
+}
+
+/// A runtime failure together with where it happened (0.0.2 U10).
+///
+/// The location is attached once, at the [`crate::vm::Vm::run`] exit, from
+/// the top call frame — `step()` only writes `frame.ip` back on the success
+/// path, so an in-flight `ip` still names the failing instruction, and
+/// `call`-path errors happen before a new frame is pushed (TICKETS U07
+/// implementation note 4). Fields are `None` when no frame was active
+/// (e.g. [`RuntimeErrorKind::UnsupportedVersion`]) or the module carries no
+/// `span_map` entries (v1 bytecode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeError {
+    /// The specific failure.
+    pub kind: RuntimeErrorKind,
+    /// Source byte span `(start, end)` of the failing instruction, taken
+    /// from the function's `span_map` (the closest entry at or before the
+    /// failing `ip`, since synthetic instructions carry no entry).
+    pub span: Option<(u32, u32)>,
+    /// Name of the function executing when the error surfaced.
+    pub func: Option<Box<str>>,
+    /// Byte offset within the function's `code` of the failing instruction
+    /// (the `frame.ip` at error time).
+    pub pc: Option<u32>,
+}
+
+impl RuntimeError {
+    /// A bare error with no location information.
+    pub fn new(kind: RuntimeErrorKind) -> Self {
+        RuntimeError {
+            kind,
+            span: None,
+            func: None,
+            pc: None,
+        }
+    }
+}
+
+impl From<RuntimeErrorKind> for RuntimeError {
+    fn from(kind: RuntimeErrorKind) -> Self {
+        RuntimeError::new(kind)
+    }
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only the message; source location rendering is the CLI's job
+        // (it owns the source text in `.fln` mode and the output format).
+        self.kind.fmt(f)
     }
 }
 

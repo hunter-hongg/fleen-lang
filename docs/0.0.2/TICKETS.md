@@ -864,6 +864,28 @@ pub fn line_col(source: &str, offset: u32) -> (u32, u32);
 - span_map 为空（v1 模块）时不打印位置、不 panic
 - stderr 快照进 e2e invalid 用例（`.stderr` 关键字）
 
+### 实现说明（U10 落地时发现）
+1. **`RuntimeError` 由 enum 改为 struct**：票面"`RuntimeError` 增加
+   `span: Option<(u32, u32)>`"落地为 `RuntimeError { kind, span, func, pc }`：
+   原枚举更名 `RuntimeErrorKind`（全部变体与文案不变），`func`/`pc` 是
+   `.flnc` 退化输出 `(in `func`, pc 0x..)` 所必需（CLI 在 `Vm::new(module)`
+   后已不持有模块，无法自行取名/取 pc）。`Display` 只输出消息，位置渲染
+   归 CLI；`From<RuntimeErrorKind>` 兜底裸构造。
+2. **span 在 `run()` 出口单一收口**：VM 各内部函数统一返回
+   `RuntimeErrorKind`，`run_inner` 的错误经 `locate_error` 一次性附加位置。
+   依据 U07 契约（`step` 只在成功路径回写 `frame.ip`）：栈顶帧即出错帧；
+   `call` 路径错误（深度超限、builtin）发生在新帧 push 之前，位置自然落在
+   调用点。测试锁定：深递归的 span = 最深递归调用点。
+3. **已知限制：二元表达式的 span 只含左操作数**：AST 二元变体
+   （`Add`/`Div`/…共 13 个）自身无 span，`Expr::span()` 委托 lhs
+   （`parser/ast.rs`），因此 `a / b` 的除零 caret 指向 `a` 而非整个
+   `a / b`（票面样例画的是全表达式）。修复需给二元变体加 span 字段并
+   贯穿 parser/typeck/lower，属编译器侧独立改动，不并入 U10；已有测试
+   锁定现状，扩宽时属有意变更。
+4. **CRLF 列数**：lexer 把 `\r` 当空白（`\r\n` 折叠为一个换行，
+   ASI.md §2），`line_col`/caret 渲染对 `\r` 不计列，与 token span 的
+   字节偏移保持一致。
+
 ### 验收
 ```
 cargo test -p fleen-vm

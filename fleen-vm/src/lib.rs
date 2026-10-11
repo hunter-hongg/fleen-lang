@@ -6,6 +6,7 @@
 //! binary drives that flow and can additionally compile `.fln` source
 //! in-process, making it a one-command compile → verify → execute driver.
 
+pub mod diag;
 pub mod error;
 pub mod fmt;
 pub mod frame;

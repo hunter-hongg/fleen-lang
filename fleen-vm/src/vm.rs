@@ -2,7 +2,7 @@
 
 use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
 
-use crate::error::RuntimeError;
+use crate::error::{RuntimeError, RuntimeErrorKind};
 use crate::fmt::fmt_scalar;
 use crate::frame::CallFrame;
 use crate::value::Value;
@@ -15,7 +15,7 @@ const MAX_CALL_DEPTH: usize = 1024;
 /// functions run host-side. A global whose descriptor has `mutable ==
 /// false` may only be written while the currently executing function is
 /// named `__init__` (the module initializer); writes elsewhere raise
-/// [`RuntimeError::ImmutableGlobal`].
+/// [`RuntimeErrorKind::ImmutableGlobal`].
 pub struct Vm {
     module: Module,
     stack: Vec<Value>,
@@ -40,10 +40,16 @@ impl Vm {
 
     /// Run the module's `entry` function to completion.
     ///
-    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2).
+    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2). On failure the
+    /// [`RuntimeError`] carries the source location of the failing
+    /// instruction when one can be determined (0.0.2 U10).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
+        self.run_inner().map_err(|kind| self.locate_error(kind))
+    }
+
+    fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
         if !matches!(self.module.version, 1 | 2) {
-            return Err(RuntimeError::UnsupportedVersion(self.module.version));
+            return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
         self.call(entry, 0)?;
@@ -67,16 +73,44 @@ impl Vm {
         }
     }
 
+    /// Attach source location to a runtime error (0.0.2 U10).
+    ///
+    /// The top frame is always where the error originated: `step()` only
+    /// writes `frame.ip` back on the success path, so an in-flight `ip`
+    /// still names the failing instruction; `call`-path errors (depth,
+    /// builtin dispatch) happen before a new frame is pushed, so the ip
+    /// points at the `Call` that triggered them. The span is the closest
+    /// `span_map` entry at or before that ip — the failing instruction may
+    /// itself be synthetic and carry no entry. Every lookup is defensive
+    /// (`None` on miss): location is best-effort, never a second failure.
+    fn locate_error(&self, kind: RuntimeErrorKind) -> RuntimeError {
+        let mut err = RuntimeError::new(kind);
+        let Some(frame) = self.frames.last() else {
+            return err;
+        };
+        err.pc = Some(frame.ip as u32);
+        if let Some(f) = self.module.functions.get(frame.func.0 as usize) {
+            let n = f.span_map.partition_point(|e| e.offset <= frame.ip as u32);
+            if let Some(entry) = n.checked_sub(1).and_then(|i| f.span_map.get(i)) {
+                err.span = Some((entry.start, entry.end));
+            }
+            if let Ok(name) = self.func_name(frame.func) {
+                err.func = Some(Box::from(name));
+            }
+        }
+        err
+    }
+
     /// Name of a function (for builtin dispatch and `__init__` detection).
-    fn func_name(&self, fid: FuncId) -> Result<&str, RuntimeError> {
+    fn func_name(&self, fid: FuncId) -> Result<&str, RuntimeErrorKind> {
         let f = self
             .module
             .functions
             .get(fid.0 as usize)
-            .ok_or(RuntimeError::FuncOutOfRange(fid))?;
+            .ok_or(RuntimeErrorKind::FuncOutOfRange(fid))?;
         match &self.module.constants[f.name.0 as usize] {
             Const::Str(s) => Ok(s),
-            _ => Err(RuntimeError::StackShape),
+            _ => Err(RuntimeErrorKind::StackShape),
         }
     }
 
@@ -92,20 +126,20 @@ impl Vm {
 
     /// Invoke `fid` with `argc` arguments already on the operand stack.
     /// Builtins execute host-side; normal functions push a new frame.
-    fn call(&mut self, fid: FuncId, argc: u16) -> Result<(), RuntimeError> {
+    fn call(&mut self, fid: FuncId, argc: u16) -> Result<(), RuntimeErrorKind> {
         let func = self
             .module
             .functions
             .get(fid.0 as usize)
-            .ok_or(RuntimeError::FuncOutOfRange(fid))?
+            .ok_or(RuntimeErrorKind::FuncOutOfRange(fid))?
             .clone();
         if func.params != argc {
-            return Err(RuntimeError::StackShape);
+            return Err(RuntimeErrorKind::StackShape);
         }
         if func.is_builtin {
             let name = self.func_name(fid)?.to_string();
             let args: Vec<Value> = (0..argc)
-                .map(|_| self.stack.pop().ok_or(RuntimeError::StackUnderflow))
+                .map(|_| self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .rev()
@@ -115,12 +149,12 @@ impl Vm {
             return Ok(());
         }
         if self.frames.len() >= MAX_CALL_DEPTH {
-            return Err(RuntimeError::CallDepthExceeded);
+            return Err(RuntimeErrorKind::CallDepthExceeded);
         }
         let base = self.stack.len() - argc as usize;
         // Reserve slots for locals beyond the parameters.
         if (func.locals as usize) < argc as usize {
-            return Err(RuntimeError::StackShape);
+            return Err(RuntimeErrorKind::StackShape);
         }
         self.stack.resize(base + func.locals as usize, Value::Unit);
         self.frames.push(CallFrame {
@@ -131,7 +165,7 @@ impl Vm {
         Ok(())
     }
 
-    fn exec_builtin(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
+    fn exec_builtin(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
         match name {
             "print" => {
                 // 0.0.2 U13: scalar rendering shares `fmt_scalar` with `ToStr`
@@ -150,24 +184,24 @@ impl Vm {
                             other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
                         })
                     })
-                    .collect::<Result<Vec<_>, RuntimeError>>()?
+                    .collect::<Result<Vec<_>, RuntimeErrorKind>>()?
                     .join("");
                 println!("{line}");
                 Ok(Value::Unit)
             }
-            _ => Err(RuntimeError::UnknownBuiltin(name.to_string())),
+            _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
         }
     }
 
-    fn step(&mut self) -> Result<(), RuntimeError> {
-        let frame = *self.frames.last().ok_or(RuntimeError::StackUnderflow)?;
+    fn step(&mut self) -> Result<(), RuntimeErrorKind> {
+        let frame = *self.frames.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
         let func = &self.module.functions[frame.func.0 as usize];
         let code = &func.code;
         if frame.ip >= code.len() {
-            return Err(RuntimeError::BadJumpTarget);
+            return Err(RuntimeErrorKind::BadJumpTarget);
         }
         let op = code[frame.ip];
-        let opcode = Opcode::from_byte(op).ok_or(RuntimeError::InvalidOpcode(op))?;
+        let opcode = Opcode::from_byte(op).ok_or(RuntimeErrorKind::InvalidOpcode(op))?;
         let mut ip = frame.ip + 1;
 
         // Read an operand of `n` bytes; defensive length checks.
@@ -175,7 +209,7 @@ impl Vm {
             ($n:expr) => {{
                 let n: usize = $n;
                 if ip + n > code.len() {
-                    return Err(RuntimeError::BadJumpTarget);
+                    return Err(RuntimeErrorKind::BadJumpTarget);
                 }
                 let s = &code[ip..ip + n];
                 ip += n;
@@ -187,7 +221,7 @@ impl Vm {
             ($n:expr) => {{
                 let n: usize = $n;
                 if ip + n > code.len() {
-                    return Err(RuntimeError::BadJumpTarget);
+                    return Err(RuntimeErrorKind::BadJumpTarget);
                 }
                 &code[ip..ip + n]
             }};
@@ -201,7 +235,7 @@ impl Vm {
                     Some(Const::Float(v)) => Value::Float(*v),
                     Some(Const::Str(s)) => Value::Str(Box::from(s.as_ref())),
                     None => {
-                        return Err(RuntimeError::ConstOutOfRange(
+                        return Err(RuntimeErrorKind::ConstOutOfRange(
                             fleen_compiler::codegen::ConstId(id as u32),
                         ));
                     }
@@ -212,14 +246,14 @@ impl Vm {
             Opcode::False => self.stack.push(Value::Bool(false)),
             Opcode::Unit => self.stack.push(Value::Unit),
             Opcode::Pop => {
-                self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
             }
             Opcode::Dup => {
                 let v = self
                     .stack
                     .last()
                     .cloned()
-                    .ok_or(RuntimeError::StackUnderflow)?;
+                    .ok_or(RuntimeErrorKind::StackUnderflow)?;
                 self.stack.push(v);
             }
             Opcode::LoadLocal => {
@@ -230,16 +264,16 @@ impl Vm {
                     .stack
                     .get(idx)
                     .cloned()
-                    .ok_or(RuntimeError::StackShape)?;
+                    .ok_or(RuntimeErrorKind::StackShape)?;
                 self.stack.push(v);
             }
             Opcode::StoreLocal => {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let idx = frame.stack_base + slot;
                 if idx >= self.stack.len() {
-                    return Err(RuntimeError::StackShape);
+                    return Err(RuntimeErrorKind::StackShape);
                 }
                 self.stack[idx] = v;
             }
@@ -250,7 +284,7 @@ impl Vm {
                     .globals
                     .get(id)
                     .cloned()
-                    .ok_or(RuntimeError::GlobalOutOfRange(
+                    .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
                     ))?;
                 self.stack.push(v);
@@ -262,15 +296,15 @@ impl Vm {
                     .module
                     .globals
                     .get(id)
-                    .ok_or(RuntimeError::GlobalOutOfRange(
+                    .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
                     ))?;
                 if !g.mutable && !self.current_frame_is_init() {
-                    return Err(RuntimeError::ImmutableGlobal(
+                    return Err(RuntimeErrorKind::ImmutableGlobal(
                         fleen_compiler::codegen::GlobalId(id as u32),
                     ));
                 }
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 self.globals[id] = v;
             }
             Opcode::IAdd => self.int_binop(|a, b| a.checked_add(*b))?,
@@ -279,17 +313,21 @@ impl Vm {
             Opcode::IDiv => {
                 let (a, b) = self.pop_int_pair()?;
                 if b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeErrorKind::DivisionByZero);
                 }
-                let v = a.checked_div(b).ok_or(RuntimeError::ArithmeticOverflow)?;
+                let v = a
+                    .checked_div(b)
+                    .ok_or(RuntimeErrorKind::ArithmeticOverflow)?;
                 self.stack.push(Value::Int(v));
             }
             Opcode::IMod => {
                 let (a, b) = self.pop_int_pair()?;
                 if b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeErrorKind::DivisionByZero);
                 }
-                let v = a.checked_rem(b).ok_or(RuntimeError::ArithmeticOverflow)?;
+                let v = a
+                    .checked_rem(b)
+                    .ok_or(RuntimeErrorKind::ArithmeticOverflow)?;
                 self.stack.push(Value::Int(v));
             }
             Opcode::FAdd => self.float_binop(|a, b| a + b)?,
@@ -303,26 +341,27 @@ impl Vm {
             Opcode::Le => self.ord_op(|o| o != std::cmp::Ordering::Greater)?,
             Opcode::Ge => self.ord_op(|o| o != std::cmp::Ordering::Less)?,
             Opcode::Not => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match v {
                     Value::Bool(b) => self.stack.push(Value::Bool(!b)),
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::NegI => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match v {
                     Value::Int(i) => self.stack.push(Value::Int(
-                        i.checked_neg().ok_or(RuntimeError::ArithmeticOverflow)?,
+                        i.checked_neg()
+                            .ok_or(RuntimeErrorKind::ArithmeticOverflow)?,
                     )),
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::NegF => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match v {
                     Value::Float(x) => self.stack.push(Value::Float(-x)),
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::Jump => {
@@ -333,19 +372,19 @@ impl Vm {
             Opcode::JumpIfFalse => {
                 let s = take_untracked!(2);
                 let target = u16::from_le_bytes([s[0], s[1]]) as usize;
-                match self.stack.pop().ok_or(RuntimeError::StackUnderflow)? {
+                match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
                     Value::Bool(false) => ip = self.checked_target(frame.func, target)?,
                     Value::Bool(true) => ip += 2,
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::JumpIfTrue => {
                 let s = take_untracked!(2);
                 let target = u16::from_le_bytes([s[0], s[1]]) as usize;
-                match self.stack.pop().ok_or(RuntimeError::StackUnderflow)? {
+                match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
                     Value::Bool(true) => ip = self.checked_target(frame.func, target)?,
                     Value::Bool(false) => ip += 2,
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::Call => {
@@ -357,11 +396,11 @@ impl Vm {
                     .module
                     .functions
                     .get(id as usize)
-                    .ok_or(RuntimeError::FuncOutOfRange(fid))?
+                    .ok_or(RuntimeErrorKind::FuncOutOfRange(fid))?
                     .params;
                 self.frames
                     .last_mut()
-                    .ok_or(RuntimeError::StackUnderflow)?
+                    .ok_or(RuntimeErrorKind::StackUnderflow)?
                     .ip = ip;
                 self.call(fid, params)?;
                 return Ok(());
@@ -370,7 +409,7 @@ impl Vm {
                 let s = take!(2);
                 let id = u16::from_le_bytes([s[0], s[1]]) as u32;
                 if id as usize >= self.module.functions.len() {
-                    return Err(RuntimeError::FuncOutOfRange(FuncId(id)));
+                    return Err(RuntimeErrorKind::FuncOutOfRange(FuncId(id)));
                 }
                 self.stack.push(Value::Func(FuncId(id)));
             }
@@ -378,7 +417,7 @@ impl Vm {
                 let s = take!(1);
                 let argc = s[0] as u16;
                 if self.stack.len() < argc as usize + 1 {
-                    return Err(RuntimeError::StackUnderflow);
+                    return Err(RuntimeErrorKind::StackUnderflow);
                 }
                 let idx = self.stack.len() - argc as usize - 1;
                 let f = self.stack.remove(idx);
@@ -386,17 +425,17 @@ impl Vm {
                     Value::Func(fid) => {
                         self.frames
                             .last_mut()
-                            .ok_or(RuntimeError::StackUnderflow)?
+                            .ok_or(RuntimeErrorKind::StackUnderflow)?
                             .ip = ip;
                         self.call(fid, argc)?;
                         return Ok(());
                     }
-                    _ => return Err(RuntimeError::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
                 }
             }
             Opcode::Return => {
-                let ret = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-                let done = self.frames.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let ret = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let done = self.frames.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 self.stack.truncate(done.stack_base);
                 // Move the return value back onto the caller's stack. Under
                 // exclusive ownership (`Str`/`Boxed`/`Ok`/`Err` are not
@@ -413,10 +452,10 @@ impl Vm {
                     .stack
                     .last()
                     .cloned()
-                    .ok_or(RuntimeError::StackUnderflow)?;
+                    .ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let idx = frame.stack_base + slot;
                 if idx >= self.stack.len() {
-                    return Err(RuntimeError::StackShape);
+                    return Err(RuntimeErrorKind::StackShape);
                 }
                 self.stack[idx] = v;
             }
@@ -424,8 +463,8 @@ impl Vm {
             // scalar; a non-scalar reaching here is a compiler bug, so this is
             // a hard error rather than a silent fallback.
             Opcode::ToStr => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-                let s = fmt_scalar(&v).ok_or(RuntimeError::CastOperandNotScalar)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let s = fmt_scalar(&v).ok_or(RuntimeErrorKind::CastOperandNotScalar)?;
                 self.stack.push(Value::Str(s.as_str().into()));
             }
             // ----------------------------------------------------------------
@@ -436,14 +475,14 @@ impl Vm {
             // every depth invariant the verifier reasons about.
             // ----------------------------------------------------------------
             Opcode::AllocBox => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 // Runtime backstop for hand-written bytecode (typeck forbids
                 // boxing a borrow handle — Ref never inside Boxed, so this
                 // is unreachable from compiled code; `fleen-verify` has no
                 // value-type view of the stack, so release builds need the
                 // check too, not just a debug_assert).
                 if matches!(v, Value::Ref { .. }) {
-                    return Err(RuntimeError::BorrowOutOfRange);
+                    return Err(RuntimeErrorKind::BorrowOutOfRange);
                 }
                 self.stack.push(Value::Boxed(Box::new(v)));
             }
@@ -452,10 +491,10 @@ impl Vm {
                 // copy of the pointee is pushed. The operand may be a borrow
                 // handle (`ref box<T>` read path) — resolve it first.
                 let copy = {
-                    let b = self.stack.last().ok_or(RuntimeError::StackUnderflow)?;
+                    let b = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
                     match self.read_ref(b)? {
                         Value::Boxed(inner) => inner.as_ref().clone(),
-                        _ => return Err(RuntimeError::StackShape),
+                        _ => return Err(RuntimeErrorKind::StackShape),
                     }
                 };
                 self.stack.push(copy);
@@ -466,31 +505,33 @@ impl Vm {
                 // in the handle's target slot (the only form with persistent
                 // effect; the compiler's own lowering no longer emits this
                 // opcode — see `fleen-compiler/src/lower` AssignDeref).
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-                let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let b = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match b {
                     Value::Boxed(mut inner) => {
                         *inner = v;
                     }
                     Value::Ref { .. } => {
-                        let idx = self.ref_index(&b).ok_or(RuntimeError::BorrowOutOfRange)?;
+                        let idx = self
+                            .ref_index(&b)
+                            .ok_or(RuntimeErrorKind::BorrowOutOfRange)?;
                         let slot = self
                             .stack
                             .get_mut(idx)
-                            .ok_or(RuntimeError::BorrowOutOfRange)?;
+                            .ok_or(RuntimeErrorKind::BorrowOutOfRange)?;
                         match slot {
                             Value::Boxed(inner) => **inner = v,
-                            _ => return Err(RuntimeError::StackShape),
+                            _ => return Err(RuntimeErrorKind::StackShape),
                         }
                     }
-                    _ => return Err(RuntimeError::StackShape),
+                    _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
             Opcode::MakeRefLocal => {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]);
                 let idx = frame.stack_base + slot as usize;
-                let existing = self.stack.get(idx).ok_or(RuntimeError::StackShape)?;
+                let existing = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
                 let handle = match existing {
                     // Forwarding: the slot already holds a handle (a `ref`
                     // parameter re-passed to another `ref` parameter). Push
@@ -512,7 +553,7 @@ impl Vm {
                 // derived Clone copies recursively; a handle on top copies
                 // the value it points at, never the handle.
                 let copy = {
-                    let top = self.stack.last().ok_or(RuntimeError::StackUnderflow)?;
+                    let top = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
                     self.read_ref(top)?.clone()
                 };
                 self.stack.push(copy);
@@ -524,7 +565,10 @@ impl Vm {
                 // Consumptive read: the slot is cleared so the moved value's
                 // Drop cannot be deferred to frame destruction.
                 let v = {
-                    let slot_v = self.stack.get_mut(idx).ok_or(RuntimeError::StackShape)?;
+                    let slot_v = self
+                        .stack
+                        .get_mut(idx)
+                        .ok_or(RuntimeErrorKind::StackShape)?;
                     std::mem::replace(slot_v, Value::Unit)
                 };
                 self.stack.push(v);
@@ -533,7 +577,7 @@ impl Vm {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
                 let idx = frame.stack_base + slot;
-                let copy = match self.stack.get(idx).ok_or(RuntimeError::StackShape)? {
+                let copy = match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
                     // Cloning a borrowed parameter deep-copies its target.
                     v @ Value::Ref { .. } => self.read_ref(v)?.clone(),
                     other => other.clone(),
@@ -547,7 +591,7 @@ impl Vm {
                     .globals
                     .get(id)
                     .cloned()
-                    .ok_or(RuntimeError::GlobalOutOfRange(
+                    .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
                     ))?;
                 // Globals never hold borrow handles in compiled code (typeck
@@ -557,18 +601,18 @@ impl Vm {
                 self.stack.push(g);
             }
             Opcode::PackOk => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 // Same runtime backstop as `AllocBox` (Ref never inside Ok).
                 if matches!(v, Value::Ref { .. }) {
-                    return Err(RuntimeError::BorrowOutOfRange);
+                    return Err(RuntimeErrorKind::BorrowOutOfRange);
                 }
                 self.stack.push(Value::Ok(Box::new(v)));
             }
             Opcode::PackErr => {
-                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 // Same runtime backstop as `AllocBox` (Ref never inside Err).
                 if matches!(v, Value::Ref { .. }) {
-                    return Err(RuntimeError::BorrowOutOfRange);
+                    return Err(RuntimeErrorKind::BorrowOutOfRange);
                 }
                 self.stack.push(Value::Err(Box::new(v)));
             }
@@ -576,71 +620,71 @@ impl Vm {
                 // Pops the *duplicated* copy the `?`/choose-Result lowering
                 // puts on top; the original Result stays for the matching
                 // Unwrap on either branch.
-                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let r = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let is_err = match r {
                     Value::Ok(_) => false,
                     Value::Err(_) => true,
-                    _ => return Err(RuntimeError::StackShape),
+                    _ => return Err(RuntimeErrorKind::StackShape),
                 };
                 self.stack.push(Value::Bool(is_err));
             }
             Opcode::UnwrapOk => {
-                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let r = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match r {
                     Value::Ok(v) => self.stack.push(*v),
-                    Value::Err(_) => return Err(RuntimeError::ResultMismatch),
-                    _ => return Err(RuntimeError::StackShape),
+                    Value::Err(_) => return Err(RuntimeErrorKind::ResultMismatch),
+                    _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
             Opcode::UnwrapErr => {
-                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let r = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match r {
                     Value::Err(e) => self.stack.push(*e),
-                    Value::Ok(_) => return Err(RuntimeError::ResultMismatch),
-                    _ => return Err(RuntimeError::StackShape),
+                    Value::Ok(_) => return Err(RuntimeErrorKind::ResultMismatch),
+                    _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
         }
         self.frames
             .last_mut()
-            .ok_or(RuntimeError::StackUnderflow)?
+            .ok_or(RuntimeErrorKind::StackUnderflow)?
             .ip = ip;
         Ok(())
     }
 
-    fn checked_target(&self, fid: FuncId, target: usize) -> Result<usize, RuntimeError> {
+    fn checked_target(&self, fid: FuncId, target: usize) -> Result<usize, RuntimeErrorKind> {
         let code = &self.module.functions[fid.0 as usize].code;
         if target > code.len() {
-            return Err(RuntimeError::BadJumpTarget);
+            return Err(RuntimeErrorKind::BadJumpTarget);
         }
         Ok(target)
     }
 
-    fn pop_int_pair(&mut self) -> Result<(i64, i64), RuntimeError> {
-        let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+    fn pop_int_pair(&mut self) -> Result<(i64, i64), RuntimeErrorKind> {
+        let b = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
         match (a, b) {
             (Value::Int(x), Value::Int(y)) => Ok((x, y)),
-            _ => Err(RuntimeError::ArithTypeMismatch),
+            _ => Err(RuntimeErrorKind::ArithTypeMismatch),
         }
     }
 
-    fn int_binop(&mut self, f: impl Fn(&i64, &i64) -> Option<i64>) -> Result<(), RuntimeError> {
+    fn int_binop(&mut self, f: impl Fn(&i64, &i64) -> Option<i64>) -> Result<(), RuntimeErrorKind> {
         let (a, b) = self.pop_int_pair()?;
-        let v = f(&a, &b).ok_or(RuntimeError::ArithmeticOverflow)?;
+        let v = f(&a, &b).ok_or(RuntimeErrorKind::ArithmeticOverflow)?;
         self.stack.push(Value::Int(v));
         Ok(())
     }
 
-    fn float_binop(&mut self, f: fn(f64, f64) -> f64) -> Result<(), RuntimeError> {
-        let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+    fn float_binop(&mut self, f: fn(f64, f64) -> f64) -> Result<(), RuntimeErrorKind> {
+        let b = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
         match (a, b) {
             (Value::Float(x), Value::Float(y)) => {
                 self.stack.push(Value::Float(f(x, y)));
                 Ok(())
             }
-            _ => Err(RuntimeError::ArithTypeMismatch),
+            _ => Err(RuntimeErrorKind::ArithTypeMismatch),
         }
     }
 
@@ -663,8 +707,8 @@ impl Vm {
     /// operand-stack reallocation. Typeck guarantees a handle only points at
     /// a frame below the current call chain (which therefore outlives it);
     /// the range check here is the defensive backstop for hand-written
-    /// bytecode, firing [`RuntimeError::BorrowOutOfRange`].
-    fn read_ref<'s>(&'s self, v: &'s Value) -> Result<&'s Value, RuntimeError> {
+    /// bytecode, firing [`RuntimeErrorKind::BorrowOutOfRange`].
+    fn read_ref<'s>(&'s self, v: &'s Value) -> Result<&'s Value, RuntimeErrorKind> {
         match self.ref_index(v) {
             Some(idx) => {
                 let target = &self.stack[idx];
@@ -677,14 +721,14 @@ impl Vm {
                 );
                 Ok(target)
             }
-            None if matches!(v, Value::Ref { .. }) => Err(RuntimeError::BorrowOutOfRange),
+            None if matches!(v, Value::Ref { .. }) => Err(RuntimeErrorKind::BorrowOutOfRange),
             None => Ok(v),
         }
     }
 
-    fn eq_op(&mut self, f: fn(bool) -> bool) -> Result<(), RuntimeError> {
-        let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+    fn eq_op(&mut self, f: fn(bool) -> bool) -> Result<(), RuntimeErrorKind> {
+        let b = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
         // Borrow handles dereference before comparing (BYTECODE.md §3.2);
         // the derived structural `PartialEq` on `Ref` is for tests only.
         let a = self.read_ref(&a)?;
@@ -702,27 +746,27 @@ impl Vm {
             (Value::Ok(x), Value::Ok(y)) => x == y,
             (Value::Err(x), Value::Err(y)) => x == y,
             (Value::Ok(_), Value::Err(_)) | (Value::Err(_), Value::Ok(_)) => false,
-            _ => return Err(RuntimeError::ArithTypeMismatch),
+            _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
         };
         self.stack.push(Value::Bool(f(eq)));
         Ok(())
     }
 
-    fn ord_op(&mut self, f: impl Fn(std::cmp::Ordering) -> bool) -> Result<(), RuntimeError> {
-        let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+    fn ord_op(&mut self, f: impl Fn(std::cmp::Ordering) -> bool) -> Result<(), RuntimeErrorKind> {
+        let b = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
         // Same handle discipline as `eq_op` (a `ref string` parameter can
         // reach `<`/`<=`/... through ordinary comparison expressions).
         let a = self.read_ref(&a)?;
         let b = self.read_ref(&b)?;
         let r = match (a, b) {
             (Value::Int(x), Value::Int(y)) => x.cmp(y),
-            (Value::Float(x), Value::Float(y)) => {
-                x.partial_cmp(y).ok_or(RuntimeError::ArithTypeMismatch)?
-            }
+            (Value::Float(x), Value::Float(y)) => x
+                .partial_cmp(y)
+                .ok_or(RuntimeErrorKind::ArithTypeMismatch)?,
             (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
             (Value::Str(x), Value::Str(y)) => x.cmp(y),
-            _ => return Err(RuntimeError::ArithTypeMismatch),
+            _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
         };
         self.stack.push(Value::Bool(f(r)));
         Ok(())
