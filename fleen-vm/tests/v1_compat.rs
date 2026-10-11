@@ -10,6 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode, to_bytes};
+
 /// Path to the `fleen-vm` binary built for this test run.
 const VM: &str = env!("CARGO_BIN_EXE_fleen-vm");
 
@@ -48,4 +50,55 @@ fn v001_fib_fixture_verifies_and_executes() {
         expected,
         "v1 fib output drifted"
     );
+}
+
+#[test]
+fn v001_runtime_error_degrades_to_func_and_pc() {
+    // A v1 module carries no usable source and (here) no span_map entries,
+    // so a runtime error must degrade to `message (in `func`, pc 0x..)`
+    // and exit 1 — no source location, no panic (TICKETS U10).
+    let m = Module {
+        version: 1,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(0)],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([
+                Opcode::Const as u8,
+                1,
+                0,
+                0,
+                0, // Const 1
+                Opcode::Const as u8,
+                2,
+                0,
+                0,
+                0, // Const 0
+                Opcode::IDiv as u8,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+
+    let path = std::env::temp_dir().join("fleen_v1_runtime_error.flnc");
+    fs::write(&path, to_bytes(&m)).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+
+    let output = Command::new(VM)
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {VM}: {e}"));
+    assert_eq!(output.status.code(), Some(1), "exit code must stay 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // pc 0xa: the failing `IDiv` sits at byte 10 (two 5-byte `Const`s).
+    assert_eq!(
+        stderr, "runtime error: division by zero (in `main`, pc 0xa)\n",
+        "degraded report must name the function and offset"
+    );
+
+    fs::remove_file(&path).unwrap_or_else(|e| panic!("cleanup {}: {e}", path.display()));
 }

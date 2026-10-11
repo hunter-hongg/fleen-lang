@@ -2,6 +2,10 @@
 //!
 //! Error-path only; every scan is a single O(n) pass over the source.
 
+use std::path::Path;
+
+use crate::error::RuntimeError;
+
 /// Convert a source byte offset to a 1-based `(line, column)` pair.
 ///
 /// Columns count `char`s, not bytes (the source is UTF-8). `\r` occupies no
@@ -38,9 +42,86 @@ pub fn locate(source: &str, offset: u32) -> (u32, u32, &str) {
     (line, col, text)
 }
 
+/// Render a runtime error as the CLI prints it on stderr (0.0.2 U10).
+///
+/// With the source text and a span (the `.fln` one-command path) the error
+/// renders rustc-style, e.g.:
+///
+/// ```text
+/// runtime error: division by zero
+///   --> crash.fln:5:9
+///    |
+///  5 |     q = a / b;
+///    |         ^^^^^
+/// ```
+///
+/// Without a usable location — `.flnc` execution (no source), a module with
+/// no `span_map` entries (v1 bytecode), or a span outside the source — the
+/// report degenerates to the message plus, when known, the function and
+/// instruction offset: `runtime error: … (in `div`, pc 0x12)`.
+///
+/// The returned string has no trailing newline; callers add one.
+pub fn render_runtime_error(path: &Path, source: Option<&str>, e: &RuntimeError) -> String {
+    if let (Some(src), Some((start, end))) = (source, e.span)
+        && (start as usize) < src.len()
+        && end <= src.len() as u32
+    {
+        let file = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        return format!(
+            "runtime error: {e}\n{}",
+            render_location(&file, src, (start, end))
+        );
+    }
+    let suffix = match (&e.func, e.pc) {
+        (Some(f), Some(pc)) => format!(" (in `{f}`, pc 0x{pc:x})"),
+        _ => String::new(),
+    };
+    format!("runtime error: {e}{suffix}")
+}
+
+/// Render the `-->`/source-line/caret block for a span inside `source`.
+fn render_location(file: &str, source: &str, span: (u32, u32)) -> String {
+    let (line, col, text) = locate(source, span.0);
+    // A span may cross a newline (multi-line expression); only the first
+    // line is shown, so the caret run stops at its end. `\r` never renders.
+    let text = text.trim_end_matches('\r');
+    let num = line.to_string();
+    let bar = " ".repeat(num.len() + 2);
+    let caret_end = (span.1 as usize).min(source.len());
+    let carets = source[span.0 as usize..caret_end]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|&c| c != '\r')
+        .count()
+        .max(1);
+    format!(
+        "  --> {file}:{line}:{col}\n{bar}|\n {num} | {text}\n{bar}| {}{}",
+        " ".repeat(col as usize - 1),
+        "^".repeat(carets),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{line_col, locate};
+    use std::path::Path;
+
+    use super::{line_col, locate, render_runtime_error};
+    use crate::error::{RuntimeError, RuntimeErrorKind};
+
+    /// A located division-by-zero error at `span` in `func`.
+    fn div_err(span: Option<(u32, u32)>) -> RuntimeError {
+        RuntimeError {
+            kind: RuntimeErrorKind::DivisionByZero,
+            span,
+            func: Some("main".into()),
+            pc: Some(16),
+        }
+    }
 
     #[test]
     fn start_of_file_is_one_one() {
@@ -90,5 +171,79 @@ mod tests {
         assert_eq!(text, "second line");
         let (_, _, text) = locate(src, u32::MAX);
         assert_eq!(text, "third");
+    }
+
+    // -------------------------------------------------------------------
+    // CLI rendering (`render_runtime_error`): exact-output locks for the
+    // `-->`/source-line/caret block and both degradation forms.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn renders_rustc_style_block() {
+        // 'a' of `a / b` sits at byte 11 (line 2, char 5).
+        let src = "x = 1;\nq = a / b;\n";
+        let out = render_runtime_error(Path::new("crash.fln"), Some(src), &div_err(Some((11, 12))));
+        assert_eq!(
+            out,
+            "runtime error: division by zero\n  --> crash.fln:2:5\n   |\n 2 | q = a / b;\n   |     ^"
+        );
+    }
+
+    #[test]
+    fn caret_run_matches_span_width() {
+        // A wide span (e.g. once binary spans cover the whole expression)
+        // draws one caret per char.
+        let src = "x = 1;\nq = a / b;\n";
+        let out = render_runtime_error(Path::new("c.fln"), Some(src), &div_err(Some((11, 16))));
+        assert!(out.ends_with("|     ^^^^^"), "full output: {out:?}");
+    }
+
+    #[test]
+    fn multiline_span_caret_stops_at_first_line() {
+        // The span runs from `a` across the newline into the next line (5
+        // bytes); the block shows only the first line and the caret run
+        // stops at its end — 3 carets, not the span's byte width.
+        let src = "q = a /\nb;";
+        let out = render_runtime_error(Path::new("c.fln"), Some(src), &div_err(Some((4, 9))));
+        assert_eq!(
+            out,
+            "runtime error: division by zero\n  --> c.fln:1:5\n   |\n 1 | q = a /\n   |     ^^^"
+        );
+    }
+
+    #[test]
+    fn carriage_return_is_invisible_in_the_block() {
+        // `\r` takes no column (ASI.md §2) and never appears in the output.
+        let src = "q = a / b;\r\nx = 1;\r\n";
+        let out = render_runtime_error(Path::new("c.fln"), Some(src), &div_err(Some((4, 5))));
+        assert!(!out.contains('\r'), "full output: {out:?}");
+        assert!(out.contains("--> c.fln:1:5"), "full output: {out:?}");
+    }
+
+    #[test]
+    fn flnc_degrades_to_func_and_pc() {
+        let out = render_runtime_error(Path::new("m.flnc"), None, &div_err(Some((0, 1))));
+        assert_eq!(out, "runtime error: division by zero (in `main`, pc 0x10)");
+    }
+
+    #[test]
+    fn error_without_any_location_prints_the_message_only() {
+        let e = RuntimeError {
+            kind: RuntimeErrorKind::StackUnderflow,
+            span: None,
+            func: None,
+            pc: None,
+        };
+        let out = render_runtime_error(Path::new("m.flnc"), None, &e);
+        assert_eq!(out, "runtime error: stack underflow");
+    }
+
+    #[test]
+    fn span_outside_source_degrades() {
+        // Defensive: a span past the end (corrupt span_map) must not panic
+        // or slice; the report falls back to the function/offset form.
+        let src = "x = 1;\n";
+        let out = render_runtime_error(Path::new("c.fln"), Some(src), &div_err(Some((100, 102))));
+        assert_eq!(out, "runtime error: division by zero (in `main`, pc 0x10)");
     }
 }

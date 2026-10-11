@@ -10,8 +10,7 @@ use std::{env, fs, path::Path, process};
 
 use fleen_compiler::codegen::Module;
 
-use fleen_vm::diag::locate;
-use fleen_vm::error::RuntimeError;
+use fleen_vm::diag::render_runtime_error;
 use fleen_vm::value::Value;
 use fleen_vm::vm::Vm;
 
@@ -76,17 +75,13 @@ fn main() {
         // discarded).
         Ok(_) => {}
         Err(e) => {
-            report_runtime_error(path, source.as_deref(), &e);
+            eprintln!("{}", render_runtime_error(path, source.as_deref(), &e));
             process::exit(1);
         }
     }
 }
 
 /// Load a module from `.fln` source (full pipeline) or `.flnc` bytes.
-///
-/// Returns the module plus the original source text when the input was
-/// `.fln` — the source is what lets runtime errors be rendered with a
-/// file/line/column location (0.0.2 U10).
 fn load_module(path: &Path) -> Result<(Module, Option<String>), LoadError> {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("fln") => {
@@ -101,65 +96,4 @@ fn load_module(path: &Path) -> Result<(Module, Option<String>), LoadError> {
         }
         _ => Err(LoadError::Usage),
     }
-}
-
-/// Print a runtime error, with a source location when possible (0.0.2 U10).
-///
-/// With the source text and a span (the `.fln` path) the error renders
-/// rustc-style, e.g.:
-///
-/// ```text
-/// runtime error: division by zero
-///   --> crash.fln:5:9
-///    |
-///  5 |     q = a / b;
-///    |         ^^^^^
-/// ```
-///
-/// Without a location — `.flnc` execution (no source), or a module with no
-/// `span_map` entries (v1 bytecode) — the report degenerates to the message
-/// plus, when known, the function and instruction offset:
-/// `runtime error: … (in `div`, pc 0x12)`.
-fn report_runtime_error(path: &Path, source: Option<&str>, e: &RuntimeError) {
-    if let (Some(src), Some((start, end))) = (source, e.span)
-        && (start as usize) < src.len()
-        && end <= src.len() as u32
-    {
-        let file = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        eprintln!("runtime error: {e}");
-        eprintln!("{}", render_location(&file, src, (start, end)));
-        return;
-    }
-    let suffix = match (&e.func, e.pc) {
-        (Some(f), Some(pc)) => format!(" (in `{f}`, pc 0x{pc:x})"),
-        _ => String::new(),
-    };
-    eprintln!("runtime error: {e}{suffix}");
-}
-
-/// Render the `-->`/source-line/caret block for a span inside `source`.
-fn render_location(file: &str, source: &str, span: (u32, u32)) -> String {
-    let (line, col, text) = locate(source, span.0);
-    // A span may cross a newline (multi-line expression); only the first
-    // line is shown, so the caret run stops at its end. `\r` never renders.
-    let text = text.trim_end_matches('\r');
-    let num = line.to_string();
-    let bar = " ".repeat(num.len() + 2);
-    let caret_end = (span.1 as usize).min(source.len());
-    let carets = source[span.0 as usize..caret_end]
-        .lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .filter(|&c| c != '\r')
-        .count()
-        .max(1);
-    format!(
-        "  --> {file}:{line}:{col}\n{bar}|\n {num} | {text}\n{bar}| {}{}",
-        " ".repeat(col as usize - 1),
-        "^".repeat(carets),
-    )
 }
