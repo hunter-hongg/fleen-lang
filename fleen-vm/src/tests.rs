@@ -4,7 +4,7 @@ use super::diag::line_col;
 use super::error::{RuntimeError, RuntimeErrorKind};
 use super::value::Value;
 use super::vm::Vm;
-use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode};
+use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode, SpanEntry};
 
 fn enc(ops: &[(Opcode, Vec<u8>)]) -> Box<[u8]> {
     let mut code = Vec::new();
@@ -1026,9 +1026,10 @@ fn runtime_error_carries_source_span() {
 
 #[test]
 fn call_path_error_span_points_at_call_site() {
-    // `CallDepthExceeded` surfaces before the callee's frame is pushed, so
-    // the location comes from the caller's frame: the deepest recursive
-    // call site, not the callee's body.
+    // `CallDepthExceeded` surfaces before the callee's frame is pushed, and
+    // `Call`/`CallValue` rewind the caller's ip on failure, so the location
+    // comes from the caller's frame: the deepest recursive call site, not
+    // the callee's body and not the instruction after the call.
     let src = concat!(
         "func f(n: int): int {\n",
         "    if n <= 0 { 0 } else { f(n - 1) }\n",
@@ -1046,6 +1047,65 @@ fn call_path_error_span_points_at_call_site() {
     // `Call` instruction records the callee expression's head, here `f`.
     assert_eq!(&src[start as usize..end as usize], "f");
     assert_eq!(err.func.as_deref(), Some("f"));
+}
+
+#[test]
+fn call_path_error_picks_the_call_entry_not_the_next_instruction() {
+    // Regression for the U10 review finding: the caller's ip is advanced
+    // past the `Call` before `call` runs, so without the rewind the span
+    // lookup (`closest entry at or before ip`) would land on the *next*
+    // instruction's entry. Synthetic spans make the two entries
+    // distinguishable: the call site's span is (7, 8), the following
+    // `Const`'s is (20, 21); the error must report the former.
+    let builtin = Func {
+        name: ConstId(1),
+        params: 0,
+        locals: 0,
+        code: Box::new([]),
+        span_map: Box::new([]),
+        is_builtin: true,
+    };
+    let main_code = enc(&[
+        (Opcode::Call, u16b(1)),
+        (Opcode::Const, u32b(2)),
+        (Opcode::Return, vec![]),
+    ]);
+    let main_fn = Func {
+        name: ConstId(0),
+        params: 0,
+        locals: 0,
+        code: main_code,
+        span_map: Box::new([
+            SpanEntry {
+                offset: 0,
+                start: 7,
+                end: 8,
+            },
+            SpanEntry {
+                offset: 3,
+                start: 20,
+                end: 21,
+            },
+        ]),
+        is_builtin: false,
+    };
+    let m = Module {
+        version: 2,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Str("nope".into()),
+            Const::Int(1),
+        ],
+        functions: vec![main_fn, builtin],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::UnknownBuiltin("nope".into()));
+    // The call site's span, not the following `Const`'s.
+    assert_eq!(err.span, Some((7, 8)));
+    // The ip was rewound to the `Call` itself.
+    assert_eq!(err.pc, Some(0));
 }
 
 #[test]

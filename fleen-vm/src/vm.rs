@@ -77,12 +77,14 @@ impl Vm {
     ///
     /// The top frame is always where the error originated: `step()` only
     /// writes `frame.ip` back on the success path, so an in-flight `ip`
-    /// still names the failing instruction; `call`-path errors (depth,
-    /// builtin dispatch) happen before a new frame is pushed, so the ip
-    /// points at the `Call` that triggered them. The span is the closest
-    /// `span_map` entry at or before that ip — the failing instruction may
-    /// itself be synthetic and carry no entry. Every lookup is defensive
-    /// (`None` on miss): location is best-effort, never a second failure.
+    /// still names the failing instruction. `Call`/`CallValue` advance the
+    /// caller's ip before invoking `call` (the callee runs from the main
+    /// loop once the frame is pushed) but rewind it on failure — `call`
+    /// errors happen before the new frame is pushed — so the ip names the
+    /// `Call` itself. The span is the closest `span_map` entry at or before
+    /// that ip — the failing instruction may itself be synthetic and carry
+    /// no entry. Every lookup is defensive (`None` on miss): location is
+    /// best-effort, never a second failure.
     fn locate_error(&self, kind: RuntimeErrorKind) -> RuntimeError {
         let mut err = RuntimeError::new(kind);
         let Some(frame) = self.frames.last() else {
@@ -398,11 +400,22 @@ impl Vm {
                     .get(id as usize)
                     .ok_or(RuntimeErrorKind::FuncOutOfRange(fid))?
                     .params;
+                let start = frame.ip;
                 self.frames
                     .last_mut()
                     .ok_or(RuntimeErrorKind::StackUnderflow)?
                     .ip = ip;
-                self.call(fid, params)?;
+                if let Err(e) = self.call(fid, params) {
+                    // `call` fails before the callee's frame is pushed, so
+                    // the top frame is still the caller: rewind its ip to
+                    // the `Call` itself or `locate_error` would report the
+                    // next instruction's span.
+                    self.frames
+                        .last_mut()
+                        .ok_or(RuntimeErrorKind::StackUnderflow)?
+                        .ip = start;
+                    return Err(e);
+                }
                 return Ok(());
             }
             Opcode::LoadFunc => {
@@ -423,11 +436,20 @@ impl Vm {
                 let f = self.stack.remove(idx);
                 match f {
                     Value::Func(fid) => {
+                        let start = frame.ip;
                         self.frames
                             .last_mut()
                             .ok_or(RuntimeErrorKind::StackUnderflow)?
                             .ip = ip;
-                        self.call(fid, argc)?;
+                        if let Err(e) = self.call(fid, argc) {
+                            // Same rewind as the `Call` arm: `call` errors
+                            // surface before the callee's frame is pushed.
+                            self.frames
+                                .last_mut()
+                                .ok_or(RuntimeErrorKind::StackUnderflow)?
+                                .ip = start;
+                            return Err(e);
+                        }
                         return Ok(());
                     }
                     _ => return Err(RuntimeErrorKind::ArithTypeMismatch),

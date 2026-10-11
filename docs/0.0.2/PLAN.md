@@ -776,7 +776,8 @@ pub struct SpanEntry {
 
 ### 7.2 运行时诊断
 
-- VM 执行出错时按 `当前帧 ip - 1` 查 `span_map`，`RuntimeError` 携带可选 span；
+- VM 执行出错时按 `当前帧 ip` 查 `span_map`（契约 `offset == 出错时的 frame.ip`，
+  见 TICKETS U07 实现说明 4；原稿的 `ip - 1` 已更正），`RuntimeError` 携带可选 span；
 - `fleen-vm` CLI 在 **`.fln` 一站式模式**下持有源码，把字节偏移换算为行列：
 
 ```console
