@@ -385,8 +385,9 @@ pub enum RuntimeError {
   不是编码的一部分
 - `MakeRefLocal` 的**转发**：目标槽已持有句柄（`ref` 参数再传给下一个
   `ref` 参数）时原样再压该句柄，不得再包一层（句柄套句柄无法解引用穿透）
-- 编译器对局部 box 的 `deref b = v` 生成 `v; AllocBox; StoreLocal b`
-  （U09 修正）：`StoreDerefBox` 的契约是弹出 box 写入后丢弃，而
+- 编译器对局部 box 的 `deref b = v` 生成 `v; AllocBox; StoreLocal b; Unit`
+  （U09 修正；尾随 `Unit` 是赋值表达式的值，作语句时由 `Pop` 丢弃）：
+  `StoreDerefBox` 的契约是弹出 box 写入后丢弃，而
   `LoadLocal` 取出的是深拷贝，写入无法落回槽内 box；唯一所有权下
   点内替换与整 box 替换观测等价。`StoreDerefBox` 保留给手写字节码与
   写穿透句柄的路径（0.0.2 编译器不再生成该指令）
@@ -598,8 +599,8 @@ q = div(a, b)?;
 ```
 
 ```text
-<eval div(a, b)>      ; r: Result
-Dup                   ; r r
+<eval div(a, b)>      ; r: Result<int, string>（string 载荷 owned → DupDeep）
+DupDeep               ; r r
 IsErr                 ; r bool
 JumpIfTrue  L_err
 UnwrapOk              ; r → v
@@ -612,6 +613,11 @@ Return                ; 提前返回 Err（函数级）
 L_cont:
 ```
 
+> **Dup vs DupDeep**：`?` 的复制指令按操作数类型的所有权选择——
+> `Result<T, E>` 中 `T` / `E` 任一 owned（`string` / `box<T>`）即整型 owned，
+> 用 `DupDeep`；纯 Copy 载荷（如 `Result<int, int>`）用 `Dup`。
+> 上例 `string` 载荷 owned，故为 `DupDeep`。
+
 ### 6.8 choose（Result scrutinee，v0.0.2）
 
 ```fleen
@@ -622,8 +628,8 @@ choose div(10, 2) {
 ```
 
 ```text
-<eval div(10, 2)>     ; r
-Dup
+<eval div(10, 2)>     ; r: Result<int, string>（string 载荷 owned → DupDeep）
+DupDeep
 IsErr
 JumpIfTrue  L_err
 UnwrapOk              ; payload v（转移）

@@ -938,7 +938,7 @@ x = 44;              // 改的是哪个？
 
 | 版本 | 内容 |
 |------|------|
-| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI —— **已定稿，规划见 `docs/0.0.2/PLAN.md`** |
+| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` —— **已实现，规划与实现记录见 `docs/0.0.2/PLAN.md`** |
 | 0.0.3 | `struct` / `for` / 迭代器 |
 | 0.0.4 | `async` / `await` |
 | 0.0.5 | `unsafe` / `trusted` |

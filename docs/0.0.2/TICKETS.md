@@ -990,12 +990,16 @@ cargo fln tests/e2e/valid/question.fln
 
 ### 文档核对（规划期已同步，实现后核对差异）
 - [x] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
-- [ ] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现）
+- [x] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现；
+  已对照 `lower/mod.rs` 全局 ref 实参 `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` 核实）
 - [x] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修；于 U07 审查时提前完成）
-- [ ] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6）
-- [ ] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13）
-- [ ] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致
-- [ ] `SPEC.md` §14 快速参考补 `?` 示例（如实现形态有出入）
+- [x] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6；§9 已在）
+- [x] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13；已在）
+- [x] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致
+  （U12 核对修正三处：§5.9 `deref b = v` 序列补尾随 `Unit`；
+  §6.7/§6.8 owned Result 示例 `Dup` → `DupDeep`）
+- [x] `SPEC.md` §14 快速参考补 `?` 示例（如实现形态有出入；
+  U12 补 Result/`?`/`as` 示例与优先级表 `as` 行）
 - [x] 新增错误信息样例与实际输出比对（`UseAfterMove` 等）
 
 ### 版本与发布

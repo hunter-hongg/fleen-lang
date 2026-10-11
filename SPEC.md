@@ -589,6 +589,28 @@ choose value {
 
 **分号规则**：`when` 子句和 `otherwise` 子句本身不带分号，只有 `choose` 整体作为语句使用时末尾加分号。
 
+### Result 与 `?` 传播（0.0.2）
+
+```fleen
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func safe_half(a: int): Result<int, string> {
+    q = div(a, 2)?;    // Err 时整函数立即返回该 Err；Ok 时取出 payload
+    Ok(q)
+}
+
+// choose 的 Ok/Err pattern：两臂齐即穷尽，无需 otherwise
+res = choose safe_half(10) {
+    when Ok(v) { v }
+    when Err(e) { 0 - 1 }
+};
+
+// print 仅接受 string，标量用 `as string` 转换（0.0.2 临时，泛型后重审）
+print(res as string);
+```
+
 ### 运算符优先级（从低到高）
 
 ```
@@ -598,6 +620,7 @@ and
 < > <= >=
 + -
 * / %
+as     (类型转换，0.0.2：紧于二元运算符、松于一元前缀，同 Rust)
 ?      (后缀，0.0.2)
 box deref move clone - !    (一元前缀；box/deref/move/clone 为 0.0.2 新增)
 ;       (显式分号：0.0.1 必填，0.0.2 起可选)

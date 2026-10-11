@@ -2,7 +2,7 @@
 (* Fleen 语言 EBNF 文法 v0.0.2                  *)
 (* 0.0.2 新增：box/deref/move/clone 前缀表达式、 *)
 (* ? 后缀、Ok/Err pattern、deref 赋值目标、     *)
-(* 分号可选（ASI）                              *)
+(* as 转换层（cast）、分号可选（ASI）            *)
 (* ============================================ *)
 
 (* ---------- 程序 ---------- *)
@@ -133,16 +133,23 @@ comparison      = additive , { ( "<" | ">" | "<=" | ">=" ) , additive } ;
 
 additive        = multiplicative , { ( "+" | "-" ) , multiplicative } ;
 
-multiplicative  = unary , { ( "*" | "/" | "%" ) , unary } ;
+multiplicative  = cast , { ( "*" | "/" | "%" ) , cast } ;
+
+(* 0.0.2 U13：as 转换层，紧于二元运算符、松于一元前缀（同 Rust）：
+   deref b as string = (deref b) as string；1 + 2 as string = 1 + (2 as string)。
+   白名单（int/float/bool → string）由语义阶段校验，文法只认形态。 *)
+cast            = unary , { "as" , type } ;
 
 (* 0.0.2：前缀关键字表达式，右结合、可叠加：
    clone deref b = clone(deref(b))，box box 1 = box(box(1))。
    move/clone/deref/box 的操作数合法性（place 约束、类型）由语义阶段校验，
-   文法只认形态。`?` 为后缀，绑定比前缀紧：deref b? = deref(b?) *)
-unary           = unary_prefix , unary
+   文法只认形态。`?` 为后缀，绑定比前缀紧：deref b? = deref(b?)
+   `box` 特例：操作数在 cast 层解析，box 1 as string = box (1 as string) *)
+unary           = "box" , cast
+                | unary_prefix , unary
                 | postfix ;
 
-unary_prefix    = "-" | "!" | "box" | "deref" | "move" | "clone" ;
+unary_prefix    = "-" | "!" | "deref" | "move" | "clone" ;
 
 postfix         = primary , { call_suffix | index_suffix | field_suffix | question_suffix } ;
 
