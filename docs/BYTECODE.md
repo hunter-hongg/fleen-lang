@@ -352,6 +352,10 @@ pub enum RuntimeError {
 - `CallValue` 用于**一等值调用**（`f(a, b)` 其中 `f` 是变量），`argc` 为实参个数
 - **栈上顺序**：`f` 必须在实参之前压栈，即 `f arg0 arg1 ...`（`f` 在栈底方向，实参在栈顶方向）
 - 0.0.1 `argc` 用 `u8`（最多 255 参数）；语言层后续若需要更多，加 `CallValueWide`，不改现有编码
+- **变参内置函数**（`print`）：`Call` 弹出恰好 `callee.params` 个实参，
+  因此每个观测到的调用参数个数对应函数表中一个独立实例（`params = argc`，
+  按 `print` 名称由宿主分派，U09 修正）——共享单一 `params == 1` 实例
+  会让多余实参残留在栈上
 
 ### 5.8 choose 辅助
 
@@ -379,6 +383,13 @@ pub enum RuntimeError {
 - `MakeRefLocal` 的 slot 校验同 `LoadLocal`/`StoreLocal`（slot < `locals`）；
   句柄值 `Ref { base, slot }` 中的 `base` 由 VM 在调用时绑定调用方帧，
   不是编码的一部分
+- `MakeRefLocal` 的**转发**：目标槽已持有句柄（`ref` 参数再传给下一个
+  `ref` 参数）时原样再压该句柄，不得再包一层（句柄套句柄无法解引用穿透）
+- 编译器对局部 box 的 `deref b = v` 生成 `v; AllocBox; StoreLocal b`
+  （U09 修正）：`StoreDerefBox` 的契约是弹出 box 写入后丢弃，而
+  `LoadLocal` 取出的是深拷贝，写入无法落回槽内 box；唯一所有权下
+  点内替换与整 box 替换观测等价。`StoreDerefBox` 保留给手写字节码与
+  写穿透句柄的路径（0.0.2 编译器不再生成该指令）
 
 ### 5.10 move / clone（v0.0.2）
 
@@ -395,6 +406,10 @@ pub enum RuntimeError {
   `CloneLocal`/`CloneGlobal`，由 codegen 按静态类型选择
 - "已移动"槽位的内容对 VM 不可见（typeck 保证不再读取）；`MoveLocal` 用
   `mem::replace` 清槽，避免旧值延迟到帧销毁才释放
+- **`CloneGlobal` 不做句柄解引用**（U09 决策，与 `CloneLocal`/`DupDeep` 不同）：
+  typeck 禁止把 `Ref` 存入全局，全局槽只会持有 owned 值，拷贝点无需解引用；
+  手写字节码把句柄存进全局时，兜底在**消费点**（`Eq`/`Ne`、序比较、`print`
+  实参、`DupDeep`、`DerefBox` 的 `read_ref`），越界即 `BorrowOutOfRange`
 
 ### 5.11 Result / 错误处理（v0.0.2）
 

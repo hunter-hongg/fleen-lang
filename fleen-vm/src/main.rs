@@ -10,6 +10,7 @@ use std::{env, fs, path::Path, process};
 
 use fleen_compiler::codegen::Module;
 
+use fleen_vm::value::Value;
 use fleen_vm::vm::Vm;
 
 /// How loading the input module failed; each variant maps to an exit code.
@@ -60,9 +61,22 @@ fn main() {
         eprintln!("verify: FAIL: {e}");
         process::exit(1);
     }
-    if let Err(e) = Vm::new(module).run() {
-        eprintln!("Runtime error: {e}");
-        process::exit(1);
+    match Vm::new(module).run() {
+        // 0.0.2 U09 (D8): an entry function returning `Result` propagates a
+        // trailing `Err` (via `?` or an explicit return) out of execution.
+        // Print the payload to stderr and exit 1; the exit-code contract
+        // (0 success / 1 error / 2 usage·IO) is unchanged.
+        Ok(Value::Err(e)) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        // Any other module result keeps the 0.0.1 behavior (silently
+        // discarded).
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Runtime error: {e}");
+            process::exit(1);
+        }
     }
 }
 

@@ -18,6 +18,7 @@ use self::slots::{SlotAlloc, allocate_slots};
 use crate::lexer::Span;
 use crate::parser::ast::ResultCtor;
 use crate::resolver::hir::BindingId;
+use crate::typeck::builtins::find_builtin;
 use crate::typeck::typed_hir::Access;
 use crate::typeck::typed_hir::*;
 use std::collections::HashMap;
@@ -122,8 +123,9 @@ impl std::fmt::Display for LowerError {
 
 impl std::error::Error for LowerError {}
 
-/// Builtin function names known to 0.0.1.
-const BUILTINS: &[&str] = &["print"];
+// Builtin declarations live in `crate::typeck::builtins::BUILTINS` (single
+// source of truth for names, arities and signatures); lower mirrors them
+// into leading `MirFunc`s in `LowerCtx::new`.
 
 /// Where a binding lives at runtime.
 enum Location {
@@ -141,9 +143,47 @@ struct LowerCtx {
     /// FuncId → parameter types (for `ref` argument detection in calls).
     /// Builtins have an empty vec (no Ref parameters).
     param_types: HashMap<FuncId, Vec<Type>>,
+    /// Variadic builtins get one `MirFunc` per observed call arity: the
+    /// `Call` instruction pops exactly `callee.params` operands, so the
+    /// arity must be encoded in the callee's `params` field. Maps
+    /// (name, argc) → FuncId; the base instance registered in `new` covers
+    /// its own arity.
+    builtin_arities: HashMap<(String, u16), FuncId>,
 }
 
 impl LowerCtx {
+    /// FuncId of a variadic builtin instance that takes exactly `argc`
+    /// arguments, instantiating it on first use (U09 fix: the `Call`
+    /// instruction pops `callee.params` operands, so a `print("a", b)` call
+    /// must target an instance whose `params == 2` — the shared
+    /// `params == 1` base instance left the extra argument on the stack and
+    /// desynced every depth the verifier reasons about).
+    fn variadic_builtin_fid(&mut self, name: &str, argc: u16) -> FuncId {
+        if let Some(&fid) = self.builtin_arities.get(&(name.to_string(), argc)) {
+            return fid;
+        }
+        let ret = find_builtin(name)
+            .map(|sig| sig.ret.clone())
+            .unwrap_or(Type::Unit);
+        let id = FuncId(self.funcs.len() as u32);
+        self.funcs.push(MirFunc {
+            func_id: id,
+            name: name.to_string(),
+            params: argc,
+            locals: argc.max(1),
+            entry: BlockId(0),
+            blocks: vec![MirBlock {
+                id: BlockId(0),
+                instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(0, 0))],
+                terminator: Terminator::Return,
+            }],
+            is_builtin: true,
+            ret_type: ret,
+        });
+        self.builtin_arities.insert((name.to_string(), argc), id);
+        id
+    }
+
     fn new(hir: &TypedHir) -> Self {
         let mut ctx = LowerCtx {
             funcs: Vec::new(),
@@ -151,15 +191,16 @@ impl LowerCtx {
             func_ids: HashMap::new(),
             global_of_binding: HashMap::new(),
             param_types: HashMap::new(),
+            builtin_arities: HashMap::new(),
         };
         // Builtin functions occupy leading FuncIds.
-        for &name in BUILTINS {
+        for sig in crate::typeck::builtins::BUILTINS {
             let id = FuncId(ctx.funcs.len() as u32);
-            ctx.func_ids.insert(name.to_string(), id);
+            ctx.func_ids.insert(sig.name.to_string(), id);
             ctx.param_types.insert(id, Vec::new()); // builtins have no Ref params
             ctx.funcs.push(MirFunc {
                 func_id: id,
-                name: name.to_string(),
+                name: sig.name.to_string(),
                 params: 1,
                 locals: 1,
                 entry: BlockId(0),
@@ -169,8 +210,11 @@ impl LowerCtx {
                     terminator: Terminator::Return,
                 }],
                 is_builtin: true,
-                ret_type: Type::Unit,
+                ret_type: sig.ret.clone(),
             });
+            // The base instance serves the 1-argument call sites; other
+            // arities instantiate lazily (see `variadic_builtin_fid`).
+            ctx.builtin_arities.insert((sig.name.to_string(), 1), id);
         }
         // Assign FuncIds to user functions in declaration order.
         for item in &hir.items {
@@ -813,10 +857,22 @@ impl<'a> FnBodyCx<'a> {
                 let box_loc = self.loc(*binding_id, "?", *span)?;
                 match box_loc {
                     Location::Local(slot) => {
-                        // [b]; [v]; StoreDerefBox; Unit — one value on the stack.
-                        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(slot), *span));
+                        // 0.0.2 U09 fix: `StoreDerefBox`'s contract pops the
+                        // box and discards it, and `LoadLocal` yields a deep
+                        // copy — a write through the loaded copy could never
+                        // reach the box in the slot (the same copy-through
+                        // limitation that makes global deref-assign a
+                        // typeck error). Under unique ownership (§10.3: no
+                        // handle may be stored) replacing the pointee is
+                        // observationally identical to replacing the box:
+                        // evaluate rhs first (the old box is still in the
+                        // slot, so a self-referential rhs reads the old
+                        // value), box it, and let `StoreLocal` overwrite the
+                        // slot — the old box, and with it the old pointee,
+                        // is released exactly there.
                         self.lower_expr_into(fb, rhs)?;
-                        fb.emit(MirInstr::new(MirInstrKind::StoreDerefBox, *span));
+                        fb.emit(MirInstr::new(MirInstrKind::AllocBox, *span));
+                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
                         fb.emit(MirInstr::new(MirInstrKind::Unit, *span));
                     }
                     Location::Global(gid) => {
@@ -871,7 +927,14 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Ident {
                 name, binding_id, ..
             } if self.is_function_binding(*binding_id) => {
-                let fid = self.lcx.func_ids[name];
+                let mut fid = self.lcx.func_ids[name];
+                // Variadic builtins: resolve to (or instantiate) the
+                // instance whose `params` matches this call's argc.
+                if self.lcx.funcs[fid.0 as usize].is_builtin
+                    && self.lcx.funcs[fid.0 as usize].params != args.len() as u16
+                {
+                    fid = self.lcx.variadic_builtin_fid(name, args.len() as u16);
+                }
                 let param_tys = self.lcx.param_types.get(&fid).cloned().unwrap_or_default();
                 self.prepare_args(fb, args, &param_tys)?;
                 fb.emit(MirInstr::new(MirInstrKind::Call(fid), span));

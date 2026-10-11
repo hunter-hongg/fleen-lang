@@ -40,9 +40,7 @@ impl Vm {
 
     /// Run the module's `entry` function to completion.
     ///
-    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2); a v2 module whose
-    /// instructions this VM does not implement yet fails per instruction with
-    /// [`RuntimeError::InvalidOpcode`] (see `step`).
+    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
         if !matches!(self.module.version, 1 | 2) {
             return Err(RuntimeError::UnsupportedVersion(self.module.version));
@@ -142,11 +140,18 @@ impl Vm {
                 // tightens the typeck side to `string`-only.
                 let line: String = args
                     .iter()
-                    .map(|a| match a {
-                        Value::Str(s) => s.to_string(),
-                        other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
+                    .map(|a| {
+                        // A borrowed argument (`ref T` parameter read, U09)
+                        // arrives as a handle — dereference before formatting
+                        // or it would print the opaque `<ref>`.
+                        let v = self.read_ref(a)?;
+                        Ok(match v {
+                            Value::Str(s) => s.to_string(),
+                            other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, RuntimeError>>()?
+                    .join("");
                 println!("{line}");
                 Ok(Value::Unit)
             }
@@ -423,12 +428,178 @@ impl Vm {
                 let s = fmt_scalar(&v).ok_or(RuntimeError::CastOperandNotScalar)?;
                 self.stack.push(Value::Str(s.as_str().into()));
             }
-            // 0.0.2 U07: the v2 opcodes (0x80–0xA4) are *encoded* by codegen
-            // from U07 on, but they are only *executed* from U09 on. Until
-            // then they must fail loudly rather than fall through as a no-op
-            // — a silent no-op would corrupt every depth invariant the
-            // verifier reasons about.
-            _ => return Err(RuntimeError::InvalidOpcode(op)),
+            // ----------------------------------------------------------------
+            // 0.0.2 U09: ownership & Result instructions (BYTECODE.md §5.9–5.11).
+            // Type/shape violations below are defensive — `fleen-verify`
+            // rejects malformed modules before execution — and fail loudly
+            // rather than falling through as a no-op, which would corrupt
+            // every depth invariant the verifier reasons about.
+            // ----------------------------------------------------------------
+            Opcode::AllocBox => {
+                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                // Runtime backstop for hand-written bytecode (typeck forbids
+                // boxing a borrow handle — Ref never inside Boxed, so this
+                // is unreachable from compiled code; `fleen-verify` has no
+                // value-type view of the stack, so release builds need the
+                // check too, not just a debug_assert).
+                if matches!(v, Value::Ref { .. }) {
+                    return Err(RuntimeError::BorrowOutOfRange);
+                }
+                self.stack.push(Value::Boxed(Box::new(v)));
+            }
+            Opcode::DerefBox => {
+                // `b → b v`: the box stays on the stack (peek, not pop); a
+                // copy of the pointee is pushed. The operand may be a borrow
+                // handle (`ref box<T>` read path) — resolve it first.
+                let copy = {
+                    let b = self.stack.last().ok_or(RuntimeError::StackUnderflow)?;
+                    match self.read_ref(b)? {
+                        Value::Boxed(inner) => inner.as_ref().clone(),
+                        _ => return Err(RuntimeError::StackShape),
+                    }
+                };
+                self.stack.push(copy);
+            }
+            Opcode::StoreDerefBox => {
+                // `b v →`: replace the pointee, old value released by the
+                // assignment's Drop. Through a borrow handle the write lands
+                // in the handle's target slot (the only form with persistent
+                // effect; the compiler's own lowering no longer emits this
+                // opcode — see `fleen-compiler/src/lower` AssignDeref).
+                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                match b {
+                    Value::Boxed(mut inner) => {
+                        *inner = v;
+                    }
+                    Value::Ref { .. } => {
+                        let idx = self.ref_index(&b).ok_or(RuntimeError::BorrowOutOfRange)?;
+                        let slot = self
+                            .stack
+                            .get_mut(idx)
+                            .ok_or(RuntimeError::BorrowOutOfRange)?;
+                        match slot {
+                            Value::Boxed(inner) => **inner = v,
+                            _ => return Err(RuntimeError::StackShape),
+                        }
+                    }
+                    _ => return Err(RuntimeError::StackShape),
+                }
+            }
+            Opcode::MakeRefLocal => {
+                let s = take!(2);
+                let slot = u16::from_le_bytes([s[0], s[1]]);
+                let idx = frame.stack_base + slot as usize;
+                let existing = self.stack.get(idx).ok_or(RuntimeError::StackShape)?;
+                let handle = match existing {
+                    // Forwarding: the slot already holds a handle (a `ref`
+                    // parameter re-passed to another `ref` parameter). Push
+                    // the original handle as-is — re-wrapping would create a
+                    // handle-to-handle, which dereference cannot see through.
+                    // The check is on the *slot contents*, not the stack top:
+                    // with several ref arguments in one call the top of the
+                    // stack is the previously prepared argument.
+                    Value::Ref { .. } => existing.clone(),
+                    _ => Value::Ref {
+                        base: frame.stack_base as u32,
+                        slot,
+                    },
+                };
+                self.stack.push(handle);
+            }
+            Opcode::DupDeep => {
+                // `clone`'s stack form: deep copy the top. `Box<Value>`'s
+                // derived Clone copies recursively; a handle on top copies
+                // the value it points at, never the handle.
+                let copy = {
+                    let top = self.stack.last().ok_or(RuntimeError::StackUnderflow)?;
+                    self.read_ref(top)?.clone()
+                };
+                self.stack.push(copy);
+            }
+            Opcode::MoveLocal => {
+                let s = take!(2);
+                let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let idx = frame.stack_base + slot;
+                // Consumptive read: the slot is cleared so the moved value's
+                // Drop cannot be deferred to frame destruction.
+                let v = {
+                    let slot_v = self.stack.get_mut(idx).ok_or(RuntimeError::StackShape)?;
+                    std::mem::replace(slot_v, Value::Unit)
+                };
+                self.stack.push(v);
+            }
+            Opcode::CloneLocal => {
+                let s = take!(2);
+                let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let idx = frame.stack_base + slot;
+                let copy = match self.stack.get(idx).ok_or(RuntimeError::StackShape)? {
+                    // Cloning a borrowed parameter deep-copies its target.
+                    v @ Value::Ref { .. } => self.read_ref(v)?.clone(),
+                    other => other.clone(),
+                };
+                self.stack.push(copy);
+            }
+            Opcode::CloneGlobal => {
+                let s = take!(2);
+                let id = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let g = self
+                    .globals
+                    .get(id)
+                    .cloned()
+                    .ok_or(RuntimeError::GlobalOutOfRange(
+                        fleen_compiler::codegen::GlobalId(id as u32),
+                    ))?;
+                // Globals never hold borrow handles in compiled code (typeck
+                // forbids storing a `Ref`); the defensive backstop for
+                // hand-written modules is the dereference at the consumption
+                // point, not the copy here.
+                self.stack.push(g);
+            }
+            Opcode::PackOk => {
+                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                // Same runtime backstop as `AllocBox` (Ref never inside Ok).
+                if matches!(v, Value::Ref { .. }) {
+                    return Err(RuntimeError::BorrowOutOfRange);
+                }
+                self.stack.push(Value::Ok(Box::new(v)));
+            }
+            Opcode::PackErr => {
+                let v = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                // Same runtime backstop as `AllocBox` (Ref never inside Err).
+                if matches!(v, Value::Ref { .. }) {
+                    return Err(RuntimeError::BorrowOutOfRange);
+                }
+                self.stack.push(Value::Err(Box::new(v)));
+            }
+            Opcode::IsErr => {
+                // Pops the *duplicated* copy the `?`/choose-Result lowering
+                // puts on top; the original Result stays for the matching
+                // Unwrap on either branch.
+                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                let is_err = match r {
+                    Value::Ok(_) => false,
+                    Value::Err(_) => true,
+                    _ => return Err(RuntimeError::StackShape),
+                };
+                self.stack.push(Value::Bool(is_err));
+            }
+            Opcode::UnwrapOk => {
+                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                match r {
+                    Value::Ok(v) => self.stack.push(*v),
+                    Value::Err(_) => return Err(RuntimeError::ResultMismatch),
+                    _ => return Err(RuntimeError::StackShape),
+                }
+            }
+            Opcode::UnwrapErr => {
+                let r = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                match r {
+                    Value::Err(e) => self.stack.push(*e),
+                    Value::Ok(_) => return Err(RuntimeError::ResultMismatch),
+                    _ => return Err(RuntimeError::StackShape),
+                }
+            }
         }
         self.frames
             .last_mut()
@@ -473,16 +644,64 @@ impl Vm {
         }
     }
 
+    /// Absolute operand-stack index a borrow handle points at, or `None`
+    /// for any other value (0.0.2 U09).
+    fn ref_index(&self, v: &Value) -> Option<usize> {
+        match v {
+            Value::Ref { base, slot } => {
+                let idx = *base as usize + *slot as usize;
+                (idx < self.stack.len()).then_some(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Read-only dereference: a handle yields the slot it points at, any
+    /// other value yields itself (TICKETS U09).
+    ///
+    /// Handles use absolute stack indices, so the target is found even after
+    /// operand-stack reallocation. Typeck guarantees a handle only points at
+    /// a frame below the current call chain (which therefore outlives it);
+    /// the range check here is the defensive backstop for hand-written
+    /// bytecode, firing [`RuntimeError::BorrowOutOfRange`].
+    fn read_ref<'s>(&'s self, v: &'s Value) -> Result<&'s Value, RuntimeError> {
+        match self.ref_index(v) {
+            Some(idx) => {
+                let target = &self.stack[idx];
+                // Handle-to-handle cannot arise from the compiler: the only
+                // handle producer, `MakeRefLocal`, forwards an existing
+                // handle instead of re-wrapping one.
+                debug_assert!(
+                    !matches!(target, Value::Ref { .. }),
+                    "handle-to-handle: MakeRefLocal forwarding must prevent re-wrapping"
+                );
+                Ok(target)
+            }
+            None if matches!(v, Value::Ref { .. }) => Err(RuntimeError::BorrowOutOfRange),
+            None => Ok(v),
+        }
+    }
+
     fn eq_op(&mut self, f: fn(bool) -> bool) -> Result<(), RuntimeError> {
         let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
         let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let eq = match (&a, &b) {
+        // Borrow handles dereference before comparing (BYTECODE.md §3.2);
+        // the derived structural `PartialEq` on `Ref` is for tests only.
+        let a = self.read_ref(&a)?;
+        let b = self.read_ref(&b)?;
+        let eq = match (a, b) {
             (Value::Int(x), Value::Int(y)) => x == y,
             (Value::Float(x), Value::Float(y)) => x == y,
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
             (Value::Unit, Value::Unit) => true,
             (Value::Func(x), Value::Func(y)) => x == y,
+            // A box observes — and compares — its pointee (§3.2, matching
+            // Rust's `Box: PartialEq`).
+            (Value::Boxed(x), Value::Boxed(y)) => x == y,
+            (Value::Ok(x), Value::Ok(y)) => x == y,
+            (Value::Err(x), Value::Err(y)) => x == y,
+            (Value::Ok(_), Value::Err(_)) | (Value::Err(_), Value::Ok(_)) => false,
             _ => return Err(RuntimeError::ArithTypeMismatch),
         };
         self.stack.push(Value::Bool(f(eq)));
@@ -492,7 +711,11 @@ impl Vm {
     fn ord_op(&mut self, f: impl Fn(std::cmp::Ordering) -> bool) -> Result<(), RuntimeError> {
         let b = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
         let a = self.stack.pop().ok_or(RuntimeError::StackUnderflow)?;
-        let r = match (&a, &b) {
+        // Same handle discipline as `eq_op` (a `ref string` parameter can
+        // reach `<`/`<=`/... through ordinary comparison expressions).
+        let a = self.read_ref(&a)?;
+        let b = self.read_ref(&b)?;
+        let r = match (a, b) {
             (Value::Int(x), Value::Int(y)) => x.cmp(y),
             (Value::Float(x), Value::Float(y)) => {
                 x.partial_cmp(y).ok_or(RuntimeError::ArithTypeMismatch)?

@@ -212,8 +212,10 @@ fn immutable_global_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 0.0.2 U07: v2 opcodes are *encoded* (U07) but not *executed* (U09).
-// These tests lock that behavior so the catch-all cannot silently regress.
+// 0.0.2 U07/U09: v2 opcodes. U07 locked their loud failure while only encoded;
+// U09 replaces that with real dispatch — the per-opcode behavior now lives in
+// the dedicated execution tests below. What remains here is the module-level
+// gate: version 2 runs v1 instruction streams, unknown versions are rejected.
 // ---------------------------------------------------------------------------
 
 fn v2_module(code: Box<[u8]>) -> Module {
@@ -227,50 +229,13 @@ fn v2_module(code: Box<[u8]>) -> Module {
 }
 
 #[test]
-fn v2_opcode_fails_loudly_until_u09() {
+fn v2_module_gate() {
     // A v2 module whose body contains only v1 instructions still runs:
     // `run` accepts module versions {1, 2}.
     let m = v2_module(enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]));
     assert_eq!(Vm::new(m).run(), Ok(Value::Unit));
 
-    // The first v2 opcode encountered must fail with `InvalidOpcode`
-    // (not a silent no-op, which would corrupt the depth invariants
-    // `fleen-verify` reasons about). U09 replaces these with real dispatch.
-    for (op, byte) in [
-        (Opcode::AllocBox, 0x80u8),
-        (Opcode::DerefBox, 0x81),
-        (Opcode::StoreDerefBox, 0x82),
-        (Opcode::MakeRefLocal, 0x83),
-        (Opcode::DupDeep, 0x90),
-        (Opcode::MoveLocal, 0x91),
-        (Opcode::CloneLocal, 0x92),
-        (Opcode::CloneGlobal, 0x93),
-        (Opcode::PackOk, 0xA0),
-        (Opcode::PackErr, 0xA1),
-        (Opcode::IsErr, 0xA2),
-        (Opcode::UnwrapOk, 0xA3),
-        (Opcode::UnwrapErr, 0xA4),
-    ] {
-        // The u16 operand only exists on the four slot/global opcodes;
-        // either way the dispatch fails before an operand is read.
-        let operand = if matches!(
-            op,
-            Opcode::MakeRefLocal | Opcode::MoveLocal | Opcode::CloneLocal | Opcode::CloneGlobal
-        ) {
-            u16b(0)
-        } else {
-            Vec::new()
-        };
-        let m = v2_module(enc(&[(op, operand), (Opcode::Return, vec![])]));
-        assert_eq!(
-            Vm::new(m).run(),
-            Err(RuntimeError::InvalidOpcode(byte)),
-            "opcode 0x{byte:02x} must fail with InvalidOpcode until U09"
-        );
-    }
-
-    // `ToStr` is U13 and *is* executed, so it is not part of the
-    // fail-loudly set.
+    // `ToStr` (0xA5, U13) is executed.
     let m = Module {
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(7)],
@@ -294,6 +259,654 @@ fn v2_opcode_fails_loudly_until_u09() {
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(Vm::new(m).run(), Err(RuntimeError::UnsupportedVersion(3)));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U09: box / ref execution (BYTECODE.md §5.9).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn box_alloc_and_deref_roundtrip() {
+    // box 42; deref b → 42 (the box stays below the pushed copy).
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::AllocBox, vec![]),
+        (Opcode::DerefBox, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(42)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(42));
+}
+
+#[test]
+fn box_deref_read_leaves_box_on_stack() {
+    // `b → b v`: after DerefBox the box is still underneath, so a second
+    // read works — pinning the peek (not pop) contract.
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::AllocBox, vec![]),
+        (Opcode::DerefBox, vec![]),
+        (Opcode::Pop, vec![]),
+        (Opcode::DerefBox, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(9)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(9));
+}
+
+#[test]
+fn nested_box_deref_reads_through() {
+    // box box 42 → two DerefBox reach 42; nested boxes clone deeply.
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::AllocBox, vec![]),
+        (Opcode::AllocBox, vec![]),
+        (Opcode::DerefBox, vec![]),
+        (Opcode::DerefBox, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(42)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(42));
+}
+
+#[test]
+fn store_deref_box_writes_through_handle() {
+    // MakeRefLocal + StoreDerefBox: the write lands in the handle's target
+    // slot — the only form of `StoreDerefBox` with persistent effect.
+    // (The compiler's own deref-write lowering emits AllocBox+StoreLocal;
+    // this pins the opcode's value-level contract for hand-written modules.)
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::AllocBox, vec![]),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::MakeRefLocal, u16b(0)),
+                (Opcode::Const, u32b(2)),
+                (Opcode::StoreDerefBox, vec![]),
+                (Opcode::LoadLocal, u16b(0)),
+                (Opcode::DerefBox, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(7));
+}
+
+#[test]
+fn clone_box_is_independent_after_write() {
+    // b = box 1; c = clone b; write b (AllocBox+StoreLocal, the compiler's
+    // deref-write shape); deref c must still be 1.
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(99)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::AllocBox, vec![]),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::CloneLocal, u16b(0)),
+                (Opcode::StoreLocal, u16b(1)),
+                (Opcode::Const, u32b(2)),
+                (Opcode::AllocBox, vec![]),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::LoadLocal, u16b(1)),
+                (Opcode::DerefBox, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            2,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(1));
+}
+
+#[test]
+fn clone_box_copies_pointee_deeply() {
+    // c = clone b must deep-copy: after the clone, writing b's box replaces
+    // only b's slot — and the cloned box holds the same pointee value.
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::AllocBox, vec![]),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::CloneLocal, u16b(0)),
+                (Opcode::StoreLocal, u16b(1)),
+                // Write through b's slot: replace the box wholesale.
+                (Opcode::Const, u32b(1)),
+                (Opcode::AllocBox, vec![]),
+                (Opcode::StoreLocal, u16b(0)),
+                // Read c.
+                (Opcode::LoadLocal, u16b(1)),
+                (Opcode::DerefBox, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            2,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(5));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U09: move / clone execution (BYTECODE.md §5.10).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn move_local_returns_value() {
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::MoveLocal, u16b(0)),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(5));
+}
+
+#[test]
+fn move_local_clears_slot_to_unit() {
+    // After MoveLocal the slot reads Unit — the value's release is not
+    // deferred to frame destruction.
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::MoveLocal, u16b(0)),
+                (Opcode::Pop, vec![]),
+                (Opcode::LoadLocal, u16b(0)),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Unit);
+}
+
+#[test]
+fn clone_global_reads_global_slot() {
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Str("owned".into())],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::StoreGlobal, u16b(0)),
+                (Opcode::CloneGlobal, u16b(0)),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![fleen_compiler::codegen::Global {
+            name: ConstId(0),
+            mutable: true,
+        }],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("owned".into()));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U09: ref handles — forwarding, dereferencing at consumption points.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ref_handle_forwards_through_call_chain() {
+    // main passes a handle to f; f's slot holds the handle, and f passing it
+    // on must FORWARD the original (MakeRefLocal on a slot that already
+    // holds one re-pushes it) — g's CloneLocal deep-copies the ultimate
+    // target, not an intermediate handle.
+    let f = func(
+        enc(&[
+            (Opcode::MakeRefLocal, u16b(0)),
+            (Opcode::Call, u16b(2)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        1,
+    );
+    let g = func(
+        enc(&[(Opcode::CloneLocal, u16b(0)), (Opcode::Return, vec![])]),
+        1,
+        1,
+    );
+    let main = func(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MakeRefLocal, u16b(0)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+        functions: vec![main, f, g],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("hi".into()));
+}
+
+#[test]
+fn eq_dereferences_borrow_handles() {
+    // `s == "hi"` with s a borrowed parameter: Eq must compare the target,
+    // not the handles (derived PartialEq on Ref is tests-only).
+    let f = func(
+        enc(&[
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::Eq, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        1,
+    );
+    let main = func(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MakeRefLocal, u16b(0)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+        functions: vec![main, f],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn eq_compares_box_pointees() {
+    // Two separately allocated boxes with equal pointees compare equal
+    // (BYTECODE.md §3.2), exercising DupDeep on a Boxed operand.
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::AllocBox, vec![]),
+        (Opcode::DupDeep, vec![]),
+        (Opcode::Eq, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(3)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn print_builtin_dereferences_handle_argument() {
+    // print(s) with a borrowed argument must print the target, not `<ref>`.
+    let print_fn = Func {
+        name: ConstId(0),
+        params: 1,
+        locals: 1,
+        code: Box::new([]),
+        span_map: Box::new([]),
+        is_builtin: true,
+    };
+    let main = func(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MakeRefLocal, u16b(0)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let m = Module {
+        version: 2,
+        constants: vec![
+            Const::Str("print".into()),
+            Const::Str("x".into()),
+            Const::Int(0),
+        ],
+        functions: vec![main, print_fn],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(0));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.2 U09: Result execution (BYTECODE.md §5.11). The `?` / choose-Result
+// lowering shape is `<r> Dup/DupDeep IsErr JumpIfTrue L_err` — IsErr pops the
+// duplicate, the matching Unwrap consumes the original on each branch.
+// ---------------------------------------------------------------------------
+
+/// `<payload>; Pack<k>; DupDeep; IsErr; JumpIfTrue L; Unwrap<other>; Return;
+/// L: Unwrap<k>; Return` — round-trips the payload through the branch shape.
+fn result_branch_module(payload: Const, pack: Opcode, unwrap_err_branch: Opcode) -> Module {
+    let consts = vec![Const::Str("main".into()), payload];
+    Module {
+        version: 2,
+        constants: consts,
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (pack, vec![]),
+                (Opcode::DupDeep, vec![]),
+                (Opcode::IsErr, vec![]),
+                // Jump target 13 = the L_err `Unwrap<other>` below.
+                (Opcode::JumpIfTrue, u16b(13)),
+                (Opcode::UnwrapOk, vec![]),
+                (Opcode::Return, vec![]),
+                (unwrap_err_branch, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn result_ok_roundtrip_through_branch_shape() {
+    let m = result_branch_module(Const::Int(5), Opcode::PackOk, Opcode::UnwrapErr);
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(5));
+}
+
+#[test]
+fn result_err_roundtrip_through_branch_shape() {
+    let m = result_branch_module(
+        Const::Str("boom".into()),
+        Opcode::PackErr,
+        Opcode::UnwrapErr,
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("boom".into()));
+}
+
+#[test]
+fn unwrap_mismatch_is_defensive_error() {
+    // UnwrapOk on Err / UnwrapErr on Ok fire ResultMismatch — the branch
+    // jumps make this unreachable from compiled code, the VM must not
+    // silently degrade.
+    let ok_then_unwrap_err = enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackOk, vec![]),
+        (Opcode::UnwrapErr, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    let m = v2_module(ok_then_unwrap_err);
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap_err(), RuntimeError::ResultMismatch);
+
+    let err_then_unwrap_ok = enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackErr, vec![]),
+        (Opcode::UnwrapOk, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    let m = v2_module(err_then_unwrap_ok);
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap_err(), RuntimeError::ResultMismatch);
+}
+
+#[test]
+fn is_err_classifies_variants() {
+    let ok_case = enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackOk, vec![]),
+        (Opcode::IsErr, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    let m = v2_module(ok_case);
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(false));
+
+    let err_case = enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackErr, vec![]),
+        (Opcode::IsErr, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    let m = v2_module(err_case);
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn borrow_out_of_range_is_defensive() {
+    // A handle whose target left the live stack fires BorrowOutOfRange at
+    // the consumption point. The compiler cannot produce this (typeck keeps
+    // handles below the current frame and they cannot be stored), so it is
+    // built by hand: `f` stores a handle to its own slot into a global and
+    // returns — the frame truncation destroys the target, and `main`'s
+    // later DupDeep dereference must fail loudly instead of reading garbage.
+    let f = func(
+        enc(&[
+            (Opcode::MakeRefLocal, u16b(2)),
+            (Opcode::StoreGlobal, u16b(0)),
+            (Opcode::Unit, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        3,
+    );
+    let main = func(
+        enc(&[
+            (Opcode::Call, u16b(1)),
+            (Opcode::CloneGlobal, u16b(0)),
+            (Opcode::DupDeep, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![main, f],
+        globals: vec![fleen_compiler::codegen::Global {
+            name: ConstId(0),
+            mutable: true,
+        }],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err(),
+        RuntimeError::BorrowOutOfRange
+    );
+}
+
+#[test]
+fn dup_deep_on_handle_copies_target() {
+    // DupDeep with a handle on top must push a copy of the handle's target,
+    // never the handle itself (the clone of a borrowed value). Returns the
+    // copied target directly — a returned handle would read as `<ref>`.
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::MakeRefLocal, u16b(0)),
+                (Opcode::DupDeep, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("hi".into()));
+}
+
+#[test]
+fn ord_dereferences_borrow_handles() {
+    // `s < "hi"` with s a borrowed parameter: Lt must compare the target
+    // strings, same discipline as Eq.
+    let f = func(
+        enc(&[
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::Lt, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        1,
+    );
+    let main = func(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MakeRefLocal, u16b(0)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let m = Module {
+        version: 2,
+        constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+        functions: vec![main, f],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(false));
+}
+
+#[test]
+fn eq_ok_vs_err_is_false() {
+    // Ok(5) and Err(5) are never equal, even with identical payloads
+    // (BYTECODE.md §3.2: the variant is part of the value's identity).
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackOk, vec![]),
+        (Opcode::Const, u32b(1)),
+        (Opcode::PackErr, vec![]),
+        (Opcode::Eq, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(false));
+}
+
+#[test]
+fn store_deref_box_consumes_its_box_operand() {
+    // Plain-Boxed path (no handle): StoreDerefBox writes the pointee of the
+    // box it pops and then *discards that box* — the original box below is
+    // untouched. The compiler no longer emits this opcode, but the
+    // value-level contract must hold for hand-written modules.
+    let m = v2_module(enc(&[
+        (Opcode::Const, u32b(1)),
+        (Opcode::AllocBox, vec![]),
+        // DupDeep clones the box; the write below lands in the clone.
+        (Opcode::DupDeep, vec![]),
+        (Opcode::Const, u32b(2)),
+        (Opcode::StoreDerefBox, vec![]),
+        // The operand was discarded; the original still reads 1.
+        (Opcode::DerefBox, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    let m = Module {
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
+        ..m
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(1));
+}
+
+#[test]
+fn handle_discipline_enforced_at_runtime() {
+    // Boxing or packing a borrow handle fires BorrowOutOfRange in *any*
+    // build (unreachable from compiled code; the backstop exists because
+    // `fleen-verify` has no value-type view of the stack).
+    for (op, name) in [
+        (Opcode::AllocBox, "AllocBox"),
+        (Opcode::PackOk, "PackOk"),
+        (Opcode::PackErr, "PackErr"),
+    ] {
+        let code = enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MakeRefLocal, u16b(0)),
+            (op, vec![]),
+            (Opcode::Return, vec![]),
+        ]);
+        let m = Module {
+            version: 2,
+            constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
+            functions: vec![func(code, 0, 1)],
+            globals: vec![],
+            entry: FuncId(0),
+        };
+        assert_eq!(
+            Vm::new(m).run().unwrap_err(),
+            RuntimeError::BorrowOutOfRange,
+            "{name} on a borrow handle must fail loudly"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

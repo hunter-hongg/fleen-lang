@@ -212,6 +212,39 @@ fn lower_builtin_print_placeholder() {
 }
 
 #[test]
+fn lower_variadic_print_per_arity_instances() {
+    // U09 fix: the `Call` instruction pops exactly `callee.params` operands,
+    // so each observed call arity gets its own builtin instance — a shared
+    // `params == 1` print left extra arguments on the stack and desynced
+    // every depth the verifier reasons about.
+    let src = r#"
+func f(): int {
+    print("one");
+    print("a", "b");
+    print("x", "y", "z");
+    print("again", "dupe");
+    0
+}
+"#;
+    let mir = lower_src(src);
+    let mut arities: Vec<u16> = mir
+        .funcs
+        .iter()
+        .filter(|f| f.name == "print")
+        .map(|f| f.params)
+        .collect();
+    arities.sort_unstable();
+    assert_eq!(arities, vec![1, 2, 3], "one instance per distinct arity");
+    // Same-arity call sites reuse the instance.
+    let twos = mir
+        .funcs
+        .iter()
+        .filter(|f| f.name == "print" && f.params == 2)
+        .count();
+    assert_eq!(twos, 1);
+}
+
+#[test]
 fn lower_expr_stmt_emits_pop() {
     // A statement `1 + 1;` computes a value that must be discarded with Pop.
     let src = r#"
@@ -435,8 +468,12 @@ func f(): int {
 }
 
 #[test]
-fn lower_deref_assign() {
-    // `deref b = 7`: [b]; [7]; StoreDerefBox; Unit — one value left on stack.
+fn lower_deref_assign_replaces_the_box() {
+    // `deref b = 7`: [7]; AllocBox; StoreLocal b; Unit — one value left on
+    // stack. The pointee replacement compiles to a box replacement (unique
+    // ownership makes the two observationally identical): StoreDerefBox pops
+    // and discards its box operand, and the LoadLocal copy it used to write
+    // into could never reach the slot's box (U09 fix, see AssignDeref).
     let src = r#"
 func f() {
     b = box 42;
@@ -445,11 +482,27 @@ func f() {
 "#;
     let mir = lower_src(src);
     let f = find_func(&mir, "f");
-    assert!(f.blocks.iter().any(|b| {
-        b.instrs
+    let kinds: Vec<_> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .map(|i| &i.kind)
+        .collect();
+    assert!(kinds.iter().any(|k| matches!(k, MirInstrKind::AllocBox)));
+    assert!(
+        !kinds
             .iter()
-            .any(|i| matches!(i.kind, MirInstrKind::StoreDerefBox))
-    }));
+            .any(|k| matches!(k, MirInstrKind::StoreDerefBox))
+    );
+    // The write targets the box variable's own slot: ConstInt 7 → AllocBox →
+    // StoreLocal(b) appear back to back after the initial box allocation.
+    let store_local_b = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::StoreLocal(s) if *s == 0));
+    assert!(
+        store_local_b.is_some(),
+        "deref write must store to b's slot"
+    );
 }
 
 #[test]

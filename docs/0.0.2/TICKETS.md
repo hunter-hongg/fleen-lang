@@ -756,6 +756,14 @@ fleen-vm/src/
 └── tests.rs
 ```
 
+> **实施备注（U09 实际范围超出上表）**：集成中发现两处 U06/U07 的 lower 缺陷，
+> 不修则本票验收（多参 `print`、借用/owned 实参、`deref` 写）跑不通，已随本票
+> 修复并记入 BYTECODE.md §5.7/§5.9"U09 修正"：
+> ① 变参内置函数按观察到的参数个数各实例化一个 `MirFunc`（`Call` 弹恰好
+> `callee.params` 个操作数，共享 `params == 1` 实例会让多余实参残留在栈上）；
+> ② 局部 box 的 `deref b = v` 改发 `v; AllocBox; StoreLocal b`（`LoadLocal`
+> 深拷贝使 `StoreDerefBox` 的写永远落不回槽内 box）。
+
 ### 指令分派（vm.rs `step()`）
 
 | 指令 | 实现 |
@@ -763,11 +771,14 @@ fleen-vm/src/
 | `AllocBox` | `let v = pop(); push(Value::Boxed(Box::new(v)))` |
 | `DerefBox` | `let b = peek()`；`push(inner.clone())`——`b` 为 `Ref` 时先解句柄（见下） |
 | `StoreDerefBox` | `let v = pop(); let b = pop()`；`*inner = v`（旧值由赋值 Drop 释放） |
-| `MakeRefLocal` | 栈顶为 `Ref` → 原样再压一份（转发借用）；否则压 `Value::Ref { base: frame.stack_base, slot }` |
+| `MakeRefLocal` | 目标槽已持有 `Ref` → 原样再压一份（转发借用；实施修正：判槽内容
+  而非栈顶——多 `ref` 实参时栈顶是先前备好的实参）；否则压
+  `Value::Ref { base: frame.stack_base, slot }` |
 | `DupDeep` | `let v = peek().clone(); push(v)`（`Box<Value>` 自动深拷贝） |
 | `MoveLocal` | `let v = std::mem::replace(&mut stack[base+slot], Value::Unit); push(v)` |
 | `CloneLocal` | `push(stack[base+slot].clone())`；值为 `Ref` 时深拷贝**句柄目标** |
-| `CloneGlobal` | 同 `CloneLocal`，作用于全局表 |
+| `CloneGlobal` | `push(globals[id].clone())`——**不解句柄**（实施修正：typeck 禁止
+  `Ref` 入全局，兜底在消费点，见 BYTECODE.md §5.10） |
 | `PackOk` / `PackErr` | `pop` 后包 `Ok/Err` 压回 |
 | `IsErr` | `pop r; push(Bool(matches!(r, Err(_))))` |
 | `UnwrapOk` | `pop r`；`Ok(v) → push(v)`；`Err → RuntimeError::ResultMismatch`（防御） |
@@ -785,10 +796,13 @@ fn read_ref(&self, v: &Value) -> Result<&Value, RuntimeError> {
     }
 }
 ```
-- 使用点：`Eq`/`Ne`（两侧）、`exec_builtin`（print 实参）、`CloneLocal`/`CloneGlobal`/
-  `DupDeep`/`DerefBox` 的源值——消费 `Ref` 的指令必须先解引用
+- 使用点：`Eq`/`Ne`（两侧）、序比较（两侧）、`exec_builtin`（print 实参）、
+  `CloneLocal`/`DupDeep`/`DerefBox` 的源值——消费 `Ref` 的指令必须先解引用
+  （`CloneGlobal` 例外，见上表）
 - **纪律**：`Ref` 不得出现在 `Boxed` / `Ok` / `Err` 内部（typeck 保证）；
-  `debug_assert!` 辅助，违反即防御性 `BorrowOutOfRange`
+  违反即在运行时防御性返回 `BorrowOutOfRange`（U09 实施时由 `debug_assert!`
+  升级为无条件检查：`fleen-verify` 对栈上值没有类型视图，release 构建同样
+  需要兜底）
 
 ### Drop 语义核对（无新代码，须验证）
 - 帧销毁：`Return` 后 `stack.truncate(stack_base)` —— Rust 对被截断元素逐个
@@ -796,6 +810,8 @@ fn read_ref(&self, v: &Value) -> Result<&Value, RuntimeError> {
 - 槽位覆盖：`StoreLocal`/`StoreGlobal` 索引赋值释放旧值 ✓
 - `Pop` 丢弃语句值：`Vec::pop` Drop ✓
 - 单测：clone 后改写点内值互不影响；move 后原槽为 `Unit`；嵌套 box 深释放
+  （实施备注：VM 无分配计数手段，"深释放"以嵌套深拷贝用例 +
+  `Return` 后 `truncate` 的逐元素 `Drop` 语义作依据，未做直接观察）
 
 ### 入口 Err（main.rs，D8）
 ```rust
