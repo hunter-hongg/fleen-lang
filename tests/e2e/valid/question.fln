@@ -1,0 +1,21 @@
+// 0.0.2 U11 e2e benchmark: Ok/Err construction, `?`, choose-Result patterns.
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func safe_half(a: int): Result<int, string> {
+    q = div(a, 2)?;
+    Ok(q)
+}
+
+func main(): int {
+    res = choose safe_half(10) {
+        when Ok(v) { v }
+        when Err(e) {
+            print("error: ", e);
+            0 - 1
+        }
+    };
+    print(res as string);
+    0
+}

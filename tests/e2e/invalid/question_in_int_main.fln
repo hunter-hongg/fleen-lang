@@ -1,0 +1,8 @@
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("x") } else { Ok(a / b) }
+}
+
+func main(): int {
+    q = div(1, 2)?
+    q
+}

@@ -1,0 +1,6 @@
+func main(): int {
+    s = "hello"
+    t = move s
+    print(s)
+    0
+}

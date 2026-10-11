@@ -1,0 +1,4 @@
+func main(): int {
+    x: ref int = 1;
+    0
+}

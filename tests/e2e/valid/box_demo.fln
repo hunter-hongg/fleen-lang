@@ -1,0 +1,21 @@
+// 0.0.2 U11 e2e: box — allocate, read, write, clone independence, nesting.
+// `deref` requires a box-typed local as its operand, so the nested box is
+// observed through `clone deref outer` (a deep copy of the pointee box).
+func main(): int {
+    b = box 42
+    print(deref b as string)
+    deref b = deref b + 1
+    print(deref b as string)
+
+    b2 = clone b
+    deref b2 = 100
+    print(deref b as string)
+    print(deref b2 as string)
+
+    outer = box (clone b)
+    inner = clone deref outer
+    deref inner = 7
+    print(deref inner as string)
+    print(deref b as string)
+    0
+}

@@ -1,0 +1,18 @@
+// 0.0.2 U11 e2e: move / clone / conditional transfer of an owned string.
+func pick(flag: bool): string {
+    a = "from-a"
+    b = "from-b"
+    if flag { move a } else { move b }
+}
+
+func main(): int {
+    s = "hello"
+    t = move s
+    print(t)
+    u = clone t
+    print(u)
+    print(t)
+    print(pick(true))
+    print(pick(false))
+    0
+}

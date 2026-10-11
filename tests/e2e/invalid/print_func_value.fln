@@ -1,0 +1,6 @@
+func f(): int = 1
+
+func main(): int {
+    print(f)
+    0
+}

@@ -957,6 +957,23 @@ func main(): int {
   —— 锁死"v2 不破坏 v1"的承诺（`BYTECODE.md` §10）
 - 归属：`fleen-vm/tests/v1_compat.rs`（新集成测试文件）
 
+### 实现说明（U11 落地时发现）
+1. **v1 夹具必须用 v0.0.1 版的 `fib.fln` 编译**：现行 `fib.fln` 用了
+   `as string`（U13 语法），0.0.1 工具链无法编译。夹具源码取自
+   `git show v0.0.1:tests/e2e/valid/fib.fln`（`print(fib(x))` 形态，当时
+   print 收任意标量）；其输出与现行 `fib.expected` 逐字节一致（运行时
+   标量经 `fmt_scalar` 回退渲染）。生成方式：`git worktree` 检出
+   `v0.0.1` tag 构建 release 编译器，编译后立即移除 worktree。
+2. **二进制夹具保护**：新增根 `.gitattributes`
+   （`tests/fixtures/v1/*.flnc binary`），防止 autocrlf 等文本化改写
+   字节码。
+3. **`box_demo` 的嵌套读法受 place 限制**：`deref` 的操作数必须是
+   box 类型的局部变量（与 `ownership_deref_invalid_operand` 一致），
+   `deref deref nested` 被拒；嵌套 box 的观察走 `clone deref outer`
+   （点内 box 的深拷贝）。夹具按此设计，非缺陷。
+4. **`question_in_int_main` 产生两个错误**：`?` 不在 Result 函数 +
+   `q` 未定义（`?` 被拒后绑定未建立）；`.stderr` needle 只锚定第一条。
+
 ### 回归底线
 - `cargo test` 全绿，且 0.0.1 的 321 个测试**零语义改动**（仅 mechanical
   调整允许，如 MirInstr 包装的构造处）

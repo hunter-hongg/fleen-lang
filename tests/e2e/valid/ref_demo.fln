@@ -1,0 +1,13 @@
+// 0.0.2 U11 e2e: a `ref` parameter borrows; the original stays usable.
+func shout(s: ref string): int {
+    print(s)
+    42
+}
+
+func main(): int {
+    name = "fleen"
+    code = shout(name)
+    print(name)
+    print(code as string)
+    0
+}

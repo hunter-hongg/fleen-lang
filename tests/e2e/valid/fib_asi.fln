@@ -1,0 +1,19 @@
+// 0.0.2 U11: the 0.0.1 fib regression rewritten without explicit semicolons
+// (ASI). Output must be byte-identical to fib.expected.
+func fib(n: int): int {
+    if n < 2 { n }
+    elif n == 2 { 1 }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+func main(): int {
+    x = 0
+    const limit = 10
+
+    while x < limit {
+        print(fib(x) as string)
+        x = x + 1
+    }
+
+    0
+}
