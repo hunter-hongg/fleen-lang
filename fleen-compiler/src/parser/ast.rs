@@ -31,7 +31,7 @@ pub struct ImportDecl {
     pub span: Span,
 }
 
-/// Declaration: function, variable binding, or const.
+/// Declaration: function, variable binding, const, or struct.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
     /// `func add(a: int, b: int): int = a + b`
@@ -40,6 +40,25 @@ pub enum Decl {
     Var(VarBinding),
     /// `const y: int = 42;`
     Const(ConstDecl),
+    /// `struct Point { x: int, y: int }` (0.0.3 V02)
+    Struct(StructDecl),
+}
+
+/// Struct declaration (0.0.3 V02). Like `func`, a struct declaration takes
+/// no trailing semicolon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructDecl {
+    pub name: String,
+    pub fields: Vec<StructField>,
+    pub span: Span,
+}
+
+/// One `name: type` entry in a struct declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
+    pub span: Span,
 }
 
 /// Function declaration.
@@ -102,6 +121,9 @@ pub enum Type {
     Result(Box<Type>, Box<Type>),
     /// `(T, U) -> R`
     Func(Vec<Type>, Box<Type>),
+    /// A named user type (a struct, 0.0.3 V02). Whether the name actually
+    /// refers to a declared struct is resolved by typeck.
+    Named(String),
 }
 
 /// Base types.
@@ -148,6 +170,7 @@ impl fmt::Display for Type {
             Type::Box(t) => write!(f, "box<{}>", t),
             Type::Ref(t) => write!(f, "ref {}", t),
             Type::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
+            Type::Named(name) => write!(f, "{name}"),
             Type::Func(params, ret) => {
                 let ps: Vec<String> = params.iter().map(|t| t.to_string()).collect();
                 write!(f, "({},) -> {}", ps.join(", "), ret)
@@ -234,6 +257,10 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     /// `obj.field`
     Field(Box<Expr>, String),
+    /// `Name { field: expr, ... }` — struct literal (0.0.3 V02; the
+    /// `struct_literal` grammar rule reserved since 0.0.1). Initializers
+    /// keep source order; field-order rules are typeck's business.
+    StructLit(ExprStructLit),
     /// Integer literal
     Int(i64, Span),
     /// Float literal
@@ -279,6 +306,7 @@ impl Expr {
             Expr::Call(f, _) => f.span(),
             Expr::Index(a, _) => a.span(),
             Expr::Field(o, _) => o.span(),
+            Expr::StructLit(l) => l.span,
             Expr::Int(_, s)
             | Expr::Float(_, s)
             | Expr::Bool(_, s)
@@ -290,6 +318,14 @@ impl Expr {
             Expr::Block(b) => b.span,
         }
     }
+}
+
+/// Struct literal: `Name { field: expr, ... }` (0.0.3 V02).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprStructLit {
+    pub name: String,
+    pub inits: Vec<(String, Expr)>,
+    pub span: Span,
 }
 
 /// `if` expression.
@@ -399,6 +435,7 @@ impl fmt::Display for Expr {
                 write!(f, "({})", args_str.join(", "))
             }
             Expr::Field(expr, field) => write!(f, "{}.{}", expr, field),
+            Expr::StructLit(l) => write!(f, "{} {{ ... }}", l.name),
             Expr::Index(arr, idx) => write!(f, "{}[{}]", arr, idx),
             Expr::If(ExprIf { condition, .. }) => write!(f, "if {} {{ ... }}", condition),
             Expr::While(ExprWhile { condition, .. }) => {

@@ -45,6 +45,11 @@ pub enum Value {
     Ok(Box<Value>),
     /// `Err(e)` payload of a `Result` value.
     Err(Box<Value>),
+    /// User-defined struct value (0.0.3 V02): fields in declaration order.
+    /// Owned unless the struct's field types are all Copy (static rule);
+    /// `Eq` on a struct is a typeck-level error, so a struct only reaches
+    /// comparison opcodes through malformed bytecode (defensive error).
+    Struct(Box<[Value]>),
     /// The unit value (no meaningful data).
     Unit,
     /// First-class function reference.
@@ -64,6 +69,18 @@ impl fmt::Display for Value {
             Value::Ref { .. } => write!(f, "<ref>"),
             Value::Ok(v) => write!(f, "Ok({v})"),
             Value::Err(v) => write!(f, "Err({v})"),
+            // Field names live only in source; the runtime value renders
+            // its fields positionally (used in tests and error messages).
+            Value::Struct(fields) => {
+                write!(f, "{{ ")?;
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{field}")?;
+                }
+                write!(f, " }}")
+            }
             Value::Unit => write!(f, "unit"),
             Value::Func(id) => write!(f, "<func #{}>", id.0),
         }

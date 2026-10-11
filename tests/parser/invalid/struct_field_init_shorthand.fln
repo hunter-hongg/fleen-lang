@@ -1,0 +1,5 @@
+func main(): int {
+    x = 1;
+    p = Point { x, y: 2 };
+    0
+}

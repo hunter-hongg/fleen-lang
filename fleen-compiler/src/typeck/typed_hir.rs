@@ -8,6 +8,24 @@ use crate::lexer::Span;
 use crate::parser::ast::ResultCtor;
 use crate::resolver::hir::*;
 
+/// Unique ID of a struct declaration (0.0.3 V02). Allocated contiguously
+/// from 0 in declaration order; feeds `StructNew(id)` lowering and the
+/// bytecode `struct_defs` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructId(pub u32);
+
+/// Shared per-declaration struct data carried inside `Type::Struct`
+/// (0.0.3 V02). `id` is what lowering emits; `name` renders error messages
+/// without access to the struct table; `copy` is the cached D2 verdict
+/// (a struct is Copy iff every field is Copy) so the pure `Type::is_copy`
+/// stays total. Built once by the struct-table pass, in dependency order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructInfo {
+    pub id: StructId,
+    pub name: Box<str>,
+    pub copy: bool,
+}
+
 /// A type in the Fleen type system (0.0.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -31,6 +49,8 @@ pub enum Type {
     Box(Box<Type>),
     /// Ref type (0.0.2: typeck-supported read-only borrow; lowering in U06).
     Ref(Box<Type>),
+    /// User-defined struct type (0.0.3 V02).
+    Struct(Box<StructInfo>),
     /// Unsupported type (for features not yet implemented).
     Unsupported(String),
 }
@@ -52,6 +72,7 @@ impl Type {
             Type::Array(elem) => format!("[{}]", elem.name()),
             Type::Box(inner) => format!("box<{}>", inner.name()),
             Type::Ref(inner) => format!("ref {}", inner.name()),
+            Type::Struct(info) => info.name.to_string(),
             Type::Unsupported(name) => name.clone(),
         }
     }
@@ -72,6 +93,9 @@ impl Type {
             Type::Int | Type::Float | Type::Bool | Type::Unit => true,
             Type::Func(_, _) => true,
             Type::Result(t, e) => t.is_copy() && e.is_copy(),
+            // D2: a struct is Copy iff every field is Copy — precomputed
+            // per declaration by the struct-table pass (dependency order).
+            Type::Struct(info) => info.copy,
             Type::String | Type::Box(_) | Type::Array(_) | Type::Ref(_) | Type::Unsupported(_) => {
                 false
             }
@@ -87,6 +111,8 @@ impl Type {
         match self {
             Type::String | Type::Box(_) => true,
             Type::Result(t, e) => t.is_owned() || e.is_owned(),
+            // A struct with any non-Copy field is an owned type (D2).
+            Type::Struct(info) => !info.copy,
             _ => false,
         }
     }
@@ -124,7 +150,19 @@ pub enum Access {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedHir {
     pub items: Vec<TypedHirItem>,
+    /// The struct table, in declaration order (0.0.3 V02). Index =
+    /// [`StructId`]; consumed by lowering to emit `StructNew(id)` and by
+    /// codegen for the `struct_defs` table.
+    pub structs: Vec<TypedStructDef>,
     pub span: Span,
+}
+
+/// One entry of the struct table (0.0.3 V02): the field types in
+/// declaration order. Codegen derives the `struct_defs` type tags from it;
+/// lowering only needs the field count via `StructNew(id)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedStructDef {
+    pub field_types: Vec<Type>,
 }
 
 /// Top-level item in Typed HIR.
@@ -277,12 +315,42 @@ pub enum TypedExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// `p.f = <expr>` (0.0.3 V02: one-level field write; replaces the
+    /// field, old value released; the struct binding itself is untouched).
+    /// `field_idx` is the declaration-order index into the struct table.
+    AssignField {
+        obj_name: String,
+        obj_binding_id: BindingId,
+        field_idx: u16,
+        rhs: Box<TypedExprHir>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `Name { field: expr, ... }` (0.0.3 V02). Initializers are in
+    /// *source* order paired with their declaration-order field index, so
+    /// lowering evaluates source-first and reorders into `StructNew`'s
+    /// declaration order.
+    StructLit {
+        struct_id: StructId,
+        inits: Vec<(u16, TypedExprHir)>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
     /// Function call
     Call(Box<TypedExprHir>, Vec<TypedExprHir>, Type), // Type = return type
     /// Index access
     Index(Box<TypedExprHir>, Box<TypedExprHir>),
-    /// Field access
-    Field(Box<TypedExprHir>, String),
+    /// Field access `obj.field` (0.0.3 V02): reads are copies of the field
+    /// (deep for owned fields). `field_idx` is the declaration-order index
+    /// into the struct table; `ty` is the field's type.
+    Field {
+        obj: Box<TypedExprHir>,
+        field_idx: u16,
+        ty: Type,
+        span: Span,
+    },
     /// Literals
     Int(i64, Span),
     Float(f64, Span),
@@ -335,9 +403,11 @@ impl TypedExprHir {
                 other => other,
             },
             TypedExprHir::AssignDeref { .. } => Type::Unit,
+            TypedExprHir::AssignField { .. } => Type::Unit,
+            TypedExprHir::StructLit { ty, .. } => ty.clone(),
             TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
             TypedExprHir::Index(_, _) => Type::Unsupported("index".to_string()),
-            TypedExprHir::Field(_, _) => Type::Unsupported("field".to_string()),
+            TypedExprHir::Field { ty, .. } => ty.clone(),
             TypedExprHir::Int(_, _) => Type::Int,
             TypedExprHir::Float(_, _) => Type::Float,
             TypedExprHir::Bool(_, _) => Type::Bool,
@@ -374,9 +444,11 @@ impl TypedExprHir {
             TypedExprHir::ResultCtor { span, .. } => *span,
             TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) => *s,
             TypedExprHir::AssignDeref { span, .. } => *span,
+            TypedExprHir::AssignField { span, .. } => *span,
+            TypedExprHir::StructLit { span, .. } => *span,
             TypedExprHir::Call(f, _, _) => f.span(),
             TypedExprHir::Index(a, _) => a.span(),
-            TypedExprHir::Field(o, _) => o.span(),
+            TypedExprHir::Field { span, .. } => *span,
             TypedExprHir::Int(_, s)
             | TypedExprHir::Float(_, s)
             | TypedExprHir::Bool(_, s)

@@ -1,0 +1,9 @@
+struct Owner {
+    name: string,
+}
+
+func main(): int {
+    o = Owner { name: "a" };
+    t = move o.name;
+    0
+}

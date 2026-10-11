@@ -1,0 +1,7 @@
+struct Point { x: int }
+
+func main(): int {
+    b = box Point { x: 1 };
+    print(b.x as string);
+    0
+}

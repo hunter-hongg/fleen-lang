@@ -336,6 +336,7 @@ fn check_func_call() {
     assert_eq!(
         only_expr_ty(&TypedHir {
             items: vec![hir.items[1].clone()],
+            structs: Vec::new(),
             span: hir.span
         }),
         Type::Int
@@ -868,13 +869,14 @@ fn check_index_on_non_array() {
 }
 
 #[test]
-fn check_field_access_unsupported() {
+fn check_field_access_on_non_struct() {
+    // 0.0.3 V02: field access on a non-struct value is an InvalidOperand.
     let errs = compile_err("x = 1;\nx.foo;");
     assert!(
         err_kinds(&errs)
             .iter()
-            .any(|k| matches!(k, TypeckErrorKind::UnsupportedFeature { .. })),
-        "expected UnsupportedFeature, got {errs:?}"
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { .. })),
+        "expected InvalidOperand, got {errs:?}"
     );
 }
 
@@ -981,6 +983,21 @@ fn is_copy_exhaustive() {
     assert!(!Type::Ref(Box::new(Type::Int)).is_copy());
     assert!(!Type::Unsupported("x".to_string()).is_copy());
     assert!(!Type::Result(Box::new(Type::String), Box::new(Type::Int)).is_copy());
+    // 0.0.3 V02: the struct verdict is the cached D2 flag.
+    let copy_info = Type::Struct(Box::new(StructInfo {
+        id: StructId(0),
+        name: "Copy".into(),
+        copy: true,
+    }));
+    let owned_info = Type::Struct(Box::new(StructInfo {
+        id: StructId(1),
+        name: "Owned".into(),
+        copy: false,
+    }));
+    assert!(copy_info.is_copy());
+    assert!(!copy_info.is_owned());
+    assert!(!owned_info.is_copy());
+    assert!(owned_info.is_owned());
 }
 
 #[test]

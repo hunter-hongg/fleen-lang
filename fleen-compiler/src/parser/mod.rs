@@ -28,6 +28,7 @@ const KEYWORDS: &[&str] = &[
     "when",
     "otherwise",
     "import",
+    "struct",
     "true",
     "false",
     "int",
@@ -79,6 +80,13 @@ pub struct Parser {
     /// built by the parser carry it.
     file: FileId,
     pos: usize,
+    /// Whether `ident {` may parse as a struct literal (0.0.3 V02).
+    ///
+    /// Disabled while parsing block-head expressions (`if`/`while`
+    /// conditions, `choose` scrutinee, arm guards): there `ident {` must be
+    /// the construct's block, never a literal — the Rust-2020 ambiguity.
+    /// Block bodies always re-enable it.
+    allow_struct_lit: bool,
 }
 
 impl Parser {
@@ -91,6 +99,7 @@ impl Parser {
             tokens,
             file,
             pos: 0,
+            allow_struct_lit: true,
         }
     }
 
@@ -308,6 +317,12 @@ impl Parser {
             return Ok(ast::Item::Decl(ast::Decl::Const(self.parse_const_decl()?)));
         }
 
+        if self.check(&crate::lexer::TokenKind::Struct) {
+            return Ok(ast::Item::Decl(ast::Decl::Struct(
+                self.parse_struct_decl()?,
+            )));
+        }
+
         // Check for variable binding: ident followed by : or =
         if self.check(&crate::lexer::TokenKind::Ident(String::new())) {
             let next_kind = self.peek_kind(1);
@@ -388,6 +403,63 @@ impl Parser {
             path,
             span: self.span(start, end),
         }))
+    }
+
+    /// Parse a struct declaration (0.0.3 V02):
+    /// `struct Name { field: type, ... }` — top-level only, no trailing
+    /// semicolon (same rule as `func`; the ASI pass may insert one after
+    /// the closing `}`, which is tolerated here).
+    fn parse_struct_decl(&mut self) -> Result<ast::StructDecl, ParseError> {
+        let start = self.current().span.start;
+        self.expect(&crate::lexer::TokenKind::Struct, "expected `struct`")?;
+        let name = self.parse_ident()?;
+        self.expect(
+            &crate::lexer::TokenKind::LBrace,
+            "expected `{` after struct name",
+        )?;
+
+        let mut fields = Vec::new();
+        if !self.check(&crate::lexer::TokenKind::RBrace) {
+            loop {
+                let fstart = self.current().span.start;
+                let fname = self.parse_ident()?;
+                if !self.matches(&crate::lexer::TokenKind::Colon) {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::ExpectedFieldColon {
+                            field: fname.clone(),
+                        },
+                        span: self.current().span,
+                    });
+                }
+                let ty = self.parse_type()?;
+                let fend = self.prev_span_end();
+                fields.push(ast::StructField {
+                    name: fname,
+                    ty,
+                    span: self.span(fstart, fend),
+                });
+                if !self.matches(&crate::lexer::TokenKind::Comma) {
+                    break;
+                }
+                // Trailing comma allowed (`y: int,}`).
+                if self.check(&crate::lexer::TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.expect(
+            &crate::lexer::TokenKind::RBrace,
+            "expected `}` after struct fields",
+        )?;
+        let _ = self.matches(&crate::lexer::TokenKind::Semi);
+
+        let end = self.prev_span_end();
+        Ok(ast::StructDecl {
+            name,
+            fields,
+            span: self.span(start, end),
+        })
     }
 
     /// Parse a const declaration: `const ident [: type] = expr ;`
@@ -587,6 +659,13 @@ impl Parser {
                 self.advance();
                 ast::Type::Base(ast::BaseType::Unit)
             }
+            crate::lexer::TokenKind::Ident(name) => {
+                // Named user type (a struct, 0.0.3 V02). Whether the name
+                // refers to a declared struct is typeck's business.
+                let name = name.clone();
+                self.advance();
+                ast::Type::Named(name)
+            }
             crate::lexer::TokenKind::LParen => {
                 // Function type: (T, T, ...) -> T
                 self.advance();
@@ -669,6 +748,13 @@ impl Parser {
 
         self.expect(&crate::lexer::TokenKind::LBrace, "expected `{`")?;
 
+        // Block bodies are always struct-literal-allowed contexts (V02):
+        // even when a block appears inside an `if`/`while` condition
+        // expression, its statements parse with the flag on. (The flag is
+        // re-established by every `parse_cond`; on an error return the
+        // whole parse aborts, so not restoring on `?` paths is harmless.)
+        self.allow_struct_lit = true;
+
         let mut stmts = Vec::new();
         let mut tail_expr = None;
 
@@ -699,6 +785,20 @@ impl Parser {
                             | Some(crate::lexer::TokenKind::Assign)
                     )
                 });
+
+            // Struct declarations are top-level only (0.0.3 D1): inside a
+            // block they would need scoped struct tables for no benefit.
+            if self.check(&crate::lexer::TokenKind::Struct) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "statement (struct declarations are only \
+                                   allowed at the top level)"
+                            .to_string(),
+                        found: self.current().kind.clone(),
+                    },
+                    span: self.current().span,
+                });
+            }
 
             if is_decl {
                 // Parse declaration

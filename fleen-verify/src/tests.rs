@@ -1,9 +1,11 @@
+use crate::verify;
 use crate::verify::VerifyError;
 use fleen_compiler::codegen::*;
 
 /// A v2 module (bytecode version 2, as emitted by the 0.0.2 compiler).
 fn module(constants: Vec<Const>, functions: Vec<Func>, globals: Vec<Global>, entry: u32) -> Module {
     Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants,
         functions,
@@ -21,6 +23,7 @@ fn module_v1(
     entry: u32,
 ) -> Module {
     Module {
+        struct_defs: Vec::new(),
         version: 1,
         ..module(constants, functions, globals, entry)
     }
@@ -633,7 +636,7 @@ func main(): int {
 }
 "#;
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 2);
+    assert_eq!(module.version, 3);
     assert!(
         crate::verify(&module).is_ok(),
         "{:?}",
@@ -909,4 +912,140 @@ fn v2_in_v1_module_rejection_covers_every_v2_byte() {
             "opcode 0x{op:02x} in a v1 module must be rejected"
         );
     }
+}
+
+// ------------------- 0.0.3 V02: structs (bytecode v3) -------------------
+
+use fleen_compiler::codegen::{FieldTypeTag, StructDefMeta, V3_OPCODE_BASE};
+
+/// A v3 module with one struct (two int fields) and `StructNew(0)` +
+/// `GetField(0)` in main.
+fn v3_struct_module() -> Module {
+    Module {
+        version: 3,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([
+                Opcode::True as u8,
+                Opcode::StructNew as u8,
+                0,
+                0,
+                Opcode::GetField as u8,
+                0,
+                0,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![StructDefMeta {
+            field_types: Box::new([FieldTypeTag::Int, FieldTypeTag::Int]),
+        }],
+    }
+}
+
+#[test]
+fn v3_struct_instructions_verify() {
+    // StructNew pops both fields (the True value is only the first field —
+    // wait: StructNew(2) needs TWO values; this module underflows by one.
+    // Adjust: push True twice.
+    let mut m = v3_struct_module();
+    m.functions[0].code = Box::new([
+        Opcode::True as u8,
+        Opcode::True as u8,
+        Opcode::StructNew as u8,
+        0,
+        0,
+        Opcode::GetField as u8,
+        0,
+        0,
+        Opcode::Return as u8,
+    ]);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn v3_struct_new_bad_id_rejected() {
+    let mut m = v3_struct_module();
+    m.functions[0].code[2] = 9; // StructNew(9): struct table has 1 entry
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::StructIndexOutOfRange { pc: 1, index: 9 })
+    );
+}
+
+#[test]
+fn v3_struct_new_count_cross_check() {
+    // StructNew(0) with only ONE value on the stack underflows: the table
+    // says the struct has 2 fields (operand-derived, static effect).
+    let mut m = v3_struct_module();
+    m.functions[0].code = Box::new([
+        Opcode::True as u8,
+        Opcode::StructNew as u8,
+        0,
+        0,
+        Opcode::GetField as u8,
+        0,
+        0,
+        Opcode::Return as u8,
+    ]);
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::StackUnderflow { .. })
+    ));
+}
+
+#[test]
+fn v3_opcode_in_v2_module_rejected() {
+    // Explicit gate: a 0xB0 opcode in a v2 module is rejected, not "naturally
+    // fine" (the 0.0.2 U07 lesson).
+    let mut m = v3_struct_module();
+    m.version = 2;
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::V3OpcodeInV1V2Module {
+            pc: 1,
+            byte: Opcode::StructNew as u8
+        })
+    );
+}
+
+#[test]
+fn v3_compiled_struct_program_verifies() {
+    // Full-chain smoke (standing policy): the compiler's own output for a
+    // struct program passes verify.
+    let src = r#"
+struct Point { x: int, y: int }
+struct Owner { name: string, pos: Point }
+func main(): int {
+    p = Point { x: 1, y: 2 };
+    o = Owner { name: "a", pos: clone p };
+    o.name = "b";
+    print(o.name);
+    0
+}
+"#;
+    let module = fleen_compiler::compile(src).expect("compile");
+    assert!(module.struct_defs.len() >= 2);
+    assert_eq!(
+        verify::verify(&module),
+        Ok(()),
+        "{:?}",
+        verify::verify(&module)
+    );
+}
+
+#[test]
+fn v3_opcode_base_is_struct_group() {
+    // Lock the numbering: struct group starts at 0xB0 (BYTECODE v3).
+    assert_eq!(V3_OPCODE_BASE, 0xB0);
+    assert_eq!(Opcode::StructNew as u8, 0xB0);
+    assert_eq!(Opcode::GetField as u8, 0xB1);
+    assert_eq!(Opcode::SetFieldLocal as u8, 0xB2);
+    assert_eq!(Opcode::SetFieldGlobal as u8, 0xB3);
 }

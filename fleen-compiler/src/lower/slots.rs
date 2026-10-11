@@ -181,7 +181,13 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
             collect_expr(alloc, a);
             collect_expr(alloc, i);
         }
-        TypedExprHir::Field(o, _) => collect_expr(alloc, o),
+        TypedExprHir::Field { obj, .. } => collect_expr(alloc, obj),
+        TypedExprHir::StructLit { inits, .. } => {
+            for (_, init) in inits {
+                collect_expr(alloc, init);
+            }
+        }
+        TypedExprHir::AssignField { rhs, .. } => collect_expr(alloc, rhs),
         TypedExprHir::Block(b) => collect_block(alloc, b),
         TypedExprHir::Int(..)
         | TypedExprHir::Float(..)

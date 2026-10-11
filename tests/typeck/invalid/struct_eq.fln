@@ -1,0 +1,7 @@
+struct Point { x: int, y: int }
+
+func main(): int {
+    a = Point { x: 1, y: 2 };
+    b = Point { x: 1, y: 2 };
+    if a == b { 1 } else { 0 }
+}

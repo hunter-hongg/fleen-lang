@@ -31,6 +31,10 @@ impl fmt::Display for BindingId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hir {
     pub items: Vec<HirItem>,
+    /// Top-level struct declarations, in declaration order (0.0.3 V02).
+    /// Kept out of `items`: structs are a type-table input for typeck, not
+    /// executable code.
+    pub structs: Vec<StructDeclHir>,
     pub span: Span,
 }
 
@@ -55,6 +59,26 @@ pub enum DeclHir {
     Func(FuncDeclHir),
     Var(VarBindingHir),
     Const(ConstDeclHir),
+    /// Struct declaration placeholder: struct declarations never reach the
+    /// per-item resolution (they are collected into `Hir::structs`).
+    Struct(StructDeclHir),
+}
+
+/// Struct declaration in HIR (0.0.3 V02). Field types stay in their AST
+/// form; typeck converts them once its struct table is built.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructDeclHir {
+    pub name: String,
+    pub fields: Vec<StructFieldHir>,
+    pub span: Span,
+}
+
+/// One struct field in HIR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructFieldHir {
+    pub name: String,
+    pub ty: Type,
+    pub span: Span,
 }
 
 /// Function declaration in HIR.
@@ -147,6 +171,27 @@ pub enum ExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// Field assignment: `p.f = expr` (0.0.3 V02, one level). `binding_id`
+    /// refers to the struct variable `p`; writing a field does not rebind
+    /// `p` itself (mirror of `AssignDeref`). Place rules are re-asserted
+    /// by typeck.
+    AssignField {
+        obj_name: String,
+        obj_binding_id: BindingId,
+        field: String,
+        rhs: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// Struct literal: `Name { field: expr, ... }` (0.0.3 V02). Initializers
+    /// keep source order; whether `Name` is a declared struct and the
+    /// field-set rules are typeck's business.
+    StructLit {
+        name: String,
+        inits: Vec<(String, ExprHir)>,
+        hir_id: HirId,
+        span: Span,
+    },
     /// If expression
     If(ExprIfHir),
     /// While expression
@@ -210,6 +255,8 @@ impl ExprHir {
         match self {
             ExprHir::Assign { span, .. } => *span,
             ExprHir::AssignDeref { span, .. } => *span,
+            ExprHir::AssignField { span, .. } => *span,
+            ExprHir::StructLit { span, .. } => *span,
             ExprHir::If(e) => e.span,
             ExprHir::While(e) => e.span,
             ExprHir::Choose(e) => e.span,

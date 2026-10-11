@@ -1,0 +1,10 @@
+struct Point { x: int, y: int }
+struct Outer { p: Point }
+
+func main(): int {
+    p = Point { x: 1, y: 2 };
+    o = Outer { p: p };
+    p.x = 4;
+    print(o.p.x as string);
+    0
+}

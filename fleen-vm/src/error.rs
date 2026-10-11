@@ -48,6 +48,13 @@ pub enum RuntimeErrorKind {
     /// handles only reference lower frames that outlive them). Reserved for
     /// U09's `MakeRefLocal` and handle dereference.
     BorrowOutOfRange,
+    /// `StructNew` names a struct id outside the `struct_defs` table
+    /// (0.0.3 V02, defensive: verify rejects it first).
+    StructOutOfRange(u16),
+    /// A field offset exceeded the struct's field count (0.0.3 V02,
+    /// defensive: the encoding carries no struct id on `GetField`/
+    /// `SetField*`, so verify cannot check offsets statically).
+    FieldOutOfRange { index: u16, len: usize },
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -76,6 +83,15 @@ impl std::fmt::Display for RuntimeErrorKind {
                 write!(f, "unwrap opcode applied to mismatched Result variant")
             }
             RuntimeErrorKind::BorrowOutOfRange => write!(f, "borrow handle out of range"),
+            RuntimeErrorKind::StructOutOfRange(id) => {
+                write!(f, "struct id {id} out of range")
+            }
+            RuntimeErrorKind::FieldOutOfRange { index, len } => {
+                write!(
+                    f,
+                    "field offset {index} out of range (struct has {len} fields)"
+                )
+            }
         }
     }
 }

@@ -1,0 +1,10 @@
+struct Pair { a: int, b: int }
+
+func main(): int {
+    c = Pair { a: 1, b: 2 };
+    d = c;
+    d.a = 9;
+    print(c.a as string);
+    print(d.a as string);
+    0
+}

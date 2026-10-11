@@ -1,0 +1,9 @@
+struct A {
+    b: B,
+}
+
+struct B {
+    a: A,
+}
+
+func main(): int { 0 }

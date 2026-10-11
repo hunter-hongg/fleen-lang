@@ -4,12 +4,14 @@ use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
 
-/// Versions this reader accepts: 0.0.1 (v1) and 0.0.2 (v2) modules.
+/// Versions this reader accepts: 0.0.1 (v1), 0.0.2 (v2) and 0.0.3 (v3)
+/// modules.
 ///
-/// v2 adds instructions and fills `span_map`; the field order and widths of
-/// every existing table are unchanged (BYTECODE.md §9), so a v1 file reads
-/// unmodified.
-const READ_VERSIONS: [u16; 2] = [1, 2];
+/// v2 adds instructions and fills `span_map`; v3 adds the struct
+/// instructions and the appended `struct_defs` table (read only for
+/// version >= 3). The field order and widths of every existing table are
+/// unchanged (BYTECODE.md §9), so a v1 file reads unmodified.
+const READ_VERSIONS: [u16; 3] = [1, 2, 3];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +145,17 @@ pub fn to_bytes(m: &Module) -> Vec<u8> {
     }
 
     w.u32(m.entry.0);
+    // 0.0.3 V02: the appended `struct_defs` table, only in v3+ modules —
+    // appending at the very end keeps the v1/v2 layout byte-identical.
+    if m.version >= 3 {
+        w.u32(m.struct_defs.len() as u32);
+        for s in &m.struct_defs {
+            w.u32(s.field_types.len() as u32);
+            for tag in s.field_types.iter() {
+                w.u8(*tag as u8);
+            }
+        }
+    }
     w.0
 }
 
@@ -233,6 +246,38 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
     if entry.0 as usize >= nf {
         return Err(FlncError("entry FuncId out of range".into()));
     }
+
+    // 0.0.3 V02: the appended `struct_defs` table (version-gated).
+    let mut struct_defs = Vec::new();
+    if version >= 3 {
+        let ns = r.u32()? as usize;
+        struct_defs = Vec::with_capacity(r.capacity_hint(ns, 4));
+        for _ in 0..ns {
+            let field_count = r.u32()? as usize;
+            let mut tags = Vec::with_capacity(field_count);
+            for _ in 0..field_count {
+                let byte = r.u8()?;
+                let tag = match byte {
+                    0 => FieldTypeTag::Int,
+                    1 => FieldTypeTag::Float,
+                    2 => FieldTypeTag::Bool,
+                    3 => FieldTypeTag::Str,
+                    4 => FieldTypeTag::Unit,
+                    5 => FieldTypeTag::Func,
+                    6 => FieldTypeTag::Result,
+                    7 => FieldTypeTag::Array,
+                    8 => FieldTypeTag::Box,
+                    9 => FieldTypeTag::Ref,
+                    10 => FieldTypeTag::Struct,
+                    t => return Err(FlncError(format!("bad field type tag {t}"))),
+                };
+                tags.push(tag);
+            }
+            struct_defs.push(StructDefMeta {
+                field_types: tags.into_boxed_slice(),
+            });
+        }
+    }
     if r.pos != buf.len() {
         return Err(FlncError("trailing bytes".into()));
     }
@@ -243,5 +288,6 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
         functions,
         globals,
         entry,
+        struct_defs,
     })
 }

@@ -1,0 +1,9 @@
+struct Inner { v: int }
+struct Outer { inner: Inner, data: box<int> }
+
+func main(): int {
+    o = Outer { inner: Inner { v: 7 }, data: box 1 };
+    print(o.inner.v as string);
+    print(deref o.data as string);
+    0
+}

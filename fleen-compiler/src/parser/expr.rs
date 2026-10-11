@@ -72,6 +72,18 @@ fn binop_level(kind: &TokenKind) -> Option<(usize, BinCtor)> {
 }
 
 impl Parser {
+    /// Parse a block-head expression (`if`/`while` condition, `choose`
+    /// scrutinee, arm guard): struct literals are disabled here, so that
+    /// `while running {` parses the `{` as the body block, never as a
+    /// `running { ... }` literal (the ident-`{` ambiguity; V02).
+    fn parse_cond(&mut self) -> Result<Expr, ParseError> {
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = false;
+        let expr = self.parse_expr();
+        self.allow_struct_lit = saved;
+        expr
+    }
+
     // Main entry: handles if/while/choose or falls through to assign_expr
     fn parse_expr_or(&mut self) -> Result<Expr, ParseError> {
         let head = match self.current_kind() {
@@ -80,7 +92,6 @@ impl Parser {
             TokenKind::Choose => self.parse_choose()?,
             _ => return self.parse_assign(),
         };
-
         // Block-like heads return before operator climbing resumes, so a
         // following `(`/`[`/`?`/binary operator continues the expression
         // (ASI.md §4 #3: operator continuation wins, `if c { 1 }` ⏎ `- 2` ⇒ `(if) - 2`).
@@ -293,9 +304,14 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let name = name.clone();
+                let name_span = span;
                 self.advance();
-                // Check for struct literal: ident { ... }  -- not in 0.0.1
-                // But identifiers can be followed by ( for calls, [ for index, . for field (handled in postfix)
+                // Struct literal: `Name { field: expr, ... }` (0.0.3 V02).
+                // Only where the grammar allows it — block heads disable the
+                // form via `allow_struct_lit` (see `parse_cond`).
+                if self.allow_struct_lit && self.check(&TokenKind::LBrace) {
+                    return self.parse_struct_literal(name, name_span);
+                }
                 Ok(Expr::Ident(name, span))
             }
             TokenKind::LParen => {
@@ -320,12 +336,62 @@ impl Parser {
         }
     }
 
+    /// Parse a struct literal after the name was consumed:
+    /// `Name { field: expr, ... }` — free field order, trailing comma
+    /// allowed, no field-init shorthand (`ExpectedFieldColon`), duplicate
+    /// fields rejected here (typeck checks the set against the declaration).
+    fn parse_struct_literal(&mut self, name: String, name_span: Span) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::LBrace, "expected `{` after struct name")?;
+
+        let mut inits: Vec<(String, Expr)> = Vec::new();
+        if !self.check(&TokenKind::RBrace) {
+            loop {
+                let field = self.parse_ident()?;
+                if !self.matches(&TokenKind::Colon) {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::ExpectedFieldColon { field },
+                        span: self.current().span,
+                    });
+                }
+                let value = self.parse_expr()?;
+                if inits.iter().any(|(n, _)| *n == field) {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected {
+                            expected: format!("a different field (duplicate field `{field}`)"),
+                            found: self.current().kind.clone(),
+                        },
+                        span: self.current().span,
+                    });
+                }
+                inits.push((field, value));
+                if !self.matches(&TokenKind::Comma) {
+                    break;
+                }
+                // Trailing comma allowed (`p = Point { x: 1, }`).
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.expect(
+            &TokenKind::RBrace,
+            "expected `}` after struct literal fields",
+        )?;
+        let end = self.prev_span_end();
+        Ok(Expr::StructLit(crate::parser::ast::ExprStructLit {
+            name,
+            inits,
+            span: self.span(name_span.start, end),
+        }))
+    }
+
     /// Parse an if expression.
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
         let start = self.current().span.start;
 
         self.expect(&TokenKind::If, "expected `if`")?;
-        let condition = Box::new(self.parse_expr()?);
+        let condition = Box::new(self.parse_cond()?);
         let then_branch = self.parse_block()?;
 
         let mut elif_branches = Vec::new();
@@ -333,7 +399,7 @@ impl Parser {
 
         loop {
             if self.matches(&TokenKind::Elif) {
-                let elif_cond = Box::new(self.parse_expr()?);
+                let elif_cond = Box::new(self.parse_cond()?);
                 let elif_block = self.parse_block()?;
                 elif_branches.push((elif_cond, elif_block));
             } else if self.matches(&TokenKind::Else) {
@@ -360,7 +426,7 @@ impl Parser {
         let start = self.current().span.start;
 
         self.expect(&TokenKind::While, "expected `while`")?;
-        let condition = Box::new(self.parse_expr()?);
+        let condition = Box::new(self.parse_cond()?);
         let body = self.parse_block()?;
 
         let end = self.prev_span_end();
@@ -376,7 +442,7 @@ impl Parser {
         let start = self.current().span.start;
 
         self.expect(&TokenKind::Choose, "expected `choose`")?;
-        let scrutinee = Box::new(self.parse_expr()?);
+        let scrutinee = Box::new(self.parse_cond()?);
 
         self.expect(&TokenKind::LBrace, "expected `{` after choose expression")?;
 
@@ -390,7 +456,9 @@ impl Parser {
             // puts one here, so it is always an artifact — skip it (ASI.md §4).
             let _ = self.matches(&TokenKind::Semi);
             let guard = if self.matches(&TokenKind::If) {
-                Some(Box::new(self.parse_expr()?))
+                // A guard is a block head too: `when x if x > 0 {` — the `{`
+                // after the guard is the arm body, never a struct literal.
+                Some(Box::new(self.parse_cond()?))
             } else {
                 None
             };

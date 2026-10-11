@@ -99,6 +99,8 @@ pub enum TokenKind {
     Otherwise,
     /// `import` keyword
     Import,
+    /// `struct` keyword (0.0.3: user-defined aggregate types)
+    Struct,
     /// `true` literal
     True,
     /// `false` literal
@@ -226,6 +228,7 @@ impl TokenKind {
                 | TokenKind::When
                 | TokenKind::Otherwise
                 | TokenKind::Import
+                | TokenKind::Struct
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::IntType
@@ -259,6 +262,7 @@ impl TokenKind {
             TokenKind::When => "when",
             TokenKind::Otherwise => "otherwise",
             TokenKind::Import => "import",
+            TokenKind::Struct => "struct",
             TokenKind::True => "true",
             TokenKind::False => "false",
             TokenKind::IntType => "int",

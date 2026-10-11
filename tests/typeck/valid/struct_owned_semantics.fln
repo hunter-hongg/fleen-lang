@@ -1,0 +1,8 @@
+struct Owner { name: string }
+
+func main(): int {
+    o = Owner { name: "first" };
+    t = clone o;
+    print(t.name);
+    0
+}

@@ -10,32 +10,53 @@ use crate::resolver::scope::{Binding, BindingKind, ScopeStack};
 use crate::typeck::builtins::{BuiltinParam, find_builtin};
 use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
-    Access, Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir, TypedDeclHir,
-    TypedExprChooseHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir,
-    TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir,
-    TypedVarBindingHir,
+    Access, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir,
+    TypedDeclHir, TypedExprChooseHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir,
+    TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir,
+    TypedStmtHir, TypedStructDef, TypedVarBindingHir,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
 
-/// Convert `ast::Type` to `typed_hir::Type`.
-fn convert_type(ty: &ast::Type) -> Type {
+/// One struct-table entry (0.0.3 V02). Built in three phases by
+/// [`TypeChecker::collect_structs`]: names registered, copy-ness computed
+/// in dependency order (against the raw AST field types), then converted
+/// field types filled in.
+struct StructEntry {
+    name: String,
+    /// Declared fields in declaration order, with converted types.
+    fields: Vec<(String, Type, Span)>,
+    /// D2 cached verdict: a struct is Copy iff every field is Copy.
+    copy: bool,
+    decl_span: Span,
+}
+
+impl StructEntry {
+    /// Declaration-order index of a field, if declared.
+    fn field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|(n, _, _)| n == name)
+    }
+}
+
+/// Collect the names of every named (struct) type mentioned anywhere in
+/// `ty` (recursing through composites) and feed them to `f`.
+fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
     match ty {
-        ast::Type::Base(BaseType::Int) => Type::Int,
-        ast::Type::Base(BaseType::Float) => Type::Float,
-        ast::Type::Base(BaseType::Bool) => Type::Bool,
-        ast::Type::Base(BaseType::String) => Type::String,
-        ast::Type::Base(BaseType::Unit) => Type::Unit,
-        ast::Type::Func(params, ret) => {
-            let param_types: Vec<Type> = params.iter().map(convert_type).collect();
-            Type::Func(param_types, Box::new(convert_type(ret)))
+        ast::Type::Named(name) => f(name),
+        ast::Type::Array(el) | ast::Type::Box(el) | ast::Type::Ref(el) => {
+            collect_named_type_refs(el, f)
         }
         ast::Type::Result(ok, err) => {
-            Type::Result(Box::new(convert_type(ok)), Box::new(convert_type(err)))
+            collect_named_type_refs(ok, f);
+            collect_named_type_refs(err, f);
         }
-        ast::Type::Array(elem) => Type::Array(Box::new(convert_type(elem))),
-        ast::Type::Box(inner) => Type::Box(Box::new(convert_type(inner))),
-        ast::Type::Ref(inner) => Type::Ref(Box::new(convert_type(inner))),
+        ast::Type::Func(params, ret) => {
+            for p in params {
+                collect_named_type_refs(p, f);
+            }
+            collect_named_type_refs(ret, f);
+        }
+        ast::Type::Base(_) => {}
     }
 }
 
@@ -63,6 +84,10 @@ pub struct TypeChecker {
     /// globals are read as deep copies and may never be moved — ownership
     /// checks key off this set.
     global_ids: HashSet<BindingId>,
+    /// Struct table, indexed by [`StructId`] (0.0.3 V02).
+    structs: Vec<StructEntry>,
+    /// Struct name → id (declaration order; duplicates are rejected).
+    struct_by_name: HashMap<String, StructId>,
 }
 
 impl TypeChecker {
@@ -76,12 +101,236 @@ impl TypeChecker {
             fn_ret_stack: Vec::new(),
             binding_types: HashMap::new(),
             global_ids: HashSet::new(),
+            structs: Vec::new(),
+            struct_by_name: HashMap::new(),
         }
     }
 
     /// Add an error to the collection.
     fn add_error(&mut self, kind: TypeckErrorKind, span: Span) {
         self.errors.push(TypeckError::new(kind, span));
+    }
+
+    /// Convert `ast::Type` to `typed_hir::Type` (0.0.3 V02: struct-aware).
+    ///
+    /// A named type resolves through the struct table; an unknown name
+    /// records `UnknownType` and degrades to `Type::Unsupported` — the
+    /// overall compilation fails with the collected errors anyway, and the
+    /// `Unsupported` placeholder keeps the caller total.
+    fn convert_type(&mut self, ty: &ast::Type, span: Span) -> Type {
+        match ty {
+            ast::Type::Base(BaseType::Int) => Type::Int,
+            ast::Type::Base(BaseType::Float) => Type::Float,
+            ast::Type::Base(BaseType::Bool) => Type::Bool,
+            ast::Type::Base(BaseType::String) => Type::String,
+            ast::Type::Base(BaseType::Unit) => Type::Unit,
+            ast::Type::Func(params, ret) => {
+                let param_types: Vec<Type> =
+                    params.iter().map(|p| self.convert_type(p, span)).collect();
+                Type::Func(param_types, Box::new(self.convert_type(ret, span)))
+            }
+            ast::Type::Result(ok, err) => Type::Result(
+                Box::new(self.convert_type(ok, span)),
+                Box::new(self.convert_type(err, span)),
+            ),
+            ast::Type::Array(elem) => Type::Array(Box::new(self.convert_type(elem, span))),
+            ast::Type::Box(inner) => Type::Box(Box::new(self.convert_type(inner, span))),
+            ast::Type::Ref(inner) => Type::Ref(Box::new(self.convert_type(inner, span))),
+            ast::Type::Named(name) => match self.struct_by_name.get(name) {
+                Some(&id) => {
+                    let entry = &self.structs[id.0 as usize];
+                    Type::Struct(Box::new(StructInfo {
+                        id,
+                        name: entry.name.clone().into_boxed_str(),
+                        copy: entry.copy,
+                    }))
+                }
+                None => {
+                    self.add_error(TypeckErrorKind::UnknownType { name: name.clone() }, span);
+                    Type::Unsupported(name.clone())
+                }
+            },
+        }
+    }
+
+    /// Build the struct table from the HIR's struct declarations (0.0.3 V02).
+    ///
+    /// Three phases, in this order:
+    /// 1. register every declaration's name (duplicates reported);
+    /// 2. cycle detection over the struct-reference graph, then copy-ness
+    ///    (`is_copy`) in dependency order — a struct is Copy iff every
+    ///    field is Copy (D2); acyclicity (phase 2) is what makes the
+    ///    recursion terminate;
+    /// 3. field-type conversion, so every `Type::Struct` value carries the
+    ///    final name/copy verdict.
+    fn collect_structs(&mut self, hir: &Hir) {
+        // Phase 1: names. Raw field types are kept in a parallel vec (index
+        // = StructId) until every verdict is final.
+        let mut raw: Vec<Vec<(String, ast::Type, Span)>> = Vec::new();
+        for decl in &hir.structs {
+            if self.struct_by_name.contains_key(&decl.name) {
+                self.add_error(
+                    TypeckErrorKind::DuplicateStructName {
+                        name: decl.name.clone(),
+                    },
+                    decl.span,
+                );
+                continue;
+            }
+            let id = StructId(self.structs.len() as u32);
+            self.structs.push(StructEntry {
+                name: decl.name.clone(),
+                fields: Vec::new(),
+                copy: false,
+                decl_span: decl.span,
+            });
+            raw.push(
+                decl.fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone(), f.span))
+                    .collect(),
+            );
+            self.struct_by_name.insert(decl.name.clone(), id);
+        }
+
+        // Phase 2a: cycle detection (D1: direct or indirect, including via
+        // `box` — a box field is still an edge to the pointee struct).
+        let mut color: Vec<u8> = vec![0; self.structs.len()]; // 0 white, 1 gray, 2 black
+        for start in 0..self.structs.len() {
+            if color[start] == 0 {
+                self.detect_struct_cycle(start, &raw, &mut color, &mut Vec::new());
+            }
+        }
+
+        // Phase 2b: copy-ness in dependency order (memoized DFS).
+        let ids: Vec<StructId> = (0..self.structs.len() as u32).map(StructId).collect();
+        for id in ids {
+            let copy = self.compute_struct_copy(id, &raw, &mut HashSet::new());
+            self.structs[id.0 as usize].copy = copy;
+        }
+
+        // Phase 3: convert field types now that every verdict is final.
+        for (i, fields) in raw.into_iter().enumerate() {
+            self.structs[i].fields = fields
+                .into_iter()
+                .map(|(name, ty, span)| {
+                    let conv = self.convert_type(&ty, span);
+                    (name, conv, span)
+                })
+                .collect();
+        }
+    }
+
+    /// DFS cycle detection over struct field references. `path` carries the
+    /// current stack of struct names; a gray hit closes a cycle and reports
+    /// `RecursiveStruct` with the full path.
+    fn detect_struct_cycle(
+        &mut self,
+        id: usize,
+        raw: &[Vec<(String, ast::Type, Span)>],
+        color: &mut [u8],
+        path: &mut Vec<String>,
+    ) {
+        if color[id] == 1 {
+            // Cycle closes here: render from the first occurrence of `id`.
+            let start = path
+                .iter()
+                .position(|n| *n == self.structs[id].name)
+                .unwrap_or(0);
+            let mut cycle: Vec<String> = path[start..].to_vec();
+            cycle.push(self.structs[id].name.clone());
+            let span = self.structs[id].decl_span;
+            self.add_error(
+                TypeckErrorKind::RecursiveStruct {
+                    path: cycle.join(" → "),
+                },
+                span,
+            );
+            return;
+        }
+        if color[id] == 2 {
+            return;
+        }
+        color[id] = 1;
+        path.push(self.structs[id].name.clone());
+        let refs = self.struct_field_struct_refs(&raw[id]);
+        for r in refs {
+            self.detect_struct_cycle(r, raw, color, path);
+        }
+        path.pop();
+        color[id] = 2;
+    }
+
+    /// Struct ids directly referenced by `raw` field types (via `Named`
+    /// names resolved through the table; unknown names are skipped here —
+    /// they get their own error at conversion time).
+    fn struct_field_struct_refs(&self, fields: &[(String, ast::Type, Span)]) -> Vec<usize> {
+        let mut refs = Vec::new();
+        for (_, ty, _) in fields {
+            collect_named_type_refs(ty, &mut |name| {
+                if let Some(&r) = self.struct_by_name.get(name) {
+                    refs.push(r.0 as usize);
+                }
+            });
+        }
+        refs
+    }
+
+    /// D2 copy verdict for struct `id`: Copy iff every field type is Copy.
+    /// `in_progress` guards the recursion (cycles are reported separately;
+    /// a cycle participant degrades to not-Copy so this stays total).
+    fn compute_struct_copy(
+        &mut self,
+        id: StructId,
+        raw: &[Vec<(String, ast::Type, Span)>],
+        in_progress: &mut HashSet<usize>,
+    ) -> bool {
+        let idx = id.0 as usize;
+        if !in_progress.insert(idx) {
+            return false; // cycle (already reported): treat as owned
+        }
+        let mut all_copy = true;
+        for (_, ty, _) in &raw[idx] {
+            if !self.ast_type_is_copy(ty, raw, in_progress) {
+                all_copy = false;
+                break;
+            }
+        }
+        in_progress.remove(&idx);
+        all_copy
+    }
+
+    /// Copy-ness of a raw (AST) field type. Struct references recurse into
+    /// the table verdict; `box`/array/`ref` are never Copy.
+    fn ast_type_is_copy(
+        &mut self,
+        ty: &ast::Type,
+        raw: &[Vec<(String, ast::Type, Span)>],
+        in_progress: &mut HashSet<usize>,
+    ) -> bool {
+        match ty {
+            ast::Type::Base(BaseType::Int)
+            | ast::Type::Base(BaseType::Float)
+            | ast::Type::Base(BaseType::Bool)
+            | ast::Type::Base(BaseType::Unit) => true,
+            ast::Type::Base(BaseType::String) => false,
+            ast::Type::Named(name) => match self.struct_by_name.get(name) {
+                Some(&id) => {
+                    if self.structs[id.0 as usize].copy {
+                        true
+                    } else {
+                        self.compute_struct_copy(id, raw, in_progress)
+                    }
+                }
+                None => false,
+            },
+            ast::Type::Array(_) | ast::Type::Box(_) | ast::Type::Ref(_) => false,
+            ast::Type::Result(ok, err) => {
+                self.ast_type_is_copy(ok, raw, in_progress)
+                    && self.ast_type_is_copy(err, raw, in_progress)
+            }
+            ast::Type::Func(_, _) => true,
+        }
     }
 
     /// Register builtin functions.
@@ -108,12 +357,18 @@ impl TypeChecker {
     fn collect_func_signatures(&mut self, hir: &Hir) {
         for item in &hir.items {
             if let HirItem::Decl(DeclHir::Func(func)) = item {
-                let param_types: Vec<Type> =
-                    func.params.iter().map(|p| convert_type(&p.ty)).collect();
+                let param_types: Vec<Type> = func
+                    .params
+                    .iter()
+                    .map(|p| self.convert_type(&p.ty, p.span))
+                    .collect();
                 let ret_type = func
                     .ret_type
                     .as_ref()
-                    .map(convert_type)
+                    .map(|t| {
+                        let span = func.span;
+                        self.convert_type(t, span)
+                    })
                     .unwrap_or(Type::Unit);
                 self.func_signatures
                     .insert(func.name.clone(), (param_types, ret_type));
@@ -125,11 +380,17 @@ impl TypeChecker {
     /// Type check the entire program.
     pub fn typeck(mut self, hir: Hir) -> Result<TypedHir, Vec<TypeckError>> {
         self.register_builtins();
+        self.collect_structs(&hir);
         self.collect_func_signatures(&hir);
         self.collect_global_ids(&hir);
 
         let mut typed_items = Vec::new();
         for item in hir.items {
+            // Struct declarations were folded into the table by
+            // `collect_structs`; they produce no typed item.
+            if matches!(item, HirItem::Decl(DeclHir::Struct(_))) {
+                continue;
+            }
             if let Ok(typed_item) = self.typeck_item(item) {
                 typed_items.push(typed_item);
             }
@@ -139,8 +400,17 @@ impl TypeChecker {
             return Err(self.errors);
         }
 
+        let structs = self
+            .structs
+            .iter()
+            .map(|entry| TypedStructDef {
+                field_types: entry.fields.iter().map(|(_, ty, _)| ty.clone()).collect(),
+            })
+            .collect();
+
         Ok(TypedHir {
             items: typed_items,
+            structs,
             span: hir.span,
         })
     }
@@ -177,6 +447,9 @@ impl TypeChecker {
             DeclHir::Func(func) => Ok(TypedDeclHir::Func(self.typeck_func_decl(func)?)),
             DeclHir::Var(var) => Ok(TypedDeclHir::Var(self.typeck_var_binding(var)?)),
             DeclHir::Const(c) => Ok(TypedDeclHir::Const(self.typeck_const_decl(c)?)),
+            // Struct declarations are folded into the table before item
+            // typeck (see `typeck`); this arm is unreachable via `typeck`.
+            DeclHir::Struct(_) => Err(()),
         }
     }
 
@@ -193,7 +466,7 @@ impl TypeChecker {
             // the same binding.
             let binding_id = param.binding_id;
             let hir_id = param.hir_id;
-            let param_type = convert_type(&param.ty);
+            let param_type = self.convert_type(&param.ty, param.span);
             let _ = self.scopes.declare(
                 param.name.clone(),
                 Binding {
@@ -218,7 +491,10 @@ impl TypeChecker {
         }
 
         // Return type: `None` means the function has no annotation (unit).
-        let ret_ty: Option<Type> = func.ret_type.as_ref().map(convert_type);
+        let ret_ty: Option<Type> = func
+            .ret_type
+            .as_ref()
+            .map(|t| self.convert_type(t, func.span));
 
         // The declared return type drives both the `expected` thread into the
         // body (Ok/Err constructors) and the `?` legality check, which needs
@@ -234,7 +510,10 @@ impl TypeChecker {
         Ok(TypedFuncDeclHir {
             name: func.name,
             params: typed_params,
-            ret_type: func.ret_type.as_ref().map(convert_type),
+            ret_type: func.ret_type.clone().map(|t| {
+                let span = func.span;
+                self.convert_type(&t, span)
+            }),
             body: typed_body,
             hir_id: func.hir_id,
             span: func.span,
@@ -275,7 +554,7 @@ impl TypeChecker {
 
     /// Type check a variable binding.
     fn typeck_var_binding(&mut self, var: VarBindingHir) -> Result<TypedVarBindingHir, ()> {
-        let typed_ty = var.ty.as_ref().map(convert_type);
+        let typed_ty = var.ty.as_ref().map(|t| self.convert_type(t, var.span));
         // Annotated bindings pass their type down so `Ok`/`Err` in the
         // initializer can infer (D6, path 2 of the expected thread).
         let typed_init = self.typeck_expr(*var.init, typed_ty.as_ref())?;
@@ -343,7 +622,7 @@ impl TypeChecker {
 
     /// Type check a const declaration.
     fn typeck_const_decl(&mut self, c: ConstDeclHir) -> Result<TypedConstDeclHir, ()> {
-        let typed_ty = c.ty.as_ref().map(convert_type);
+        let typed_ty = c.ty.as_ref().map(|t| self.convert_type(t, c.span));
         // Same expected thread as `typeck_var_binding` (D6, path 2).
         let typed_init = self.typeck_expr(*c.init, typed_ty.as_ref())?;
         if let Some(ref annotated_ty) = typed_ty
@@ -582,6 +861,20 @@ impl TypeChecker {
                 hir_id,
                 span,
             } => self.typeck_assign_deref(name, binding_id, *rhs, hir_id, span),
+            ExprHir::AssignField {
+                obj_name,
+                obj_binding_id,
+                field,
+                rhs,
+                hir_id,
+                span,
+            } => self.typeck_assign_field(obj_name, obj_binding_id, field, *rhs, hir_id, span),
+            ExprHir::StructLit {
+                name,
+                inits,
+                hir_id,
+                span,
+            } => self.typeck_struct_lit(name, inits, hir_id, span),
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             ExprHir::Block(block) => {
                 let typed_block = self.typeck_block(&block, expected)?;
@@ -993,6 +1286,20 @@ impl TypeChecker {
         // Both operands must have the same type
         if let Err(e) = unify(&typed_lhs.ty(), &typed_rhs.ty(), typed_rhs.span()) {
             self.add_error(e.kind, e.span);
+            return Err(());
+        }
+
+        // 0.0.3 (§1.4): struct (and later array/range) values have no `==` —
+        // element-wise equality needs a recursion rule and traits; the VM's
+        // defensive TypeMismatch stays a backstop only.
+        if matches!(op, "==" | "!=") && matches!(typed_lhs.ty(), Type::Struct(_)) {
+            self.add_error(
+                TypeckErrorKind::InvalidOperand {
+                    op: op.to_string(),
+                    ty: typed_lhs.ty(),
+                },
+                typed_lhs.span(),
+            );
             return Err(());
         }
 
@@ -1409,6 +1716,7 @@ impl TypeChecker {
     /// `Ident { access: Move }` — the transfer itself is registered by the
     /// flow-sensitive ownership pass.
     fn typeck_move(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let move_path = hir_field_path(&inner);
         match inner {
             ExprHir::Ident {
                 name,
@@ -1448,6 +1756,12 @@ impl TypeChecker {
                 // The box keeps its unique ownership; the pointee can only
                 // be copied out (`clone deref b`).
                 self.add_error(TypeckErrorKind::MoveOutOfBox, span);
+                Err(())
+            }
+            ExprHir::Field(_, _) => {
+                // D2: structs own their fields exclusively — no partial
+                // moves out of a field, not even one level deep.
+                self.add_error(TypeckErrorKind::MoveOutOfStruct { path: move_path }, span);
                 Err(())
             }
             _ => {
@@ -1494,6 +1808,10 @@ impl TypeChecker {
                 })
             }
             ExprHir::Deref(box_expr, _) => self.typeck_deref(*box_expr, span),
+            // 0.0.3 V02 (D2): `clone p.f` copies the field out — and a field
+            // *read* is already a copy (GetField deep-copies), so the clone
+            // form lowers to the plain field read.
+            ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             _ => {
                 self.add_error(TypeckErrorKind::InvalidClonePlace, span);
                 Err(())
@@ -1513,33 +1831,23 @@ impl TypeChecker {
 
     /// 0.0.2 U05: type check `deref <box>` (PLAN §3.2.1).
     ///
-    /// Reads the pointee as a copy; the box itself stays in its slot. The
-    /// operand must be a variable holding a `box<T>` value.
+    /// Reads the pointee as a copy; the box itself is untouched. The operand
+    /// must be a `box<T>` *expression*: a bare binding (the box stays in its
+    /// slot, so the load is a plain read) or any box-typed chain such as
+    /// `w.payload` (0.0.3 V02), whose value is already a fresh copy.
     fn typeck_deref(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
         let typed_inner = self.typeck_expr(inner, None)?;
-        let TypedExprHir::Ident { ty, .. } = &typed_inner else {
+        if !matches!(typed_inner.ty(), Type::Box(_)) {
             self.add_error(
                 TypeckErrorKind::InvalidOperand {
                     op: "deref".to_string(),
                     ty: typed_inner.ty().clone(),
                 },
-                span,
+                typed_inner.span(),
             );
             return Err(());
-        };
-        match ty {
-            Type::Box(_) => Ok(TypedExprHir::Deref(Box::new(typed_inner), span)),
-            other => {
-                self.add_error(
-                    TypeckErrorKind::InvalidOperand {
-                        op: "deref".to_string(),
-                        ty: other.clone(),
-                    },
-                    typed_inner.span(),
-                );
-                Err(())
-            }
         }
+        Ok(TypedExprHir::Deref(Box::new(typed_inner), span))
     }
 
     /// 0.0.2 U05: type check `deref <b> = <expr>` (PLAN §3.2.1).
@@ -1656,18 +1964,223 @@ impl TypeChecker {
         }
     }
 
-    /// Type check a field access.
-    fn typeck_field(&mut self, obj: ExprHir, _field: String) -> Result<TypedExprHir, ()> {
+    /// Type check a field access `obj.field` (0.0.3 V02).
+    ///
+    /// The object must be a struct value (a `ref` parameter forwards to its
+    /// pointee struct: a read through a borrow is a copy, D2). A `box` must
+    /// be read with `deref` first. The result is a copy of the field — deep
+    /// for owned fields — which is why reads never disturb the object.
+    fn typeck_field(&mut self, obj: ExprHir, field: String) -> Result<TypedExprHir, ()> {
         let typed_obj = self.typeck_expr(obj, None)?;
+        let obj_ty = typed_obj.ty();
 
-        // Structs/fields are parsed but not supported in 0.0.2.
-        self.add_error(
-            TypeckErrorKind::UnsupportedFeature {
-                feature: "field access".to_string(),
+        // Resolve the struct whose field is being read: the object's own
+        // type, or (through a borrow) the pointee type.
+        let struct_ty = match &obj_ty {
+            Type::Struct(_) => Some(obj_ty.clone()),
+            Type::Ref(inner) => match inner.as_ref() {
+                Type::Struct(_) => Some((**inner).clone()),
+                Type::Box(_) => {
+                    self.add_error(TypeckErrorKind::FieldOnBox, typed_obj.span());
+                    return Err(());
+                }
+                other => {
+                    self.add_error(
+                        TypeckErrorKind::InvalidOperand {
+                            op: "field access".to_string(),
+                            ty: other.clone(),
+                        },
+                        typed_obj.span(),
+                    );
+                    return Err(());
+                }
             },
-            typed_obj.span(),
-        );
-        Err(())
+            Type::Box(_) => {
+                self.add_error(TypeckErrorKind::FieldOnBox, typed_obj.span());
+                return Err(());
+            }
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "field access".to_string(),
+                        ty: other.clone(),
+                    },
+                    typed_obj.span(),
+                );
+                return Err(());
+            }
+        };
+
+        let Some(Type::Struct(info)) = struct_ty else {
+            // Unreachable: `struct_ty` is `Some` only for `Type::Struct`.
+            unreachable!("struct_ty is always Type::Struct here")
+        };
+        let entry = &self.structs[info.id.0 as usize];
+        let Some(idx) = entry.field_index(&field) else {
+            let struct_name = info.name.to_string();
+            let obj_span = typed_obj.span();
+            self.add_error(
+                TypeckErrorKind::UnknownField { struct_name, field },
+                obj_span,
+            );
+            return Err(());
+        };
+        let field_ty = entry.fields[idx].1.clone();
+        let obj_span = typed_obj.span();
+        Ok(TypedExprHir::Field {
+            obj: Box::new(typed_obj),
+            field_idx: idx as u16,
+            ty: field_ty,
+            span: obj_span,
+        })
+    }
+
+    /// Type check a struct literal `Name { field: expr, ... }` (0.0.3 V02).
+    ///
+    /// The field set must match the declaration exactly (missing →
+    /// `MissingField`, unknown → `UnknownField`; duplicates are already
+    /// rejected by the parser). Field types unify exactly (0.0.1 rule) and
+    /// each initializer is a consuming position (bare owned values need
+    /// `move` / `clone`). Initializers keep source order, paired with their
+    /// declaration-order index for lowering's reorder.
+    fn typeck_struct_lit(
+        &mut self,
+        name: String,
+        inits: Vec<(String, ExprHir)>,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let Some(&sid) = self.struct_by_name.get(&name) else {
+            self.add_error(TypeckErrorKind::UnknownStruct { name }, span);
+            return Err(());
+        };
+
+        let declared: Vec<(String, Type)> = self.structs[sid.0 as usize]
+            .fields
+            .iter()
+            .map(|(n, ty, _)| (n.clone(), ty.clone()))
+            .collect();
+        let struct_ty = Type::Struct(Box::new(StructInfo {
+            id: sid,
+            name: name.clone().into_boxed_str(),
+            copy: self.structs[sid.0 as usize].copy,
+        }));
+
+        // No unknown fields.
+        for (fname, _) in &inits {
+            if !declared.iter().any(|(n, _)| n == fname) {
+                self.add_error(
+                    TypeckErrorKind::UnknownField {
+                        struct_name: name.clone(),
+                        field: fname.clone(),
+                    },
+                    span,
+                );
+                return Err(());
+            }
+        }
+        // Every declared field present exactly once (the parser rejects
+        // duplicates; a >1 count here would be an invariant break).
+        for (dn, _) in &declared {
+            let count = inits.iter().filter(|(n, _)| n == dn).count();
+            if count == 0 {
+                self.add_error(
+                    TypeckErrorKind::MissingField {
+                        struct_name: name.clone(),
+                        field: dn.clone(),
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            debug_assert_eq!(count, 1, "parser rejects duplicate fields in literals");
+        }
+
+        // Type each initializer against its declared field type.
+        let mut typed_inits = Vec::with_capacity(inits.len());
+        for (fname, fexpr) in inits {
+            let idx = declared.iter().position(|(n, _)| *n == fname);
+            let Some(idx) = idx else {
+                // Unreachable: unknown fields were rejected above.
+                unreachable!("field `{fname}` was validated against the declaration")
+            };
+            let fty = declared[idx].1.clone();
+            let typed = self.typeck_expr(fexpr, Some(&fty))?;
+            if let Err(e) = unify(&fty, &typed.ty(), typed.span()) {
+                self.add_error(e.kind, e.span);
+                return Err(());
+            }
+            self.reject_bare_owned_arg(&typed, typed.span())?;
+            typed_inits.push((idx as u16, typed));
+        }
+
+        Ok(TypedExprHir::StructLit {
+            struct_id: sid,
+            inits: typed_inits,
+            ty: struct_ty,
+            hir_id,
+            span,
+        })
+    }
+
+    /// Type check a field assignment `p.f = expr` (0.0.3 V02, D2).
+    ///
+    /// The target must be a struct binding (local, global, or by-value
+    /// parameter — the resolver rejects `ref` parameters). Writing a field
+    /// does not rebind `p`, so immutability of `p` is not required (same
+    /// rule as `deref b = v`). The RHS is a consuming position.
+    #[allow(clippy::too_many_arguments)]
+    fn typeck_assign_field(
+        &mut self,
+        obj_name: String,
+        obj_binding_id: BindingId,
+        field: String,
+        rhs: ExprHir,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let obj_ty = self.lookup_type(&obj_name, span)?;
+        let struct_ty = match obj_ty {
+            Type::Struct(_) => obj_ty,
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "field assignment".to_string(),
+                        ty: other,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+        };
+        let Some(Type::Struct(info)) = Some(struct_ty) else {
+            unreachable!("checked above")
+        };
+
+        let entry = &self.structs[info.id.0 as usize];
+        let Some(idx) = entry.field_index(&field) else {
+            let struct_name = info.name.to_string();
+            self.add_error(TypeckErrorKind::UnknownField { struct_name, field }, span);
+            return Err(());
+        };
+        let field_ty = entry.fields[idx].1.clone();
+
+        let typed_rhs = self.typeck_expr(rhs, Some(&field_ty))?;
+        if let Err(e) = unify_assign(&field_ty, &typed_rhs.ty(), typed_rhs.span()) {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
+
+        Ok(TypedExprHir::AssignField {
+            obj_name,
+            obj_binding_id,
+            field_idx: idx as u16,
+            rhs: Box::new(typed_rhs),
+            ty: Type::Unit,
+            hir_id,
+            span,
+        })
     }
 
     /// Type check an `as` cast expression (0.0.2 U13).
@@ -1681,7 +2194,7 @@ impl TypeChecker {
         span: Span,
     ) -> Result<TypedExprHir, ()> {
         let typed_inner = self.typeck_expr(inner, None)?;
-        let target_ty = convert_type(&target);
+        let target_ty = self.convert_type(&target, span);
 
         // 0.0.2 whitelist: only int/float/bool → string.
         let valid = matches!(typed_inner.ty(), Type::Int | Type::Float | Type::Bool)
@@ -1737,6 +2250,16 @@ impl TypeChecker {
                 Err(())
             }
         }
+    }
+}
+
+/// Render a field-access chain as a dotted path (`o.name`, `w.payload`) for
+/// error messages; non-field/ident shapes degrade to `<expr>`.
+fn hir_field_path(expr: &ExprHir) -> String {
+    match expr {
+        ExprHir::Field(obj, field) => format!("{}.{}", hir_field_path(obj), field),
+        ExprHir::Ident { name, .. } => name.clone(),
+        _ => "<expr>".to_string(),
     }
 }
 

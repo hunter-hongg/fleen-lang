@@ -29,7 +29,7 @@ use error::{ResolveError, ResolveErrorKind};
 use hir::{
     BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, ExprChooseHir, ExprHir, ExprIfHir,
     ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir, ParamHir,
-    PatternHir, StmtHir, VarBindingHir,
+    PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
 };
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
@@ -52,6 +52,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Result(ok, err) => type_contains_ref(ok) || type_contains_ref(err),
         Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
         Type::Base(_) => false,
+        Type::Named(_) => false,
     }
 }
 
@@ -60,6 +61,12 @@ enum AssignTarget {
     Ident(String),
     /// `deref b` — write the pointee of the box held by `b`.
     Deref(String),
+    /// `p.f` — write field `f` of the struct held by `p` (0.0.3 V02, one
+    /// level; deeper paths fall into the generic invalid-target case).
+    Field {
+        obj: String,
+        field: String,
+    },
 }
 
 /// Resolve names in an AST, producing a HIR.
@@ -123,7 +130,47 @@ impl Resolver {
         let global_funcs = std::mem::take(&mut self.global_funcs);
 
         let mut hir_items = Vec::new();
+        let mut structs: Vec<StructDeclHir> = Vec::new();
         for item in ast.items {
+            // Struct declarations bypass per-item resolution (0.0.3 V02):
+            // they are a type-table input for typeck, not executable code.
+            // Only `ref`-in-type legality is checked here.
+            if let Item::Decl(Decl::Struct(s)) = &item {
+                if let Some(first) = structs.iter().find(|e| e.name == s.name) {
+                    self.errors.push(ResolveError {
+                        kind: ResolveErrorKind::DuplicateBinding {
+                            name: s.name.clone(),
+                            first_span: first.span,
+                        },
+                        span: s.span,
+                    });
+                    continue;
+                }
+                for field in &s.fields {
+                    if type_contains_ref(&field.ty) {
+                        self.errors.push(ResolveError {
+                            kind: ResolveErrorKind::RefNotAllowedHere {
+                                context: "struct field type",
+                            },
+                            span: field.span,
+                        });
+                    }
+                }
+                structs.push(StructDeclHir {
+                    name: s.name.clone(),
+                    fields: s
+                        .fields
+                        .iter()
+                        .map(|f| StructFieldHir {
+                            name: f.name.clone(),
+                            ty: f.ty.clone(),
+                            span: f.span,
+                        })
+                        .collect(),
+                    span: s.span,
+                });
+                continue;
+            }
             if let Ok(hir_item) = self.resolve_item(item, &global_funcs) {
                 hir_items.push(hir_item);
             }
@@ -137,6 +184,7 @@ impl Resolver {
 
         Ok(Hir {
             items: hir_items,
+            structs,
             span: ast.span,
         })
     }
@@ -223,6 +271,21 @@ impl Resolver {
             Decl::Func(func) => Ok(DeclHir::Func(self.resolve_func_decl(func, global_funcs)?)),
             Decl::Var(var) => Ok(DeclHir::Var(self.resolve_var_binding(var)?)),
             Decl::Const(c) => Ok(DeclHir::Const(self.resolve_const_decl(c)?)),
+            // Top-level struct declarations never reach here (resolve_program
+            // intercepts them); nested ones are rejected by the parser.
+            Decl::Struct(s) => Ok(DeclHir::Struct(StructDeclHir {
+                name: s.name,
+                fields: s
+                    .fields
+                    .into_iter()
+                    .map(|f| StructFieldHir {
+                        name: f.name,
+                        ty: f.ty,
+                        span: f.span,
+                    })
+                    .collect(),
+                span: s.span,
+            })),
         }
     }
 
@@ -732,6 +795,19 @@ impl Resolver {
                 let o = self.resolve_expr(*obj)?;
                 ExprHir::Field(Box::new(o), field)
             }
+            Expr::StructLit(lit) => {
+                let inits = lit
+                    .inits
+                    .into_iter()
+                    .map(|(name, expr)| Ok((name, self.resolve_expr(expr)?)))
+                    .collect::<Result<Vec<_>, ()>>()?;
+                ExprHir::StructLit {
+                    name: lit.name,
+                    inits,
+                    hir_id: self.next_hir_id(),
+                    span: lit.span,
+                }
+            }
             Expr::Int(n, span) => ExprHir::Int(n, span),
             Expr::Float(f, span) => ExprHir::Float(f, span),
             Expr::Bool(b, span) => ExprHir::Bool(b, span),
@@ -764,6 +840,20 @@ impl Resolver {
                     return Err(());
                 }
             },
+            // 0.0.3 V02: one-level field write `p.f = e`. The one-level rule
+            // is enforced here at the cheapest stage: `p.a.b` (Field of a
+            // Field) and any other receiver shape fall through to the
+            // invalid-target case below.
+            Expr::Field(obj, field) => {
+                let span = obj.span();
+                match *obj {
+                    Expr::Ident(name, _) => (AssignTarget::Field { obj: name, field }, span),
+                    other => {
+                        self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
+                        return Err(());
+                    }
+                }
+            }
             other => {
                 self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
                 return Err(());
@@ -772,13 +862,16 @@ impl Resolver {
 
         let rhs_hir = self.resolve_expr(rhs)?;
 
-        // Both targets resolve the box/variable by name; they differ only in
-        // lookup (plain assignment must find an assignable binding) and in
-        // mutability (writing a pointee does not rebind `b`, so `b` need not
-        // be mutable).
+        // Both targets resolve the box/struct/variable by name; they differ
+        // only in lookup (plain assignment must find an assignable binding)
+        // and in mutability (writing a pointee/field does not rebind the
+        // variable, so it need not be mutable). A `ref` parameter is
+        // read-only in both forms.
         let (name, binding) = match &target {
             AssignTarget::Ident(name) => (name, self.scopes.find_assign_target(name)),
-            AssignTarget::Deref(name) => (name, self.scopes.get(name)),
+            AssignTarget::Deref(name) | AssignTarget::Field { obj: name, .. } => {
+                (name, self.scopes.get(name))
+            }
         };
         let Some(binding) = binding else {
             self.add_error(
@@ -790,6 +883,16 @@ impl Resolver {
         if matches!(target, AssignTarget::Ident(_)) && !binding.mutable {
             self.add_error(
                 ResolveErrorKind::AssignToImmutable { name: name.clone() },
+                span,
+            );
+            return Err(());
+        }
+        // Writing a field of a borrowed struct would mutate the caller's
+        // value: `ref` parameters are read-only (DESIGN §10.4), same as the
+        // shadowing rule for `deref`-assign through a borrowed box.
+        if matches!(target, AssignTarget::Field { .. }) && binding.ref_param {
+            self.add_error(
+                ResolveErrorKind::AssignToRefParam { name: name.clone() },
                 span,
             );
             return Err(());
@@ -808,6 +911,14 @@ impl Resolver {
             AssignTarget::Deref(_) => Ok(ExprHir::AssignDeref {
                 name,
                 binding_id,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span: Span::new(span.file, span.start, rhs_span.end),
+            }),
+            AssignTarget::Field { field, .. } => Ok(ExprHir::AssignField {
+                obj_name: name,
+                obj_binding_id: binding_id,
+                field,
                 rhs: Box::new(rhs_hir),
                 hir_id: self.next_hir_id(),
                 span: Span::new(span.file, span.start, rhs_span.end),

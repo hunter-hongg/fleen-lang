@@ -8,8 +8,8 @@ pub mod flnc;
 mod tests;
 
 pub use bytecode::{
-    Bytecode, Const, ConstId, Func, FuncId, Global, GlobalId, Module, Opcode, SpanEntry,
-    V2_OPCODE_BASE,
+    Bytecode, Const, ConstId, FieldTypeTag, Func, FuncId, Global, GlobalId, Module, Opcode,
+    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -20,18 +20,24 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// Bytecode version emitted by this compiler.
 ///
 /// Version 1 was 0.0.1; version 2 adds the ownership / Result instructions
-/// and a populated `span_map` (BYTECODE.md §10). Readers accept both.
-pub const MODULE_VERSION: u16 = 2;
+/// and a populated `span_map` (BYTECODE.md §10). Version 3 (0.0.3 V02) adds
+/// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table.
+/// Readers accept all three.
+pub const MODULE_VERSION: u16 = 3;
 
 /// Lower MIR into a bytecode module.
 ///
-/// Since 0.0.2 (U07) the emitted module is bytecode version 2: it carries the
-/// ownership / Result instructions and a populated `span_map`.
+/// Since 0.0.3 (V02) the emitted module is bytecode version 3: it carries
+/// the struct instructions and the appended `struct_defs` table.
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).
 pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
-    let Mir { funcs, globals } = mir;
+    let Mir {
+        funcs,
+        globals,
+        structs,
+    } = mir;
 
     let mut pool = ConstPool::new();
 
@@ -123,11 +129,20 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         init_id
     };
 
+    // Struct table (0.0.3 V02): shape-level field tags per declaration.
+    let struct_defs = structs
+        .iter()
+        .map(|def| StructDefMeta {
+            field_types: def.field_types.iter().map(FieldTypeTag::of).collect(),
+        })
+        .collect();
+
     Ok(Module {
         version: MODULE_VERSION,
         constants: pool.items,
         functions,
         globals: gmodule,
         entry,
+        struct_defs,
     })
 }

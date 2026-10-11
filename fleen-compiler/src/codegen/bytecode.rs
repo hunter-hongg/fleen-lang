@@ -89,6 +89,61 @@ pub struct Module {
     pub functions: Vec<Func>,
     pub globals: Vec<Global>,
     pub entry: FuncId,
+    /// Struct declarations in id order (0.0.3 V02): the `struct_defs`
+    /// table. Populated only in v3+ modules; v1/v2 modules keep it empty
+    /// (the appended table is read only for version >= 3).
+    pub struct_defs: Vec<StructDefMeta>,
+}
+
+/// One `struct_defs` entry (0.0.3 V02, PLAN §5.5): the field type tags in
+/// declaration order. The table is shape-level — verify cross-checks
+/// `StructNew`'s operand against the field count; field *offsets* of
+/// `GetField`/`SetField*` cannot be validated statically (the encoding
+/// carries no struct id on those instructions) and are checked at runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructDefMeta {
+    pub field_types: Box<[FieldTypeTag]>,
+}
+
+/// Shape-level field type tag (0.0.3 V02). Deliberately coarse: it names
+/// the *kind* of a field, not the full type (struct-typed fields are all
+/// `Struct` regardless of which struct), which is all verify's count/shape
+/// checks need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FieldTypeTag {
+    Int = 0,
+    Float = 1,
+    Bool = 2,
+    Str = 3,
+    Unit = 4,
+    Func = 5,
+    Result = 6,
+    Array = 7,
+    Box = 8,
+    Ref = 9,
+    Struct = 10,
+}
+
+impl FieldTypeTag {
+    /// The tag of a field type.
+    pub fn of(ty: &crate::typeck::typed_hir::Type) -> Self {
+        use crate::typeck::typed_hir::Type;
+        match ty {
+            Type::Int => FieldTypeTag::Int,
+            Type::Float => FieldTypeTag::Float,
+            Type::Bool => FieldTypeTag::Bool,
+            Type::String => FieldTypeTag::Str,
+            Type::Unit => FieldTypeTag::Unit,
+            Type::Func(_, _) => FieldTypeTag::Func,
+            Type::Result(_, _) => FieldTypeTag::Result,
+            Type::Array(_) => FieldTypeTag::Array,
+            Type::Box(_) => FieldTypeTag::Box,
+            Type::Ref(_) => FieldTypeTag::Ref,
+            Type::Struct(_) => FieldTypeTag::Struct,
+            Type::Unsupported(_) => FieldTypeTag::Unit,
+        }
+    }
 }
 
 /// Codegen output alias (SPEC.md §6 `codegen` stage).
@@ -162,6 +217,15 @@ pub enum Opcode {
     /// Convert a scalar (int/float/bool) on the stack to a fresh owned string.
     /// 0.0.2 U13 (F8): `e as string`.
     ToStr = 0xA5,
+    // 0xB0–0xB3 structs (0.0.3 V02, bytecode v3; 0xB4+ stays reserved)
+    /// Pop n field values (n = struct table entry) into struct `struct_id`.
+    StructNew = 0xB0,
+    /// Pop the struct, push a copy of field `offset` (deep for owned fields).
+    GetField = 0xB1,
+    /// Overwrite field `offset` of the struct in local `slot` (v →).
+    SetFieldLocal = 0xB2,
+    /// Overwrite field `offset` of the struct held by global `gid` (v →).
+    SetFieldGlobal = 0xB3,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -170,6 +234,10 @@ pub enum Opcode {
 /// lets `fleen-verify` reject v2 instructions in a v1 module with one
 /// comparison (BYTECODE.md §4.2 / §10).
 pub const V2_OPCODE_BASE: u8 = 0x80;
+
+/// Lowest opcode number reserved for the 0.0.3 (v3) instruction set
+/// (structs, 0xB0–0xB3; arrays/range follow in V03/V04).
+pub const V3_OPCODE_BASE: u8 = 0xB0;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -194,7 +262,11 @@ impl Opcode {
             | Opcode::MakeRefLocal
             | Opcode::MoveLocal
             | Opcode::CloneLocal
-            | Opcode::CloneGlobal => 2,
+            | Opcode::CloneGlobal
+            | Opcode::StructNew
+            | Opcode::GetField => 2,
+            // `SetFieldLocal` / `SetFieldGlobal`: slot (or gid) + offset.
+            Opcode::SetFieldLocal | Opcode::SetFieldGlobal => 4,
             Opcode::CallValue => 1,
             _ => 0,
         }
@@ -258,6 +330,10 @@ impl Opcode {
             0xA3 => Opcode::UnwrapOk,
             0xA4 => Opcode::UnwrapErr,
             0xA5 => Opcode::ToStr,
+            0xB0 => Opcode::StructNew,
+            0xB1 => Opcode::GetField,
+            0xB2 => Opcode::SetFieldLocal,
+            0xB3 => Opcode::SetFieldGlobal,
             _ => return None,
         })
     }

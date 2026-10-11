@@ -46,6 +46,16 @@ impl fmt::Display for BlockId {
 pub struct Mir {
     pub funcs: Vec<MirFunc>,
     pub globals: Vec<MirGlobal>,
+    /// Struct table in declaration order (0.0.3 V02); index = `StructId`.
+    /// Codegen derives the `struct_defs` table from the field types.
+    pub structs: Vec<MirStructDef>,
+}
+
+/// One struct table entry (0.0.3 V02): the field types in declaration
+/// order (field-count and type tags for the bytecode `struct_defs` table).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirStructDef {
+    pub field_types: Vec<Type>,
 }
 
 /// A lowered function.
@@ -191,4 +201,16 @@ pub enum MirInstrKind {
     IsErr,     // result → bool
     UnwrapOk,  // result → v (payload T)
     UnwrapErr, // result → e (payload E)
+    // 0.0.3 V02: struct instructions (bytecode v3, 0xB0–0xB3)
+    /// Pop n field values (declaration order; n = struct table entry) and
+    /// build the struct of `struct_id`. Stack effect: f₁…fₙ → s.
+    StructNew(u16),
+    /// Pop the struct on top and push a **copy** of field `offset` (D2 read
+    /// semantics; deep for owned fields). Stack effect: s → v.
+    GetField(u16),
+    /// Overwrite field `offset` of the struct in local `slot`; the old
+    /// field value is released. Stack effect: v →.
+    SetFieldLocal(u16, u16),
+    /// Same, for the struct held by global `gid`. Stack effect: v →.
+    SetFieldGlobal(u16, u16),
 }

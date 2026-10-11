@@ -121,6 +121,18 @@ impl Encoder {
             MirInstrKind::LoadFunc(fid) => self.emit_u16(fid_u16(*fid)?),
             MirInstrKind::CallValue(argc) => self.emit_u8(*argc),
             MirInstrKind::BindMatch(slot) => self.emit_u16(*slot),
+            // 0.0.3 V02: struct instructions. `SetField*` carry two u16
+            // operands (slot/gid + field offset).
+            MirInstrKind::StructNew(id) => self.emit_u16(*id),
+            MirInstrKind::GetField(offset) => self.emit_u16(*offset),
+            MirInstrKind::SetFieldLocal(slot, offset) => {
+                self.emit_u16(*slot);
+                self.emit_u16(*offset);
+            }
+            MirInstrKind::SetFieldGlobal(gid, offset) => {
+                self.emit_u16(*gid);
+                self.emit_u16(*offset);
+            }
             // 0.0.2 U07: the four slot/global-operand instructions.
             MirInstrKind::MoveLocal(slot) => self.emit_u16(*slot),
             MirInstrKind::CloneLocal(slot) => self.emit_u16(*slot),
@@ -221,6 +233,11 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::IsErr => Opcode::IsErr,
         MirInstrKind::UnwrapOk => Opcode::UnwrapOk,
         MirInstrKind::UnwrapErr => Opcode::UnwrapErr,
+        // 0.0.3 V02: structs (bytecode v3).
+        MirInstrKind::StructNew(..) => Opcode::StructNew,
+        MirInstrKind::GetField(..) => Opcode::GetField,
+        MirInstrKind::SetFieldLocal(..) => Opcode::SetFieldLocal,
+        MirInstrKind::SetFieldGlobal(..) => Opcode::SetFieldGlobal,
     })
 }
 

@@ -36,6 +36,7 @@ fn func(code: Box<[u8]>, params: u16, locals: u16) -> Func {
 
 fn module_with_entry(entry_code: Box<[u8]>) -> Module {
     Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into())],
         functions: vec![func(entry_code, 0, 0)],
@@ -47,6 +48,7 @@ fn module_with_entry(entry_code: Box<[u8]>) -> Module {
 #[test]
 fn returns_const() {
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(42)],
         functions: vec![func(
@@ -63,6 +65,7 @@ fn returns_const() {
 #[test]
 fn int_add_and_store_local() {
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(3)],
         functions: vec![func(
@@ -92,6 +95,7 @@ fn division_by_zero() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Int(1), Const::Int(0)],
         ..m
     };
@@ -124,6 +128,7 @@ fn call_and_return() {
         0,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(4), Const::Int(5)],
         functions: vec![main, add],
@@ -156,6 +161,7 @@ fn indirect_call() {
         0,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(7)],
         functions: vec![main, double],
@@ -179,6 +185,7 @@ fn jump_if_false() {
     code.extend_from_slice(&u32b(1));
     code.push(Opcode::Return as u8);
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(1), Const::Int(2)],
         functions: vec![func(code.into_boxed_slice(), 0, 0)],
@@ -191,6 +198,7 @@ fn jump_if_false() {
 #[test]
 fn immutable_global_rejected() {
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(1)],
         functions: vec![func(
@@ -224,6 +232,7 @@ fn immutable_global_rejected() {
 
 fn v2_module(code: Box<[u8]>) -> Module {
     Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into())],
         functions: vec![func(code, 0, 0)],
@@ -241,6 +250,7 @@ fn v2_module_gate() {
 
     // `ToStr` (0xA5, U13) is executed.
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(7)],
         functions: vec![func(
@@ -259,12 +269,13 @@ fn v2_module_gate() {
 
     // Unknown module versions are rejected before execution.
     let m = Module {
-        version: 3,
+        struct_defs: Vec::new(),
+        version: 4,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(3)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(4)))
     );
 }
 
@@ -282,6 +293,7 @@ fn box_alloc_and_deref_roundtrip() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         ..m
     };
@@ -301,6 +313,7 @@ fn box_deref_read_leaves_box_on_stack() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(9)],
         ..m
     };
@@ -319,6 +332,7 @@ fn nested_box_deref_reads_through() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         ..m
     };
@@ -332,6 +346,7 @@ fn store_deref_box_writes_through_handle() {
     // (The compiler's own deref-write lowering emits AllocBox+StoreLocal;
     // this pins the opcode's value-level contract for hand-written modules.)
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
         functions: vec![func(
@@ -360,6 +375,7 @@ fn clone_box_is_independent_after_write() {
     // b = box 1; c = clone b; write b (AllocBox+StoreLocal, the compiler's
     // deref-write shape); deref c must still be 1.
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(99)],
         functions: vec![func(
@@ -390,6 +406,7 @@ fn clone_box_copies_pointee_deeply() {
     // c = clone b must deep-copy: after the clone, writing b's box replaces
     // only b's slot — and the cloned box holds the same pointee value.
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -424,6 +441,7 @@ fn clone_box_copies_pointee_deeply() {
 #[test]
 fn move_local_returns_value() {
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -447,6 +465,7 @@ fn move_local_clears_slot_to_unit() {
     // After MoveLocal the slot reads Unit — the value's release is not
     // deferred to frame destruction.
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -470,6 +489,7 @@ fn move_local_clears_slot_to_unit() {
 #[test]
 fn clone_global_reads_global_slot() {
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("owned".into())],
         functions: vec![func(
@@ -527,6 +547,7 @@ fn ref_handle_forwards_through_call_chain() {
         1,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f, g],
@@ -562,6 +583,7 @@ fn eq_dereferences_borrow_handles() {
         1,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -583,6 +605,7 @@ fn eq_compares_box_pointees() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(3)],
         ..m
     };
@@ -613,6 +636,7 @@ fn print_builtin_dereferences_handle_argument() {
         1,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![
             Const::Str("print".into()),
@@ -637,6 +661,7 @@ fn print_builtin_dereferences_handle_argument() {
 fn result_branch_module(payload: Const, pack: Opcode, unwrap_err_branch: Opcode) -> Module {
     let consts = vec![Const::Str("main".into()), payload];
     Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: consts,
         functions: vec![func(
@@ -689,6 +714,7 @@ fn unwrap_mismatch_is_defensive_error() {
     ]);
     let m = v2_module(ok_then_unwrap_err);
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -705,6 +731,7 @@ fn unwrap_mismatch_is_defensive_error() {
     ]);
     let m = v2_module(err_then_unwrap_ok);
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -724,6 +751,7 @@ fn is_err_classifies_variants() {
     ]);
     let m = v2_module(ok_case);
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -737,6 +765,7 @@ fn is_err_classifies_variants() {
     ]);
     let m = v2_module(err_case);
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -772,6 +801,7 @@ fn borrow_out_of_range_is_defensive() {
         0,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into())],
         functions: vec![main, f],
@@ -793,6 +823,7 @@ fn dup_deep_on_handle_copies_target() {
     // never the handle itself (the clone of a borrowed value). Returns the
     // copied target directly — a returned handle would read as `<ref>`.
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![func(
@@ -838,6 +869,7 @@ fn ord_dereferences_borrow_handles() {
         1,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -860,6 +892,7 @@ fn eq_ok_vs_err_is_false() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -884,6 +917,7 @@ fn store_deref_box_consumes_its_box_operand() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
         ..m
     };
@@ -908,6 +942,7 @@ fn handle_discipline_enforced_at_runtime() {
             (Opcode::Return, vec![]),
         ]);
         let m = Module {
+            struct_defs: Vec::new(),
             version: 2,
             constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
             functions: vec![func(code, 0, 1)],
@@ -991,6 +1026,7 @@ fn string_return_through_call() {
         0,
     );
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -1090,6 +1126,7 @@ fn call_path_error_picks_the_call_entry_not_the_next_instruction() {
         is_builtin: false,
     };
     let m = Module {
+        struct_defs: Vec::new(),
         version: 2,
         constants: vec![
             Const::Str("main".into()),
@@ -1119,6 +1156,7 @@ fn error_without_span_map_entries_degrades() {
         (Opcode::Return, vec![]),
     ]));
     let m = Module {
+        struct_defs: Vec::new(),
         // Const 0 stays the function's name so `func` can be attached.
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(0)],
         ..m
@@ -1135,12 +1173,220 @@ fn error_without_span_map_entries_degrades() {
 fn unsupported_version_has_no_location() {
     // No frame is ever pushed, so no location can be attached.
     let m = Module {
-        version: 3,
+        struct_defs: Vec::new(),
+        version: 4,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(3))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(4))
     );
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.3 V02: structs. Value::Struct semantics: fields are copied out
+// (GetField), overwrites release the old field, deep clone independence,
+// and defensive failures for shape violations legal bytecode never emits.
+// ---------------------------------------------------------------------------
+
+fn fleenc_struct_def(n: usize) -> fleen_compiler::codegen::StructDefMeta {
+    fleen_compiler::codegen::StructDefMeta {
+        field_types: vec![fleenc_int_tag(); n].into_boxed_slice(),
+    }
+}
+
+fn fleenc_int_tag() -> fleen_compiler::codegen::FieldTypeTag {
+    fleen_compiler::codegen::FieldTypeTag::Int
+}
+
+#[test]
+fn struct_field_copy_independence() {
+    // p = {1, 2}; q = p (Copy struct → LoadLocal); q.a = 9; p.a must stay 1.
+    // main returns p.a via GetField(0).
+    let code: Vec<u8> = [
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(), // 1
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(), // 1
+        vec![Opcode::StructNew as u8, 0, 0],
+        vec![Opcode::StoreLocal as u8, 0, 0], // p (slot 0)
+        vec![Opcode::LoadLocal as u8, 0, 0],  // q = p (Copy load)
+        vec![Opcode::StoreLocal as u8, 1, 0], // q (slot 1)
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(), // 9
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(),
+        vec![Opcode::StructNew as u8, 0, 0],  // {9, 9}
+        vec![Opcode::StoreLocal as u8, 1, 0], // q = {9, 9}
+        vec![Opcode::LoadLocal as u8, 0, 0],  // p
+        vec![Opcode::GetField as u8, 0, 0],   // p.a
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(9)],
+        functions: vec![func(code.into_boxed_slice(), 0, 2)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(1)));
+}
+
+#[test]
+fn struct_setfield_overwrites_field() {
+    // p = {1, 2}; p.a = 9; return p.a → 9 (SetFieldLocal path).
+    let code: Vec<u8> = [
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(),
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(),
+        vec![Opcode::StructNew as u8, 0, 0],
+        vec![Opcode::StoreLocal as u8, 0, 0],
+        vec![Opcode::Const as u8],
+        u32b(2).to_vec(), // 9
+        vec![Opcode::Dup as u8],
+        vec![Opcode::SetFieldLocal as u8, 0, 0, 0, 0],
+        vec![Opcode::Pop as u8],
+        vec![Opcode::LoadLocal as u8, 0, 0],
+        vec![Opcode::GetField as u8, 0, 0],
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(9)],
+        functions: vec![func(code.into_boxed_slice(), 0, 1)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(9)));
+}
+
+#[test]
+fn struct_eq_is_defensive_error() {
+    // `Eq` on two struct values is a typeck-level error; a hand-written
+    // module must fail loudly (TypeMismatch), not compare.
+    let code: Vec<u8> = [
+        vec![Opcode::True as u8],
+        vec![Opcode::True as u8],
+        vec![Opcode::StructNew as u8, 0, 0],
+        vec![Opcode::True as u8],
+        vec![Opcode::True as u8],
+        vec![Opcode::StructNew as u8, 0, 0],
+        vec![Opcode::Eq as u8],
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(code.into_boxed_slice(), 0, 0)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert!(matches!(
+        Vm::new(m).run(),
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::ArithTypeMismatch,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn struct_new_out_of_range_id() {
+    // StructNew(9) with an empty struct table (defensive; verify rejects it
+    // before execution — this pins the VM backstop).
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(
+            enc(&[(Opcode::StructNew, vec![9, 0]), (Opcode::Return, vec![])]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: Vec::new(),
+    };
+    assert!(matches!(
+        Vm::new(m).run(),
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::StructOutOfRange(9),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn struct_getfield_out_of_range_offset() {
+    // GetField(5) on a 2-field struct: defensive FieldOutOfRange (verify
+    // cannot check offsets statically — the encoding carries no struct id).
+    let code: Vec<u8> = [
+        vec![Opcode::True as u8],
+        vec![Opcode::True as u8],
+        vec![Opcode::StructNew as u8, 0, 0],
+        vec![Opcode::GetField as u8, 5, 0],
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(code.into_boxed_slice(), 0, 0)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert!(matches!(
+        Vm::new(m).run(),
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::FieldOutOfRange { index: 5, len: 2 },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn struct_deep_clone_via_dupdeep() {
+    // A struct holding a box: DupDeep must deep-copy (pointee independence).
+    // p = {box 1}; q = DupDeep(p); write through q's box; p's box unchanged.
+    let code: Vec<u8> = [
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(),
+        vec![Opcode::AllocBox as u8],
+        vec![Opcode::StructNew as u8, 0, 0], // 1-field struct: box
+        vec![Opcode::DupDeep as u8],         // q = clone p
+        vec![Opcode::StoreLocal as u8, 0, 0], // p (slot 0)
+        vec![Opcode::StoreLocal as u8, 1, 0], // q (slot 1)
+        vec![Opcode::Const as u8],
+        u32b(2).to_vec(), // 9
+        vec![Opcode::AllocBox as u8],
+        vec![Opcode::SetFieldLocal as u8, 1, 0, 0, 0], // q.field0 = box 9
+        // Read p's box pointee: LoadLocal p (slot 0), GetField(0), DerefBox
+        // leaves box copy + pointee copy; park the pointee, pop the box.
+        vec![Opcode::LoadLocal as u8, 0, 0],
+        vec![Opcode::GetField as u8, 0, 0],
+        vec![Opcode::DerefBox as u8],
+        vec![Opcode::StoreLocal as u8, 2, 0],
+        vec![Opcode::Pop as u8],
+        vec![Opcode::LoadLocal as u8, 2, 0],
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(9)],
+        functions: vec![func(code.into_boxed_slice(), 0, 3)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(1)],
+    };
+    // q's write reached only q: p's pointee is still 1.
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(1)));
 }

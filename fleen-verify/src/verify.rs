@@ -1,6 +1,8 @@
 //! Static verification of bytecode modules (BYTECODE.md §8).
 
-use fleen_compiler::codegen::{Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE};
+use fleen_compiler::codegen::{
+    Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE,
+};
 
 /// A verification failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +89,17 @@ pub enum VerifyError {
     V2OpcodeInV1Module {
         pc: usize,
         byte: u8,
+    },
+    /// A v3 instruction (opcode >= 0xB0) appears in a v1/v2 module
+    /// (0.0.3 V02; the explicit gate — the 0.0.2 U07 lesson).
+    V3OpcodeInV1V2Module {
+        pc: usize,
+        byte: u8,
+    },
+    /// `StructNew` names a struct id outside the `struct_defs` table.
+    StructIndexOutOfRange {
+        pc: usize,
+        index: u16,
     },
     /// A function body contains no instructions at all, so it has no
     /// `Return` and falls off the end of the function (BYTECODE.md §8).
@@ -197,6 +210,18 @@ impl std::fmt::Display for VerifyError {
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v2, module is v1"
                 )
             }
+            Self::V3OpcodeInV1V2Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v3, module is v1/v2"
+                )
+            }
+            Self::StructIndexOutOfRange { pc, index } => {
+                write!(
+                    f,
+                    "StructNew at pc {pc} references struct id {index}, out of range"
+                )
+            }
             Self::EmptyFunctionBody { func } => {
                 write!(f, "function {func} has an empty body: no Return")
             }
@@ -290,13 +315,10 @@ pub fn fallthrough(d: &Decoded, code_len: usize) -> Option<usize> {
 
 /// Static stack effect of an instruction: `(delta, min_depth_before)`.
 ///
-/// `Call` needs the callee's `params` to compute its effect, hence the
-/// `functions` table. Corresponds to the table in BYTECODE.md §5.
-pub fn stack_effect(
-    code: &[u8],
-    d: &Decoded,
-    functions: &[Func],
-) -> Result<(i64, i64), VerifyError> {
+/// `Call` needs the callee's `params` and `StructNew` the struct table's
+/// field count to compute its effect, hence the module. Corresponds to the
+/// table in BYTECODE.md §5.
+pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i64), VerifyError> {
     Ok(match d.opcode {
         Opcode::Const
         | Opcode::True
@@ -348,10 +370,13 @@ pub fn stack_effect(
         Opcode::JumpIfFalse | Opcode::JumpIfTrue => (-1, 1),
         Opcode::Call => {
             let t = func_index(code, d)? as usize;
-            let callee = functions.get(t).ok_or(VerifyError::FuncIndexOutOfRange {
-                pc: d.pc,
-                index: t as u16,
-            })?;
+            let callee = module
+                .functions
+                .get(t)
+                .ok_or(VerifyError::FuncIndexOutOfRange {
+                    pc: d.pc,
+                    index: t as u16,
+                })?;
             let p = callee.params as i64;
             (1 - p, p)
         }
@@ -361,6 +386,26 @@ pub fn stack_effect(
         }
         Opcode::BindMatch => (0, 1),
         Opcode::Return => (0, 1), // treated as path termination; depth equality is checked separately in the analysis
+        // 0.0.3 V02: structs (BYTECODE v3). `StructNew`'s field count comes
+        // from the `struct_defs` table (static — the count is the table
+        // entry). `GetField` pops the struct and pushes the field copy (Δ0,
+        // min 1); `SetField*` pop the value only — the field offset is an
+        // operand, not a stack item (PLAN §5.1's `v →`).
+        Opcode::StructNew => {
+            let id = slot_index(code, d)?;
+            let n = module
+                .struct_defs
+                .get(id as usize)
+                .ok_or(VerifyError::StructIndexOutOfRange {
+                    pc: d.pc,
+                    index: id,
+                })?
+                .field_types
+                .len() as i64;
+            (1 - n, n)
+        }
+        Opcode::GetField => (0, 1), // s → v
+        Opcode::SetFieldLocal | Opcode::SetFieldGlobal => (-1, 1), // v →
     })
 }
 
@@ -400,14 +445,34 @@ fn walk_function(
     for d in &at {
         // Version gate: v1 opcode numbers are all below V2_OPCODE_BASE and v2
         // ones at or above it (BYTECODE.md §4.2), so a single comparison keeps
-        // v2 instructions out of v1 modules.
+        // v2 instructions out of v1 modules; likewise v3 (structs, >= 0xB0)
+        // are kept out of v1/v2 modules — an explicit comparison, not
+        // something that holds "naturally" (the 0.0.2 U07 lesson).
         if module.version < 2 && (d.opcode as u8) >= V2_OPCODE_BASE {
             return Err(VerifyError::V2OpcodeInV1Module {
                 pc: d.pc,
                 byte: d.opcode as u8,
             });
         }
+        if module.version < 3 && (d.opcode as u8) >= V3_OPCODE_BASE {
+            return Err(VerifyError::V3OpcodeInV1V2Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
         match d.opcode {
+            // 0.0.3 V02: `StructNew`'s struct id must index the
+            // `struct_defs` table; the field count is cross-checked via the
+            // operand-derived stack effect.
+            Opcode::StructNew => {
+                let id = slot_index(code, d)?;
+                if id as usize >= module.struct_defs.len() {
+                    return Err(VerifyError::StructIndexOutOfRange {
+                        pc: d.pc,
+                        index: id,
+                    });
+                }
+            }
             Opcode::Const => {
                 let idx = const_index(code, d)?;
                 if idx as usize >= module.constants.len() {

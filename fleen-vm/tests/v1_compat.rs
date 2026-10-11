@@ -58,6 +58,7 @@ fn v001_runtime_error_degrades_to_func_and_pc() {
     // so a runtime error must degrade to `message (in `func`, pc 0x..)`
     // and exit 1 — no source location, no panic (TICKETS U10).
     let m = Module {
+        struct_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(0)],
         functions: vec![Func {

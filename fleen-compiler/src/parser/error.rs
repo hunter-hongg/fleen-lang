@@ -18,6 +18,9 @@ pub enum ParseErrorKind {
     /// Statement boundary holds a token that can neither continue the
     /// previous statement nor start a new one (0.0.2 ASI, ASI.md §3).
     ExpectedSemiOrNewStmt { found: TokenKind },
+    /// A struct field was written without its type (`Point { x, y }` field
+    /// init shorthand, or `struct Point { x }`): fields are `name: type`.
+    ExpectedFieldColon { field: String },
     /// Reached end of file unexpectedly.
     UnexpectedEof,
 }
@@ -34,6 +37,13 @@ impl fmt::Display for ParseErrorKind {
                     "expected `;`, a continuation of the previous statement, \
                      or the start of a new statement, found {}",
                     found
+                )
+            }
+            ParseErrorKind::ExpectedFieldColon { field } => {
+                write!(
+                    f,
+                    "expected `:` after field name `{field}` — fields are \
+                     `name: type` (no field-init shorthand)"
                 )
             }
             ParseErrorKind::UnexpectedEof => {

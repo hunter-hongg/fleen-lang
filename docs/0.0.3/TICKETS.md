@@ -7,7 +7,8 @@
 > `docs/BYTECODE.md` v0.0.2 (opcode space, §10 versioning rules), `docs/DESIGN.md` §9/§10/§18,
 > `docs/0.0.2/TICKETS.md` (current implementation state: 0.0.2 complete).
 > **Status** (2026-10-11): V01 implemented (completion notes at the end of its section);
-> V02+ not started. Implementation begins after the PLAN review freezes D1–D10.
+> V02 implemented (completion notes at the end of its section); V03+ not started.
+> Implementation begins after the PLAN review freezes D1–D10.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
 > 0.0.3 is cut **by feature** — every ticket is a vertical slice through Lex → Parse → … → VM
 > for one feature (the 0.0.2 U13 precedent, generalized). PLAN §9's stage-based table is
@@ -247,6 +248,77 @@ Struct(Box<[Value]>),   // fields in declaration order; owned unless all-Copy (s
 cargo test -p fleen-compiler -p fleen-verify -p fleen-vm
 cargo fln tests/e2e/valid/struct_demo.fln
 ```
+
+> **Implemented** (2026-10-11). Full chain landed: `TokenKind::Struct` (reserved word), struct
+> decl/literal parsing with the block-head ambiguity resolved via a parser-wide
+> `allow_struct_lit` flag (`parse_cond` disables the form in `if`/`while`/`choose` heads and arm
+> guards; block bodies re-enable it), resolver `AssignTarget::Field` (one-level rule),
+> typeck struct table (three-phase: names → cycle check + copy-ness in dependency order →
+> field-type conversion), lower `StructNew`/`GetField`/`SetFieldLocal`/`SetFieldGlobal`
+> (0xB0–0xB3, version 3, appended `struct_defs` table), verify cross-checks + explicit
+> v3 gate, VM `Value::Struct` with lockstep version gate `{1, 2, 3}`. fmt/clippy/tests/doc
+> green; all 0.0.1/0.0.2 e2e byte-for-byte; full-chain smoke (compiler output passes verify)
+> added as a standing test. Deviations, recorded:
+> - **`GetField` pops the struct (`s → v`, Δ0, min 1)** — not PLAN §5.1's peek form
+>   (`s → s v`, Δ+1). The peek form leaves the struct under the field value with no
+>   remove-below-top instruction; `p.f.g` chains require the pop. Erratum folds back into
+>   PLAN/BYTECODE at V10 (the U07 precedent). Same for `SetField*`: Δ−1, min 1 — the offset
+>   is an *operand*, not a stack item (PLAN §5.2's −2 row conflates them with `ArrSet*`,
+>   which does take a stack index).
+> - **`Type::Struct(Box<StructInfo>)`** instead of PLAN's bare `Type::Struct(StructId)`:
+>   the shared info box carries the declaration name (error rendering has no table access)
+>   and the cached D2 copy verdict, keeping the pure `Type::name()`/`is_copy()`/`is_owned()`
+>   total. `StructId` is still what lowering emits.
+> - **Verify cannot check `GetField`/`SetField*` field offsets** (the encoding carries no
+>   struct id on those instructions — PLAN §5.1's "offsets < field count" verify claim is
+>   not statically checkable): offsets are checked at runtime (`RuntimeErrorKind::
+>   FieldOutOfRange`), and the offset range is pinned by a VM test.
+> - **`deref` accepts any box-typed expression**, not just a bare `Ident` (0.0.2 behavior):
+>   the ticket's own test list requires `deref w.payload`, whose operand is a field chain.
+>   Read-through is a copy of a fresh value, so value semantics are unchanged. The write
+>   form `deref w.payload = v` remains an `InvalidAssignmentTarget` (0.0.2 behavior; a box
+>   interior inside a struct is V03+ territory).
+> - **The one-level assignment rule is enforced in the resolver**, not the parser: the
+>   existing `InvalidAssignmentTarget` for `f() = 1` lives there (`resolve_assign`), so
+>   `p.a.b = e` reports from the same stage with the same error kind.
+> - **Struct literals in global initializers** lower only when written in declaration order
+>   (global init has no frame, hence no temp slots for the reorder); anything else reports
+>   `ComplexGlobalInit`. Function-level literals reorder freely (source-order evaluation
+>   into temps, declaration-order `StructNew`, covered by a dedicated test).
+> - **`Eq` on a struct** is a typeck `InvalidOperand` error (PLAN §1.4); the VM's
+>   `ArithTypeMismatch` backstop is pinned by a test.
+> - The struct table lives in typeck (`collect_structs`), flows to lowering via
+>   `TypedHir.structs`/`Mir.structs`, and to codegen as the `struct_defs` tags; the
+>   resolver only collects raw declarations + `ref`-in-field-type legality.
+> - **Struct declarations are top-level only**: a `struct` inside a block is a parse error
+>   (scoped struct tables would buy nothing in 0.0.3). The ticket did not specify; the
+>   parser-level rejection keeps the struct table flat.
+> - **`FieldNotInPlace` (ticket's typeck error list) does not exist as a named kind** — its
+>   four cases are covered by earlier, cheaper errors: deep paths and non-place receivers
+>   (`f().x = e`) → resolver `InvalidAssignmentTarget`; undeclared object →
+>   `UndeclaredVariable`; `ref`-param object → resolver `AssignToRefParam`; a non-struct
+>   object that slips through → typeck `InvalidOperand { op: "field assignment" }`.
+>   Recorded as an erratum so V10 does not "restore" a dead kind.
+> - **By-value parameters are legal field-write targets** (`p.f = e` where `p: Point` is a
+>   parameter): the callee owns its copy, so the write is local and safe. PLAN D2's
+>   "local or global struct binding" is read as "any owned place binding"; `ref`
+>   parameters stay read-only.
+> - **Name-collision handling**: a duplicate struct name reports resolver
+>   `DuplicateBinding`; a duplicate field inside one literal is rejected by the *parser*
+>   (typeck re-asserts the field set with `MissingField`/`UnknownField`). Neither collision
+>   case was specified in the ticket.
+> - **`clone p.f` lowers to the plain field read** (typeck folds it into the `Field` node):
+>   a read is already a copy (deep for owned fields), so the clone form adds nothing.
+>   Documented in `typeck_clone`; only `move p.f` is an error.
+> - **`p.f = e` as an expression yields the assigned value** (lower emits `Dup`/`DupDeep`
+>   before `SetField*`), mirroring the existing `x = e` convention — the ticket's lower
+>   table showed only `<e>; SetFieldLocal`, which would have desynced the statement-level
+>   `Pop`. Assignment still types `Unit` and stays banned as a block tail.
+> - **`SetFieldGlobal` skips the `mutable` gate** that `StoreGlobal` enforces: writing a
+>   field does not rebind the global, so `const` struct globals are field-writable — the
+>   same rule as `deref b = v` on a const box binding. (There is no copy-through problem
+>   here, unlike the 0.0.2 global-box deref-assign restriction: `SetFieldGlobal` mutates
+>   `globals[gid]` in place.)
 
 ---
 

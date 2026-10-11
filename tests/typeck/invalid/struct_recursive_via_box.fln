@@ -1,0 +1,5 @@
+struct Node {
+    next: box<Node>,
+}
+
+func main(): int { 0 }

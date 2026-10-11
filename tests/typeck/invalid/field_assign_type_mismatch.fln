@@ -1,0 +1,7 @@
+struct Point { x: int, y: int }
+
+func main(): int {
+    p = Point { x: 1, y: 2 };
+    p.x = "no";
+    0
+}

@@ -281,6 +281,15 @@ impl<'a> Cx<'a> {
             }
             // A fresh allocation consumes its inner value.
             TypedExprHir::Box(inner, _) => self.walk_expr(inner, true),
+            // A fresh struct consumes its field initializers (V02).
+            TypedExprHir::StructLit { inits, .. } => {
+                for (_, init) in inits.iter_mut() {
+                    self.walk_expr(init, true);
+                }
+            }
+            // A field read is read-only: the object stays in its slot and
+            // the field itself is copied out (deep for owned fields, D2).
+            TypedExprHir::Field { obj, .. } => self.walk_expr(obj, false),
             // Loading a box does not move it: the box binding stays in its
             // slot, so the load is a plain read even for owned boxes —
             // `deref` must not clone (deep-copy) the box itself.
@@ -373,14 +382,38 @@ impl<'a> Cx<'a> {
                 self.walk_expr(a, false);
                 self.walk_expr(b, false);
             }
-            TypedExprHir::Field(a, _) => {
-                self.walk_expr(a, false);
-            }
             TypedExprHir::Int(..)
             | TypedExprHir::Float(..)
             | TypedExprHir::Bool(..)
             | TypedExprHir::Str(..) => {}
             TypedExprHir::Block(b) => self.walk_block(b, true),
+            // Field assignment mirrors plain assignment: the RHS is not a
+            // producing position; the struct binding's own move state resets
+            // (globals hold the original, never moved — D5).
+            TypedExprHir::AssignField {
+                obj_name,
+                obj_binding_id,
+                rhs,
+                span,
+                ..
+            } => {
+                self.walk_expr(rhs, false);
+                if self.declared.contains(obj_binding_id) && !self.globals.contains(obj_binding_id)
+                {
+                    if matches!(
+                        self.current(obj_binding_id),
+                        MoveState::Moved { .. } | MoveState::MaybeMoved { .. }
+                    ) {
+                        self.errors.push(TypeckError::new(
+                            TypeckErrorKind::AssignToMoved {
+                                name: obj_name.clone(),
+                            },
+                            *span,
+                        ));
+                    }
+                    self.state.remove(obj_binding_id);
+                }
+            }
         }
     }
 
@@ -674,7 +707,13 @@ fn scan_owned_local_uses(
             scan_owned_local_uses(a, out, globals, entry);
             scan_owned_local_uses(b, out, globals, entry);
         }
-        TypedExprHir::Field(a, _) => scan_owned_local_uses(a, out, globals, entry),
+        TypedExprHir::Field { obj, .. } => scan_owned_local_uses(obj, out, globals, entry),
+        TypedExprHir::StructLit { inits, .. } => {
+            for (_, init) in inits {
+                scan_owned_local_uses(init, out, globals, entry);
+            }
+        }
+        TypedExprHir::AssignField { rhs, .. } => scan_owned_local_uses(rhs, out, globals, entry),
         TypedExprHir::Block(b) => scan_block_owned_local_uses(b, out, globals, entry),
         TypedExprHir::If(i) => {
             scan_owned_local_uses(&i.condition, out, globals, entry);

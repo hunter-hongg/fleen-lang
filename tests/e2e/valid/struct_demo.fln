@@ -1,0 +1,34 @@
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Wrapped {
+    label: string,
+    pos: Point,
+}
+
+func magnitude2(p: ref Point): int = p.x * p.x + p.y * p.y
+
+func main(): int {
+    p = Point { x: 3, y: 4 };
+    print(magnitude2(p) as string);
+
+    p.x = 10;
+    print(p.x as string);
+
+    w = Wrapped { label: "demo", pos: clone p };
+    print(w.pos.x as string);
+    w.label = "changed";
+    print(w.label);
+
+    q = clone w;
+    q.pos = Point { x: 999, y: 0 };
+    print(w.pos.x as string);
+    print(q.pos.x as string);
+
+    r = Point { y: 5, x: 1 };
+    print(r.x as string);
+    print(r.y as string);
+    0
+}

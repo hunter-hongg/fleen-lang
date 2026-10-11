@@ -40,11 +40,12 @@ fn encode_single_block_function() {
         terminator: Terminator::Return,
     }]);
     let mir = Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     };
     let module = codegen(mir).expect("codegen");
-    assert_eq!(module.version, 2);
+    assert_eq!(module.version, 3);
     assert_eq!(module.entry, FuncId(0));
     let code = &module.functions[0].code;
     // Const <id0> ; Return
@@ -85,6 +86,7 @@ fn jump_targets_are_absolute_offsets() {
         ret_type: Type::Int,
     };
     let mir = Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     };
@@ -116,6 +118,7 @@ fn entry_is_init_when_globals_present() {
         init: vec![instr(MirInstrKind::ConstInt(7))],
     };
     let mir = Mir {
+        structs: Vec::new(),
         funcs: vec![main],
         globals: vec![g],
     };
@@ -139,6 +142,7 @@ fn entry_is_init_when_globals_present() {
 #[test]
 fn missing_main_is_error() {
     let mir = Mir {
+        structs: Vec::new(),
         funcs: vec![],
         globals: vec![],
     };
@@ -176,6 +180,7 @@ fn builtin_keeps_placeholder_body() {
         ret_type: Type::Unit,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![print, main],
         globals: vec![],
     })
@@ -257,6 +262,7 @@ fn all_instructions_encode_with_expected_opcode_and_width() {
             terminator: Terminator::Return,
         }]);
         let module = codegen(Mir {
+            structs: Vec::new(),
             funcs: vec![f],
             globals: vec![],
         })
@@ -287,6 +293,7 @@ fn float_and_str_constants_load() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -349,6 +356,7 @@ fn jump_and_jump_if_true_targets_resolve() {
         ret_type: Type::Int,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -392,6 +400,7 @@ fn backward_jump_offsets_resolve() {
         ret_type: Type::Int,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -414,6 +423,7 @@ fn bad_jump_target_is_error() {
     }]);
     assert!(
         codegen(Mir {
+            structs: Vec::new(),
             funcs: vec![f],
             globals: vec![],
         })
@@ -429,6 +439,7 @@ fn call_with_overflowing_func_id_is_error() {
         terminator: Terminator::Return,
     }]);
     let r = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main],
         globals: vec![],
     });
@@ -460,6 +471,7 @@ fn constants_deduped_across_functions() {
         ret_type: Type::Int,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![a, b],
         globals: vec![],
     })
@@ -494,6 +506,7 @@ fn init_func_emits_globals_in_order_and_calls_main() {
         init: vec![instr(MirInstrKind::ConstInt(2))],
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main],
         globals: vec![g1, g2],
     })
@@ -529,6 +542,7 @@ fn empty_globals_gives_empty_global_table_and_main_entry() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main],
         globals: vec![],
     })
@@ -541,6 +555,7 @@ fn empty_globals_gives_empty_global_table_and_main_entry() {
 #[test]
 fn flnc_round_trip() {
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: {
             let mut f = main_func(vec![MirBlock {
                 id: BlockId(0),
@@ -573,6 +588,7 @@ fn flnc_round_trip() {
 #[test]
 fn flnc_rejects_bad_magic_and_trailing_bytes() {
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
             instrs: vec![instr(MirInstrKind::Unit)],
@@ -594,6 +610,7 @@ fn flnc_rejects_bad_magic_and_trailing_bytes() {
 
 fn sample_module() -> Bytecode {
     codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
             instrs: vec![instr(MirInstrKind::Unit)],
@@ -732,6 +749,7 @@ fn flnc_round_trip_builtin_and_empty_module() {
         ret_type: Type::Unit,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![print, main],
         globals: vec![],
     })
@@ -758,6 +776,7 @@ fn func_params_and_locals_propagate() {
         ret_type: Type::Unit,
     };
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -840,6 +859,7 @@ fn v2_slot_operands_round_trip_le_u16() {
         }],
     );
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -879,6 +899,7 @@ fn jump_offsets_account_for_v2_instruction_widths() {
         ],
     );
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -906,6 +927,7 @@ fn span_map_records_instruction_offsets_and_real_spans() {
         }],
     );
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -936,6 +958,7 @@ fn span_map_skips_synthetic_spans() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -976,6 +999,7 @@ fn builtin_span_map_stays_empty() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main, print],
         globals: vec![],
     })
@@ -1013,6 +1037,7 @@ fn init_func_span_map_keeps_initializer_spans_only() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![main],
         globals: vec![g],
     })
@@ -1042,6 +1067,7 @@ fn span_map_survives_flnc_round_trip() {
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
+        structs: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -1107,4 +1133,89 @@ fn flnc_rejects_oversized_table_lengths() {
     b.extend_from_slice(&0u32.to_le_bytes()); // span_map_len
     b.extend_from_slice(&big); // globals_len
     assert!(crate::codegen::from_bytes(&b).is_err());
+}
+
+// ------------------- 0.0.3 V02: structs (bytecode v3) -------------------
+
+#[test]
+fn struct_opcodes_and_version() {
+    let src = r#"
+struct Point { x: int, y: int }
+func main(): int {
+    p = Point { x: 1, y: 2 };
+    p.x = 9;
+    p.x
+}
+"#;
+    let module = compile_full(src);
+    assert_eq!(module.version, 3);
+    // struct_defs: one entry, two Int fields.
+    assert_eq!(module.struct_defs.len(), 1);
+    assert_eq!(
+        module.struct_defs[0].field_types.as_ref(),
+        [FieldTypeTag::Int, FieldTypeTag::Int]
+    );
+    // The new opcodes appear in main's code stream.
+    let main = module
+        .functions
+        .iter()
+        .find(|f| matches!(&module.constants[f.name.0 as usize], Const::Str(s) if s.as_ref() == "main"))
+        .unwrap();
+    assert!(main.code.contains(&(Opcode::StructNew as u8)));
+    assert!(main.code.contains(&(Opcode::GetField as u8)));
+    assert!(main.code.contains(&(Opcode::SetFieldLocal as u8)));
+}
+
+#[test]
+fn struct_defs_flnc_round_trip() {
+    let src = r#"
+struct Point { x: int, y: int }
+struct Owner { name: string, pos: Point }
+func main(): int = 0
+"#;
+    let module = compile_full(src);
+    assert_eq!(module.struct_defs.len(), 2);
+    let bytes = to_bytes(&module);
+    let parsed = from_bytes(&bytes).expect("round trip");
+    assert_eq!(parsed.version, 3);
+    assert_eq!(parsed.struct_defs, module.struct_defs);
+}
+
+#[test]
+fn v1_v2_modules_read_without_struct_defs() {
+    // A v2 byte stream carries no struct_defs table; the reader must not
+    // demand one, and the parsed module's table stays empty.
+    let m = v2_module_fixture();
+    let bytes = to_bytes(&m);
+    let parsed = from_bytes(&bytes).expect("v2 round trip");
+    assert_eq!(parsed.version, 2);
+    assert!(parsed.struct_defs.is_empty());
+}
+
+fn v2_module_fixture() -> Module {
+    Module {
+        version: 2,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([Opcode::Unit as u8, Opcode::Return as u8]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: Vec::new(),
+    }
+}
+
+/// Full-pipeline helper for the V02 struct tests: source → bytecode.
+fn compile_full(source: &str) -> Module {
+    let tokens = crate::lexer::tokenize(source).expect("lex");
+    let ast = crate::parser::parse(tokens).expect("parse");
+    let hir = crate::resolver::resolve(ast).expect("resolve");
+    let typed = crate::typeck::typeck(hir).expect("typeck");
+    let mir = crate::lower::lower(typed).expect("lower");
+    codegen(mir).expect("codegen")
 }

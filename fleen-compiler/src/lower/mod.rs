@@ -43,6 +43,13 @@ pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
     Ok(Mir {
         funcs: lcx.funcs,
         globals: lcx.globals,
+        structs: typed_hir
+            .structs
+            .into_iter()
+            .map(|def| MirStructDef {
+                field_types: def.field_types,
+            })
+            .collect(),
     })
 }
 
@@ -458,6 +465,31 @@ fn lower_global_init(
         TypedExprHir::Box(inner, span) => {
             lower_global_init(lcx, inner, out)?;
             out.push(MirInstr::new(MirInstrKind::AllocBox, *span));
+        }
+        // 0.0.3 V02: struct literal in a global initializer. Global init
+        // has no frame, so there are no temp slots for the reorder — only
+        // declaration-ordered initializers can be lowered here; anything
+        // else stays a `ComplexGlobalInit`.
+        TypedExprHir::StructLit {
+            struct_id,
+            inits,
+            span,
+            ..
+        } => {
+            let in_decl_order = inits
+                .iter()
+                .enumerate()
+                .all(|(i, (idx, _))| *idx == i as u16);
+            if !in_decl_order {
+                return Err(LowerError::new(LowerErrorKind::ComplexGlobalInit, *span));
+            }
+            for (_, init) in inits {
+                lower_global_init(lcx, init, out)?;
+            }
+            out.push(MirInstr::new(
+                MirInstrKind::StructNew(struct_id.0 as u16),
+                *span,
+            ));
         }
         _ => {
             return Err(LowerError::new(
@@ -897,15 +929,90 @@ impl<'a> FnBodyCx<'a> {
                     }
                 }
             }
+            // 0.0.3 V02: struct literal. StructNew takes the fields in
+            // *declaration* order; the initializers keep *source* order
+            // (typeck pairs each with its declaration index), so when the
+            // two differ the values are parked in temp slots and reloaded
+            // in declaration order — source-order side effects, correct
+            // field order.
+            TypedExprHir::StructLit {
+                struct_id,
+                inits,
+                span,
+                ..
+            } => {
+                let in_decl_order = inits
+                    .iter()
+                    .enumerate()
+                    .all(|(i, (idx, _))| *idx == i as u16);
+                if in_decl_order {
+                    for (_, init) in inits {
+                        self.lower_expr_into(fb, init)?;
+                    }
+                } else {
+                    let mut order: Vec<usize> = (0..inits.len()).collect();
+                    order.sort_by_key(|&i| inits[i].0);
+                    let mut temps = Vec::with_capacity(inits.len());
+                    for (_, init) in inits {
+                        self.lower_expr_into(fb, init)?;
+                        let tmp = self.fresh_temp();
+                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(tmp), *span));
+                        temps.push(tmp);
+                    }
+                    for i in order {
+                        let tmp = temps[i];
+                        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(tmp), *span));
+                    }
+                }
+                fb.emit(MirInstr::new(
+                    MirInstrKind::StructNew(struct_id.0 as u16),
+                    *span,
+                ));
+            }
+            // 0.0.3 V02: field read — `GetField` pops the object (a fresh
+            // copy: the load above cloned the binding, and a borrow handle
+            // is dereferenced by the VM) and pushes the field copy.
+            TypedExprHir::Field {
+                obj,
+                field_idx,
+                span,
+                ..
+            } => {
+                self.lower_expr_into(fb, obj)?;
+                fb.emit(MirInstr::new(MirInstrKind::GetField(*field_idx), *span));
+            }
+            // 0.0.3 V02: one-level field write. Mirrors `Assign`: evaluate
+            // the RHS, duplicate it (the assignment expression's value),
+            // then store into the field — the old field value is released
+            // by the overwrite.
+            TypedExprHir::AssignField {
+                obj_binding_id,
+                field_idx,
+                rhs,
+                span,
+                ..
+            } => {
+                self.lower_expr_into(fb, rhs)?;
+                let dup_kind = if rhs.ty().is_owned() {
+                    MirInstrKind::DupDeep
+                } else {
+                    MirInstrKind::Dup
+                };
+                fb.emit(MirInstr::new(dup_kind, *span));
+                match self.loc(*obj_binding_id, "?", *span)? {
+                    Location::Local(slot) => fb.emit(MirInstr::new(
+                        MirInstrKind::SetFieldLocal(slot, *field_idx),
+                        *span,
+                    )),
+                    Location::Global(gid) => fb.emit(MirInstr::new(
+                        MirInstrKind::SetFieldGlobal(gid.0 as u16, *field_idx),
+                        *span,
+                    )),
+                }
+            }
             TypedExprHir::Index(..) => {
                 return Err(LowerError::new(
                     LowerErrorKind::UnsupportedFeature { feature: "index" },
-                    expr.span(),
-                ));
-            }
-            TypedExprHir::Field(..) => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature { feature: "field" },
                     expr.span(),
                 ));
             }

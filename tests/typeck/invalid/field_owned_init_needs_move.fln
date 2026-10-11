@@ -1,0 +1,7 @@
+struct Owner { name: string }
+
+func main(): int {
+    s = "hello";
+    o = Owner { name: s };
+    0
+}

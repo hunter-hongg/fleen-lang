@@ -1,0 +1,4 @@
+func main(): int {
+    struct Point { x: int }
+    0
+}

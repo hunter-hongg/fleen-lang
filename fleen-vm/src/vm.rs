@@ -40,15 +40,15 @@ impl Vm {
 
     /// Run the module's `entry` function to completion.
     ///
-    /// Accepts bytecode versions 1 (0.0.1) and 2 (0.0.2). On failure the
-    /// [`RuntimeError`] carries the source location of the failing
-    /// instruction when one can be determined (0.0.2 U10).
+    /// Accepts bytecode versions 1 (0.0.1), 2 (0.0.2) and 3 (0.0.3). On
+    /// failure the [`RuntimeError`] carries the source location of the
+    /// failing instruction when one can be determined (0.0.2 U10).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
         self.run_inner().map_err(|kind| self.locate_error(kind))
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
-        if !matches!(self.module.version, 1 | 2) {
+        if !(1..=3).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -663,6 +663,104 @@ impl Vm {
                 match r {
                     Value::Err(e) => self.stack.push(*e),
                     Value::Ok(_) => return Err(RuntimeErrorKind::ResultMismatch),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                }
+            }
+            // ----------------------------------------------------------------
+            // 0.0.3 V02: struct instructions (bytecode v3, 0xB0–0xB3).
+            // Shape violations are defensive — `fleen-verify` rejects
+            // malformed modules before execution.
+            // ----------------------------------------------------------------
+            Opcode::StructNew => {
+                let s = take!(2);
+                let id = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let n = self
+                    .module
+                    .struct_defs
+                    .get(id)
+                    .ok_or(RuntimeErrorKind::StructOutOfRange(id as u16))?
+                    .field_types
+                    .len();
+                if self.stack.len() < n {
+                    return Err(RuntimeErrorKind::StackUnderflow);
+                }
+                let fields: Vec<Value> = self.stack.split_off(self.stack.len() - n);
+                self.stack.push(Value::Struct(fields.into_boxed_slice()));
+            }
+            Opcode::GetField => {
+                let s = take!(2);
+                let offset = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                // The object may be a borrow handle (`ref S` parameter read
+                // path) — dereference first; the copy-out semantics make the
+                // read trivially safe (D2).
+                let copy = {
+                    let obj = self.read_ref(&v)?;
+                    match obj {
+                        Value::Struct(fields) => {
+                            if offset >= fields.len() {
+                                return Err(RuntimeErrorKind::FieldOutOfRange {
+                                    index: offset as u16,
+                                    len: fields.len(),
+                                });
+                            }
+                            fields[offset].clone()
+                        }
+                        _ => return Err(RuntimeErrorKind::StackShape),
+                    }
+                };
+                self.stack.push(copy);
+            }
+            Opcode::SetFieldLocal => {
+                let s = take!(4);
+                let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let offset = u16::from_le_bytes([s[2], s[3]]) as usize;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let idx = frame.stack_base + slot;
+                let slot_v = self
+                    .stack
+                    .get_mut(idx)
+                    .ok_or(RuntimeErrorKind::StackShape)?;
+                // Field writes go through local/global struct bindings only
+                // (typeck rejects writes through borrow handles), so a `Ref`
+                // in the slot is malformed bytecode.
+                match slot_v {
+                    Value::Struct(fields) => {
+                        if offset >= fields.len() {
+                            return Err(RuntimeErrorKind::FieldOutOfRange {
+                                index: offset as u16,
+                                len: fields.len(),
+                            });
+                        }
+                        // The overwrite drops the old field value.
+                        fields[offset] = v;
+                    }
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                }
+            }
+            Opcode::SetFieldGlobal => {
+                let s = take!(4);
+                let gid = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let offset = u16::from_le_bytes([s[2], s[3]]) as usize;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                if gid >= self.globals.len() {
+                    return Err(RuntimeErrorKind::GlobalOutOfRange(
+                        fleen_compiler::codegen::GlobalId(gid as u32),
+                    ));
+                }
+                // Writing a field does not rebind the global, so the
+                // `mutable` gate of `StoreGlobal` does not apply here (same
+                // rule as `deref b = v` on a const box binding).
+                match &mut self.globals[gid] {
+                    Value::Struct(fields) => {
+                        if offset >= fields.len() {
+                            return Err(RuntimeErrorKind::FieldOutOfRange {
+                                index: offset as u16,
+                                len: fields.len(),
+                            });
+                        }
+                        fields[offset] = v;
+                    }
                     _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }

@@ -42,7 +42,7 @@ pub fn analyze(
             .copied()
             .flatten()
             .ok_or(VerifyError::TruncatedInstruction { pc })?;
-        let (delta, min_depth) = stack_effect(code, &d, &module.functions)?;
+        let (delta, min_depth) = stack_effect(code, &d, module)?;
 
         if current < min_depth {
             return Err(VerifyError::StackUnderflow {

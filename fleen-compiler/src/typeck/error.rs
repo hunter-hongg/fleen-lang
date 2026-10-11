@@ -114,6 +114,27 @@ pub enum TypeckErrorKind {
     /// deep copies, so the write could only reach a copy (0.0.2 limit;
     /// see DESIGN §10.3 / U12).
     DerefAssignOfGlobalBox,
+    // ---- 0.0.3 V02: struct error family ----
+    /// A struct refers to itself, directly or indirectly (including via
+    /// `box`); the cycle path is reported (`A → B → A`).
+    RecursiveStruct { path: String },
+    /// A struct literal does not initialize a declared field.
+    MissingField { struct_name: String, field: String },
+    /// A struct literal or field access names a field the struct does not
+    /// declare.
+    UnknownField { struct_name: String, field: String },
+    /// `move p.f`: structs own their fields exclusively; copy instead.
+    /// Carries the field path (`o.name`) for the help text.
+    MoveOutOfStruct { path: String },
+    /// `b.field` where `b: box<S>`: a box must be read with `deref` first.
+    FieldOnBox,
+    /// `Name { ... }` where `Name` is not a declared struct.
+    UnknownStruct { name: String },
+    /// A type annotation names a type that is not declared (unknown struct
+    /// name in a `p: Point` position).
+    UnknownType { name: String },
+    /// Two struct declarations share one name.
+    DuplicateStructName { name: String },
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -345,6 +366,58 @@ impl fmt::Display for TypeckErrorKind {
                      as a deep copy, so the write would only reach the copy \
                      (0.0.2 limit — see DESIGN §10.3)"
                 )
+            }
+            TypeckErrorKind::RecursiveStruct { path } => {
+                write!(
+                    f,
+                    "recursive struct is not allowed: {path} — a struct's \
+                     size must be statically known; help: break the cycle \
+                     with `box` indirection syntax once it exists"
+                )
+            }
+            TypeckErrorKind::MissingField { struct_name, field } => {
+                write!(
+                    f,
+                    "missing field `{field}` in `{struct_name}` literal — \
+                     all fields must be initialized"
+                )
+            }
+            TypeckErrorKind::UnknownField { struct_name, field } => {
+                write!(
+                    f,
+                    "`{struct_name}` has no field `{field}` — help: check \
+                     the declaration of `{struct_name}`"
+                )
+            }
+            TypeckErrorKind::MoveOutOfStruct { path } => {
+                write!(
+                    f,
+                    "cannot move out of struct field `{path}` — structs own \
+                     their fields exclusively — help: copy the field \
+                     instead: `clone {path}`"
+                )
+            }
+            TypeckErrorKind::FieldOnBox => {
+                write!(
+                    f,
+                    "cannot access a field of a box directly — help: read \
+                     the pointee first: `(deref b).field`"
+                )
+            }
+            TypeckErrorKind::UnknownStruct { name } => {
+                write!(
+                    f,
+                    "unknown struct `{name}` — help: declare it with `struct {name} {{ ... }}`"
+                )
+            }
+            TypeckErrorKind::UnknownType { name } => {
+                write!(
+                    f,
+                    "unknown type `{name}` — help: declare the struct with `struct {name} {{ ... }}`"
+                )
+            }
+            TypeckErrorKind::DuplicateStructName { name } => {
+                write!(f, "duplicate declaration of struct `{name}`")
             }
         }
     }

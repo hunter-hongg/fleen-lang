@@ -27,6 +27,7 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::While
             | TokenKind::Choose
             | TokenKind::Import
+            | TokenKind::Struct
             | TokenKind::Ident(_)
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
@@ -595,6 +596,22 @@ mod tests {
         // `move` / `!` and other prefixes cannot end a statement, so the
         // operand joins across the line break.
         let ks = kinds("y = move\nx\n");
+        assert_eq!(semi_count(&ks), 1);
+    }
+
+    #[test]
+    fn struct_literal_joins_across_lines() {
+        // 0.0.3 V02: `p = Point` ⏎ `{ x: 1 }` — `{` is a construct
+        // continuation, so the struct literal joins across the line break.
+        let ks = kinds("p = Point\n{ x: 1, y: 2 }\n");
+        assert_eq!(semi_count(&ks), 1); // at EOF; nothing splits the literal
+    }
+
+    #[test]
+    fn struct_decl_allman_joins_across_lines() {
+        // `struct Point` ⏎ `{` — same construct-continuation rule; the
+        // Allman-style declaration is one statement.
+        let ks = kinds("struct Point\n{ x: int }\n");
         assert_eq!(semi_count(&ks), 1);
     }
 

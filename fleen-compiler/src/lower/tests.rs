@@ -675,7 +675,11 @@ func f(value: int): string {
 }
 
 /// Net stack effect of a single instruction (args popped, result pushed).
-fn stack_delta(i: &MirInstr, func_params: &std::collections::HashMap<FuncId, u16>) -> i64 {
+fn stack_delta(
+    i: &MirInstr,
+    func_params: &std::collections::HashMap<FuncId, u16>,
+    struct_fields: &std::collections::HashMap<u16, usize>,
+) -> i64 {
     match &i.kind {
         MirInstrKind::ConstInt(_)
         | MirInstrKind::ConstFloat(_)
@@ -725,6 +729,16 @@ fn stack_delta(i: &MirInstr, func_params: &std::collections::HashMap<FuncId, u16
         MirInstrKind::IsErr => 0,     // result → bool
         MirInstrKind::UnwrapOk => 0,  // result → v
         MirInstrKind::UnwrapErr => 0, // result → e
+        // 0.0.3 V02: structs. StructNew's count comes from the struct
+        // table; the depth test's helper approximates via the operand id
+        // only when the table is unavailable — but lower tests compile
+        // from source, so re-derive nothing: GetField/SetField* are exact.
+        MirInstrKind::GetField(_) => 0,           // s → v
+        MirInstrKind::SetFieldLocal(_, _) => -1,  // v →
+        MirInstrKind::SetFieldGlobal(_, _) => -1, // v →
+        // 0.0.3 V02: field count from the struct table (the depth test
+        // compiles from source, so the table is `mir.structs`).
+        MirInstrKind::StructNew(id) => 1 - struct_fields.get(id).copied().unwrap_or(0) as i64,
     }
 }
 
@@ -759,6 +773,12 @@ func pick(v: int): int {
     let mir = lower_src(src);
     let func_params: std::collections::HashMap<FuncId, u16> =
         mir.funcs.iter().map(|f| (f.func_id, f.params)).collect();
+    let struct_fields: std::collections::HashMap<u16, usize> = mir
+        .structs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u16, s.field_types.len()))
+        .collect();
     for func in &mir.funcs {
         let mut entry_depth: Vec<Option<i64>> = vec![None; func.blocks.len()];
         let entry_pos = func
@@ -775,7 +795,7 @@ func pick(v: int): int {
             let block = &func.blocks[pos];
             let mut d = d0;
             for i in &block.instrs {
-                d += stack_delta(i, &func_params);
+                d += stack_delta(i, &func_params, &struct_fields);
                 assert!(d >= 0, "stack underflow in {:?} at {:?}", func.name, i);
             }
             let mut set = |target: BlockId, val: i64| {
@@ -1302,6 +1322,12 @@ fn assert_stack_depths_consistent(src: &str) {
     let mir = lower_src(src);
     let func_params: std::collections::HashMap<FuncId, u16> =
         mir.funcs.iter().map(|f| (f.func_id, f.params)).collect();
+    let struct_fields: std::collections::HashMap<u16, usize> = mir
+        .structs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u16, s.field_types.len()))
+        .collect();
     for func in &mir.funcs {
         if func.is_builtin {
             continue;
@@ -1319,7 +1345,7 @@ fn assert_stack_depths_consistent(src: &str) {
             let block = &func.blocks[pos];
             let mut d = d0;
             for i in &block.instrs {
-                d += stack_delta(i, &func_params);
+                d += stack_delta(i, &func_params, &struct_fields);
                 assert!(d >= 0, "stack underflow in {:?} at {:?}", func.name, i);
             }
             let mut set = |target: BlockId, val: i64| {
@@ -1436,4 +1462,74 @@ func f(): int {
 }
 "#,
     );
+}
+
+#[test]
+fn lower_struct_literal_declaration_order() {
+    // In-order literal: plain evaluate-then-StructNew sequence.
+    let mir =
+        lower_src("struct Point { x: int, y: int }\nfunc main(): Point = Point { x: 1, y: 2 }");
+    let main = mir.funcs.iter().find(|f| f.name == "main").unwrap();
+    let kinds: Vec<&MirInstrKind> = main.blocks[0].instrs.iter().map(|i| &i.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            &MirInstrKind::ConstInt(1),
+            &MirInstrKind::ConstInt(2),
+            &MirInstrKind::StructNew(0),
+        ]
+    );
+}
+
+#[test]
+fn lower_struct_literal_reorders_source_order() {
+    // Out-of-order literal: source-order evaluation into temps, then
+    // declaration-order reloads — side effects (calls) stay source-ordered.
+    let mir =
+        lower_src("struct Point { x: int, y: int }\nfunc main(): Point = Point { y: 5, x: 1 }");
+    let main = mir.funcs.iter().find(|f| f.name == "main").unwrap();
+    let kinds: Vec<&MirInstrKind> = main.blocks[0].instrs.iter().map(|i| &i.kind).collect();
+    // Evaluate y (5) into a temp, evaluate x (1) into a temp, reload
+    // declaration order (x, y), StructNew.
+    assert_eq!(
+        kinds,
+        vec![
+            &MirInstrKind::ConstInt(5),
+            &MirInstrKind::StoreLocal(0),
+            &MirInstrKind::ConstInt(1),
+            &MirInstrKind::StoreLocal(1),
+            &MirInstrKind::LoadLocal(1),
+            &MirInstrKind::LoadLocal(0),
+            &MirInstrKind::StructNew(0),
+        ]
+    );
+}
+
+#[test]
+fn lower_field_read_and_write() {
+    let mir = lower_src(
+        "struct Point { x: int, y: int }\nfunc main(): int {\n    p = Point { x: 1, y: 2 };\n    p.y = 9;\n    p.y\n}",
+    );
+    let main = mir.funcs.iter().find(|f| f.name == "main").unwrap();
+    let kinds: Vec<&MirInstrKind> = main.blocks[0].instrs.iter().map(|i| &i.kind).collect();
+    // Literal, StoreLocal p; Const 9, Dup, SetFieldLocal(p, 1); (statement Pop);
+    // read: LoadLocal p, GetField(1).
+    assert!(kinds.contains(&&MirInstrKind::GetField(1)));
+    assert!(kinds.contains(&&MirInstrKind::SetFieldLocal(0, 1)));
+    assert!(kinds.contains(&&MirInstrKind::StructNew(0)));
+}
+
+#[test]
+fn lower_struct_defs_pass_through() {
+    let mir = lower_src("struct Point { x: int, y: int }\nfunc main(): int = 0");
+    assert_eq!(mir.structs.len(), 1);
+    assert_eq!(mir.structs[0].field_types.len(), 2);
+}
+
+#[test]
+fn lower_struct_in_global_init() {
+    let mir = lower_src(
+        "struct Point { x: int, y: int }\ng = Point { x: 1, y: 2 };\nfunc main(): int = 0",
+    );
+    assert!(mir.globals.len() == 1);
 }

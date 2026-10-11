@@ -1,0 +1,19 @@
+struct Point { x: int, y: int }
+struct Pair {
+    a: int,
+    b: int,
+}
+struct Empty {}
+struct Wrapped {
+    label: string,
+    point: Point,
+}
+
+func main(): int {
+    p = Point { x: 1, y: 2 };
+    q = Pair { a: 1, b: 2, };
+    w = Wrapped { label: "w", point: p };
+    print(w.point.y as string);
+    p.x = 3;
+    0
+}
