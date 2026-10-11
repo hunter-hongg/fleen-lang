@@ -442,6 +442,48 @@ fn check_builtin_print_function_value_rejected() {
     );
 }
 
+// ========== Cast: UnsupportedCast (0.0.2 U13, PLAN §8.1) ==========
+//
+// The 0.0.2 whitelist is scalar (int/float/bool) → string only; everything
+// else — including identity casts and box values — is `UnsupportedCast`.
+
+#[test]
+fn check_unsupported_cast_identity_rejected() {
+    let errs = compile_err("x = 42 as int;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UnsupportedCast { .. })),
+        "expected UnsupportedCast, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_unsupported_cast_fields_pin_from_and_to() {
+    let errs = compile_err("x = 42 as float;");
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::UnsupportedCast {
+                from: Type::Int,
+                to: Type::Float
+            }
+        )),
+        "expected UnsupportedCast {{ int -> float }}, got {errs:?}"
+    );
+}
+
+#[test]
+fn check_unsupported_cast_box_to_string_rejected() {
+    let errs = compile_err("func f(b: box<int>) {\n    x = b as string;\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UnsupportedCast { .. })),
+        "expected UnsupportedCast, got {errs:?}"
+    );
+}
+
 // ========== Result: Ok/Err Constructors (0.0.2 U04, PLAN §3.4.1/D6) ==========
 
 #[test]

@@ -1,0 +1,25 @@
+// 0.0.2 coverage addendum: float arithmetic (FAdd/FSub/FMul/FDiv) and the
+// comparison/logic operators Gt/Le/Ge/Not/NegI/NegF had no executing test —
+// e2e programs only ever exercised Lt/Eq and wrote negatives as `0 - n`.
+// Output is anchored line-by-line by operators.expected.
+func main(): int {
+    a = 1.5 + 2.25;
+    print(a as string);
+    b = 3.5 - 0.25;
+    print(b as string);
+    c = 2.5 * 4.0;
+    print(c as string);
+    d = 7.5 / 2.5;
+    print(d as string);
+    print((1.5 < 1.5) as string);
+    print((2.0 > 1.5) as string);
+    print((2 <= 2) as string);
+    print((3 >= 4) as string);
+    print((1 == 2) as string);
+    print((1 != 2) as string);
+    print((!true) as string);
+    print((!false) as string);
+    print((-(2 + 3)) as string);
+    print((-2.5) as string);
+    0
+}

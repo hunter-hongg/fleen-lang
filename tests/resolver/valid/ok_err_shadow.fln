@@ -1,0 +1,4 @@
+// `Ok`/`Err` are builtin Result constructor names (resolver/mod.rs BUILTINS)
+// and may be shadowed by user bindings — PLAN 0.0.2 §8.1 resolver valid.
+Ok = 5;
+const Err = "shadowed";

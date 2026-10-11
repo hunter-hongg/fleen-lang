@@ -1,0 +1,8 @@
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) { v }
+        when Err(e) { 0 }
+        otherwise { 99 }
+    }
+}
