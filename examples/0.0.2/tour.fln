@@ -1,0 +1,77 @@
+// 0.0.2 "Hermit Crab" 新功能一览。
+// 运行：cargo fln examples/0.0.2/tour.fln
+//
+// 覆盖特性：
+//   1. ASI        —— 分号可选（显式分号仍合法）
+//   2. 所有权     —— move 显式转移、clone 深拷贝、Copy 类型不受影响
+//   3. box<T>     —— box 堆分配、deref 读写点内值
+//   4. ref T      —— 只读借用（仅参数位置），局部/全局实参均可
+//   5. Result     —— Ok/Err 构造、choose 的 Ok/Err pattern、? 传播
+//   6. as         —— 标量转 string（0.0.2 临时特性）
+//   7. main 返回 Result —— Err 冒泡到进程：stderr + 退出码 1
+
+// ── ref T：只读借用参数。零拷贝读 owned 值，句柄不能逃逸；
+//    借用参数只能读，要拿走 owned 值请 clone ──
+func describe(s: ref string, n: int) {
+    print(s, " owns ", n as string, " box(es)")
+}
+
+// ── Result 构造：Ok / Err ──
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+// ── ? 传播：Err 时整函数立即返回该 Err，Ok 时取出 payload ──
+func half_of_diff(a: int, b: int, d: int): Result<int, string> {
+    q = div(a - b, d)?
+    Ok(q / 2)
+}
+
+// 全局 owned 值：作为 ref 实参时经临时槽复制承接（不需 move/clone）
+tagline = "hermit crab"
+
+func main(): Result<int, string> {
+    // ── 1. ASI：以下每行都没有分号 ──
+    language = "fleen"
+    milestone = "ownership begins"
+    print(language, " 0.0.2 — ", milestone)
+
+    // ── 2. 所有权 ──
+    owner = "vm"
+    keeper = move owner        // 转移：此后 owner 不可再用（编译期拒绝）
+    twin = clone keeper        // 深拷贝：两者都可独立使用
+    print("moved: ", keeper, " / cloned: ", twin)
+
+    x = 41                     // int 是 Copy 类型：赋值、传参、
+    y = x                      // 返回都按位复制，不需要 move/clone
+    x = x + 1                  // x 照常可写（int 的 + 不受影响）
+
+    // ── 3. box<T>：堆分配，确定性释放（无 GC）──
+    counter = box y            // counter: box<int>
+    deref counter = deref counter + 1   // 写点内值（y 不受影响）
+    boxes = deref counter      // 读点内值：得到副本
+    print("boxes on the heap: ", boxes as string, ", y still: ", y as string)
+
+    // ── 4. ref T 借用：局部变量与全局变量都能借 ──
+    describe(twin, boxes)
+    describe(tagline, boxes)
+
+    // ── 5. Result：choose 的 Ok/Err pattern，两臂齐即穷尽，
+    //    无需 otherwise（带守卫的臂不计入穷尽性）──
+    choose div(boxes, 2) {
+        when Ok(v)  { print("exact half: ", v as string) }
+        when Err(e) { print("refused: ", e) }
+    }
+
+    // ? 在 Err 路径上传播：div(..., 0) 产出 Err，
+    // half_of_diff 把它原样冒泡，这里 choose 兜住它
+    outcome = choose half_of_diff(boxes, boxes, 0) {
+        when Ok(v)  { v }
+        when Err(e) { print("caught upstream: ", e)
+                       0 - 1 }
+    }
+    print("outcome: ", outcome as string)
+
+    // ── 7. 入口返回 Result：main 以 Ok 结束，进程退出码 0 ──
+    Ok(0)
+}
