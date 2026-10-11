@@ -3,39 +3,63 @@
 所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，
 版本语义遵循 [SPEC.md](SPEC.md) §13（`0.0.x` = 早期开发，API 不稳定）。
 
-## 0.0.2 — 未发布（所有权起步）
+## 0.0.2 — Hermit Crab (2026-10-11) 🐚
 
-> 特性规划与设计决议：[docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。
-> 以下为已定稿的 0.0.2 范围；实现落地后在正式条目中逐项确认。
+所有权起步：堆上的值开始有主人，错误开始流动，分号开始退休。
+特性规划与设计决议：[docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。
 
-### ✨ 语言特性（规划）
+### ✨ 语言特性
 
 - **所有权系统**：`string` / `box<T>` 拥有唯一所有者；`move` 显式转移、
-  `clone` 深拷贝；Copy 类型（`int` / `float` / `bool` / 函数值）不受影响；
-  使用已移动的值在编译期拒绝（`UseAfterMove` 等）
-- **`box<T>`**：`box expr` 堆分配、`deref b` 读写点内值、确定性释放（无 GC）
-- **`ref T`**：只读借用，仅函数参数位置——句柄不逃逸，无需借用检查器
+  `clone` 深拷贝；Copy 类型（`int` / `float` / `bool` / `unit` / 函数值）
+  不受影响；使用已移动的值在编译期拒绝（`UseAfterMove`、
+  `MaybeMovedAfterBranch` 等，循环回边同样覆盖）
+- **`box<T>`**：`box expr` 堆分配、`deref b` 读写点内值、确定性释放（无 GC）；
+  点内类型允许集合：`int` / `float` / `bool` / `string` / `box<U>` /
+  `Result<T, E>`；不可移出 box（`move deref b` 编译错误，需要值用
+  `clone deref b`）；`deref b = v` 的 `b` 仅限局部 box（全局 box 写点内值报
+  `DerefAssignOfGlobalBox`）
+- **`ref T`**：只读借用，仅函数参数位置——句柄不逃逸，无需借用检查器；
+  实参必须是变量，全局实参经临时槽复制承接（`CloneGlobal` + 临时槽 +
+  `MakeRefLocal`）；全局初始化器不支持 ref 实参（`RefArgInGlobalInit`）
 - **错误处理**：`Ok(v)` / `Err(e)` 构造、`choose` 的 `Ok`/`Err` pattern
-  （两臂齐即穷尽）、`?` 传播运算符；`main` 可返回 `Result`
-  （`Err` → stderr + 退出码 1）
-- **ASI**：分号可选（parser 端"可续接"判定，显式分号仍合法）
+  （两臂齐即穷尽；带守卫的臂不计入穷尽性）、`?` 传播运算符；入口函数
+  （`main`）可返回 `Result`——尾随 `Err` 打印 payload 到 stderr 并以
+  退出码 1 结束（退出码契约不变）
+- **ASI**：分号可选，显式分号仍合法；换行敏感（同行语句拼接仍非法），
+  跨行续接规则见 [docs/0.0.2/ASI.md](docs/0.0.2/ASI.md)
+- **`as` 类型转换**（0.0.2 临时，泛型后重审）：白名单仅
+  `int` / `float` / `bool` → `string` 三条，其余（含恒等转换）报
+  `UnsupportedCast { from, to }`；结果是新鲜 owned string，与 print 共用
+  同一格式化 helper（`fleen-vm/src/fmt.rs`）
 
-### 🛠 工具链（规划）
+### 🛠 工具链
 
-- 字节码 v2：所有权指令（`AllocBox` / `MoveLocal` / `CloneLocal` 等，
-  0x80–0x93）与 Result 指令（0xA0–0xA4）；v1 模块向后兼容
-- `Value::Str(Rc<str>)` → `Str(Box<str>)`（所有权表示，偿还 0.0.1 临时决策）
-- `span_map` 生成 + 运行时错误携带源码位置（`.fln` 模式显示行列）
+- 字节码 v2：所有权指令（`AllocBox` / `DerefBox` / `StoreDerefBox` /
+  `MakeRefLocal` 0x80–0x83；`DupDeep` / `MoveLocal` / `CloneLocal` /
+  `CloneGlobal` 0x90–0x93）、Result 指令（0xA0–0xA4）与 `ToStr`（0xA5）；
+  v2 模块可执行 v1 指令流，v2 指令禁止出现在 version=1 模块
+  （规范见 [docs/BYTECODE.md](docs/BYTECODE.md)）
+- `Value::Str(Rc<str>)` → `Str(Box<str>)`（独占所有权，偿还 0.0.1 临时决策）
+- `span_map` 转正 + 运行时错误携带源码行列（`.fln` 模式）；经调用链传播的
+  错误指向调用点
 - `print` 内建真实签名（可变元 string；非 string 实参报 `ArgTypeMismatch`
-  并提示 `as string`），移除 typeck 特判（0.0.1 已知 Hack）
+  并提示 `as string`），移除 typeck 特判（0.0.1 已知 Hack，
+  `DESIGN.md` §18 已知 Hack 清空）
+- 实现期行为细则：局部 box 的 `deref b = v` 降载为
+  `v; AllocBox; StoreLocal b`（点内替换与整 box 替换观测等价，编译器不再
+  生成 `StoreDerefBox`）；choose-Result 降载为 `IsErr` 分支链（带守卫臂或
+  `otherwise` 的 Result-choose 由 typeck 拒绝）；`CloneGlobal` 不做句柄解引用
+  （typeck 禁止句柄入全局）
 - 安全性修复：`.flnc` 解码器不再对恶意表长度做无界预分配（0.0.1 起
   超大长度会触发进程 abort，现降级为解码错误）；verify 拒绝空函数体
   模块（0.0.1 起曾 panic，现报 `EmptyFunctionBody`）
 
-### ⚠️ Breaking（规划）
+### ⚠️ Breaking
 
 - owned 值（`string` / `box<T>`）赋值/传参需显式 `move` 或 `clone`
-- `move` / `clone` / `deref` 成为保留字（0.0.1 可用作标识符）
+  （0.0.1 的 `t = s` 为浅共享复制，现为编译错误）
+- `move` / `clone` / `deref` / `as` 成为保留字（0.0.1 可用作标识符）
 - `print(函数值)` 由 0.0.1 的放行改为编译错误
 
 ## 0.0.1 — Swift Fox (2026-10-06) 🦊

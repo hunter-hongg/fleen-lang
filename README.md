@@ -4,7 +4,7 @@
 五阶段编译器（词法 → 语法 → 名字解析 → 类型检查 → 降级与字节码生成）、
 静态字节码验证器和栈式虚拟机。
 
-> 当前版本 **0.0.1 · Swift Fox** —— "Fibonacci 能跑" 里程碑。
+> 当前版本 **0.0.2 · Hermit Crab 🐚** —— "堆上的值开始有主人" 里程碑。
 
 ## 语言一览
 
@@ -29,13 +29,15 @@ func main(): int {
 ```
 
 特性概览：可变绑定 `=` 与 `const` 不可变、`int` / `float` / `bool` / `string` / `unit`、
-`Result<T, U>`、一等函数与函数类型、`if` / `elif` / `else` 表达式、`while`、
-`choose` 模式匹配（支持守卫）。0.0.1 需显式分号，`struct` / `for` / 泛型等
-尚未纳入 —— 完整范围见 [SPEC.md](SPEC.md) §15。
+`Result<T, U>`（`Ok` / `Err` 构造、`choose` pattern、`?` 传播）、一等函数与函数类型、
+`if` / `elif` / `else` 表达式、`while`、`choose` 模式匹配（支持守卫）、
+分号可选（ASI，显式分号仍合法）。
 
-**0.0.2（规划中）**：所有权系统（`move` / `clone` / `box<T>` / `ref`）、
-`?` 错误传播（含 `Ok` / `Err` 构造与 pattern）、ASI 分号可选 ——
-规划与设计决议见 [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。
+**0.0.2 · 所有权起步**：`string` / `box<T>` 拥有唯一所有者——`move` 显式转移、
+`clone` 深拷贝、`box expr` 堆分配与 `deref b` 读写点内值（确定性释放，无 GC）、
+`ref T` 只读借用（仅参数位置）、`as string` 标量转换（临时特性）；
+运行时错误携带源码行列。规划与实现决议见
+[docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。0.0.3 将带来 `struct` / `for`。
 
 ## 快速开始
 
