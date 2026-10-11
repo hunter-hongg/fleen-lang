@@ -842,7 +842,8 @@ impl TypeChecker {
             }
 
             ExprHir::Call(func, args) => self.typeck_call(*func, args, expected),
-            ExprHir::Index(arr, idx) => self.typeck_index(*arr, *idx),
+            ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
+            ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
             // 0.0.2 U05: ownership expressions — validated here; the
             // flow-sensitive move analysis runs afterwards in
             // `ownership.rs` over the produced TypedHir.
@@ -878,6 +879,14 @@ impl TypeChecker {
                 hir_id,
                 span,
             ),
+            ExprHir::AssignIndex {
+                name,
+                binding_id,
+                index,
+                rhs,
+                hir_id,
+                span,
+            } => self.typeck_assign_index(name, binding_id, *index, *rhs, hir_id, span),
             ExprHir::StructLit {
                 name,
                 inits,
@@ -1298,10 +1307,10 @@ impl TypeChecker {
             return Err(());
         }
 
-        // 0.0.3 (§1.4): struct (and later array/range) values have no `==` —
-        // element-wise equality needs a recursion rule and traits; the VM's
-        // defensive TypeMismatch stays a backstop only.
-        if matches!(op, "==" | "!=") && matches!(typed_lhs.ty(), Type::Struct(_)) {
+        // 0.0.3 (§1.4): struct/array values have no `==` — element-wise
+        // equality needs a recursion rule and traits; the VM's defensive
+        // TypeMismatch stays a backstop only.
+        if matches!(op, "==" | "!=") && matches!(typed_lhs.ty(), Type::Struct(_) | Type::Array(_)) {
             self.add_error(
                 TypeckErrorKind::InvalidOperand {
                     op: op.to_string(),
@@ -1773,6 +1782,12 @@ impl TypeChecker {
                 self.add_error(TypeckErrorKind::MoveOutOfStruct { path: move_path }, span);
                 Err(())
             }
+            ExprHir::Index(_, _, _) => {
+                // D3: arrays own their elements exclusively — no moves out
+                // of an element, not even one level deep.
+                self.add_error(TypeckErrorKind::MoveOutOfArray { path: move_path }, span);
+                Err(())
+            }
             _ => {
                 self.add_error(TypeckErrorKind::InvalidClonePlace, span);
                 Err(())
@@ -1821,6 +1836,10 @@ impl TypeChecker {
             // *read* is already a copy (GetField deep-copies), so the clone
             // form lowers to the plain field read.
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
+            // 0.0.3 V03 (D3): `clone a[i]` copies the element out — and an
+            // element *read* is already a copy (ArrGet deep-copies), so the
+            // clone form lowers to the plain element read.
+            ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             _ => {
                 self.add_error(TypeckErrorKind::InvalidClonePlace, span);
                 Err(())
@@ -1938,39 +1957,189 @@ impl TypeChecker {
         }
     }
 
-    /// Type check an index expression.
-    fn typeck_index(&mut self, arr: ExprHir, idx: ExprHir) -> Result<TypedExprHir, ()> {
+    /// Type check an index expression `a[i]` (0.0.3 V03).
+    ///
+    /// The subscript must be `int` (`IndexNotInt`); the indexed value must
+    /// be an array (a `ref [T]` parameter reads as `[T]`; a `box<[T]>` must
+    /// be read with `deref` first). The result is a bounds-checked **copy**
+    /// of the element — deep for owned element types (D3) — so the read
+    /// never disturbs the array.
+    fn typeck_index(&mut self, arr: ExprHir, idx: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
         let typed_arr = self.typeck_expr(arr, None)?;
         let typed_idx = self.typeck_expr(idx, None)?;
 
-        // Index must be Int
-        if let Err(e) = unify(&Type::Int, &typed_idx.ty(), typed_idx.span()) {
-            self.add_error(e.kind, e.span);
+        if !matches!(typed_idx.ty(), Type::Int) {
+            self.add_error(
+                TypeckErrorKind::IndexNotInt {
+                    found: typed_idx.ty(),
+                },
+                typed_idx.span(),
+            );
             return Err(());
         }
 
-        // Arrays are parsed but not supported in 0.0.2.
-        match typed_arr.ty() {
-            Type::Array(_) => {
-                self.add_error(
-                    TypeckErrorKind::UnsupportedFeature {
-                        feature: "array indexing".to_string(),
-                    },
-                    typed_arr.span(),
-                );
-                Err(())
+        let arr_ty = typed_arr.ty();
+        let target: &Type = match &arr_ty {
+            Type::Ref(inner) => inner,
+            ty => ty,
+        };
+        let elem_ty = match target {
+            Type::Array(el) => (**el).clone(),
+            Type::Box(_) => {
+                self.add_error(TypeckErrorKind::IndexOnBox, typed_arr.span());
+                return Err(());
             }
             other => {
                 self.add_error(
-                    TypeckErrorKind::TypeMismatch {
-                        expected: Type::Array(Box::new(Type::Unsupported("elem".to_string()))),
-                        found: other,
+                    TypeckErrorKind::InvalidOperand {
+                        op: "index".to_string(),
+                        ty: other.clone(),
                     },
                     typed_arr.span(),
                 );
-                Err(())
+                return Err(());
             }
+        };
+
+        // Span covers the whole `a[i]` chain — it is what the runtime
+        // `IndexOutOfRange` error points at. The span is threaded from the
+        // AST (`arr[idx]`, including the closing `]`) rather than derived
+        // here, so it stays accurate even when the index expression has
+        // surrounding whitespace.
+        Ok(TypedExprHir::Index {
+            arr: Box::new(typed_arr),
+            idx: Box::new(typed_idx),
+            ty: elem_ty,
+            span,
+        })
+    }
+
+    /// Type check an array literal `[e1, e2, ...]` (0.0.3 V03).
+    ///
+    /// Element types are uniform (0.0.1 equality rule): the element type is
+    /// the annotation's element type when one flows in (so `x: [int] = [];`
+    /// types the empty literal, and `[Ok(1), Err("e")]` infers payloads from
+    /// a `Result` element annotation), otherwise the first element's type.
+    /// Later elements must match it exactly → `ArrayTypeMismatch`. Each
+    /// element is a consuming position.
+    fn typeck_array_lit(
+        &mut self,
+        elems: Vec<ExprHir>,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let hint_elem: Option<Type> = match expected {
+            Some(Type::Array(el)) => Some((**el).clone()),
+            _ => None,
+        };
+
+        if elems.is_empty() {
+            let Some(elem) = hint_elem else {
+                self.add_error(TypeckErrorKind::CannotInferArrayType, span);
+                return Err(());
+            };
+            return Ok(TypedExprHir::ArrayLit {
+                elems: Vec::new(),
+                ty: Type::Array(Box::new(elem)),
+                span,
+            });
         }
+
+        let mut elem_ty = hint_elem;
+        let mut typed_elems = Vec::with_capacity(elems.len());
+        for e in elems {
+            let typed_e = self.typeck_expr(e, elem_ty.as_ref())?;
+            match &elem_ty {
+                Some(exp) => {
+                    if *exp != typed_e.ty() {
+                        self.add_error(
+                            TypeckErrorKind::ArrayTypeMismatch {
+                                expected: exp.clone(),
+                                found: typed_e.ty(),
+                            },
+                            typed_e.span(),
+                        );
+                        return Err(());
+                    }
+                }
+                None => elem_ty = Some(typed_e.ty()),
+            }
+            self.reject_bare_owned_arg(&typed_e, typed_e.span())?;
+            typed_elems.push(typed_e);
+        }
+
+        // SAFETY: non-empty elems either took the hint or set `elem_ty`
+        // from the first element above, so it cannot be `None` here.
+        let ty = Type::Array(Box::new(elem_ty.expect("element type was established")));
+        Ok(TypedExprHir::ArrayLit {
+            elems: typed_elems,
+            ty,
+            span,
+        })
+    }
+
+    /// Type check an index assignment `a[i] = expr` (0.0.3 V03, D3).
+    ///
+    /// The target must be an array binding (local, global, or by-value
+    /// parameter — the resolver rejects `ref` parameters and non-bare
+    /// receivers). Writing an element does not rebind `a`, so immutability
+    /// of `a` is not required (same rule as `p.f = e`); bounds are checked
+    /// at runtime. The RHS is a consuming position.
+    fn typeck_assign_index(
+        &mut self,
+        name: String,
+        binding_id: BindingId,
+        index: ExprHir,
+        rhs: ExprHir,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let obj_ty = self.lookup_type(&name, span)?;
+        let elem_ty = match &obj_ty {
+            Type::Array(el) => (**el).clone(),
+            Type::Box(_) => {
+                self.add_error(TypeckErrorKind::IndexOnBox, span);
+                return Err(());
+            }
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "index assignment".to_string(),
+                        ty: other.clone(),
+                    },
+                    span,
+                );
+                return Err(());
+            }
+        };
+
+        let typed_idx = self.typeck_expr(index, None)?;
+        if !matches!(typed_idx.ty(), Type::Int) {
+            self.add_error(
+                TypeckErrorKind::IndexNotInt {
+                    found: typed_idx.ty(),
+                },
+                typed_idx.span(),
+            );
+            return Err(());
+        }
+
+        let typed_rhs = self.typeck_expr(rhs, Some(&elem_ty))?;
+        if let Err(e) = unify_assign(&elem_ty, &typed_rhs.ty(), typed_rhs.span()) {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
+
+        Ok(TypedExprHir::AssignIndex {
+            name,
+            binding_id,
+            index: Box::new(typed_idx),
+            rhs: Box::new(typed_rhs),
+            ty: Type::Unit,
+            hir_id,
+            span,
+        })
     }
 
     /// Type check a field access `obj.field` (0.0.3 V02).
@@ -2246,12 +2415,20 @@ impl TypeChecker {
     }
 }
 
-/// Render a field-access chain as a dotted path (`o.name`, `w.payload`) for
-/// error messages; non-field/ident shapes degrade to `<expr>`.
+/// Render a field/index-access chain as a source-shaped path (`o.name`,
+/// `w.payload`, `a[i]`) for error messages; other shapes degrade to
+/// `<expr>`.
 fn hir_field_path(expr: &ExprHir) -> String {
     match expr {
         ExprHir::Field(obj, field) => format!("{}.{}", hir_field_path(obj), field),
+        ExprHir::Index(arr, idx, _) => format!("{}[{}]", hir_field_path(arr), hir_field_path(idx)),
         ExprHir::Ident { name, .. } => name.clone(),
+        // Literal subscripts render as themselves so `move s[0]` reads as
+        // `s[0]`, not `s[<expr>]`.
+        ExprHir::Int(n, _) => n.to_string(),
+        ExprHir::Float(f, _) => f.to_string(),
+        ExprHir::Bool(b, _) => b.to_string(),
+        ExprHir::Str(s, _) => format!("\"{s}\""),
         _ => "<expr>".to_string(),
     }
 }

@@ -55,6 +55,11 @@ pub enum RuntimeErrorKind {
     /// defensive: the encoding carries no struct id on `GetField`/
     /// `SetField*`, so verify cannot check offsets statically).
     FieldOutOfRange { index: u16, len: usize },
+    /// An array index was outside `0..len` (0.0.3 V03). This is *not*
+    /// defensive — the `a[i]` syntax is bounds-checked at runtime by
+    /// design (D3); the error carries the faulting instruction's span via
+    /// the span_map (V01).
+    IndexOutOfRange { index: i64, len: usize },
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -91,6 +96,9 @@ impl std::fmt::Display for RuntimeErrorKind {
                     f,
                     "field offset {index} out of range (struct has {len} fields)"
                 )
+            }
+            RuntimeErrorKind::IndexOutOfRange { index, len } => {
+                write!(f, "index {index} out of range (array length {len})")
             }
         }
     }

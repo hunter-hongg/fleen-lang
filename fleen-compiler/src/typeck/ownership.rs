@@ -376,20 +376,51 @@ impl<'a> Cx<'a> {
                     self.walk_expr(arg, false);
                 }
             }
-            TypedExprHir::Index(a, b) => {
-                // Index expressions are rejected by typeck, so they cannot
-                // appear in a well-formed tree; keep the walk total.
-                self.walk_expr(a, false);
-                self.walk_expr(b, false);
+            TypedExprHir::Index { arr, idx, .. } => {
+                // An element read is read-only: the array stays in its slot
+                // and the element is copied out (deep for owned elements,
+                // D3) — same shape as a field read (V02).
+                self.walk_expr(arr, false);
+                self.walk_expr(idx, false);
+            }
+            // A fresh array consumes its element initializers (V03).
+            TypedExprHir::ArrayLit { elems, .. } => {
+                for elem in elems.iter_mut() {
+                    self.walk_expr(elem, true);
+                }
             }
             TypedExprHir::Int(..)
             | TypedExprHir::Float(..)
             | TypedExprHir::Bool(..)
             | TypedExprHir::Str(..) => {}
             TypedExprHir::Block(b) => self.walk_block(b, true),
-            // Field assignment mirrors plain assignment: the RHS is not a
-            // producing position; the struct binding's own move state resets
-            // (globals hold the original, never moved — D5).
+            // Field/index assignment mirrors plain assignment: the RHS is
+            // not a producing position; the binding's own move state resets
+            // (globals hold the original, never moved — D5). The index
+            // expression is a plain read too.
+            TypedExprHir::AssignIndex {
+                name,
+                binding_id,
+                index,
+                rhs,
+                span,
+                ..
+            } => {
+                self.walk_expr(rhs, false);
+                self.walk_expr(index, false);
+                if self.declared.contains(binding_id) && !self.globals.contains(binding_id) {
+                    if matches!(
+                        self.current(binding_id),
+                        MoveState::Moved { .. } | MoveState::MaybeMoved { .. }
+                    ) {
+                        self.errors.push(TypeckError::new(
+                            TypeckErrorKind::AssignToMoved { name: name.clone() },
+                            *span,
+                        ));
+                    }
+                    self.state.remove(binding_id);
+                }
+            }
             TypedExprHir::AssignField {
                 obj_name,
                 obj_binding_id,
@@ -703,15 +734,24 @@ fn scan_owned_local_uses(
                 scan_owned_local_uses(arg, out, globals, entry);
             }
         }
-        TypedExprHir::Index(a, b) => {
-            scan_owned_local_uses(a, out, globals, entry);
-            scan_owned_local_uses(b, out, globals, entry);
+        TypedExprHir::Index { arr, idx, .. } => {
+            scan_owned_local_uses(arr, out, globals, entry);
+            scan_owned_local_uses(idx, out, globals, entry);
+        }
+        TypedExprHir::ArrayLit { elems, .. } => {
+            for elem in elems {
+                scan_owned_local_uses(elem, out, globals, entry);
+            }
         }
         TypedExprHir::Field { obj, .. } => scan_owned_local_uses(obj, out, globals, entry),
         TypedExprHir::StructLit { inits, .. } => {
             for (_, init) in inits {
                 scan_owned_local_uses(init, out, globals, entry);
             }
+        }
+        TypedExprHir::AssignIndex { index, rhs, .. } => {
+            scan_owned_local_uses(rhs, out, globals, entry);
+            scan_owned_local_uses(index, out, globals, entry);
         }
         TypedExprHir::AssignField { rhs, .. } => scan_owned_local_uses(rhs, out, globals, entry),
         TypedExprHir::Block(b) => scan_block_owned_local_uses(b, out, globals, entry),

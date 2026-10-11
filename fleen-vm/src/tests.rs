@@ -1424,3 +1424,221 @@ fn struct_deep_clone_via_dupdeep() {
     // q's write reached only q: p's pointee is still 1.
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(1)));
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.3 V03: arrays (bytecode v3, 0xB4–0xB8). `ArrGet` bounds failures are a
+// real runtime check (D3), not a defensive backstop: `a[i]` is bounds-checked
+// at runtime by design. `ArrSet*` take the array from the slot/global, so the
+// operand stack only carries the value and the index (value below, index on
+// top — the VM pops the index first). `CloneLocal(slot)` reads the *source*
+// slot and pushes a deep copy.
+// ---------------------------------------------------------------------------
+
+fn v3_array_module(constants: Vec<Const>, code: Box<[u8]>, locals: u16) -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        version: 3,
+        constants,
+        functions: vec![func(code, 0, locals)],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn arr_new_get_set_execution() {
+    // a = [10, 20]; a[0] = 99; return a[0] → 99.
+    let m = v3_array_module(
+        vec![
+            Const::Str("main".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(99),
+            Const::Int(0),
+        ],
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::ArrNew, u16b(2)),
+            (Opcode::StoreLocal, u16b(0)),
+            // a[0] = 99 (array lives in slot 0; stack carries value then index)
+            (Opcode::Const, u32b(3)),
+            (Opcode::Const, u32b(4)),
+            (Opcode::ArrSetLocal, u16b(0)),
+            // return a[0]
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(4)),
+            (Opcode::ArrGet, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+    );
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(99)));
+}
+
+#[test]
+fn arr_len_of_new_array() {
+    // `[10, 20, 30]` → ArrLen → 3. ArrLen is a peek (`a → a int`): the length
+    // is pushed on top of the array, so a second slot stashes the length and
+    // `Pop` drops the array below it before Return.
+    let m = v3_array_module(
+        vec![
+            Const::Str("main".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+        ],
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::Const, u32b(3)),
+            (Opcode::ArrNew, u16b(3)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::ArrLen, vec![]),
+            (Opcode::StoreLocal, u16b(1)), // length → slot 1, array remains
+            (Opcode::Pop, vec![]),         // drop the array
+            (Opcode::LoadLocal, u16b(1)),  // length
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+    );
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(3)));
+}
+
+#[test]
+fn arr_get_negative_index_is_out_of_range() {
+    // `a[-1]` must be an out-of-range error, never a huge usize index — the
+    // sign check precedes the cast.
+    let m = v3_array_module(
+        vec![Const::Str("main".into()), Const::Int(10), Const::Int(-1)],
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::ArrNew, u16b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(2)), // -1
+            (Opcode::ArrGet, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::IndexOutOfRange { index: -1, len: 1 }
+    );
+}
+
+#[test]
+fn arr_index_out_of_range_carries_span() {
+    // End-to-end: the `IndexOutOfRange` runtime error points at the whole
+    // `a[5]` expression (the span now covers the closing `]`), matching the
+    // design intent and the lower-span contract.
+    let src = "func main(): int {\n    a = [10, 20];\n    a[5]\n}\n";
+    let err = Vm::new(fleen_compiler::compile(src).unwrap())
+        .run()
+        .unwrap_err();
+    assert_eq!(
+        err.kind,
+        RuntimeErrorKind::IndexOutOfRange { index: 5, len: 2 }
+    );
+    let (start, end) = err.span.expect("span_map must supply a span");
+    assert_eq!(&src[start as usize..end as usize], "a[5]");
+    assert_eq!(err.func.as_deref(), Some("main"));
+    assert!(err.pc.is_some());
+}
+
+#[test]
+fn arr_deep_clone_independence() {
+    // b = clone a (deep copy of the owned array); writing b[0] must not
+    // disturb a — the clone copies the element values, not the binding.
+    let m = v3_array_module(
+        vec![
+            Const::Str("main".into()),
+            Const::Str("x".into()),
+            Const::Str("y".into()),
+            Const::Str("z".into()),
+            Const::Int(0),
+        ],
+        enc(&[
+            (Opcode::Const, u32b(1)), // "x"
+            (Opcode::Const, u32b(2)), // "y"
+            (Opcode::ArrNew, u16b(2)),
+            (Opcode::StoreLocal, u16b(0)), // a
+            (Opcode::CloneLocal, u16b(0)), // push copy of a (slot 0 is source)
+            (Opcode::StoreLocal, u16b(1)), // b
+            // b[0] = "z"
+            (Opcode::Const, u32b(3)), // "z"
+            (Opcode::Const, u32b(4)), // index 0
+            (Opcode::ArrSetLocal, u16b(1)),
+            // return a[0]
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(4)),
+            (Opcode::ArrGet, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+    );
+    assert_eq!(Vm::new(m).run(), Ok(Value::Str("x".into())));
+}
+
+#[test]
+fn empty_array_len_is_zero() {
+    // `[ ]` (ArrNew 0) has length 0. ArrLen is a peek (`a → a int`): stash the
+    // length in a slot and `Pop` the array before Return.
+    let m = v3_array_module(
+        vec![Const::Str("main".into())],
+        enc(&[
+            (Opcode::ArrNew, u16b(0)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::ArrLen, vec![]),
+            (Opcode::StoreLocal, u16b(1)),
+            (Opcode::Pop, vec![]),
+            (Opcode::LoadLocal, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+    );
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(0)));
+}
+
+#[test]
+fn eq_on_two_arrays_is_defensive_error() {
+    // `==` on two array values is a typeck-level error; the VM must not
+    // silently compare (arrays are not `Eq`-able in Fleen).
+    let m = v3_array_module(
+        vec![
+            Const::Str("main".into()),
+            Const::Str("x".into()),
+            Const::Str("x".into()),
+        ],
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::ArrNew, u16b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::ArrNew, u16b(1)),
+            (Opcode::Eq, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ArithTypeMismatch
+    );
+}
+
+#[test]
+fn value_arr_display() {
+    // `Value::Arr` renders `[a, b]` (deep elements rendered recursively).
+    assert_eq!(
+        Value::Arr(Box::new([Value::Int(1), Value::Int(2)])).to_string(),
+        "[1, 2]"
+    );
+    assert_eq!(
+        Value::Arr(Box::new([Value::Str("x".into())])).to_string(),
+        "[x]"
+    );
+    assert_eq!(Value::Arr(Box::new([])).to_string(), "[]");
+}

@@ -50,6 +50,10 @@ pub enum Value {
     /// `Eq` on a struct is a typeck-level error, so a struct only reaches
     /// comparison opcodes through malformed bytecode (defensive error).
     Struct(Box<[Value]>),
+    /// Array value (0.0.3 V03): elements in source order. **Always owned**
+    /// (D3 — even `[int]`); `Eq` on an array is a typeck-level error
+    /// (defensive error in the VM).
+    Arr(Box<[Value]>),
     /// The unit value (no meaningful data).
     Unit,
     /// First-class function reference.
@@ -80,6 +84,16 @@ impl fmt::Display for Value {
                     write!(f, "{field}")?;
                 }
                 write!(f, " }}")
+            }
+            Value::Arr(elems) => {
+                write!(f, "[")?;
+                for (i, elem) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{elem}")?;
+                }
+                write!(f, "]")
             }
             Value::Unit => write!(f, "unit"),
             Value::Func(id) => write!(f, "<func #{}>", id.0),

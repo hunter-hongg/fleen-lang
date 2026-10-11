@@ -739,6 +739,13 @@ fn stack_delta(
         // 0.0.3 V02: field count from the struct table (the depth test
         // compiles from source, so the table is `mir.structs`).
         MirInstrKind::StructNew(id) => 1 - struct_fields.get(id).copied().unwrap_or(0) as i64,
+        // 0.0.3 V03: arrays. ArrNew's count is the operand; ArrGet pops the
+        // index and the array and pushes the element copy (the erratum shape).
+        MirInstrKind::ArrNew(n) => 1 - *n as i64,
+        MirInstrKind::ArrLen => 1,
+        MirInstrKind::ArrGet => -1,
+        MirInstrKind::ArrSetLocal(_) => -2,
+        MirInstrKind::ArrSetGlobal(_) => -2,
     }
 }
 
@@ -1545,4 +1552,120 @@ fn lower_struct_in_global_init() {
         "struct Point { x: int, y: int }\ng = Point { x: 1, y: 2 };\nfunc main(): int = 0",
     );
     assert!(mir.globals.len() == 1);
+}
+
+// ========== 0.0.3 V03: arrays ==========
+
+/// All instruction kinds of a function, flattened across blocks.
+fn instr_kinds(f: &MirFunc) -> Vec<&MirInstrKind> {
+    flat(f).into_iter().map(|i| &i.kind).collect()
+}
+
+#[test]
+fn lower_array_literal_elements_then_arrnew() {
+    let mir = lower_src("func main(): int {\n    a = [1, 2, 3];\n    a[0]\n}");
+    let f = find_func(&mir, "main");
+    let kinds = instr_kinds(f);
+    // Const 1; Const 2; Const 3; ArrNew(3); StoreLocal(a); ...
+    let arrnew = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::ArrNew(n) if *n == 3))
+        .expect("ArrNew(3) expected");
+    assert!(matches!(kinds[arrnew - 3], MirInstrKind::ConstInt(1)));
+    assert!(matches!(kinds[arrnew - 2], MirInstrKind::ConstInt(2)));
+    assert!(matches!(kinds[arrnew - 1], MirInstrKind::ConstInt(3)));
+}
+
+#[test]
+fn lower_index_read_is_arrget() {
+    let mir = lower_src("func main(): int {\n    a = [1, 2];\n    a[1]\n}");
+    let f = find_func(&mir, "main");
+    let kinds = instr_kinds(f);
+    let get = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::ArrGet))
+        .expect("ArrGet expected");
+    // The index constant sits right below the ArrGet (rhs-then-index shape
+    // is not visible here — the read has no rhs). The array operand is a
+    // bare owned read → auto-Clone (D3): CloneLocal deep-copies the array
+    // and the read pops the copy.
+    assert!(matches!(kinds[get - 1], MirInstrKind::ConstInt(1)));
+    assert!(matches!(kinds[get - 2], MirInstrKind::CloneLocal(_)));
+}
+
+#[test]
+fn lower_index_write_local_shape() {
+    // `a[0] = 5;` → <5>; Dup; <0>; ArrSetLocal(slot); Pop (statement discard).
+    let mir = lower_src("func main(): int {\n    a = [1, 2];\n    a[0] = 5;\n    a[0]\n}");
+    let f = find_func(&mir, "main");
+    let kinds = instr_kinds(f);
+    let set = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::ArrSetLocal(_)))
+        .expect("ArrSetLocal expected");
+    assert!(matches!(kinds[set - 1], MirInstrKind::ConstInt(0))); // index
+    assert!(matches!(kinds[set - 2], MirInstrKind::Dup)); // expression value
+    assert!(matches!(kinds[set - 3], MirInstrKind::ConstInt(5))); // rhs
+    // Statement-level discard after the value-yielding assignment.
+    assert!(matches!(kinds[set + 1], MirInstrKind::Pop));
+}
+
+#[test]
+fn lower_index_write_owned_rhs_uses_dupdeep() {
+    let mir = lower_src(
+        "func main(): int {\n    s = [\"x\"];\n    t = \"y\";\n    s[0] = move t;\n    0\n}",
+    );
+    let f = find_func(&mir, "main");
+    let kinds = instr_kinds(f);
+    let set = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::ArrSetLocal(_)))
+        .expect("ArrSetLocal expected");
+    assert!(matches!(kinds[set - 2], MirInstrKind::DupDeep));
+}
+
+#[test]
+fn lower_index_write_global_shape() {
+    let mir = lower_src("g: [int] = [1, 2];\nfunc main(): int {\n    g[1] = 9;\n    g[0]\n}");
+    let f = find_func(&mir, "main");
+    let kinds = instr_kinds(f);
+    let set = kinds
+        .iter()
+        .position(|k| matches!(k, MirInstrKind::ArrSetGlobal(g) if *g == 0))
+        .expect("ArrSetGlobal(0) expected");
+    assert!(matches!(kinds[set - 1], MirInstrKind::ConstInt(1)));
+    assert!(matches!(kinds[set - 2], MirInstrKind::Dup));
+}
+
+#[test]
+fn lower_array_literal_in_global_init() {
+    // Source order == declaration order for arrays: any element shapes that
+    // global init accepts compose — no ComplexGlobalInit.
+    let mir = lower_src("e: [int] = [];\ng: [int] = [1, 2];\nfunc main(): int = 0");
+    assert_eq!(mir.globals.len(), 2);
+    let init = &mir.globals[1].init;
+    assert!(matches!(
+        init.last().map(|i| &i.kind),
+        Some(MirInstrKind::ArrNew(2))
+    ));
+}
+
+#[test]
+fn lower_index_read_span_covers_the_chain() {
+    // The ArrGet's span names `a[1]` — it is what a runtime
+    // IndexOutOfRange points at.
+    let src = "func main(): int {\n    a = [1, 2];\n    a[1]\n}";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "main");
+    let get = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find(|i| matches!(i.kind, MirInstrKind::ArrGet))
+        .expect("ArrGet expected");
+    // Locate `a[1]` on the last line (the literal `[1, 2]` earlier in the
+    // source contains no `a[1]`, but search from the line start to be safe).
+    let line3 = src.rfind("a[1]").expect("source slice");
+    assert_eq!(get.span.start, line3 as u32);
+    assert_eq!(get.span.end, (line3 + 4) as u32);
 }

@@ -764,6 +764,122 @@ impl Vm {
                     _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
+            // ----------------------------------------------------------------
+            // 0.0.3 V03: array instructions (bytecode v3, 0xB4–0xB8).
+            // `ArrGet` bounds failures are NOT defensive — the `a[i]` syntax
+            // is bounds-checked at runtime by design (D3). Other shape
+            // violations are defensive (fleen-verify rejects malformed
+            // modules before execution).
+            // ----------------------------------------------------------------
+            Opcode::ArrNew => {
+                let s = take!(2);
+                let n = u16::from_le_bytes([s[0], s[1]]) as usize;
+                if self.stack.len() < n {
+                    return Err(RuntimeErrorKind::StackUnderflow);
+                }
+                let elems: Vec<Value> = self.stack.split_off(self.stack.len() - n);
+                self.stack.push(Value::Arr(elems.into_boxed_slice()));
+            }
+            Opcode::ArrLen => {
+                // `a → a int`: peek — the array stays on the stack. Through
+                // a borrow handle (`ref [T]` read path) the target's length
+                // is read.
+                let len = {
+                    let a = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                    match self.read_ref(a)? {
+                        Value::Arr(elems) => elems.len(),
+                        _ => return Err(RuntimeErrorKind::StackShape),
+                    }
+                };
+                self.stack.push(Value::Int(len as i64));
+            }
+            Opcode::ArrGet => {
+                // `a i → v` (pop form, the V02 `GetField` erratum shape):
+                // the element copy is a deep copy for owned element types,
+                // so the read never disturbs the original. The sign check
+                // comes before the range check — `a[-1]` must be an
+                // out-of-range error, never a huge usize index.
+                let i = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Int(i) => i,
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                };
+                let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let copy = {
+                    let arr = self.read_ref(&a)?;
+                    match arr {
+                        Value::Arr(elems) => {
+                            if i < 0 || i as usize >= elems.len() {
+                                return Err(RuntimeErrorKind::IndexOutOfRange {
+                                    index: i,
+                                    len: elems.len(),
+                                });
+                            }
+                            elems[i as usize].clone()
+                        }
+                        _ => return Err(RuntimeErrorKind::StackShape),
+                    }
+                };
+                self.stack.push(copy);
+            }
+            Opcode::ArrSetLocal => {
+                let s = take!(2);
+                let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let i = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Int(i) => i,
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                };
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let idx = frame.stack_base + slot;
+                let slot_v = self
+                    .stack
+                    .get_mut(idx)
+                    .ok_or(RuntimeErrorKind::StackShape)?;
+                // Element writes go through local/global array bindings
+                // only (typeck rejects writes through borrow handles), so a
+                // `Ref` in the slot is malformed bytecode.
+                match slot_v {
+                    Value::Arr(elems) => {
+                        if i < 0 || i as usize >= elems.len() {
+                            return Err(RuntimeErrorKind::IndexOutOfRange {
+                                index: i,
+                                len: elems.len(),
+                            });
+                        }
+                        // The overwrite drops the old element value.
+                        elems[i as usize] = v;
+                    }
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                }
+            }
+            Opcode::ArrSetGlobal => {
+                let s = take!(2);
+                let gid = u16::from_le_bytes([s[0], s[1]]) as usize;
+                let i = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Int(i) => i,
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                };
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                if gid >= self.globals.len() {
+                    return Err(RuntimeErrorKind::GlobalOutOfRange(
+                        fleen_compiler::codegen::GlobalId(gid as u32),
+                    ));
+                }
+                // Writing an element does not rebind the global, so the
+                // `mutable` gate of `StoreGlobal` does not apply here (same
+                // rule as `SetFieldGlobal` on a const struct binding).
+                match &mut self.globals[gid] {
+                    Value::Arr(elems) => {
+                        if i < 0 || i as usize >= elems.len() {
+                            return Err(RuntimeErrorKind::IndexOutOfRange {
+                                index: i,
+                                len: elems.len(),
+                            });
+                        }
+                        elems[i as usize] = v;
+                    }
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                }
+            }
         }
         self.frames
             .last_mut()

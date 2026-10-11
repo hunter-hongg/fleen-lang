@@ -14,10 +14,12 @@ use crate::parser::error::{ParseError, ParseErrorKind};
 use crate::source_map::FileId;
 
 /// Whether this token can start a new statement (used at block starts;
-/// includes `(` `-` `!`/`not` `{`).
+/// includes `(` `-` `!`/`not` `{` and, since 0.0.3 V03, `[` — an array
+/// literal statement like `[1, 2];`).
 ///
 /// `not` and `!` are two spellings of the same operator, so the set
-/// includes both; `{` is for block-expression statements (`{ 42 }`).
+/// includes both; `{` is for block-expression statements (`{ 42 }`); `[`
+/// is for array-literal expression statements (V03).
 pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -42,6 +44,7 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::Bang
             | TokenKind::Minus
             | TokenKind::LParen
+            | TokenKind::LBracket
             | TokenKind::LBrace
     )
 }
@@ -49,14 +52,17 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
 /// After a statement is complete, whether this token implies an "implicit
 /// end" (the pass inserts a semicolon based on this).
 ///
-/// The start set ∖ {`(`, `-`, `{`} ∪ {`}`, EOF} — `(` and `-` are also in
-/// the continuation set, and continuation wins, so a statement cannot end
-/// on them (`x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`); `{` is not included so that
-/// Allman style (`if c` ⏎ `{`) does not split a statement (ASI.md §3.2,
-/// §5 #4).
+/// The start set ∖ {`(`, `-`, `[`, `{`} ∪ {`}`, EOF} — `(` and `-` are also
+/// in the continuation set, and continuation wins, so a statement cannot end
+/// on them (`x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`); `[` stays in the continuation
+/// set so `f()` ⏎ `[0]` remains an index chain (V03: the same token starts a
+/// literal only after an explicit `;`/`}` boundary — the token-based ASI
+/// cannot tell index from literal, and the `;`-always-legal escape hatch
+/// covers the literal case); `{` is not included so that Allman style
+/// (`if c` ⏎ `{`) does not split a statement (ASI.md §3.2, §5 #4).
 pub(crate) fn implies_stmt_end(kind: &TokenKind) -> bool {
     match kind {
-        TokenKind::Minus | TokenKind::LParen | TokenKind::LBrace => false,
+        TokenKind::Minus | TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => false,
         TokenKind::RBrace | TokenKind::Eof => true,
         other => can_start_stmt(other),
     }
@@ -330,6 +336,7 @@ mod tests {
             TokenKind::Bang,
             TokenKind::Minus,
             TokenKind::LParen,
+            TokenKind::LBracket,
             TokenKind::LBrace,
         ];
         for k in yes {
@@ -369,7 +376,6 @@ mod tests {
             TokenKind::Semi,
             TokenKind::RParen,
             TokenKind::RBrace,
-            TokenKind::LBracket,
             TokenKind::RBracket,
             TokenKind::Arrow,
             TokenKind::Eof,
@@ -400,6 +406,9 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::Const));
         assert!(!implies_stmt_end(&TokenKind::Minus));
         assert!(!implies_stmt_end(&TokenKind::LParen));
+        // V03: `[` can start a statement but never ends one — it is in the
+        // continuation set, so `f()` ⏎ `[0]` keeps joining as an index chain.
+        assert!(!implies_stmt_end(&TokenKind::LBracket));
         assert!(!implies_stmt_end(&TokenKind::LBrace));
         // Terminator set.
         assert!(implies_stmt_end(&TokenKind::RBrace));
@@ -550,6 +559,33 @@ mod tests {
         // `f()` ⏎ `[0]` ⇒ `f()[0]` (ASI.md §5.1 table: `[` ∈ continuation set).
         let ks = kinds("f()\n[0]\n");
         assert_eq!(semi_count(&ks), 1);
+    }
+
+    #[test]
+    fn array_literal_continues_binding_across_lines() {
+        // 0.0.3 V03: `x =` ⏎ `[1, 2]` — the binding is incomplete, so the
+        // array literal joins across the line break (PLAN §3.2.2 trap case).
+        let ks = kinds("x =\n[1, 2]\n");
+        assert_eq!(semi_count(&ks), 1); // only at EOF
+    }
+
+    #[test]
+    fn array_literal_statement_after_explicit_semi() {
+        // 0.0.3 V03: `[1, 2];` starts a new statement after an explicit
+        // `;` boundary — the token-based ASI cannot tell index from literal,
+        // so a literal statement requires the boundary (the `;` escape hatch).
+        let ks = kinds("x = 1;\n[1, 2];\n");
+        assert_eq!(semi_count(&ks), 2);
+    }
+
+    #[test]
+    fn complete_stmt_joins_bracket_as_index_trap() {
+        // 0.0.3 V03 documented trap: `x = 1` ⏎ `[1, 2]` joins as
+        // `x = 1[1, 2]` — an index on the literal, which the parser rejects.
+        // The ASI layer is token-based and cannot see the difference; the
+        // `;`-always-legal escape hatch is the fix (PLAN §3.2.2).
+        let ks = kinds("x = 1\n[1, 2]\n");
+        assert_eq!(semi_count(&ks), 1); // joined, no split inserted
     }
 
     #[test]

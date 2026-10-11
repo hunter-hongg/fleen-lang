@@ -254,6 +254,16 @@ fn all_instructions_encode_with_expected_opcode_and_width() {
         (instr(MirInstrKind::IsErr), Opcode::IsErr, 0),
         (instr(MirInstrKind::UnwrapOk), Opcode::UnwrapOk, 0),
         (instr(MirInstrKind::UnwrapErr), Opcode::UnwrapErr, 0),
+        // 0.0.3 V03: arrays (bytecode v3, 0xB4–0xB8).
+        (instr(MirInstrKind::ArrNew(2)), Opcode::ArrNew, 2),
+        (instr(MirInstrKind::ArrLen), Opcode::ArrLen, 0),
+        (instr(MirInstrKind::ArrGet), Opcode::ArrGet, 0),
+        (instr(MirInstrKind::ArrSetLocal(2)), Opcode::ArrSetLocal, 2),
+        (
+            instr(MirInstrKind::ArrSetGlobal(2)),
+            Opcode::ArrSetGlobal,
+            2,
+        ),
     ];
     for (instr, expected_op, operand_len) in cases {
         let f = main_func(vec![MirBlock {
@@ -1218,4 +1228,104 @@ fn compile_full(source: &str) -> Module {
     let typed = crate::typeck::typeck(hir).expect("typeck");
     let mir = crate::lower::lower(typed).expect("lower");
     codegen(mir).expect("codegen")
+}
+
+// ------------------- 0.0.3 V03: arrays (bytecode v3, 0xB4–0xB8) -----------
+
+#[test]
+fn array_opcodes_encode_with_expected_opcode_and_width() {
+    // Lock the numbering and the operand width of the whole array group so a
+    // codegen regression is caught (mirrors `v2_opcode_bytes_match_the_numbering_plan`).
+    assert_eq!(Opcode::ArrNew as u8, 0xB4);
+    assert_eq!(Opcode::ArrLen as u8, 0xB5);
+    assert_eq!(Opcode::ArrGet as u8, 0xB6);
+    assert_eq!(Opcode::ArrSetLocal as u8, 0xB7);
+    assert_eq!(Opcode::ArrSetGlobal as u8, 0xB8);
+
+    // Reserved slots past the group stay unknown.
+    assert_eq!(Opcode::from_byte(0xB9), None);
+
+    // Round trip through `from_byte` keeps every array opcode decodable.
+    for op in [
+        Opcode::ArrNew,
+        Opcode::ArrLen,
+        Opcode::ArrGet,
+        Opcode::ArrSetLocal,
+        Opcode::ArrSetGlobal,
+    ] {
+        assert_eq!(Opcode::from_byte(op as u8), Some(op));
+    }
+}
+
+#[test]
+fn array_u16_operand_round_trips_le() {
+    // ArrNew(0x0102) / ArrSetLocal(0x0304) / ArrSetGlobal(0x0506): the u16
+    // operand must survive both codegen emit and the .flnc byte layout in
+    // little-endian.
+    let f = main_func_locals(
+        4,
+        vec![MirBlock {
+            id: BlockId(0),
+            instrs: vec![
+                MirInstr::new(MirInstrKind::ArrNew(0x0102), Span::new(FileId(0), 0, 1)),
+                MirInstr::new(
+                    MirInstrKind::ArrSetLocal(0x0304),
+                    Span::new(FileId(0), 0, 1),
+                ),
+                MirInstr::new(
+                    MirInstrKind::ArrSetGlobal(0x0506),
+                    Span::new(FileId(0), 0, 1),
+                ),
+            ],
+            terminator: Terminator::Return,
+        }],
+    );
+    let module = codegen(Mir {
+        structs: Vec::new(),
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let code = &module.functions[0].code;
+    assert_eq!(code[0], Opcode::ArrNew as u8);
+    assert_eq!(&code[1..3], &0x0102u16.to_le_bytes());
+    assert_eq!(code[3], Opcode::ArrSetLocal as u8);
+    assert_eq!(&code[4..6], &0x0304u16.to_le_bytes());
+    assert_eq!(code[6], Opcode::ArrSetGlobal as u8);
+    assert_eq!(&code[7..9], &0x0506u16.to_le_bytes());
+    assert_eq!(code.len(), 10, "3 x 3-byte instructions + Return");
+
+    // Survives the .flnc round trip byte-for-byte.
+    let bytes = to_bytes(&module);
+    let back = from_bytes(&bytes).expect("round trip");
+    assert_eq!(back, module);
+}
+
+#[test]
+fn array_program_flnc_round_trip() {
+    // Full chain: a program exercising literals, index read, and index write
+    // compiles to bytecode v3 and survives the .flnc round trip.
+    let src = r#"
+func main(): int {
+    a = [10, 20, 30];
+    a[1] = 99;
+    a[1]
+}
+"#;
+    let module = compile_full(src);
+    assert_eq!(module.version, 3);
+    let main = module
+        .functions
+        .iter()
+        .find(|f| {
+            matches!(&module.constants[f.name.0 as usize], Const::Str(s) if s.as_ref() == "main")
+        })
+        .unwrap();
+    assert!(main.code.contains(&(Opcode::ArrNew as u8)));
+    assert!(main.code.contains(&(Opcode::ArrGet as u8)));
+    assert!(main.code.contains(&(Opcode::ArrSetLocal as u8)));
+
+    let bytes = to_bytes(&module);
+    let back = from_bytes(&bytes).expect("round trip");
+    assert_eq!(back, module);
 }

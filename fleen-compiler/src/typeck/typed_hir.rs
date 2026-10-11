@@ -43,7 +43,9 @@ pub enum Type {
     Func(Vec<Type>, Box<Type>),
     /// Result type: Result[T, E].
     Result(Box<Type>, Box<Type>),
-    /// Array type (parsed but unsupported in 0.0.2 codegen).
+    /// Array type (0.0.3 V03). Always an owned type (D3) — even `[int]`:
+    /// array identity is heap state, and a "Copy array" would silently fork
+    /// on write. Element reads are bounds-checked copies.
     Array(Box<Type>),
     /// Box type (0.0.2: typeck-supported ownership; lowering lands in U06).
     Box(Box<Type>),
@@ -109,7 +111,8 @@ impl Type {
     /// borrowed (`ref _`), which is what the ownership checker keys on.
     pub fn is_owned(&self) -> bool {
         match self {
-            Type::String | Type::Box(_) => true,
+            // D3: arrays are owned for every element type (even `[int]`).
+            Type::String | Type::Box(_) | Type::Array(_) => true,
             Type::Result(t, e) => t.is_owned() || e.is_owned(),
             // A struct with any non-Copy field is an owned type (D2).
             Type::Struct(info) => !info.copy,
@@ -327,6 +330,26 @@ pub enum TypedExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// `a[i] = <expr>` (0.0.3 V03: one-level element write). Bounds are
+    /// checked at runtime (`ArrSet*`); `ty` is the element type, carried so
+    /// lowering can pick the `Dup`/`DupDeep` form from the RHS without
+    /// re-deriving it.
+    AssignIndex {
+        name: String,
+        binding_id: BindingId,
+        index: Box<TypedExprHir>,
+        rhs: Box<TypedExprHir>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `[e1, e2, ...]` (0.0.3 V03). Elements keep source order; `ty` is the
+    /// full array type (an empty literal takes it from the annotation).
+    ArrayLit {
+        elems: Vec<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
     /// `Name { field: expr, ... }` (0.0.3 V02). Initializers are in
     /// *source* order paired with their declaration-order field index, so
     /// lowering evaluates source-first and reorders into `StructNew`'s
@@ -340,8 +363,14 @@ pub enum TypedExprHir {
     },
     /// Function call
     Call(Box<TypedExprHir>, Vec<TypedExprHir>, Type), // Type = return type
-    /// Index access
-    Index(Box<TypedExprHir>, Box<TypedExprHir>),
+    /// Index access `a[i]` (0.0.3 V03): a bounds-checked **copy** of the
+    /// element (deep for owned element types). `ty` is the element type.
+    Index {
+        arr: Box<TypedExprHir>,
+        idx: Box<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
     /// Field access `obj.field` (0.0.3 V02): reads are copies of the field
     /// (deep for owned fields). `field_idx` is the declaration-order index
     /// into the struct table; `ty` is the field's type.
@@ -404,9 +433,11 @@ impl TypedExprHir {
             },
             TypedExprHir::AssignDeref { .. } => Type::Unit,
             TypedExprHir::AssignField { .. } => Type::Unit,
+            TypedExprHir::AssignIndex { .. } => Type::Unit,
+            TypedExprHir::ArrayLit { ty, .. } => ty.clone(),
             TypedExprHir::StructLit { ty, .. } => ty.clone(),
             TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
-            TypedExprHir::Index(_, _) => Type::Unsupported("index".to_string()),
+            TypedExprHir::Index { ty, .. } => ty.clone(),
             TypedExprHir::Field { ty, .. } => ty.clone(),
             TypedExprHir::Int(_, _) => Type::Int,
             TypedExprHir::Float(_, _) => Type::Float,
@@ -445,9 +476,11 @@ impl TypedExprHir {
             TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) => *s,
             TypedExprHir::AssignDeref { span, .. } => *span,
             TypedExprHir::AssignField { span, .. } => *span,
+            TypedExprHir::AssignIndex { span, .. } => *span,
+            TypedExprHir::ArrayLit { span, .. } => *span,
             TypedExprHir::StructLit { span, .. } => *span,
             TypedExprHir::Call(f, _, _) => f.span(),
-            TypedExprHir::Index(a, _) => a.span(),
+            TypedExprHir::Index { span, .. } => *span,
             TypedExprHir::Field { span, .. } => *span,
             TypedExprHir::Int(_, s)
             | TypedExprHir::Float(_, s)

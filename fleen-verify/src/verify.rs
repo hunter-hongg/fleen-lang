@@ -406,6 +406,23 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         }
         Opcode::GetField => (0, 1), // s → v
         Opcode::SetFieldLocal | Opcode::SetFieldGlobal => (-1, 1), // v →
+        // 0.0.3 V03: arrays (BYTECODE v3). `ArrNew`'s element count is the
+        // operand (static — no abstract interpretation); `ArrLen`/`ArrGet`
+        // keep the array and push a value (Δ+1, min 1); `ArrSet*` pop the
+        // value and the index (Δ−2, min 2).
+        Opcode::ArrNew => {
+            let n = slot_index(code, d)? as i64;
+            (1 - n, n)
+        }
+        Opcode::ArrLen => (1, 1), // a → a int (peek)
+        // As-built (the V02 `GetField` erratum shape): `ArrGet` **pops** the
+        // index and the array and pushes the element copy (`a i → v`,
+        // Δ−1, min 2) — PLAN §5.1/§5.2's peek form (`a i → a v`, "+1 min 1")
+        // leaves the array stranded under the element with no
+        // remove-below-top instruction, and `a[i][j]` chains + the V04
+        // for-desugar require the pop.
+        Opcode::ArrGet => (-1, 2),
+        Opcode::ArrSetLocal | Opcode::ArrSetGlobal => (-2, 2), // v i →
     })
 }
 
@@ -510,8 +527,11 @@ fn walk_function(
                 }
             }
             // 0.0.2 U07: `CloneGlobal` is a read, so only the index range is
-            // checked (BYTECODE.md §5.10).
-            Opcode::CloneGlobal => {
+            // checked (BYTECODE.md §5.10). `ArrSetGlobal` (0.0.3 V03) writes
+            // an *element*, which does not rebind the global — so like
+            // `SetFieldGlobal` it skips the `mutable` gate and only the
+            // index range is checked.
+            Opcode::CloneGlobal | Opcode::ArrSetGlobal => {
                 let idx = global_index(code, d)?;
                 if idx as usize >= module.globals.len() {
                     return Err(VerifyError::GlobalIndexOutOfRange {
@@ -525,7 +545,8 @@ fn walk_function(
             | Opcode::BindMatch
             | Opcode::MakeRefLocal
             | Opcode::MoveLocal
-            | Opcode::CloneLocal => {
+            | Opcode::CloneLocal
+            | Opcode::ArrSetLocal => {
                 let slot = slot_index(code, d)?;
                 if slot >= func.locals {
                     return Err(VerifyError::LocalSlotOutOfRange {

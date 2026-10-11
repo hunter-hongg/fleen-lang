@@ -32,10 +32,8 @@ use std::collections::HashMap;
 /// The MIR module: functions (incl. builtin placeholders) + globals.
 ///
 /// # Errors
-/// Errors with `LowerError` on constructs that typeck already flags as
-/// unsupported (`Index`, `Field`, `Box`/`Ref`/`Array` types), which
-/// cannot be lowered in 0.0.1, or on defensively-checked invariant
-/// violations.
+/// Errors with `LowerError` on defensively-checked invariant violations
+/// (constructs typeck already flags never reach lowering).
 pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
     let mut lcx = LowerCtx::new(&typed_hir);
     lcx.lower_globals(&typed_hir.items)?;
@@ -488,6 +486,17 @@ fn lower_global_init(
                 *span,
             ));
         }
+        // 0.0.3 V03: array literal in a global initializer. Elements
+        // evaluate in source order (always the declaration order for
+        // arrays), so no reorder is needed — unlike struct literals, any
+        // element shapes that `lower_global_init` accepts compose here.
+        TypedExprHir::ArrayLit { elems, span, .. } => {
+            let n = arr_len_u16(elems.len(), *span)?;
+            for e in elems {
+                lower_global_init(lcx, e, out)?;
+            }
+            out.push(MirInstr::new(MirInstrKind::ArrNew(n), *span));
+        }
         _ => {
             return Err(LowerError::new(
                 LowerErrorKind::ComplexGlobalInit,
@@ -506,6 +515,18 @@ fn inits_in_decl_order(inits: &[(u16, TypedExprHir)]) -> bool {
         .iter()
         .enumerate()
         .all(|(i, (idx, _))| *idx == i as u16)
+}
+
+/// Fit an array literal's element count into the `ArrNew` u16 operand.
+fn arr_len_u16(n: usize, span: Span) -> Result<u16, LowerError> {
+    u16::try_from(n).map_err(|_| {
+        LowerError::new(
+            LowerErrorKind::UnsupportedFeature {
+                feature: "array literal with more than 65535 elements",
+            },
+            span,
+        )
+    })
 }
 
 /// Source span of a `choose` arm: the pattern's span when it has one,
@@ -1014,11 +1035,54 @@ impl<'a> FnBodyCx<'a> {
                     )),
                 }
             }
-            TypedExprHir::Index(..) => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature { feature: "index" },
-                    expr.span(),
-                ));
+            // 0.0.3 V03: array literal. Elements evaluate in source order
+            // (which is the declaration order for arrays — no temp-slot
+            // reorder, unlike struct literals).
+            TypedExprHir::ArrayLit { elems, span, .. } => {
+                let n = arr_len_u16(elems.len(), *span)?;
+                for e in elems {
+                    self.lower_expr_into(fb, e)?;
+                }
+                fb.emit(MirInstr::new(MirInstrKind::ArrNew(n), *span));
+            }
+            // 0.0.3 V03: element read — bounds-checked copy (D3). The array
+            // operand is a fresh copy (the load above cloned the binding,
+            // and a borrow handle is dereferenced by the VM), so the read
+            // never disturbs the original.
+            TypedExprHir::Index { arr, idx, span, .. } => {
+                self.lower_expr_into(fb, arr)?;
+                self.lower_expr_into(fb, idx)?;
+                fb.emit(MirInstr::new(MirInstrKind::ArrGet, *span));
+            }
+            // 0.0.3 V03: one-level element write. Mirrors `AssignField`:
+            // evaluate the RHS, duplicate it (the assignment expression's
+            // value), then evaluate the index and store — the old element
+            // is released by the overwrite. Stack shape `v i →` leaves the
+            // duplicated value as the expression's value.
+            TypedExprHir::AssignIndex {
+                binding_id,
+                index,
+                rhs,
+                span,
+                ..
+            } => {
+                self.lower_expr_into(fb, rhs)?;
+                let dup_kind = if rhs.ty().is_owned() {
+                    MirInstrKind::DupDeep
+                } else {
+                    MirInstrKind::Dup
+                };
+                fb.emit(MirInstr::new(dup_kind, *span));
+                self.lower_expr_into(fb, index)?;
+                match self.loc(*binding_id, "?", *span)? {
+                    Location::Local(slot) => {
+                        fb.emit(MirInstr::new(MirInstrKind::ArrSetLocal(slot), *span))
+                    }
+                    Location::Global(gid) => fb.emit(MirInstr::new(
+                        MirInstrKind::ArrSetGlobal(gid.0 as u16),
+                        *span,
+                    )),
+                }
             }
         }
         Ok(())

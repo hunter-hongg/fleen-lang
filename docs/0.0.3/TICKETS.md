@@ -7,7 +7,8 @@
 > `docs/BYTECODE.md` v0.0.2 (opcode space, §10 versioning rules), `docs/DESIGN.md` §9/§10/§18,
 > `docs/0.0.2/TICKETS.md` (current implementation state: 0.0.2 complete).
 > **Status** (2026-10-11): V01 implemented (completion notes at the end of its section);
-> V02 implemented (completion notes at the end of its section); V03+ not started.
+> V02 implemented (completion notes at the end of its section); V03 implemented
+> (completion notes at the end of its section); V04+ not started.
 > Implementation begins after the PLAN review freezes D1–D10.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
 > 0.0.3 is cut **by feature** — every ticket is a vertical slice through Lex → Parse → … → VM
@@ -386,14 +387,14 @@ MoveOutOfArray,
 // 0xB4–0xB8 arrays (numbering finalized here; PLAN §5.1's "TBD" row is resolved —
 // V10 folds this back into PLAN/BYTECODE, the 0.0.2 U07 erratum precedent)
 ArrNew        = 0xB4,   // u16 n, 3 bytes, e₁…eₙ → a
-ArrLen        = 0xB5,   // 1 byte, a → a int
-ArrGet        = 0xB6,   // 1 byte, a i → a v (bounds-checked)
+ArrLen        = 0xB5,   // 1 byte, a → a int (peek)
+ArrGet        = 0xB6,   // 1 byte, a i → v (pop form — see Implemented erratum)
 ArrSetLocal   = 0xB7,   // u16 slot, 3 bytes, v i →
 ArrSetGlobal  = 0xB8,   // u16 gid,  3 bytes, v i →
 ```
 - Verify stack effects: `ArrNew` Δ = 1−n, min n (n is the **operand** — static, no abstract
-  interpretation); `ArrLen`/`ArrGet` Δ+1 min 1; `ArrSet*` Δ−2 min 2; slot/gid bounds checks
-  as usual
+  interpretation); `ArrLen` Δ+1 min 1; `ArrGet` Δ−1 min 2; `ArrSet*` Δ−2 min 2; slot/gid
+  bounds checks as usual
 - VM `IndexOutOfRange` carries a span (the faulting `ArrGet`/`ArrSet*` instruction's span via
   the 0.0.2 span_map mechanism — line/column rendering comes free from V01)
 
@@ -422,6 +423,72 @@ Arr(Box<[Value]>),   // always owned
 cargo test -p fleen-compiler -p fleen-verify -p fleen-vm
 cargo fln tests/e2e/valid/array_demo.fln
 ```
+
+> **Implemented** (2026-10-11). Full chain landed: `[…]` array literal in primary/expression
+> position + `a[i] = e` index-write target, `Type::Array(Box<Type>)` with `is_copy([T]) =
+> false` always and `is_owned([T]) = true` (D3), lower `ArrNew`/`ArrLen`/`ArrGet`/
+> `ArrSetLocal`/`ArrSetGlobal` (0xB4–0xB8, version 3), verify stack effects + explicit v3 gate,
+> VM `Value::Arr(Box<[Value]>)` with deep element copy and span-carrying `IndexOutOfRange`.
+> fmt/clippy/tests/doc green; all 0.0.1/0.0.2 e2e byte-for-byte; full-chain smoke (compiler
+> output for array programs passes verify) added as a standing test; e2e `array_demo.fln` +
+> `.expected` and an `array_oob.fln` invalid case (`IndexOutOfRange` → exit 1, stderr
+> `out of range`). Deviations, recorded:
+> - **`ArrGet` is pop-form `a i → v` (Δ−1, min 2)** — not the peek form (`a i → a v`, Δ+1)
+>   recorded in this ticket's code block. The design block above has been corrected to the
+>   as-built form. The peek form leaves the array under the element with no remove-below-top
+>   instruction; `a[i][j]` chains need the pop (the V02 `GetField` erratum shape, generalized).
+>   `ArrLen` keeps the **peek** form `a → a int` (Δ+1) — the array must stay on the stack for
+>   the loop's subsequent `ArrGet`, and `ArrLen` reads through a `ref [T]` handle via
+>   `read_ref`. `ArrSetLocal`/`ArrSetGlobal` are `v i →` (Δ−2, min 2) and take the array from
+>   the slot/global, not the stack (the ticket's own `v i →` row was already correct).
+> - **ASI cannot tell a statement-start index `[` from a literal `[`** (token-based ASI has no
+>   parse context): a bare array-literal statement (`[1, 2];`) only begins a new statement
+>   after an explicit `;`/`}` boundary (the `;`-always-legal escape hatch covers it).
+>   Concretely `x = 1` ⏎ `[1, 2]` joins as `x = 1[1, 2]` (index on a literal), which the
+>   parser rejects — so a discarded literal statement requires the leading boundary. `f()` ⏎
+>   `[0]` stays an index chain (continuation-set `[`), and `x =` ⏎ `[1, 2]` joins as a binding
+>   (incomplete head) — both unchanged 0.0.2 rules. Pinned by `asi.rs` tests.
+> - **`IndexOutOfRange` bounds-checks the *sign* before the `usize` cast** (D3): `a[-1]` is an
+>   out-of-range error with `index: -1`, never a huge `usize` index — the array is never
+>   indexed out of its real bounds. `index` is `i64`, `len` is `usize`.
+> - **The `Expr::Index` span covers the full `arr[idx]` *including the closing `]`*** (threaded
+>   `Expr::Index(arr, idx, span)` → `ExprHir::Index` → `typeck_index(span)`), so a runtime
+>   `IndexOutOfRange` highlights `a[5]` rather than just `a[`. The parser captures `prev_span_
+>   end` after consuming `]`.
+> - **`clone a[i]` folds into the plain read** (typeck `clone` over an index node): a read is
+>   already a bounds-checked copy (deep for owned elements, D3), so the clone form adds
+>   nothing — only `move a[i]` is an error (`MoveOutOfArray`). Same discipline as V02's
+>   `clone p.f`.
+> - **`a[i] = e` as an expression yields the assigned value** (lower emits `Dup`/`DupDeep`
+>   before `ArrSet*`), mirroring the `x = e` convention; assignment still types `Unit` and
+>   stays banned as a block tail.
+> - **Index-write does not require `a` to be mutable** (bound semantics): writing an element
+>   rebinds no binding, so `const a = […]; a[0] = 1` is legal — same rule as `p.f = e` /
+>   `deref b = v`. `ArrSetGlobal` (0.0.3 V03) skips the `mutable` gate that `StoreGlobal`
+>   enforces (writing an element mutates `globals[gid]` in place; the gate is only about
+>   rebinding the global). `a` must still be a local/global/by-value-param binding — `ref`
+>   parameters and non-bare receivers (`f()[i]`, `p.f[i]`) are rejected by the resolver as
+>   `InvalidAssignmentTarget` (an index receiver must be a bare binding, matching the V02
+>   field-write rule).
+> - **`Eq` on an array is a typeck `InvalidOperand` error** (0.0.1 §1.4): arrays have no `==`.
+>   The VM's `ArithTypeMismatch` backstop (reached only via malformed bytecode) is pinned by a
+>   test (`eq_on_two_arrays_is_defensive_error`).
+> - **`ref [T]` parameters are legal** (read-only borrow, as 0.0.2): `ArrLen` and `ArrGet`
+>   both read through `read_ref` so a borrow handle into an array works; element writes
+>   through a handle are rejected at typeck (only local/global bindings are valid write
+>   targets), so a `Ref` in an `ArrSet*` slot is malformed-bytecode defensive (`StackShape`).
+>   `box<[T]>` and arrays as `Result` components are also legal (V02's whitelist extended).
+> - **Constant-pool internment discipline holds for array codegen**: `Const::Int` values must
+>   be unique (verify rejects duplicates), so element values reach the stack via pool-index
+>   `CONST_INT` loads, never raw literals. The full-chain smoke and `array_program_flnc_
+>   round_trip` exercise this.
+> - **Ragged rows are legal** (`[[1, 2], [3]]: [[int]]`) — each row is its own array; the
+>   element-type inference only unifies element-internal uniformity, not row lengths. Covered
+>   by `ragged_rows_are_legal`.
+> - The array value-table and opcode group (0xB4–0xB8) share V02's version-3 lockstep gate
+>   `{1, 2, 3}`; `flnc::from_bytes` accepts `{1, 2, 3}` and `to_bytes` appends no new table
+>   for arrays (element types are reconstructed by typeck from the source — arrays carry no
+>   encoding-side type tag, unlike structs which need `struct_defs`).
 
 ---
 

@@ -213,4 +213,21 @@ pub enum MirInstrKind {
     SetFieldLocal(u16, u16),
     /// Same, for the struct held by global `gid`. Stack effect: v →.
     SetFieldGlobal(u16, u16),
+    // 0.0.3 V03: array instructions (bytecode v3, 0xB4–0xB8)
+    /// Pop n element values (source order) and build a fresh array.
+    /// Stack effect: e₁…eₙ → a.
+    ArrNew(u16),
+    /// Push a copy of the array's length; the array stays on the stack.
+    /// Stack effect: a → a int.
+    ArrLen,
+    /// Pop the index, then the array; push a bounds-checked **copy** of the
+    /// element (deep for owned elements, D3). Out of bounds →
+    /// `IndexOutOfRange`. Stack effect: a i → a v.
+    ArrGet,
+    /// Overwrite element `index` (popped second) of the array in local
+    /// `slot`; bounds-checked, the old element is released.
+    /// Stack effect: v i →.
+    ArrSetLocal(u16),
+    /// Same, for the array held by global `gid`. Stack effect: v i →.
+    ArrSetGlobal(u16),
 }

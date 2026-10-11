@@ -235,7 +235,8 @@ impl Parser {
                 // Index access
                 let index = self.parse_expr()?;
                 self.expect(&TokenKind::RBracket, "expected `]` after index")?;
-                expr = Expr::Index(Box::new(expr), Box::new(index));
+                let span = self.span(expr.span().start, self.prev_span_end());
+                expr = Expr::Index(Box::new(expr), Box::new(index), span);
             } else if self.matches(&TokenKind::Dot) {
                 // Field access
                 let field = self.parse_ident()?;
@@ -320,6 +321,31 @@ impl Parser {
                 let expr = self.parse_expr()?;
                 self.expect(&TokenKind::RParen, "expected `)`")?;
                 Ok(expr)
+            }
+            TokenKind::LBracket => {
+                // Array literal (0.0.3 V03): `[e1, e2, ...]` at the primary
+                // position. The postfix-position `[` after a complete
+                // expression is an index — the distinction is parse position
+                // alone (PLAN §3.2.2). Trailing comma allowed.
+                self.advance();
+                let mut elems = Vec::new();
+                if !self.check(&TokenKind::RBracket) {
+                    loop {
+                        elems.push(self.parse_expr()?);
+                        if !self.matches(&TokenKind::Comma) {
+                            break;
+                        }
+                        if self.check(&TokenKind::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RBracket, "expected `]` after array elements")?;
+                let end = self.prev_span_end();
+                Ok(Expr::ArrayLit(crate::parser::ast::ExprArrayLit {
+                    elems,
+                    span: self.span(span.start, end),
+                }))
             }
             TokenKind::LBrace => {
                 // Block expression

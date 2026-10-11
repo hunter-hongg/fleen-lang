@@ -859,12 +859,13 @@ fn check_block_unit_when_no_tail() {
 
 #[test]
 fn check_index_on_non_array() {
+    // 0.0.3 V03: indexing a non-array value is an InvalidOperand for `index`.
     let errs = compile_err("x = 1;\nx[0];");
     assert!(
         err_kinds(&errs)
             .iter()
-            .any(|k| matches!(k, TypeckErrorKind::TypeMismatch { .. })),
-        "expected TypeMismatch, got {errs:?}"
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { op, .. } if op == "index")),
+        "expected InvalidOperand(index), got {errs:?}"
     );
 }
 
@@ -1018,7 +1019,9 @@ fn is_owned_exhaustive() {
     assert!(!Type::Bool.is_owned());
     assert!(!Type::Unit.is_owned());
     assert!(!Type::Func(vec![], Box::new(Type::Int)).is_owned());
-    assert!(!Type::Array(Box::new(Type::Int)).is_owned());
+    // 0.0.3 V03 (D3): arrays are owned for every element type.
+    assert!(Type::Array(Box::new(Type::Int)).is_owned());
+    assert!(Type::Array(Box::new(Type::String)).is_owned());
     assert!(!Type::Ref(Box::new(Type::Int)).is_owned());
     assert!(!Type::Unsupported("x".to_string()).is_owned());
     assert!(!Type::Result(Box::new(Type::Int), Box::new(Type::Bool)).is_owned());
@@ -1516,5 +1519,224 @@ fn ownership_stmt_block_tail_use_after() {
             .iter()
             .any(|k| matches!(k, TypeckErrorKind::UseAfterMove { .. })),
         "expected UseAfterMove, got {errs:?}"
+    );
+}
+
+// ========== 0.0.3 V03: arrays ==========
+
+#[test]
+fn infer_array_literal_type() {
+    let hir = compile_ok("[1, 2, 3];");
+    assert_eq!(only_expr_ty(&hir), Type::Array(Box::new(Type::Int)));
+}
+
+#[test]
+fn infer_nested_array_literal_type() {
+    let hir = compile_ok("[[1], [2, 3]];");
+    assert_eq!(
+        only_expr_ty(&hir),
+        Type::Array(Box::new(Type::Array(Box::new(Type::Int))))
+    );
+}
+
+#[test]
+fn array_literal_element_uniformity() {
+    let errs = compile_err("[1, \"x\"];");
+    assert!(
+        err_kinds(&errs).iter().any(
+            |k| matches!(k, TypeckErrorKind::ArrayTypeMismatch { expected, found }
+                if *expected == Type::Int && *found == Type::String)
+        ),
+        "expected ArrayTypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn array_literal_annotated_empty_ok() {
+    let hir = compile_ok("empty: [int] = [];");
+    match &hir.items[0] {
+        TypedHirItem::Decl(TypedDeclHir::Var(v)) => {
+            assert_eq!(v.ty, Some(Type::Array(Box::new(Type::Int))));
+        }
+        other => panic!("expected var binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn array_literal_unannotated_empty_is_error() {
+    let errs = compile_err("e = [];");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::CannotInferArrayType)),
+        "expected CannotInferArrayType, got {errs:?}"
+    );
+}
+
+#[test]
+fn array_literal_nested_empty_with_annotation_ok() {
+    // The annotation flows down: the inner `[]` infers `[int]` from the
+    // outer `[[int]]` element hint.
+    compile_ok("m: [[int]] = [[]];");
+}
+
+#[test]
+fn array_is_never_copy() {
+    // D3: arrays are owned for every element type — even `[int]`.
+    assert!(!Type::Array(Box::new(Type::Int)).is_copy());
+    assert!(!Type::Array(Box::new(Type::Bool)).is_copy());
+    assert!(Type::Array(Box::new(Type::Int)).is_owned());
+    // And a struct with an array field is therefore owned (D2 falls out).
+    assert!(!Type::Array(Box::new(Type::Array(Box::new(Type::Int)))).is_copy());
+}
+
+#[test]
+fn struct_with_array_field_is_owned() {
+    let hir = compile_ok("struct W { labels: [int] }\nw = W { labels: [1] };");
+    assert_eq!(hir.items.len(), 1); // struct decls are not items
+    match &hir.items[0] {
+        TypedHirItem::Decl(TypedDeclHir::Var(v)) => {
+            let ty = v.init.ty();
+            assert!(ty.is_owned(), "W with an array field must be owned");
+            assert!(!ty.is_copy());
+        }
+        other => panic!("expected var binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn array_index_read_type() {
+    let hir = compile_ok("a = [1, 2];\na[0];");
+    match &hir.items[1] {
+        TypedHirItem::Expr(e) => assert_eq!(e.ty(), Type::Int),
+        other => panic!("expected expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn array_index_not_int() {
+    let errs = compile_err("a = [1];\na[\"x\"];");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::IndexNotInt { found } if *found == Type::String)),
+        "expected IndexNotInt, got {errs:?}"
+    );
+}
+
+#[test]
+fn move_out_of_array_element() {
+    let errs = compile_err("s = [\"a\"];\nt = move s[0];");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MoveOutOfArray { path } if path == "s[0]")),
+        "expected MoveOutOfArray, got {errs:?}"
+    );
+}
+
+#[test]
+fn clone_array_element_folds_to_read() {
+    // D3: an element read is already a copy, so `clone a[i]` is the read.
+    let hir = compile_ok("s = [\"a\"];\nt = clone s[0];");
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn move_whole_array_is_legal() {
+    // Arrays are owned, so the whole array transfers with `move`. (Function
+    // locals: globals are never moved, D5.)
+    compile_ok("func main(): int {\n    a = [1, 2];\n    b = move a;\n    b[0]\n}");
+}
+
+#[test]
+fn array_element_write_typechecks() {
+    compile_ok("a = [1, 2];\na[1] = 10;");
+}
+
+#[test]
+fn array_element_write_owned_rhs_requires_move() {
+    // Function locals: a global would read as a deep copy (D5) and not
+    // exercise the transfer rule.
+    let errs = compile_err(
+        "func main(): int {\n    s = [\"x\"];\n    t = \"y\";\n    s[0] = t;\n    0\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+    compile_ok(
+        "func main(): int {\n    s = [\"x\"];\n    t = \"y\";\n    s[0] = move t;\n    0\n}",
+    );
+}
+
+#[test]
+fn ragged_rows_are_legal() {
+    compile_ok("m = [[1, 2], [3]];");
+}
+
+#[test]
+fn eq_on_array_rejected() {
+    let errs = compile_err("a = [1];\nb = [1];\na == b;");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { op, .. } if op == "==")),
+        "expected InvalidOperand(==), got {errs:?}"
+    );
+}
+
+#[test]
+fn index_on_box_rejected_with_help_shape() {
+    // `deref big[0]` parses as `deref(big[0])` (postfix binds tighter than
+    // the prefix), so the box itself is indexed — an IndexOnBox pointing at
+    // the `(deref big)[0]` spelling.
+    let errs = compile_err("big = box [1];\nx = deref big[0];");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::IndexOnBox)),
+        "expected IndexOnBox, got {errs:?}"
+    );
+    compile_ok("big = box [1];\nx = (deref big)[0];");
+}
+
+#[test]
+fn array_in_box_and_result_and_ref_param() {
+    // box<[T]> pointee, Result component, and `ref [T]` parameter are all
+    // legal containers (D3); a read through the borrow is a copy.
+    compile_ok("big = box [1, 2];\nx = (deref big)[1];");
+    compile_ok("r: Result<[int], string> = Ok([1, 2]);\nr;");
+    compile_ok(
+        "func first(a: ref [int]): int = a[0]\nfunc main(): int {\n    xs = [7, 8];\n    first(xs)\n}",
+    );
+}
+
+#[test]
+fn array_literal_elements_are_consuming_positions() {
+    let errs = compile_err("func main(): int {\n    s = \"a\";\n    w = [s];\n    0\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+    compile_ok("func main(): int {\n    s = \"a\";\n    w = [clone s];\n    0\n}");
+}
+
+#[test]
+fn use_after_element_write_resets_state() {
+    // Writing an element does not move the array; but the array binding was
+    // moved, and the ownership pass reports the write as AssignToMoved (the
+    // move-state machinery keys off the binding, unchanged from 0.0.2).
+    let errs =
+        compile_err("func main(): int {\n    a = [1];\n    b = move a;\n    a[0] = 2;\n    0\n}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::AssignToMoved { name } if name == "a")),
+        "expected AssignToMoved, got {errs:?}"
     );
 }

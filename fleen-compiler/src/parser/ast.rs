@@ -253,8 +253,12 @@ pub enum Expr {
     Question(Box<Expr>, Span),
     /// `func(args)`
     Call(Box<Expr>, Vec<Expr>),
-    /// `arr[idx]`
-    Index(Box<Expr>, Box<Expr>),
+    /// `arr[idx]` — span covers the whole `arr[idx]`, including the `]`.
+    Index(Box<Expr>, Box<Expr>, Span),
+    /// `[e1, e2, ...]` — array literal (0.0.3 V03). Parsed at the primary
+    /// position; the postfix-position `[` is an index, distinguished by
+    /// parse position alone (the same predicate ASI uses).
+    ArrayLit(ExprArrayLit),
     /// `obj.field`
     Field(Box<Expr>, String),
     /// `Name { field: expr, ... }` — struct literal (0.0.3 V02; the
@@ -304,7 +308,8 @@ impl Expr {
             | Expr::Cast(_, _, s)
             | Expr::Question(_, s) => *s,
             Expr::Call(f, _) => f.span(),
-            Expr::Index(a, _) => a.span(),
+            Expr::Index(_, _, s) => *s,
+            Expr::ArrayLit(l) => l.span,
             Expr::Field(o, _) => o.span(),
             Expr::StructLit(l) => l.span,
             Expr::Int(_, s)
@@ -325,6 +330,14 @@ impl Expr {
 pub struct ExprStructLit {
     pub name: String,
     pub inits: Vec<(String, Expr)>,
+    pub span: Span,
+}
+
+/// Array literal: `[e1, e2, ...]` (0.0.3 V03). Elements keep source order;
+/// an empty literal needs a type annotation (typeck: `CannotInferArrayType`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprArrayLit {
+    pub elems: Vec<Expr>,
     pub span: Span,
 }
 
@@ -436,7 +449,18 @@ impl fmt::Display for Expr {
             }
             Expr::Field(expr, field) => write!(f, "{}.{}", expr, field),
             Expr::StructLit(l) => write!(f, "{} {{ ... }}", l.name),
-            Expr::Index(arr, idx) => write!(f, "{}[{}]", arr, idx),
+            Expr::Index(arr, idx, _) => write!(f, "{}[{}]", arr, idx),
+            Expr::ArrayLit(l) => {
+                write!(
+                    f,
+                    "[{}]",
+                    l.elems
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             Expr::If(ExprIf { condition, .. }) => write!(f, "if {} {{ ... }}", condition),
             Expr::While(ExprWhile { condition, .. }) => {
                 write!(f, "while {} {{ ... }}", condition)

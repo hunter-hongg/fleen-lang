@@ -133,6 +133,11 @@ impl Encoder {
                 self.emit_u16(*gid);
                 self.emit_u16(*offset);
             }
+            // 0.0.3 V03: array instructions. `ArrNew` carries the element
+            // count; `ArrSet*` carries the slot/gid.
+            MirInstrKind::ArrNew(n) => self.emit_u16(*n),
+            MirInstrKind::ArrSetLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::ArrSetGlobal(gid) => self.emit_u16(*gid),
             // 0.0.2 U07: the four slot/global-operand instructions.
             MirInstrKind::MoveLocal(slot) => self.emit_u16(*slot),
             MirInstrKind::CloneLocal(slot) => self.emit_u16(*slot),
@@ -238,6 +243,12 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::GetField(..) => Opcode::GetField,
         MirInstrKind::SetFieldLocal(..) => Opcode::SetFieldLocal,
         MirInstrKind::SetFieldGlobal(..) => Opcode::SetFieldGlobal,
+        // 0.0.3 V03: arrays (bytecode v3).
+        MirInstrKind::ArrNew(..) => Opcode::ArrNew,
+        MirInstrKind::ArrLen => Opcode::ArrLen,
+        MirInstrKind::ArrGet => Opcode::ArrGet,
+        MirInstrKind::ArrSetLocal(..) => Opcode::ArrSetLocal,
+        MirInstrKind::ArrSetGlobal(..) => Opcode::ArrSetGlobal,
     })
 }
 

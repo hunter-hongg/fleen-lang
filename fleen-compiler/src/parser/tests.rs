@@ -447,7 +447,7 @@ mod tests {
     fn parse_index_access() {
         let ast = parse_str("arr[0];");
         let item = &ast.items[0];
-        if let Item::Expr(Expr::Index(arr, idx)) = item {
+        if let Item::Expr(Expr::Index(arr, idx, _)) = item {
             assert!(matches!(**arr, Expr::Ident(ref s, _) if s == "arr"));
             assert!(matches!(**idx, Expr::Int(0, _)));
         } else {
@@ -1503,5 +1503,79 @@ func main() {
             err.kind,
             ParseErrorKind::ExpectedSemiOrNewStmt { .. }
         ));
+    }
+
+    // ========== 0.0.3 V03: array literals ==========
+
+    #[test]
+    fn parse_array_literal() {
+        let ast = parse_str("[1, 2, 3];");
+        let Item::Expr(Expr::ArrayLit(l)) = &ast.items[0] else {
+            panic!("expected array literal, got {:?}", ast.items[0]);
+        };
+        assert_eq!(l.elems.len(), 3);
+    }
+
+    #[test]
+    fn parse_array_literal_nested_and_trailing_comma() {
+        let ast = parse_str("[[1, 2], [3,],];");
+        let Item::Expr(Expr::ArrayLit(l)) = &ast.items[0] else {
+            panic!("expected array literal");
+        };
+        assert_eq!(l.elems.len(), 2);
+        let Expr::ArrayLit(inner) = &l.elems[0] else {
+            panic!("expected nested array literal");
+        };
+        assert_eq!(inner.elems.len(), 2);
+    }
+
+    #[test]
+    fn parse_empty_array_literal_parses() {
+        // The parser accepts `[]`; the missing element type is typeck's
+        // CannotInferArrayType.
+        assert!(matches!(
+            parse_str("[];").items[0],
+            Item::Expr(Expr::ArrayLit(_))
+        ));
+    }
+
+    #[test]
+    fn parse_array_literal_statement() {
+        // A discarded array-literal statement after an explicit `;` boundary
+        // (V03: `[` can start a statement; the token-based ASI cannot tell
+        // index from literal without one).
+        let ast = parse_str("x = 1;\n[1, 2];");
+        assert!(matches!(ast.items[1], Item::Expr(Expr::ArrayLit(_))));
+    }
+
+    #[test]
+    fn parse_index_write_target() {
+        let ast = parse_str("a[0] = 5;");
+        let Item::Expr(Expr::Assign(lhs, _)) = &ast.items[0] else {
+            panic!("expected assignment");
+        };
+        assert!(matches!(**lhs, Expr::Index(_, _, _)));
+    }
+
+    #[test]
+    fn parse_empty_index_is_error() {
+        let err = parse_err("a[0];\nb[];");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_unclosed_index_is_error() {
+        parse_err("a[1");
+    }
+
+    #[test]
+    fn parse_literal_joins_as_index_trap() {
+        // Documented ASI trap (V03): `x = 1` ⏎ `[1, 2]` joins as
+        // `x = 1[1, 2]` — an index on the literal — and the parser rejects
+        // the `,` inside the index brackets. The `;` escape hatch splits.
+        let err = parse_err("x = 1\n[1, 2]");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        // The explicit-semi form parses cleanly.
+        parse_str("x = 1;\n[1, 2];");
     }
 }

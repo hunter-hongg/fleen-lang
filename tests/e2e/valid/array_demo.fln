@@ -1,0 +1,20 @@
+// 0.0.3 V03: [T] arrays full chain — literals, index read/write, clone
+// independence, move semantics, nested arrays.
+func main(): int {
+    a = [10, 20, 30];
+    print(a[1] as string);
+    a[1] = 99;
+    print(a[1] as string);
+
+    b = clone a;
+    b[0] = 0;
+    print(a[0] as string);
+    print(b[0] as string);
+
+    c = move a;
+    print(c[2] as string);
+
+    nested = [[1, 2], [3, 4]];
+    print(nested[1][0] as string);
+    0
+}

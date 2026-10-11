@@ -182,6 +182,20 @@ pub enum ExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// Index assignment: `a[i] = expr` (0.0.3 V03, one level — `a` must be
+    /// a bare binding; `m[i][j] = v` is rejected by the resolver). Writing
+    /// an element does not rebind `a` itself. Bounds are a runtime concern.
+    AssignIndex {
+        name: String,
+        binding_id: BindingId,
+        index: Box<ExprHir>,
+        rhs: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// Array literal: `[e1, e2, ...]` (0.0.3 V03). Elements keep source
+    /// order; empty literals need an annotation (typeck).
+    ArrayLit(Vec<ExprHir>, Span),
     /// Struct literal: `Name { field: expr, ... }` (0.0.3 V02). Initializers
     /// keep source order; whether `Name` is a declared struct and the
     /// field-set rules are typeck's business.
@@ -228,8 +242,8 @@ pub enum ExprHir {
     Question(Box<ExprHir>, Span),
     /// Function call
     Call(Box<ExprHir>, Vec<ExprHir>),
-    /// Index access
-    Index(Box<ExprHir>, Box<ExprHir>),
+    /// Index access — span covers the whole `arr[idx]` (0.0.3 V03).
+    Index(Box<ExprHir>, Box<ExprHir>, Span),
     /// Field access
     Field(Box<ExprHir>, String),
     /// Literals (with their source span)
@@ -255,6 +269,8 @@ impl ExprHir {
             ExprHir::Assign { span, .. } => *span,
             ExprHir::AssignDeref { span, .. } => *span,
             ExprHir::AssignField { span, .. } => *span,
+            ExprHir::AssignIndex { span, .. } => *span,
+            ExprHir::ArrayLit(_, s) => *s,
             ExprHir::StructLit { span, .. } => *span,
             ExprHir::If(e) => e.span,
             ExprHir::While(e) => e.span,
@@ -281,7 +297,7 @@ impl ExprHir {
             | ExprHir::Cast(_, _, s)
             | ExprHir::Question(_, s) => *s,
             ExprHir::Call(f, _) => f.span(),
-            ExprHir::Index(a, _) => a.span(),
+            ExprHir::Index(_, _, s) => *s,
             ExprHir::Field(o, _) => o.span(),
             ExprHir::Int(_, s)
             | ExprHir::Float(_, s)

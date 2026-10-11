@@ -67,6 +67,13 @@ enum AssignTarget {
         obj: String,
         field: String,
     },
+    /// `a[i]` — write element `i` of the array held by `a` (0.0.3 V03, one
+    /// level: `a` must be a bare binding; `m[i][j]`/`p.f[i]` fall into the
+    /// generic invalid-target case). Bounds are a runtime concern.
+    Index {
+        obj: String,
+        index: Box<ExprHir>,
+    },
 }
 
 /// Resolve names in an AST, producing a HIR.
@@ -775,10 +782,18 @@ impl Resolver {
                     args.into_iter().map(|a| self.resolve_expr(a)).collect();
                 ExprHir::Call(Box::new(hir_func), hir_args?)
             }
-            Expr::Index(arr, idx) => {
+            Expr::Index(arr, idx, span) => {
                 let a = self.resolve_expr(*arr)?;
                 let i = self.resolve_expr(*idx)?;
-                ExprHir::Index(Box::new(a), Box::new(i))
+                ExprHir::Index(Box::new(a), Box::new(i), span)
+            }
+            Expr::ArrayLit(lit) => {
+                let elems = lit
+                    .elems
+                    .into_iter()
+                    .map(|e| self.resolve_expr(e))
+                    .collect::<Result<Vec<_>, ()>>()?;
+                ExprHir::ArrayLit(elems, lit.span)
             }
             Expr::Field(obj, field) => {
                 let o = self.resolve_expr(*obj)?;
@@ -843,6 +858,21 @@ impl Resolver {
                     }
                 }
             }
+            // 0.0.3 V03: one-level index write `a[i] = e`. The one-level
+            // rule is enforced here at the cheapest stage: the receiver
+            // must be a bare binding, so `m[i][j]` and `p.f[i]` fall into
+            // the invalid-target case below. Bounds are a runtime concern;
+            // the parser only checked the shape.
+            Expr::Index(obj, idx, span) => match *obj {
+                Expr::Ident(name, _) => {
+                    let index = Box::new(self.resolve_expr(*idx)?);
+                    (AssignTarget::Index { obj: name, index }, span)
+                }
+                other => {
+                    self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
+                    return Err(());
+                }
+            },
             other => {
                 self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
                 return Err(());
@@ -851,16 +881,16 @@ impl Resolver {
 
         let rhs_hir = self.resolve_expr(rhs)?;
 
-        // Both targets resolve the box/struct/variable by name; they differ
-        // only in lookup (plain assignment must find an assignable binding)
-        // and in mutability (writing a pointee/field does not rebind the
-        // variable, so it need not be mutable). A `ref` parameter is
-        // read-only in both forms.
+        // Both targets resolve the box/struct/array/variable by name; they
+        // differ only in lookup (plain assignment must find an assignable
+        // binding) and in mutability (writing a pointee/field/element does
+        // not rebind the variable, so it need not be mutable). A `ref`
+        // parameter is read-only in all composite forms.
         let (name, binding) = match &target {
             AssignTarget::Ident(name) => (name, self.scopes.find_assign_target(name)),
-            AssignTarget::Deref(name) | AssignTarget::Field { obj: name, .. } => {
-                (name, self.scopes.get(name))
-            }
+            AssignTarget::Deref(name)
+            | AssignTarget::Field { obj: name, .. }
+            | AssignTarget::Index { obj: name, .. } => (name, self.scopes.get(name)),
         };
         let Some(binding) = binding else {
             self.add_error(
@@ -876,10 +906,15 @@ impl Resolver {
             );
             return Err(());
         }
-        // Writing a field of a borrowed struct would mutate the caller's
-        // value: `ref` parameters are read-only (DESIGN §10.4), same as the
-        // shadowing rule for `deref`-assign through a borrowed box.
-        if matches!(target, AssignTarget::Field { .. }) && binding.ref_param {
+        // Writing a field/element of a borrowed struct/array would mutate
+        // the caller's value: `ref` parameters are read-only (DESIGN §10.4),
+        // same as the shadowing rule for `deref`-assign through a borrowed
+        // box.
+        if matches!(
+            target,
+            AssignTarget::Field { .. } | AssignTarget::Index { .. }
+        ) && binding.ref_param
+        {
             self.add_error(
                 ResolveErrorKind::AssignToRefParam { name: name.clone() },
                 span,
@@ -908,6 +943,14 @@ impl Resolver {
                 obj_name: name,
                 obj_binding_id: binding_id,
                 field,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span: Span::new(span.file, span.start, rhs_span.end),
+            }),
+            AssignTarget::Index { index, .. } => Ok(ExprHir::AssignIndex {
+                name,
+                binding_id,
+                index,
                 rhs: Box::new(rhs_hir),
                 hir_id: self.next_hir_id(),
                 span: Span::new(span.file, span.start, rhs_span.end),

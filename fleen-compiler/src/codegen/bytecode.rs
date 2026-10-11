@@ -225,7 +225,7 @@ pub enum Opcode {
     /// Convert a scalar (int/float/bool) on the stack to a fresh owned string.
     /// 0.0.2 U13 (F8): `e as string`.
     ToStr = 0xA5,
-    // 0xB0–0xB3 structs (0.0.3 V02, bytecode v3; 0xB4+ stays reserved)
+    // 0xB0–0xB3 structs (0.0.3 V02, bytecode v3)
     /// Pop n field values (n = struct table entry) into struct `struct_id`.
     StructNew = 0xB0,
     /// Pop the struct, push a copy of field `offset` (deep for owned fields).
@@ -234,6 +234,20 @@ pub enum Opcode {
     SetFieldLocal = 0xB2,
     /// Overwrite field `offset` of the struct held by global `gid` (v →).
     SetFieldGlobal = 0xB3,
+    // 0xB4–0xB8 arrays (0.0.3 V03, bytecode v3)
+    /// Pop n element values (n = operand) into a fresh array (e₁…eₙ → a).
+    ArrNew = 0xB4,
+    /// Push a copy of the array's length; the array stays on the stack
+    /// (a → a int).
+    ArrLen = 0xB5,
+    /// Pop the index, then the array; push a bounds-checked **copy** of the
+    /// element (a i → a v). Out of bounds → `IndexOutOfRange` at runtime.
+    ArrGet = 0xB6,
+    /// Overwrite element `index` (popped second) of the array in local
+    /// `slot` (v i →), bounds-checked.
+    ArrSetLocal = 0xB7,
+    /// Same, for the array held by global `gid` (v i →), bounds-checked.
+    ArrSetGlobal = 0xB8,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -244,7 +258,7 @@ pub enum Opcode {
 pub const V2_OPCODE_BASE: u8 = 0x80;
 
 /// Lowest opcode number reserved for the 0.0.3 (v3) instruction set
-/// (structs, 0xB0–0xB3; arrays/range follow in V03/V04).
+/// (structs 0xB0–0xB3, arrays 0xB4–0xB8; range follows in V04, 0xB9–0xBB).
 pub const V3_OPCODE_BASE: u8 = 0xB0;
 
 impl Opcode {
@@ -272,7 +286,10 @@ impl Opcode {
             | Opcode::CloneLocal
             | Opcode::CloneGlobal
             | Opcode::StructNew
-            | Opcode::GetField => 2,
+            | Opcode::GetField
+            | Opcode::ArrNew
+            | Opcode::ArrSetLocal
+            | Opcode::ArrSetGlobal => 2,
             // `SetFieldLocal` / `SetFieldGlobal`: slot (or gid) + offset.
             Opcode::SetFieldLocal | Opcode::SetFieldGlobal => 4,
             Opcode::CallValue => 1,
@@ -342,6 +359,11 @@ impl Opcode {
             0xB1 => Opcode::GetField,
             0xB2 => Opcode::SetFieldLocal,
             0xB3 => Opcode::SetFieldGlobal,
+            0xB4 => Opcode::ArrNew,
+            0xB5 => Opcode::ArrLen,
+            0xB6 => Opcode::ArrGet,
+            0xB7 => Opcode::ArrSetLocal,
+            0xB8 => Opcode::ArrSetGlobal,
             _ => return None,
         })
     }

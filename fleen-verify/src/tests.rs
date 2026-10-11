@@ -29,6 +29,21 @@ fn module_v1(
     }
 }
 
+/// A v3 module (bytecode version 3, as emitted by the 0.0.3 compiler):
+/// structs + arrays opcodes are valid here.
+fn v3_module(
+    constants: Vec<Const>,
+    functions: Vec<Func>,
+    globals: Vec<Global>,
+    entry: u32,
+) -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        version: 3,
+        ..module(constants, functions, globals, entry)
+    }
+}
+
 fn func(name: ConstId, params: u16, locals: u16, code: Vec<u8>) -> Func {
     Func {
         name,
@@ -65,6 +80,12 @@ const PACK_ERR: u8 = Opcode::PackErr as u8;
 const IS_ERR: u8 = Opcode::IsErr as u8;
 const UNWRAP_OK: u8 = Opcode::UnwrapOk as u8;
 const UNWRAP_ERR: u8 = Opcode::UnwrapErr as u8;
+// 0.0.3 V03 array opcodes.
+const ARR_NEW: u8 = Opcode::ArrNew as u8;
+const ARR_LEN: u8 = Opcode::ArrLen as u8;
+const ARR_GET: u8 = Opcode::ArrGet as u8;
+const ARR_SET_LOCAL: u8 = Opcode::ArrSetLocal as u8;
+const ARR_SET_GLOBAL: u8 = Opcode::ArrSetGlobal as u8;
 
 fn u32le(v: u32) -> [u8; 4] {
     v.to_le_bytes()
@@ -1036,4 +1057,239 @@ fn v3_opcode_base_is_struct_group() {
     assert_eq!(Opcode::GetField as u8, 0xB1);
     assert_eq!(Opcode::SetFieldLocal as u8, 0xB2);
     assert_eq!(Opcode::SetFieldGlobal as u8, 0xB3);
+}
+
+// ------------------- 0.0.3 V03: arrays (bytecode v3) --------------------
+
+/// A small constant pool with int interning. `Const::Int` values must be
+/// unique (BYTECODE.md §8 rejects duplicates), so repeated pushes of the
+/// same value share one pool entry.
+struct ConstPool {
+    vec: Vec<Const>,
+    ints: std::collections::HashMap<i64, u32>,
+}
+
+impl ConstPool {
+    fn new() -> Self {
+        // Index 0 is always the main name, mirroring the helper builders.
+        ConstPool {
+            vec: vec![Const::Str("main".into())],
+            ints: std::collections::HashMap::new(),
+        }
+    }
+    fn int(&mut self, v: i64) -> u32 {
+        if let Some(&i) = self.ints.get(&v) {
+            return i;
+        }
+        let i = self.vec.len() as u32;
+        self.vec.push(Const::Int(v));
+        self.ints.insert(v, i);
+        i
+    }
+    /// Emit `Const Int(k)` (the operand is a pool index, not the value).
+    fn push_int(&mut self, code: &mut Vec<u8>, v: i64) {
+        let idx = self.int(v);
+        code.push(CONST_INT);
+        code.extend_from_slice(&u32le(idx));
+    }
+    fn build(self) -> Vec<Const> {
+        self.vec
+    }
+}
+
+/// Build a single-function v3 module whose main is the given code.
+fn v3_array_module(
+    constants: Vec<Const>,
+    code: Vec<u8>,
+    locals: u16,
+    globals: Vec<Global>,
+) -> Module {
+    v3_module(
+        constants,
+        vec![func(ConstId(0), 0, locals, code)],
+        globals,
+        0,
+    )
+}
+
+#[test]
+fn arr_new_depth_matches_operand() {
+    // `ArrNew(n)` pops n values and pushes the array (Δ = 1 − n, min n).
+    // Verify the operand-derived effect for the boundary cases n = 0/1/3.
+    for n in [0u16, 1, 3] {
+        let mut pool = ConstPool::new();
+        let mut code = Vec::new();
+        for k in 0..n {
+            pool.push_int(&mut code, k as i64);
+        }
+        code.push(ARR_NEW);
+        code.extend_from_slice(&u16le(n));
+        code.push(RETURN);
+        let m = v3_array_module(pool.build(), code, 0, vec![]);
+        assert!(
+            verify::verify(&m).is_ok(),
+            "n = {n}: {:?}",
+            verify::verify(&m)
+        );
+    }
+}
+
+#[test]
+fn arr_len_keeps_array_and_pushes_int() {
+    // `[e]; ArrLen` → array + length (Δ+1, min 1): depth 2 before Return,
+    // pop one to land at exactly 1.
+    let mut pool = ConstPool::new();
+    let mut code = Vec::new();
+    pool.push_int(&mut code, 7);
+    code.push(ARR_NEW);
+    code.extend_from_slice(&u16le(1));
+    code.push(ARR_LEN);
+    code.push(POP);
+    code.push(RETURN);
+    let m = v3_array_module(pool.build(), code, 0, vec![]);
+    assert!(verify::verify(&m).is_ok(), "{:?}", verify::verify(&m));
+}
+
+#[test]
+fn arr_len_needs_an_array() {
+    // ArrLen min_depth_before = 1: empty stack underflows.
+    let m = v3_array_module(
+        vec![Const::Str("main".into())],
+        vec![ARR_LEN, RETURN],
+        0,
+        vec![],
+    );
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0
+        })
+    );
+}
+
+#[test]
+fn arr_get_pop_form_balances() {
+    // `a i → v` (Δ−1, min 2): the index and the array are popped, the
+    // element pushed — as-built (V02 GetField erratum shape), not the
+    // PLAN peek form.
+    let mut pool = ConstPool::new();
+    let mut code = Vec::new();
+    pool.push_int(&mut code, 7);
+    code.push(ARR_NEW);
+    code.extend_from_slice(&u16le(1));
+    pool.push_int(&mut code, 0); // index
+    code.push(ARR_GET);
+    code.push(RETURN);
+    let m = v3_array_module(pool.build(), code, 0, vec![]);
+    assert!(verify::verify(&m).is_ok(), "{:?}", verify::verify(&m));
+}
+
+#[test]
+fn arr_get_needs_two_values() {
+    // ArrGet min_depth_before = 2: a lone array (depth 1) underflows.
+    let m = v3_array_module(
+        vec![Const::Str("main".into())],
+        vec![ARR_NEW, 0, 0, ARR_GET, RETURN],
+        0,
+        vec![],
+    );
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::StackUnderflow {
+            pc: 3,
+            needed: 2,
+            actual: 1
+        })
+    );
+}
+
+#[test]
+fn arr_set_local_pops_two() {
+    // `v i →` (Δ−2, min 2): value and index leave the stack. The array lives
+    // in the slot, not on the stack.
+    let mut pool = ConstPool::new();
+    let mut code = Vec::new();
+    pool.push_int(&mut code, 7);
+    code.push(ARR_NEW);
+    code.extend_from_slice(&u16le(1));
+    code.push(Opcode::StoreLocal as u8);
+    code.extend_from_slice(&u16le(0));
+    code.push(Opcode::LoadLocal as u8);
+    code.extend_from_slice(&u16le(0));
+    pool.push_int(&mut code, 0); // index
+    pool.push_int(&mut code, 5); // value
+    code.push(ARR_SET_LOCAL);
+    code.extend_from_slice(&u16le(0));
+    code.push(RETURN);
+    let m = v3_array_module(pool.build(), code, 1, vec![]);
+    assert!(verify::verify(&m).is_ok(), "{:?}", verify::verify(&m));
+}
+
+#[test]
+fn arr_set_local_slot_out_of_range() {
+    // The slot operand is range-checked against `locals` like the other
+    // slot instructions (here `locals = 0`).
+    let m = v3_array_module(
+        vec![Const::Str("main".into())],
+        vec![ARR_SET_LOCAL, 0, 0, RETURN],
+        0,
+        vec![],
+    );
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::LocalSlotOutOfRange {
+            pc: 0,
+            slot: 0,
+            locals: 0,
+        })
+    );
+}
+
+#[test]
+fn arr_set_global_gid_out_of_range() {
+    // `ArrSetGlobal` writes an *element* (not the global binding), so it
+    // skips the `mutable` gate but still range-checks the gid. No globals
+    // are declared here.
+    let m = v3_array_module(
+        vec![Const::Str("main".into())],
+        vec![ARR_SET_GLOBAL, 0, 0, RETURN],
+        0,
+        vec![],
+    );
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::GlobalIndexOutOfRange { pc: 0, index: 0 })
+    );
+}
+
+#[test]
+fn v3_array_opcode_in_v1v2_module_rejected() {
+    // Explicit gate: a 0xB4 opcode in a v2 module is rejected, the same
+    // way a struct opcode is.
+    let mut m = v3_array_module(
+        vec![Const::Str("main".into())],
+        vec![ARR_NEW, 0, 0, RETURN],
+        0,
+        vec![],
+    );
+    m.version = 2;
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::V3OpcodeInV1V2Module {
+            pc: 0,
+            byte: ARR_NEW
+        })
+    );
+}
+
+#[test]
+fn v3_opcode_base_extends_to_arrays() {
+    // Lock the numbering: the array group follows the struct group at 0xB4.
+    assert_eq!(Opcode::ArrNew as u8, 0xB4);
+    assert_eq!(Opcode::ArrLen as u8, 0xB5);
+    assert_eq!(Opcode::ArrGet as u8, 0xB6);
+    assert_eq!(Opcode::ArrSetLocal as u8, 0xB7);
+    assert_eq!(Opcode::ArrSetGlobal as u8, 0xB8);
 }

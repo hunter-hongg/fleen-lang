@@ -135,6 +135,20 @@ pub enum TypeckErrorKind {
     UnknownType { name: String },
     /// Two struct declarations share one name.
     DuplicateStructName { name: String },
+    // ---- 0.0.3 V03: array error family ----
+    /// An empty array literal `[]` with no annotation (and no annotation on
+    /// the enclosing binding) has no element type to infer from.
+    CannotInferArrayType,
+    /// Later elements of an array literal do not match the element type
+    /// established by the first element (or by the annotation).
+    ArrayTypeMismatch { expected: Type, found: Type },
+    /// An index expression's subscript is not an `int`.
+    IndexNotInt { found: Type },
+    /// `move a[i]`: arrays own their elements exclusively; copy instead.
+    /// Carries the index path (`a[i]`) for the help text.
+    MoveOutOfArray { path: String },
+    /// `b[0]` where `b: box<[T]>`: a box must be read with `deref` first.
+    IndexOnBox,
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -418,6 +432,40 @@ impl fmt::Display for TypeckErrorKind {
             }
             TypeckErrorKind::DuplicateStructName { name } => {
                 write!(f, "duplicate declaration of struct `{name}`")
+            }
+            TypeckErrorKind::CannotInferArrayType => {
+                write!(
+                    f,
+                    "cannot infer the element type of an empty array literal — \
+                     help: add a type annotation, e.g. `empty: [int] = [];`"
+                )
+            }
+            TypeckErrorKind::ArrayTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "array elements must have one uniform type: expected `{}`, \
+                     found `{}`",
+                    expected.name(),
+                    found.name()
+                )
+            }
+            TypeckErrorKind::IndexNotInt { found } => {
+                write!(f, "array index must be `int`, found `{}`", found.name())
+            }
+            TypeckErrorKind::MoveOutOfArray { path } => {
+                write!(
+                    f,
+                    "cannot move out of array element `{path}` — arrays own \
+                     their elements exclusively — help: copy the element \
+                     instead: `clone {path}`"
+                )
+            }
+            TypeckErrorKind::IndexOnBox => {
+                write!(
+                    f,
+                    "cannot index a box directly — help: read the pointee \
+                     first: `(deref b)[0]`"
+                )
             }
         }
     }

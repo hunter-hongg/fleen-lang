@@ -1,0 +1,6 @@
+// 0.0.3 V03: out-of-bounds index read is a runtime error (D3 — bounds are
+// checked at runtime by design, not a defensive backstop).
+func main(): int {
+    a = [10, 20, 30];
+    a[5]
+}

@@ -177,15 +177,24 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
                 collect_expr(alloc, arg);
             }
         }
-        TypedExprHir::Index(a, i) => {
-            collect_expr(alloc, a);
-            collect_expr(alloc, i);
+        TypedExprHir::Index { arr, idx, .. } => {
+            collect_expr(alloc, arr);
+            collect_expr(alloc, idx);
+        }
+        TypedExprHir::ArrayLit { elems, .. } => {
+            for elem in elems {
+                collect_expr(alloc, elem);
+            }
         }
         TypedExprHir::Field { obj, .. } => collect_expr(alloc, obj),
         TypedExprHir::StructLit { inits, .. } => {
             for (_, init) in inits {
                 collect_expr(alloc, init);
             }
+        }
+        TypedExprHir::AssignIndex { index, rhs, .. } => {
+            collect_expr(alloc, rhs);
+            collect_expr(alloc, index);
         }
         TypedExprHir::AssignField { rhs, .. } => collect_expr(alloc, rhs),
         TypedExprHir::Block(b) => collect_block(alloc, b),
