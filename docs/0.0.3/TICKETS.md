@@ -202,7 +202,7 @@ FieldNotInPlace,        // p.f = e where p is not a local/global binding
 ```rust
 // 0xB0–0xB3 struct (byte-for-byte as BYTECODE.md §5 will record)
 StructNew       = 0xB0,   // u16 struct_id, 3 bytes, f₁…fₙ → s
-GetField        = 0xB1,   // u16 offset,     3 bytes, s → s v
+GetField        = 0xB1,   // u16 offset,     3 bytes, s → v
 SetFieldLocal   = 0xB2,   // u16 slot, u16 offset, 5 bytes, v →
 SetFieldGlobal  = 0xB3,   // u16 gid,  u16 offset, 5 bytes, v →
 ```
@@ -259,12 +259,12 @@ cargo fln tests/e2e/valid/struct_demo.fln
 > v3 gate, VM `Value::Struct` with lockstep version gate `{1, 2, 3}`. fmt/clippy/tests/doc
 > green; all 0.0.1/0.0.2 e2e byte-for-byte; full-chain smoke (compiler output passes verify)
 > added as a standing test. Deviations, recorded:
-> - **`GetField` pops the struct (`s → v`, Δ0, min 1)** — not PLAN §5.1's peek form
+> - **`GetField` pops the struct (`s → v`, Δ0, min 1)** — not PLAN §5.1's original peek form
 >   (`s → s v`, Δ+1). The peek form leaves the struct under the field value with no
->   remove-below-top instruction; `p.f.g` chains require the pop. Erratum folds back into
->   PLAN/BYTECODE at V10 (the U07 precedent). Same for `SetField*`: Δ−1, min 1 — the offset
->   is an *operand*, not a stack item (PLAN §5.2's −2 row conflates them with `ArrSet*`,
->   which does take a stack index).
+>   remove-below-top instruction; `p.f.g` chains require the pop. Erratum folded into
+>   PLAN §5.1/§5.2 (the U07 precedent); BYTECODE.md picks it up at the V11 doc merge. Same for
+>   `SetField*`: Δ−1, min 1 — the offset is an *operand*, not a stack item (PLAN §5.2's −2 row
+>   conflated them with `ArrSet*`, which does take a stack index).
 > - **`Type::Struct(Box<StructInfo>)`** instead of PLAN's bare `Type::Struct(StructId)`:
 >   the shared info box carries the declaration name (error rendering has no table access)
 >   and the cached D2 copy verdict, keeping the pure `Type::name()`/`is_copy()`/`is_owned()`

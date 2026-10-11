@@ -676,7 +676,7 @@ unchanged from 0.0.2.
 | opcode | Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|--------|------|--------|------|
 | 0xB0 | `StructNew` | `u16` struct_id | 3 | `f₁ … fₙ → s` | Pop n field values (order = declaration order) into struct `id`; n comes from `struct_defs` |
-| 0xB1 | `GetField` | `u16` offset | 3 | `s → s v` | Push a **copy** of field `offset` (D2 read semantics) |
+| 0xB1 | `GetField` | `u16` offset | 3 | `s → v` | Pop the struct, push a **copy** of field `offset` (D2 read semantics) |
 | 0xB2 | `SetFieldLocal` | `u16` slot, `u16` offset | 5 | `v →` | Overwrite field `offset` of the struct in local `slot`; old field released |
 | 0xB3 | `SetFieldGlobal` | `u16` gid, `u16` offset | 5 | `v →` | Same, for a global binding |
 | 0xB4 | `ArrNew` | `u16` n | 3 | `e₁ … eₙ → a` | Pop n elements into a fresh array |
@@ -696,13 +696,24 @@ letter** (BYTECODE.md §10 rule); v1/v2 modules remain executable on the 0.0.3 V
 | Instruction | Δdepth | Minimum depth before execution |
 |------|--------|----------------|
 | `StructNew(id)` | `1 − n` (n from the struct table) | n |
-| `GetField` / `ArrLen` / `ArrGet` / `RangeStart` / `RangeEnd` | +1 | 1 |
+| `ArrLen` / `ArrGet` / `RangeStart` / `RangeEnd` | +1 | 1 |
+| `GetField` | 0 (pops the struct, pushes the field copy) | 1 |
 | `ArrNew(n)` | `1 − n` | n |
-| `SetFieldLocal` / `SetFieldGlobal` / `ArrSetLocal` / `ArrSetGlobal` | −2 (−1 for the value, −1 for the index) | 2 |
+| `SetFieldLocal` / `SetFieldGlobal` | −1 (the value; the offset is an operand) | 1 |
+| `ArrSetLocal` / `ArrSetGlobal` | −2 (−1 for the value, −1 for the index) | 2 |
 | `MakeRange` | −1 | 2 |
 
 All effects are static: the variable-arity instructions take their count as an operand, so
 verify needs no abstract interpretation — the existing per-instruction arithmetic extends.
+
+> **V02 erratum**: §5.1 originally gave `GetField` the peek form `s → s v` (Δ+1) and lumped
+> `SetFieldLocal`/`SetFieldGlobal` into §5.2's −2 row. As built (found by the V02 verify
+> cross-checks), `GetField` **pops** the struct (`s → v`, Δ0, min 1) — the peek form leaves
+> the struct under the field value with no remove-below-top instruction, and `p.f.g` chains
+> require the pop. `SetField*` is Δ−1, min 1 — the offset is an *operand*, not a stack item
+> (the −2 row conflated them with `ArrSet*`, which does take a stack index). The corrected
+> rows above are authoritative; BYTECODE.md picks them up at the V11 doc merge (see the
+> TICKETS V02 completion notes).
 
 ### 5.3 Value representation
 

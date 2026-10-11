@@ -271,21 +271,10 @@ impl Resolver {
             Decl::Func(func) => Ok(DeclHir::Func(self.resolve_func_decl(func, global_funcs)?)),
             Decl::Var(var) => Ok(DeclHir::Var(self.resolve_var_binding(var)?)),
             Decl::Const(c) => Ok(DeclHir::Const(self.resolve_const_decl(c)?)),
-            // Top-level struct declarations never reach here (resolve_program
-            // intercepts them); nested ones are rejected by the parser.
-            Decl::Struct(s) => Ok(DeclHir::Struct(StructDeclHir {
-                name: s.name,
-                fields: s
-                    .fields
-                    .into_iter()
-                    .map(|f| StructFieldHir {
-                        name: f.name,
-                        ty: f.ty,
-                        span: f.span,
-                    })
-                    .collect(),
-                span: s.span,
-            })),
+            // Top-level struct declarations are intercepted by `resolve_program`
+            // (they feed the typeck struct table, not `items`), and the parser
+            // rejects struct declarations inside blocks, so this arm cannot run.
+            Decl::Struct(_) => unreachable!("struct declarations never reach resolve_decl"),
         }
     }
 

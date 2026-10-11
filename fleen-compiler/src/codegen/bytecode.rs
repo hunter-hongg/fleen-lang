@@ -141,7 +141,15 @@ impl FieldTypeTag {
             Type::Box(_) => FieldTypeTag::Box,
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
-            Type::Unsupported(_) => FieldTypeTag::Unit,
+            // `Unsupported` never survives typeck, so it cannot reach codegen;
+            // the Unit mapping keeps the match total for release builds.
+            Type::Unsupported(_) => {
+                debug_assert!(
+                    false,
+                    "Unsupported type reached codegen: `Unsupported` cannot survive typeck"
+                );
+                FieldTypeTag::Unit
+            }
         }
     }
 }

@@ -1,0 +1,5 @@
+// Test: type annotation names an undeclared type (UnknownType)
+func main(): int {
+    p: Missing = 1;
+    0
+}

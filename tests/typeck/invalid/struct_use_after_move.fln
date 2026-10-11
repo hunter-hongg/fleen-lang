@@ -1,0 +1,9 @@
+// Test: reading any field of a moved struct binding
+struct Owner { label: string }
+
+func main(): int {
+    o = Owner { label: "hi" };
+    p = move o;
+    print(o.label);
+    0
+}

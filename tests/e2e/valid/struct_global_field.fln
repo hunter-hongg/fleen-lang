@@ -1,0 +1,20 @@
+// V02: field assignment on a *global* struct binding lowers to
+// SetFieldGlobal (the local path is covered by struct_demo). A field write
+// does not rebind the global, so it is also legal on a `const` global —
+// the same rule as `deref b = v` on a const box binding (TICKETS V02 notes).
+struct Point { x: int, y: int }
+
+g = Point { x: 1, y: 2 };
+const c = Point { x: 7, y: 8 };
+
+func main(): int {
+    print(g.x as string);
+    g.y = 9;
+    print(g.y as string);
+    g = Point { x: 5, y: 6 };
+    print(g.x as string);
+    print(g.y as string);
+    c.y = 10;
+    print(c.y as string);
+    0
+}

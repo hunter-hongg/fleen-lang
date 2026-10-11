@@ -1,0 +1,8 @@
+// Test: a plain (non-ref) type annotation on a struct binding
+struct Point { x: int, y: int }
+
+func main(): int {
+    p: Point = Point { x: 1, y: 2 };
+    print(p.x as string);
+    0
+}

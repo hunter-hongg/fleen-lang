@@ -1520,6 +1520,19 @@ fn lower_field_read_and_write() {
 }
 
 #[test]
+fn lower_field_write_global() {
+    // TICKETS V02 lower table: `p.f = e` on a *global* p lowers to
+    // SetFieldGlobal(gid, offset) — read: LoadGlobal, GetField.
+    let mir = lower_src(
+        "struct Point { x: int, y: int }\ng = Point { x: 1, y: 2 };\nfunc main(): int {\n    g.y = 9;\n    g.y\n}",
+    );
+    let main = mir.funcs.iter().find(|f| f.name == "main").unwrap();
+    let kinds: Vec<&MirInstrKind> = main.blocks[0].instrs.iter().map(|i| &i.kind).collect();
+    assert!(kinds.contains(&&MirInstrKind::SetFieldGlobal(0, 1)));
+    assert!(kinds.contains(&&MirInstrKind::GetField(1)));
+}
+
+#[test]
 fn lower_struct_defs_pass_through() {
     let mir = lower_src("struct Point { x: int, y: int }\nfunc main(): int = 0");
     assert_eq!(mir.structs.len(), 1);

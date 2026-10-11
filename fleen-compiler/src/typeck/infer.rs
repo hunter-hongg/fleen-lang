@@ -60,6 +60,14 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
     }
 }
 
+/// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
+/// the object binding, plus the field being written.
+struct FieldPlace {
+    obj_name: String,
+    binding_id: BindingId,
+    field: String,
+}
+
 /// Type inference context.
 pub struct TypeChecker {
     /// Scope stack for type lookup.
@@ -386,11 +394,6 @@ impl TypeChecker {
 
         let mut typed_items = Vec::new();
         for item in hir.items {
-            // Struct declarations were folded into the table by
-            // `collect_structs`; they produce no typed item.
-            if matches!(item, HirItem::Decl(DeclHir::Struct(_))) {
-                continue;
-            }
             if let Ok(typed_item) = self.typeck_item(item) {
                 typed_items.push(typed_item);
             }
@@ -447,9 +450,6 @@ impl TypeChecker {
             DeclHir::Func(func) => Ok(TypedDeclHir::Func(self.typeck_func_decl(func)?)),
             DeclHir::Var(var) => Ok(TypedDeclHir::Var(self.typeck_var_binding(var)?)),
             DeclHir::Const(c) => Ok(TypedDeclHir::Const(self.typeck_const_decl(c)?)),
-            // Struct declarations are folded into the table before item
-            // typeck (see `typeck`); this arm is unreachable via `typeck`.
-            DeclHir::Struct(_) => Err(()),
         }
     }
 
@@ -868,7 +868,16 @@ impl TypeChecker {
                 rhs,
                 hir_id,
                 span,
-            } => self.typeck_assign_field(obj_name, obj_binding_id, field, *rhs, hir_id, span),
+            } => self.typeck_assign_field(
+                FieldPlace {
+                    obj_name,
+                    binding_id: obj_binding_id,
+                    field,
+                },
+                *rhs,
+                hir_id,
+                span,
+            ),
             ExprHir::StructLit {
                 name,
                 inits,
@@ -1975,27 +1984,17 @@ impl TypeChecker {
         let obj_ty = typed_obj.ty();
 
         // Resolve the struct whose field is being read: the object's own
-        // type, or (through a borrow) the pointee type.
-        let struct_ty = match &obj_ty {
-            Type::Struct(_) => Some(obj_ty.clone()),
-            Type::Ref(inner) => match inner.as_ref() {
-                Type::Struct(_) => Some((**inner).clone()),
-                Type::Box(_) => {
-                    self.add_error(TypeckErrorKind::FieldOnBox, typed_obj.span());
-                    return Err(());
-                }
-                other => {
-                    self.add_error(
-                        TypeckErrorKind::InvalidOperand {
-                            op: "field access".to_string(),
-                            ty: other.clone(),
-                        },
-                        typed_obj.span(),
-                    );
-                    return Err(());
-                }
-            },
+        // type, or (through a borrow) the pointee type. Normalizing `ref T`
+        // to `T` up front keeps the box/other rejections in one place.
+        let target: &Type = match &obj_ty {
+            Type::Ref(inner) => inner,
+            ty => ty,
+        };
+        let info = match target {
+            Type::Struct(info) => (**info).clone(),
             Type::Box(_) => {
+                // A box must be read with `deref` first (also covers
+                // `ref box<T>` parameters, which the resolver rejects).
                 self.add_error(TypeckErrorKind::FieldOnBox, typed_obj.span());
                 return Err(());
             }
@@ -2009,11 +2008,6 @@ impl TypeChecker {
                 );
                 return Err(());
             }
-        };
-
-        let Some(Type::Struct(info)) = struct_ty else {
-            // Unreachable: `struct_ty` is `Some` only for `Type::Struct`.
-            unreachable!("struct_ty is always Type::Struct here")
         };
         let entry = &self.structs[info.id.0 as usize];
         let Some(idx) = entry.field_index(&field) else {
@@ -2129,19 +2123,21 @@ impl TypeChecker {
     /// parameter — the resolver rejects `ref` parameters). Writing a field
     /// does not rebind `p`, so immutability of `p` is not required (same
     /// rule as `deref b = v`). The RHS is a consuming position.
-    #[allow(clippy::too_many_arguments)]
     fn typeck_assign_field(
         &mut self,
-        obj_name: String,
-        obj_binding_id: BindingId,
-        field: String,
+        place: FieldPlace,
         rhs: ExprHir,
         hir_id: HirId,
         span: Span,
     ) -> Result<TypedExprHir, ()> {
+        let FieldPlace {
+            obj_name,
+            binding_id: obj_binding_id,
+            field,
+        } = place;
         let obj_ty = self.lookup_type(&obj_name, span)?;
-        let struct_ty = match obj_ty {
-            Type::Struct(_) => obj_ty,
+        let info = match obj_ty {
+            Type::Struct(info) => info,
             other => {
                 self.add_error(
                     TypeckErrorKind::InvalidOperand {
@@ -2152,9 +2148,6 @@ impl TypeChecker {
                 );
                 return Err(());
             }
-        };
-        let Some(Type::Struct(info)) = Some(struct_ty) else {
-            unreachable!("checked above")
         };
 
         let entry = &self.structs[info.id.0 as usize];

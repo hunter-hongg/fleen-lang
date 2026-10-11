@@ -1353,6 +1353,40 @@ fn struct_getfield_out_of_range_offset() {
 }
 
 #[test]
+fn struct_setfield_out_of_range_offset() {
+    // SetFieldLocal(slot 0, offset 5) on a 2-field struct: defensive
+    // FieldOutOfRange (verify cannot check offsets statically — the encoding
+    // carries no struct id); the GetField sibling is covered above.
+    let m = Module {
+        version: 3,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(
+            enc(&[
+                (Opcode::True, vec![]),
+                (Opcode::True, vec![]),
+                (Opcode::StructNew, u16b(0)),
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::True, vec![]),
+                (Opcode::SetFieldLocal, vec![0, 0, 5, 0]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert!(matches!(
+        Vm::new(m).run(),
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::FieldOutOfRange { index: 5, len: 2 },
+            ..
+        })
+    ));
+}
+
+#[test]
 fn struct_deep_clone_via_dupdeep() {
     // A struct holding a box: DupDeep must deep-copy (pointee independence).
     // p = {box 1}; q = DupDeep(p); write through q's box; p's box unchanged.

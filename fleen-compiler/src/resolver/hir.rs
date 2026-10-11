@@ -53,15 +53,14 @@ pub struct ImportDeclHir {
     pub span: Span,
 }
 
-/// Declaration in HIR.
+/// Declaration in HIR. Struct declarations never appear here: they are
+/// collected into `Hir::structs` by the resolver (a type-table input for
+/// typeck, not executable code).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclHir {
     Func(FuncDeclHir),
     Var(VarBindingHir),
     Const(ConstDeclHir),
-    /// Struct declaration placeholder: struct declarations never reach the
-    /// per-item resolution (they are collected into `Hir::structs`).
-    Struct(StructDeclHir),
 }
 
 /// Struct declaration in HIR (0.0.3 V02). Field types stay in their AST

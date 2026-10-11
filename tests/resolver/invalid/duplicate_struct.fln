@@ -1,0 +1,4 @@
+// Test: duplicate struct declaration at top level
+struct Point { x: int, y: int }
+struct Point { x: int }
+func main(): int = 0

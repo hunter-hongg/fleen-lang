@@ -918,8 +918,8 @@ fn v2_in_v1_module_rejection_covers_every_v2_byte() {
 
 use fleen_compiler::codegen::{FieldTypeTag, StructDefMeta, V3_OPCODE_BASE};
 
-/// A v3 module with one struct (two int fields) and `StructNew(0)` +
-/// `GetField(0)` in main.
+/// A v3 module with one struct (two int fields) and a valid
+/// `True; True; StructNew(0); GetField(0); Return` sequence in main.
 fn v3_struct_module() -> Module {
     Module {
         version: 3,
@@ -929,6 +929,7 @@ fn v3_struct_module() -> Module {
             params: 0,
             locals: 0,
             code: Box::new([
+                Opcode::True as u8,
                 Opcode::True as u8,
                 Opcode::StructNew as u8,
                 0,
@@ -951,31 +952,18 @@ fn v3_struct_module() -> Module {
 
 #[test]
 fn v3_struct_instructions_verify() {
-    // StructNew pops both fields (the True value is only the first field —
-    // wait: StructNew(2) needs TWO values; this module underflows by one.
-    // Adjust: push True twice.
-    let mut m = v3_struct_module();
-    m.functions[0].code = Box::new([
-        Opcode::True as u8,
-        Opcode::True as u8,
-        Opcode::StructNew as u8,
-        0,
-        0,
-        Opcode::GetField as u8,
-        0,
-        0,
-        Opcode::Return as u8,
-    ]);
+    // StructNew(2) pops both field values, so two `True` pushes precede it.
+    let m = v3_struct_module();
     assert_eq!(verify::verify(&m), Ok(()));
 }
 
 #[test]
 fn v3_struct_new_bad_id_rejected() {
     let mut m = v3_struct_module();
-    m.functions[0].code[2] = 9; // StructNew(9): struct table has 1 entry
+    m.functions[0].code[3] = 9; // StructNew(9): struct table has 1 entry
     assert_eq!(
         verify::verify(&m),
-        Err(VerifyError::StructIndexOutOfRange { pc: 1, index: 9 })
+        Err(VerifyError::StructIndexOutOfRange { pc: 2, index: 9 })
     );
 }
 
@@ -1009,7 +997,7 @@ fn v3_opcode_in_v2_module_rejected() {
     assert_eq!(
         verify::verify(&m),
         Err(VerifyError::V3OpcodeInV1V2Module {
-            pc: 1,
+            pc: 2,
             byte: Opcode::StructNew as u8
         })
     );

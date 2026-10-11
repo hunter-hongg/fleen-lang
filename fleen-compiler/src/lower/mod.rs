@@ -476,10 +476,7 @@ fn lower_global_init(
             span,
             ..
         } => {
-            let in_decl_order = inits
-                .iter()
-                .enumerate()
-                .all(|(i, (idx, _))| *idx == i as u16);
+            let in_decl_order = inits_in_decl_order(inits);
             if !in_decl_order {
                 return Err(LowerError::new(LowerErrorKind::ComplexGlobalInit, *span));
             }
@@ -499,6 +496,16 @@ fn lower_global_init(
         }
     }
     Ok(())
+}
+
+/// Whether a struct literal's initializers are already in declaration
+/// order: typeck pairs each initializer with its declaration index, so
+/// declaration order means the indices are `0..n` in sequence.
+fn inits_in_decl_order(inits: &[(u16, TypedExprHir)]) -> bool {
+    inits
+        .iter()
+        .enumerate()
+        .all(|(i, (idx, _))| *idx == i as u16)
 }
 
 /// Source span of a `choose` arm: the pattern's span when it has one,
@@ -941,10 +948,7 @@ impl<'a> FnBodyCx<'a> {
                 span,
                 ..
             } => {
-                let in_decl_order = inits
-                    .iter()
-                    .enumerate()
-                    .all(|(i, (idx, _))| *idx == i as u16);
+                let in_decl_order = inits_in_decl_order(inits);
                 if in_decl_order {
                     for (_, init) in inits {
                         self.lower_expr_into(fb, init)?;

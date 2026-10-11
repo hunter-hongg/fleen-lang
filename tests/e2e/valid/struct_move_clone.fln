@@ -1,0 +1,21 @@
+// V02: whole-struct move/clone semantics (TICKETS V02 E2E row).
+// Counter has only Copy fields, so `b = a` copies and `a` stays usable.
+// Owner has an owned (string) field, so it needs `move` / `clone`.
+struct Counter { n: int }
+struct Owner { label: string }
+
+func main(): int {
+    a = Counter { n: 1 };
+    b = a;
+    b.n = 2;
+    print(a.n as string);
+    print(b.n as string);
+
+    o = Owner { label: "hi" };
+    p = move o;
+    q = clone p;
+    q.label = "q";
+    print(p.label);
+    print(q.label);
+    0
+}
