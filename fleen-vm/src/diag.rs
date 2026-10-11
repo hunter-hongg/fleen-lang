@@ -140,9 +140,12 @@ mod tests {
 
     #[test]
     fn columns_count_chars_not_bytes() {
-        let src = "你好\nx";
+        // Multibyte: `é` is 2 bytes; columns count chars.
+        let src = "héllo\nx";
         assert_eq!(line_col(src, 0), (1, 1));
-        assert_eq!(line_col(src, 3), (1, 2));
+        // Byte 3 sits past the 2-byte `é`: char column 3, not byte column 4.
+        assert_eq!(line_col(src, 3), (1, 3));
+        // "héllo\n" is 7 bytes; byte 7 starts line 2.
         assert_eq!(line_col(src, 7), (2, 1));
     }
 
@@ -159,7 +162,7 @@ mod tests {
         assert_eq!(line_col("ab", 100), (1, 3));
         // A mid-char offset floors to the boundary of the char containing
         // it, i.e. that char's own column.
-        assert_eq!(line_col("你", 1), (1, 1));
+        assert_eq!(line_col("é", 1), (1, 1));
     }
 
     #[test]

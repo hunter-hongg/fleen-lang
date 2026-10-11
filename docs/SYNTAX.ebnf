@@ -1,11 +1,12 @@
 (* ============================================ *)
-(* Fleen 语言 EBNF 文法 v0.0.2                  *)
-(* 0.0.2 新增：box/deref/move/clone 前缀表达式、 *)
-(* ? 后缀、Ok/Err pattern、deref 赋值目标、     *)
-(* as 转换层（cast）、分号可选（ASI）            *)
+(* Fleen EBNF Grammar v0.0.2                    *)
+(* New in 0.0.2: box/deref/move/clone prefix    *)
+(* expressions, the ? suffix, Ok/Err patterns,  *)
+(* deref assignment targets, the as cast layer, *)
+(* and optional semicolons (ASI)                *)
 (* ============================================ *)
 
-(* ---------- 程序 ---------- *)
+(* ---------- Program ---------- *)
 
 program         = { import_decl | declaration } ;
 
@@ -14,7 +15,7 @@ import_decl     = "import" , module_path ;
 module_path     = ident , { "." , ident } ;
 
 
-(* ---------- 声明 ---------- *)
+(* ---------- Declarations ---------- *)
 
 declaration     = const_decl
                 | func_decl
@@ -22,7 +23,7 @@ declaration     = const_decl
                 | expr_stmt ;
 
 
-(* ---------- 变量绑定 ---------- *)
+(* ---------- Variable Bindings ---------- *)
 
 var_binding     = ident , [ type_annot ] , "=" , expr , [ ";" ] ;
 
@@ -31,7 +32,7 @@ const_decl      = "const" , ident , [ type_annot ] , "=" , expr , [ ";" ] ;
 type_annot      = ":" , type ;
 
 
-(* ---------- 函数 ---------- *)
+(* ---------- Functions ---------- *)
 
 func_decl       = "func" , ident , "(" , [ param_list ] , ")"
                   , [ type_annot ]
@@ -43,7 +44,7 @@ param_list      = param , { "," , param } ;
 param           = ident , ":" , type ;
 
 
-(* ---------- 类型 ---------- *)
+(* ---------- Types ---------- *)
 
 type            = base_type
                 | array_type
@@ -65,18 +66,21 @@ result_type     = "Result" , "<" , type , "," , type , ">" ;
 func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 
 
-(* ---------- 语句/表达式 ---------- *)
+(* ---------- Statements / Expressions ---------- *)
 
 expr_stmt       = expr , [ ";" ] ;
-(* 注：0.0.1 要求表达式语句末尾显式加分号；0.0.2 起 ASI 落地、分号可选 *)
-(* （parser 端"可续接"白名单判定，显式分号永远合法），见 DESIGN.md §3.9 *)
-(* 特殊规则：choose/when/otherwise 结构中，when 子句和 otherwise 子句本身不带分号 *)
-(* 只有 choose 整体作为表达式语句使用时，末尾才加分号 *)
+(* Note: 0.0.1 requires an explicit trailing semicolon on expression statements;
+   from 0.0.2 on, ASI is in place and semicolons are optional *)
+(* (the parser decides via a "may continue" whitelist; explicit semicolons are
+   always legal) — see DESIGN.md §3.9 *)
+(* Special rule: within a choose/when/otherwise construct, the when and
+   otherwise clauses themselves carry no semicolon *)
+(* Only a choose used as a whole expression statement takes a trailing semicolon *)
 
 block           = "{" , { declaration | expr_stmt } , "}" ;
 
 
-(* ---------- 表达式 ---------- *)
+(* ---------- Expressions ---------- *)
 
 expr            = if_expr
                 | while_expr
@@ -84,29 +88,31 @@ expr            = if_expr
                 | assign_expr ;
 
 assign_expr     = logic_or , [ "=" , assign_expr ] ;
-(* 0.0.2：赋值目标扩展为 deref b（写 box 点内值，不可带类型标注）；
-   合法性由语义阶段校验，文法只认形态 *)
+(* 0.0.2: the assignment target is extended to deref b (writes the value inside
+   the box; no type annotation allowed);
+   validity is checked by the semantic phases — the grammar only recognizes shape *)
 
 if_expr         = "if" , expr , block
                   , { "elif" , expr , block }
                   , [ "else" , block ] ;
-(* 注：if_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
+(* Note: when if_expr is used as an expression statement, 0.0.1 requires a trailing semicolon *)
 
 while_expr      = "while" , expr , block ;
-(* 注：while_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
+(* Note: when while_expr is used as an expression statement, 0.0.1 requires a trailing semicolon *)
 
 choose_expr     = "choose" , expr , "{"
                   , { when_clause }
                   , [ otherwise_clause ]
                   , "}" ;
-(* 注：choose_expr 作为表达式语句使用时，0.0.1 要求末尾加分号 *)
-(* 注意：when 子句和 otherwise 子句本身不带分号，只有整体末尾加分号 *)
+(* Note: when choose_expr is used as an expression statement, 0.0.1 requires a trailing semicolon *)
+(* Note: the when and otherwise clauses themselves carry no semicolon;
+   only the whole construct takes a trailing semicolon *)
 
 when_clause     = "when" , pattern , [ "if" , expr ] , block ;
-(* 注：when 子句不带分号 *)
+(* Note: a when clause carries no semicolon *)
 
 otherwise_clause = "otherwise" , block ;
-(* 注：otherwise 子句不带分号 *)
+(* Note: an otherwise clause carries no semicolon *)
 
 pattern         = neg_pattern
                 | literal
@@ -116,12 +122,12 @@ pattern         = neg_pattern
 (* P5: choose pattern also accepts negated numeric literals *)
 neg_pattern     = "-" , (int_lit | float_lit) ;
 
-(* 0.0.2：Result 的 Ok/Err pattern，绑定按转移语义；
-   Ok + Err 两臂齐即穷尽，无需 otherwise *)
+(* 0.0.2: the Ok/Err patterns for Result; bindings follow move semantics;
+   Ok + Err arms together are exhaustive, no otherwise needed *)
 result_pattern  = ( "Ok" | "Err" ) , "(" , ident , ")" ;
 
 
-(* ---------- 运算符优先级（从低到高） ---------- *)
+(* ---------- Operator Precedence (lowest to highest) ---------- *)
 
 logic_or        = logic_and , { "or" , logic_and } ;
 
@@ -135,16 +141,20 @@ additive        = multiplicative , { ( "+" | "-" ) , multiplicative } ;
 
 multiplicative  = cast , { ( "*" | "/" | "%" ) , cast } ;
 
-(* 0.0.2 U13：as 转换层，紧于二元运算符、松于一元前缀（同 Rust）：
-   deref b as string = (deref b) as string；1 + 2 as string = 1 + (2 as string)。
-   白名单（int/float/bool → string）由语义阶段校验，文法只认形态。 *)
+(* 0.0.2 U13: the as cast layer, tighter than binary operators and looser than
+   unary prefixes (same as Rust):
+   deref b as string = (deref b) as string; 1 + 2 as string = 1 + (2 as string).
+   The whitelist (int/float/bool → string) is checked by the semantic phases —
+   the grammar only recognizes shape. *)
 cast            = unary , { "as" , type } ;
 
-(* 0.0.2：前缀关键字表达式，右结合、可叠加：
-   clone deref b = clone(deref(b))，box box 1 = box(box(1))。
-   move/clone/deref/box 的操作数合法性（place 约束、类型）由语义阶段校验，
-   文法只认形态。`?` 为后缀，绑定比前缀紧：deref b? = deref(b?)
-   `box` 特例：操作数在 cast 层解析，box 1 as string = box (1 as string) *)
+(* 0.0.2: prefix keyword expressions, right-associative and stackable:
+   clone deref b = clone(deref(b)); box box 1 = box(box(1)).
+   Operand validity for move/clone/deref/box (place constraints, types) is
+   checked by the semantic phases — the grammar only recognizes shape.
+   `?` is a suffix that binds tighter than prefixes: deref b? = deref(b?)
+   Special case for `box`: the operand parses at the cast layer,
+   so box 1 as string = box (1 as string) *)
 unary           = "box" , cast
                 | unary_prefix , unary
                 | postfix ;
@@ -153,7 +163,7 @@ unary_prefix    = "-" | "!" | "deref" | "move" | "clone" ;
 
 postfix         = primary , { call_suffix | index_suffix | field_suffix | question_suffix } ;
 
-(* 0.0.2：? 传播运算符，操作数须为 Result<T, E>，见 DESIGN.md §8 *)
+(* 0.0.2: the ? propagation operator; its operand must be Result<T, E> — see DESIGN.md §8 *)
 question_suffix = "?" ;
 
 call_suffix     = "(" , [ arg_list ] , ")" ;
@@ -165,7 +175,7 @@ field_suffix    = "." , ident ;
 arg_list        = expr , { "," , expr } ;
 
 
-(* ---------- 基本表达式 ---------- *)
+(* ---------- Primary Expressions ---------- *)
 
 primary         = literal
                 | ident
@@ -178,7 +188,7 @@ struct_literal  = ident , "{" , [ field_init , { "," , field_init } ] , "}" ;
 field_init      = ident , ":" , expr ;
 
 
-(* ---------- 字面量 ---------- *)
+(* ---------- Literals ---------- *)
 
 literal         = int_lit
                 | float_lit
@@ -194,7 +204,7 @@ bool_lit        = "true" | "false" ;
 string_lit      = '"' , { any_char } , '"' ;
 
 
-(* ---------- 标识符 ---------- *)
+(* ---------- Identifiers ---------- *)
 
 ident           = letter , { letter | digit | "_" } ;
 
@@ -202,13 +212,14 @@ letter          = "a" .. "z" | "A" .. "Z" | "_" ;
 
 digit           = "0" .. "9" ;
 
-any_char        = ? 除双引号外的任意字符 ? ;
+any_char        = ? any character except a double quote ? ;
 
 
-(* ---------- 注释 ---------- *)
+(* ---------- Comments ---------- *)
 
 comment         = "//" , { any_char_except_newline } , newline
                 | "/*" , { any_char } , "*/" ;
 
-(* 注：0.0.1 要求显式分号；0.0.2 起 ASI（自动分号插入）落地，分号可选，
-   显式分号仍合法 *)
+(* Note: 0.0.1 requires explicit semicolons; from 0.0.2 on, ASI (automatic
+   semicolon insertion) is in place and semicolons are optional;
+   explicit semicolons remain legal *)

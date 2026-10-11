@@ -459,7 +459,7 @@ print(inner);
 }
 
 /// A nested `func` declaration inside a body must not destroy the enclosing
-/// function's shadow barrier ("函数不生效").
+/// function's shadow barrier ("functions have no effect").
 #[test]
 fn resolve_nested_func_preserves_shadow_barrier() {
     let hir = resolve_str(
@@ -965,7 +965,8 @@ func main(): int {
 // --- choose without otherwise ---
 #[test]
 fn resolve_choose_without_otherwise() {
-    // DESIGN.md says "otherwise 必须存在（或编译器能证明穷尽）"
+    // DESIGN.md says "otherwise must be present (or the compiler can prove
+    // exhaustiveness)"
     // but resolver does not enforce this; it should still resolve
     let hir = resolve_str(
         r#"

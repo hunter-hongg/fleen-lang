@@ -1161,7 +1161,7 @@ fn u06_choose_result_guard_stays_deferred() {
     // DESIGN §10.5 / TICKETS.md U07: guarded Result arms are rejected by
     // typeck (a guarded arm does not count for exhaustivity) and their
     // lowering stays deferred to U09 — U07 explicitly kept it out of scope
-    // rather than silently widening (TICKETS.md U07「范围决定」).
+    // rather than silently widening (TICKETS.md U07 "scope decision").
     let tokens = tokenize(
         r#"
 func f(): int {

@@ -1,12 +1,13 @@
 # Fleen
 
-**Fleen** 是一门表达式优先的小型编程语言，配有从源码到字节码到执行的完整工具链：
-五阶段编译器（词法 → 语法 → 名字解析 → 类型检查 → 降级与字节码生成）、
-静态字节码验证器和栈式虚拟机。
+**Fleen** is an expression-oriented small programming language with a complete toolchain from
+source to bytecode to execution: a five-stage compiler (lexing → parsing → name resolution →
+type checking → lowering and bytecode generation), a static bytecode verifier, and a
+stack-based virtual machine.
 
-> 当前版本 **0.0.2 · Hermit Crab 🐚** —— "堆上的值开始有主人" 里程碑。
+> Current version **0.0.2 · Hermit Crab 🐚** — the "heap values get owners" milestone.
 
-## 语言一览
+## Language at a Glance
 
 ```fleen
 func fib(n: int): int {
@@ -28,62 +29,63 @@ func main(): int {
 }
 ```
 
-特性概览：可变绑定 `=` 与 `const` 不可变、`int` / `float` / `bool` / `string` / `unit`、
-`Result<T, U>`（`Ok` / `Err` 构造、`choose` pattern、`?` 传播）、一等函数与函数类型、
-`if` / `elif` / `else` 表达式、`while`、`choose` 模式匹配（支持守卫）、
-分号可选（ASI，显式分号仍合法）。
+Feature overview: mutable bindings with `=` and immutable `const`; `int` / `float` / `bool` / `string` / `unit`;
+`Result<T, U>` (`Ok` / `Err` constructors, `choose` patterns, `?` propagation); first-class functions
+and function types; `if` / `elif` / `else` expressions; `while`; `choose` pattern matching
+(with guards); optional semicolons (ASI; explicit semicolons remain legal).
 
-**0.0.2 · 所有权起步**：`string` / `box<T>` 拥有唯一所有者——`move` 显式转移、
-`clone` 深拷贝、`box expr` 堆分配与 `deref b` 读写点内值（确定性释放，无 GC）、
-`ref T` 只读借用（仅参数位置）、`as string` 标量转换（临时特性）；
-运行时错误携带源码行列。规划与实现决议见
-[docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md)。0.0.3 将带来 `struct` / `for`。
+**0.0.2 · Ownership begins**: `string` / `box<T>` have a single owner — `move` transfers explicitly,
+`clone` deep-copies, `box expr` heap-allocates and `deref b` reads/writes the value inside the box
+(deterministic deallocation, no GC); `ref T` provides read-only borrowing (parameter position only);
+`as string` converts scalars (a temporary feature); runtime errors carry source line/column.
+See [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) for planning and implementation decisions.
+0.0.3 will bring `struct` / `for`.
 
-## 快速开始
+## Quick Start
 
-需要 Rust 1.85+（2024 edition）。
+Requires Rust 1.85+ (2024 edition).
 
 ```bash
 git clone https://github.com/hunter-hongg/fleen-lang.git
 cd fleen-lang
 
-# 构建
+# Build
 cargo build --release
 
-# 单命令编译 + 验证 + 执行（仓库内可用 cargo 别名）
+# Single command: compile + verify + execute (a cargo alias available in the repo)
 cargo fln tests/e2e/valid/fib.fln
 
-# 或直接运行二进制
+# Or run the binary directly
 ./target/release/fleen-vm tests/e2e/valid/fib.fln
 ```
 
-三个可执行文件：
+Three executables:
 
-| 命令 | 用法 |
+| Command | Usage |
 |------|------|
-| `fleen-vm` | `fleen-vm <file.fln \| file.flnc>`：一站式编译→验证→执行，或直接执行字节码 |
-| `fleen-compiler` | `fleen-compiler <file.fln> [-o <out.flnc>]`：只编译成字节码 |
-| `fleen-verify` | `fleen-verify <file.flnc>`：静态验证字节码 |
+| `fleen-vm` | `fleen-vm <file.fln \| file.flnc>`: one-stop compile→verify→execute, or run bytecode directly |
+| `fleen-compiler` | `fleen-compiler <file.fln> [-o <out.flnc>]`: compile to bytecode only |
+| `fleen-verify` | `fleen-verify <file.flnc>`: statically verify bytecode |
 
-退出码契约：`0` 成功 / `1` 编译·验证·运行错误 / `2` 用法·IO 错误。
+Exit code contract: `0` success / `1` compile·verify·runtime error / `2` usage·IO error.
 
-## 测试
+## Testing
 
 ```bash
-cargo test          # 单元 + 集成 + 端到端（含真实二进制 E2E）
+cargo test          # unit + integration + end-to-end (including real-binary E2E)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --no-deps
 ```
 
-## 文档
+## Documentation
 
-- [SPEC.md](SPEC.md) —— 项目与代码规范、语言快速参考
-- [docs/DESIGN.md](docs/DESIGN.md) —— 语言设计草案
-- [docs/SYNTAX.ebnf](docs/SYNTAX.ebnf) —— EBNF 文法
-- [docs/BYTECODE.md](docs/BYTECODE.md) —— 字节码格式规范
-- [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) —— 0.0.2 特性规划（所有权起步）
-- [CHANGELOG.md](CHANGELOG.md) —— 版本日志
+- [SPEC.md](SPEC.md) — project and code standards, language quick reference
+- [docs/DESIGN.md](docs/DESIGN.md) — language design draft
+- [docs/SYNTAX.ebnf](docs/SYNTAX.ebnf) — EBNF grammar
+- [docs/BYTECODE.md](docs/BYTECODE.md) — bytecode format specification
+- [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) — 0.0.2 feature plan (the beginning of ownership)
+- [CHANGELOG.md](CHANGELOG.md) — version history
 
-## 许可证
+## License
 
 [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)

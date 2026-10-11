@@ -51,13 +51,13 @@ const KEYWORDS: &[&str] = &[
 /// 0.0.1-shaped stream.
 ///
 /// # Arguments
-/// - `tokens`: 词法分析后的 Token 流
+/// - `tokens`: the token stream produced by the lexer
 ///
-/// # 返回
-/// - `Ok(Ast)`: 解析成功
-/// - `Err(ParseError)`: 解析失败，带 Span 和错误信息
+/// # Returns
+/// - `Ok(Ast)`: parsing succeeded
+/// - `Err(ParseError)`: parsing failed, with a Span and an error message
 ///
-/// # 示例
+/// # Example
 /// ```
 /// use fleen_compiler::lexer::tokenize;
 /// use fleen_compiler::parser::parse;

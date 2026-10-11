@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn float_whole() {
         // Anchored to exact text: must match what print renders (§"float as
-        // string 与 print 的 float 输出一致"), Rust Display for f64 gives "3".
+        // string matches print's float output"), Rust Display for f64 gives "3".
         assert_eq!(fmt_scalar(&Value::Float(3.0)), Some("3".to_string()));
     }
 

@@ -1,4 +1,4 @@
-// choose 表达式中负数模式（P5）
+// Negative number pattern in a choose expression (P5)
 // Note: choose as tail expression (no semicolon)
 func main(): int {
     choose x {

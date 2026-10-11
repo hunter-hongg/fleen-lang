@@ -1188,18 +1188,18 @@ func main() {
         assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
 
-    // ========== ASI（0.0.2，见 docs/0.0.2/ASI.md §5.1 陷阱表） ==========
+    // ========== ASI (0.0.2, see docs/0.0.2/ASI.md §5.1 pitfall table) ==========
 
     #[test]
     fn asi_two_stmts_across_newline() {
-        // `x = 1` ⏎ `y = 2` → 两条语句
+        // `x = 1` ⏎ `y = 2` → two statements
         let ast = parse_str("x = 1\ny = 2\n");
         assert_eq!(ast.items.len(), 2);
     }
 
     #[test]
     fn asi_binding_before_rbrace() {
-        // `{ x = 1 }` → 绑定贴 `}` 免分号，无尾表达式
+        // `{ x = 1 }` → binding flush against `}` needs no semicolon, no tail expression
         let ast = parse_str("{ x = 1 }");
         let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
             panic!("expected block expr");
@@ -1219,7 +1219,7 @@ func main() {
 
     #[test]
     fn asi_tail_expr_preserved() {
-        // `{ 42 }` → 尾表达式（pass 不在 `}` 前插分号）
+        // `{ 42 }` → tail expression (the pass never inserts a semicolon before `}`)
         let ast = parse_str("{ 42 }");
         let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
             panic!("expected block expr");
@@ -1233,7 +1233,7 @@ func main() {
 
     #[test]
     fn asi_explicit_semi_still_discards() {
-        // `{ f(); }` → 语句（has_semi），块值 unit
+        // `{ f(); }` → statement (has_semi), block value is unit
         let ast = parse_str("{ f(); }");
         let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
             panic!("expected block expr");
@@ -1244,7 +1244,7 @@ func main() {
 
     #[test]
     fn asi_cross_line_if_else_is_one_expr() {
-        // `if c { 1 }` ⏎ `else { 2 }` → 一个 if-else 表达式
+        // `if c { 1 }` ⏎ `else { 2 }` → one if-else expression
         let ast = parse_str("r = if c { 1 }\nelse { 2 };\n");
         let Item::Decl(Decl::Var(binding)) = &ast.items[0] else {
             panic!("expected binding");
@@ -1254,7 +1254,7 @@ func main() {
 
     #[test]
     fn asi_allman_braces() {
-        // Allman 风格：`{` 单独成行不断句
+        // Allman style: a `{` on its own line does not split the statement
         let ast = parse_str("r = if c\n{ 1 }\nelse\n{ 2 };\n");
         let Item::Decl(Decl::Var(binding)) = &ast.items[0] else {
             panic!("expected binding");
@@ -1264,14 +1264,14 @@ func main() {
 
     #[test]
     fn asi_if_stmt_then_binding() {
-        // `if c { 1 }` ⏎ `y = 2` → if 语句完结，pass 插分号
+        // `if c { 1 }` ⏎ `y = 2` → the if statement is complete, the pass inserts a semicolon
         let ast = parse_str("if c { 1 }\ny = 2\n");
         assert_eq!(ast.items.len(), 2);
     }
 
     #[test]
     fn asi_else_after_terminated_if_rejected() {
-        // `if c { 1 };` ⏎ `else { 2 }` → else 不续接已完结的 if 语句
+        // `if c { 1 };` ⏎ `else { 2 }` → else does not continue a terminated if statement
         let err = parse_err("if c { 1 };\nelse { 2 }\n");
         assert!(matches!(
             err.kind,
@@ -1281,7 +1281,7 @@ func main() {
 
     #[test]
     fn asi_same_line_juxtaposition_rejected() {
-        // `x = 1 y = 2`（同行拼接）→ 语法错误
+        // `x = 1 y = 2` (same-line juxtaposition) → syntax error
         let err = parse_err("x = 1 y = 2\n");
         assert!(matches!(
             err.kind,
@@ -1291,8 +1291,9 @@ func main() {
 
     #[test]
     fn asi_block_expr_stmt_needs_leading_semi() {
-        // `x = 1` ⏎ `{ print(1) }` → 块表达式语句需前导分号
-        // （`{` ∉ 隐式结束集，pass 不断句，绑定收尾报错）
+        // `x = 1` ⏎ `{ print(1) }` → a block-expression statement needs a
+        // leading semicolon (`{` is not in the implicit-end set, the pass
+        // does not split, so the binding-close errors)
         let err = parse_err("x = 1\n{ print(1) }\n");
         assert!(matches!(
             err.kind,
@@ -1321,7 +1322,8 @@ func main() {
 
     #[test]
     fn asi_if_head_binary_climb() {
-        // `if c { 1 }` ⏎ `- 2` ⇒ `(if-expr) - 2`（block-like 头续接爬升）
+        // `if c { 1 }` ⏎ `- 2` ⇒ `(if-expr) - 2` (block-like head continues
+        // into operator climbing)
         let ast = parse_str("if c { 1 }\n- 2\n");
         assert!(matches!(ast.items[0], Item::Expr(Expr::Sub(_, _))));
     }
@@ -1338,7 +1340,7 @@ func main() {
 
     #[test]
     fn asi_choose_arms_across_lines() {
-        // `}` ⏎ `when` —— 臂延续不断句
+        // `}` ⏎ `when` — arm continuation does not split
         let ast = parse_str("choose x {\nwhen 0 { 1 }\nwhen 1 { 2 }\n}\n");
         let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
             panic!("expected choose");
@@ -1348,7 +1350,8 @@ func main() {
 
     #[test]
     fn asi_when_guard_across_lines() {
-        // `when 0` ⏎ `if guard { … }` —— guard 可跨行（pass 插入分号被跳过）
+        // `when 0` ⏎ `if guard { … }` — the guard may span lines (the pass's
+        // inserted semicolon is skipped)
         let ast = parse_str("choose x {\nwhen 0\nif x > 1 { 1 }\n}\n");
         let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
             panic!("expected choose");
@@ -1358,14 +1361,14 @@ func main() {
 
     #[test]
     fn asi_func_decl_then_binding() {
-        // `func f() { 1 }` ⏎ `x = 2` → 两个 item（pass 在 `}` 后插分号）
+        // `func f() { 1 }` ⏎ `x = 2` → two items (the pass inserts a semicolon after `}`)
         let ast = parse_str("func f() { 1 }\nx = 2\n");
         assert_eq!(ast.items.len(), 2);
     }
 
     #[test]
     fn asi_binding_in_when_arm_before_rbrace() {
-        // when 臂内绑定贴 `}` 免分号
+        // binding flush against `}` inside a when arm needs no semicolon
         let ast = parse_str("choose x {\nwhen 0 { y = 1 }\n}\n");
         let Item::Expr(Expr::Choose(choose)) = &ast.items[0] else {
             panic!("expected choose");
@@ -1375,8 +1378,9 @@ func main() {
 
     #[test]
     fn asi_assign_shape_before_rbrace_is_statement() {
-        // `deref b = v` 贴 `}` 按语句处理，不作尾表达式（ASI.md §4 #2：
-        // Assign 的 lower 栈残留与 Unit 类型错位的防御）
+        // `deref b = v` flush against `}` is treated as a statement, not a
+        // tail expression (ASI.md §4 #2: defense against Assign's lowering
+        // leaving stack residue misaligned with the Unit type)
         let ast = parse_str("func f() {\nderef b = 3\n}");
         let Item::Decl(Decl::Func(func)) = &ast.items[0] else {
             panic!("expected func decl");
@@ -1394,7 +1398,8 @@ func main() {
 
     #[test]
     fn asi_block_with_explicit_semi_binding_is_statement() {
-        // `{ x = 1; }` —— 显式分号：绑定按语句处理，块值 unit（ASI.md §5.1）
+        // `{ x = 1; }` — explicit semicolon: the binding is treated as a
+        // statement, block value is unit (ASI.md §5.1)
         let ast = parse_str("{ x = 1; }");
         let Item::Expr(Expr::Block(block)) = &ast.items[0] else {
             panic!("expected block expression");

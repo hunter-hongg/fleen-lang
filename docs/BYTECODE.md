@@ -1,454 +1,460 @@
-# Fleen 字节码规范 v0.0.2
+# Fleen Bytecode Specification v0.0.2
 
-> **快、简、安、直觉**
-> 本文档定义 Fleen 编译器（`codegen` 阶段）的输出格式，
-> 以及 Fleen VM（`fleen-vm`）的执行模型。
-> 编译器与 VM 必须共同遵守本文档。
+> **Fast, Simple, Safe, Intuitive**
+> This document defines the output format of the Fleen compiler (the `codegen`
+> stage) and the execution model of the Fleen VM (`fleen-vm`).
+> The compiler and the VM must both adhere to this document.
 >
-> **v0.0.2 增量**：所有权指令（0x80–0x93）、Result 指令（0xA0–0xA4）、
-> `Value` 所有权表示、`span_map` 生成。设计决议见 `docs/0.0.2/PLAN.md`；
-> 实现落地前，当前工具链仍产出/执行 v1，读取端须同时接受 `{1, 2}`。
+> **v0.0.2 additions**: ownership instructions (0x80–0x93), Result instructions (0xA0–0xA4),
+> the `Value` ownership representation, and `span_map` generation. Design decisions are in
+> `docs/0.0.2/PLAN.md`; until the implementation lands, the current toolchain still
+> produces/executes v1, and readers must accept both `{1, 2}`.
 
 ---
 
-## 1. 总览
+## 1. Overview
 
-Fleen 编译到**自定义栈式字节码**，由自研 VM 解释执行。
+Fleen compiles to a **custom stack-based bytecode**, executed by a purpose-built VM.
 
-- **执行模型**：栈式虚拟机（stack machine），操作数隐式位于栈顶
-- **编码**：字节流，小端序（little-endian）
-- **指令格式**：`opcode: u8` + 定长/变长操作数
-- **结构**：一个字节码模块（`Module`）= 常量池 + 函数表 + 全局变量表 + 入口点
-- **无 GC、无异常表、无元循环指令**：与语言设计一致（所有权由 v2 的 `AllocBox` /
-  `MoveLocal` / `CloneLocal` 等指令承担，§5.9–5.10；释放由值的确定性析构完成）
+- **Execution model**: stack machine; operands are implicitly on top of the stack
+- **Encoding**: byte stream, little-endian
+- **Instruction format**: `opcode: u8` + fixed- or variable-length operands
+- **Structure**: one bytecode module (`Module`) = constant pool + function table + global variable table + entry point
+- **No GC, no exception table, no meta-circular instructions**: consistent with the language design
+  (ownership is carried by v2 instructions such as `AllocBox` /
+  `MoveLocal` / `CloneLocal`, §5.9–5.10; release is done via deterministic destruction of values)
 
-### 阶段衔接
+### Stage Handoff
 
 ```
-Lower (Typed HIR → MIR)    MIR 是控制流展平后的线性指令序列
-Codegen (MIR → Bytecode)   MIR 指令 1:1 映射为字节码 + 常量池索引
-Execute (Bytecode → 结果)  VM 解释执行
+Lower (Typed HIR → MIR)    MIR is a linear instruction sequence after control-flow flattening
+Codegen (MIR → Bytecode)   MIR instructions map 1:1 to bytecode + constant pool indices
+Execute (Bytecode → result)  VM interprets and executes
 ```
 
-规则：
-- Codegen 是**纯函数**：`pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError>`
-- MIR 与字节码指令**基本一一对应**，不做窥孔优化（后版本可加，但格式不变）
-- VM 不做类型检查——类型安全由 `typeck` 阶段保证，VM 信任字节码
+Rules:
+- Codegen is a **pure function**: `pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError>`
+- MIR and bytecode instructions correspond **essentially one-to-one**; no peephole optimization (later versions may add it, but the format stays unchanged)
+- The VM does no type checking — type safety is guaranteed by the `typeck` stage; the VM trusts the bytecode
 
 ---
 
-## 2. 模块格式（Module）
+## 2. Module Format
 
 ```rust
 pub struct Module {
-    pub version: u16,          // 字节码版本：0.0.2 写入 2，读取接受 {1, 2}
-    pub constants: Vec<Const>, // 常量池
-    pub functions: Vec<Func>,  // 函数表
-    pub globals: Vec<Global>,  // 全局变量表
-    pub entry: FuncId,         // 入口函数：通常为 main；有全局变量时为合成的 __init__
+    pub version: u16,          // bytecode version: 0.0.2 writes 2, readers accept {1, 2}
+    pub constants: Vec<Const>, // constant pool
+    pub functions: Vec<Func>,  // function table
+    pub globals: Vec<Global>,  // global variable table
+    pub entry: FuncId,         // entry function: usually main; synthesized __init__ when globals exist
 }
 ```
 
-规则：
-- **常量池去重**：相同常量只存一份，用索引 `ConstId(u32)` 引用
-- **函数从 0 开始连续编号**，用 `FuncId(u32)` 引用
-- **全局变量从 0 开始连续编号**，用 `GlobalId(u32)` 引用
-- ID 均为 newtype，避免混淆（见 SPEC.md §5）
-- **入口点由 `entry` 指定**，不靠函数名约定；模块**存在全局变量**时 `entry` 指向合成的 `__init__`（见下）
+Rules:
+- **Constant pool deduplication**: identical constants are stored once and referenced by index `ConstId(u32)`
+- **Functions are numbered consecutively from 0**, referenced by `FuncId(u32)`
+- **Global variables are numbered consecutively from 0**, referenced by `GlobalId(u32)`
+- All IDs are newtypes to avoid confusion (see SPEC.md §5)
+- **The entry point is specified by `entry`**, not by function-name convention; when the module
+  **has global variables**, `entry` points to the synthesized `__init__` (see below)
 
-### 入口与全局初始化
+### Entry and Global Initialization
 
-全局变量没有独立的“初始化段”，其初始化代码由一个**合成函数 `__init__`** 承载：
+Global variables have no separate "initialization section"; their initialization code is carried by a
+**synthesized function `__init__`**:
 
-- **无全局变量**：`entry` 直接指向 `main`。
-- **有全局变量**：`codegen` 额外合成一个函数 `__init__`（`params = 0`、`locals = 0`、`is_builtin = false`），放入函数表（`FuncId` 排在所有函数之后）。
-  - `__init__` 按**声明顺序**执行每个全局的初始化代码（MIR 中 `MirGlobal::init`），初始化表达式在栈顶留下一个值，紧接一条 `StoreGlobal gid` 存入对应全局。
-  - 全部存完后执行 `Call main_id`，再 `Return`（把 `main` 的返回值原样传出）。
-  - `entry` 指向 `__init__`。
-- **`main` 仍按名字查找**：函数表中没有名为 `main` 的函数时，`codegen` 报错。
-- VM 的执行契约不变：**先执行 `entry`**。`entry` 为 `__init__` 时，由它在初始化完成后调用 `main`。
+- **No globals**: `entry` points directly to `main`.
+- **With globals**: `codegen` additionally synthesizes a function `__init__` (`params = 0`, `locals = 0`, `is_builtin = false`) and places it in the function table (its `FuncId` comes after all functions).
+  - `__init__` executes each global's initialization code in **declaration order** (`MirGlobal::init` in MIR); the initialization expression leaves one value on the stack, immediately followed by a `StoreGlobal gid` that stores it into the corresponding global.
+  - After all stores, it executes `Call main_id`, then `Return` (passing `main`'s return value through unchanged).
+  - `entry` points to `__init__`.
+- **`main` is still looked up by name**: if the function table has no function named `main`, `codegen` errors.
+- The VM's execution contract is unchanged: **execute `entry` first**. When `entry` is `__init__`, it calls `main` after initialization completes.
 
-> `StoreGlobal` 对 `mutable: false` 全局的写入只允许发生在 `__init__`（入口函数）中，作为初始化；其余函数对 `const` 全局写入是 verify 失败（见 §8）。
+> A `StoreGlobal` write to a `mutable: false` global is only allowed inside `__init__` (the entry function), as initialization; a write to a `const` global from any other function is a verify failure (see §8).
 
-### 常量池（Constant Pool）
+### Constant Pool
 
 ```rust
 pub enum Const {
     Int(i64),
     Float(f64),
-    Bool(bool),      // bool 可不入池（用指令编码），预留
-    Str(Box<str>),   // UTF-8 字符串
+    Bool(bool),      // bool need not be pooled (encoded by instructions); reserved
+    Str(Box<str>),   // UTF-8 string
 }
 ```
 
-规则：
-- `int` / `float` / `string` 字面量入池；小整数优化见 §7
-- `bool` 用 `True` / `False` 指令直接编码，不入池
-- `unit` 无值，用 `Unit` 指令编码
+Rules:
+- `int` / `float` / `string` literals go into the pool; see §7 for the small-integer optimization
+- `bool` is encoded directly by the `True` / `False` instructions and is not pooled
+- `unit` has no value; it is encoded by the `Unit` instruction
 
-### 函数表（Function Table）
+### Function Table
 
 ```rust
 pub struct Func {
-    pub name: ConstId,        // 指向常量池中的字符串
-    pub params: u16,          // 参数个数
-    pub locals: u16,          // 局部变量槽总数（含参数）
-    pub code: Box<[u8]>,      // 指令字节流
-    pub span_map: Box<[SpanEntry]>, // 指令偏移 → 源码位置（用于运行时诊断）
-    pub is_builtin: bool,     // 宿主内置函数（如 print），由 VM 直接执行，不跑 code
+    pub name: ConstId,        // index into the constant pool's strings
+    pub params: u16,          // number of parameters
+    pub locals: u16,          // total number of local slots (including parameters)
+    pub code: Box<[u8]>,      // instruction byte stream
+    pub span_map: Box<[SpanEntry]>, // instruction offset → source location (for runtime diagnostics)
+    pub is_builtin: bool,     // host builtin (e.g. print), executed directly by the VM, `code` not run
 }
 ```
 
-> **SpanEntry（0.0.2 定义并启用）**：
+> **SpanEntry (defined and enabled in 0.0.2)**:
 >
 > ```rust
 > pub struct SpanEntry {
->     pub offset: u32,  // 指令起始字节偏移（相对函数 code）
->     pub start: u32,   // 源码起始字节偏移
->     pub end: u32,     // 源码结束字节偏移（不含）
+>     pub offset: u32,  // starting byte offset of the instruction (relative to the function's code)
+>     pub start: u32,   // starting byte offset in the source
+>     pub end: u32,     // ending byte offset in the source (exclusive)
 > }
 > ```
 >
-> 0.0.1 决定暂不生成（留空 `Box::new([])`）。0.0.2 起 codegen 逐指令填充
-> `span_map`（数据来源：MIR 指令携带的 Span），供运行时错误诊断使用。
+> 0.0.1 decided not to generate it for now (left empty, `Box::new([])`). From 0.0.2 on,
+> codegen fills `span_map` instruction by instruction (data source: the Spans carried by MIR
+> instructions), for use in runtime error diagnostics.
 >
-> **条目规则（0.0.2 U07 定契约）**：
+> **Entry rules (contract fixed by 0.0.2 U07)**:
 >
-> - 只覆盖 **MIR 指令**；块终结符（`Return` / `Jump` / `JumpIf*`）在 MIR 层
->   没有 span，**不产生条目**；
-> - codegen 合成的胶水指令（`__init__` 里的 `StoreGlobal` / `Call main`）
->   使用 `Span::SYNTHETIC`，**不产生条目**；
-> - `is_builtin` 函数的占位体无源码对应，`span_map` 恒为空；
-> - `offset` 即该指令的操作码字节位置，与 VM 出错时的 `frame.ip` 同义
->   （U10 按 `frame.ip` 查表）；读取端对空表与非空表都必须接受；
-> - **查不到 offset = 没有源码位置**：消费方退化为"函数名 + 指令偏移"，
->   不得假设表覆盖每条指令。
+> - Only **MIR instructions** are covered; block terminators (`Return` / `Jump` / `JumpIf*`)
+>   have no span at the MIR level and **produce no entries**;
+> - Glue instructions synthesized by codegen (`StoreGlobal` / `Call main` inside `__init__`)
+>   use `Span::SYNTHETIC` and **produce no entries**;
+> - `is_builtin` functions have placeholder bodies with no source correspondence; their `span_map` is always empty;
+> - `offset` is the position of the instruction's opcode byte, synonymous with `frame.ip` when the VM
+>   errors (U10 looks up by `frame.ip`); readers must accept both empty and non-empty tables;
+> - **A missed offset lookup = no source location**: consumers fall back to
+>   "function name + instruction offset" and must not assume the table covers every instruction.
 
-规则：
-- **内置函数用 `is_builtin: true` 标记**，不靠函数名判断：语言允许用户遮蔽内建名（如自定义 `func print`），仅凭名字无法区分宿主内置与用户函数。
-- `is_builtin` 为 `true` 时，VM 直接执行宿主实现并忽略 `code`；`code` 仍保留占位体（`Unit; Return`）以维持结构良构，并通过 verify。
-- `codegen` 将 MIR 的 `MirFunc::is_builtin` 原样搬运到此字段。
+Rules:
+- **Builtin functions are marked with `is_builtin: true`**, not identified by name: the language lets users shadow builtin names (e.g. a user-defined `func print`), so the host builtin cannot be distinguished from user functions by name alone.
+- When `is_builtin` is `true`, the VM executes the host implementation directly and ignores `code`; `code` still holds a placeholder body (`Unit; Return`) to keep the structure well-formed and pass verify.
+- `codegen` copies MIR's `MirFunc::is_builtin` verbatim into this field.
 
-### 全局变量表（Global Table）
+### Global Variable Table
 
 ```rust
 pub struct Global {
-    pub name: ConstId,   // 指向常量池中的字符串
-    pub mutable: bool,   // 是否可变（const 为 false）
+    pub name: ConstId,   // index into the constant pool's strings
+    pub mutable: bool,   // whether mutable (const is false)
 }
 ```
 
-规则：
-- 全局变量的**不可变性在 VM 层强制执行**：对 `mutable: false` 的全局执行 `StoreGlobal` 是 VM 错误
-- 全局变量初始化顺序 = 表中顺序；初始化代码位于合成的 `__init__` 函数中（见 §2「入口与全局初始化」）
-- `__init__` 中初始化 `const` 全局的 `StoreGlobal` 是允许的；其余位置的 `StoreGlobal` 目标必须 `mutable: true`
+Rules:
+- **Immutability of globals is enforced at the VM level**: a `StoreGlobal` targeting a `mutable: false` global is a VM error
+- Global initialization order = table order; initialization code lives in the synthesized `__init__` function (see §2 "Entry and Global Initialization")
+- A `StoreGlobal` that initializes a `const` global inside `__init__` is allowed; everywhere else, the target of `StoreGlobal` must be `mutable: true`
 
 ---
 
-## 3. 运行时模型（VM）
+## 3. Runtime Model (VM)
 
-### 3.1 栈
+### 3.1 Stacks
 
-- **操作数栈**（operand stack）：存放临时值，指令的输入输出
-- **调用栈**（call stack）：每层调用一个 `CallFrame`：
+- **Operand stack**: holds temporary values; the inputs and outputs of instructions
+- **Call stack**: one `CallFrame` per call level:
 
 ```rust
 pub struct CallFrame {
     pub func: FuncId,
-    pub ip: usize,          // 指令指针，指向 code 中的字节偏移
-    pub stack_base: usize,  // 本帧的局部变量在栈中的起始槽位
+    pub ip: usize,          // instruction pointer, a byte offset into code
+    pub stack_base: usize,  // starting stack slot of this frame's locals
 }
 ```
 
-- 局部变量**不单独使用栈槽**，而是按 `stack_base + slot` 在操作数栈上定位
-- `LoadLocal i` = 取 `stack_base + i`；`StoreLocal i` = 写 `stack_base + i`
+- Locals **do not get dedicated stack slots**; they are located on the operand stack at `stack_base + slot`
+- `LoadLocal i` = read `stack_base + i`; `StoreLocal i` = write `stack_base + i`
 
-### 3.2 值表示
+### 3.2 Value Representation
 
 ```rust
 pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(Box<str>),                 // 0.0.2：独占所有权（0.0.1 临时用的 Rc<str> 已按计划替换）
-    Boxed(Box<Value>),             // 0.0.2：box<T>，唯一所有权
-    Ref { base: u32, slot: u16 },  // 0.0.2：借用句柄，仅存在于被调帧生命期
-    Ok(Box<Value>),                // 0.0.2：Result 构造
-    Err(Box<Value>),               // 0.0.2：Result 构造
-    Unit,           // 空值，占位
-    Func(FuncId),   // 一等值函数引用
+    Str(Box<str>),                 // 0.0.2: exclusive ownership (0.0.1's temporary Rc<str> has been replaced as planned)
+    Boxed(Box<Value>),             // 0.0.2: box<T>, unique ownership
+    Ref { base: u32, slot: u16 },  // 0.0.2: borrow handle, lives only within the callee frame's lifetime
+    Ok(Box<Value>),                // 0.0.2: Result construction
+    Err(Box<Value>),               // 0.0.2: Result construction
+    Unit,           // empty value, placeholder
+    Func(FuncId),   // first-class function reference
 }
 ```
 
-规则：
-- 值**自描述类型**，VM 据此做算术指令的快速分派
-- 类型不匹配的算术指令（如 `int + string`）是 **VM 错误**（`RuntimeError`），但正常编译通过的字节码不应出现——那是 `typeck` 的职责
-- **所有权纪律由 typeck 静态保证**；VM 侧 Rust 的移动/丢弃语义即运行时实现，
-  `Drop` 确定性完成（帧销毁 truncate、槽位覆盖、`Pop`），无 GC
-- `Eq` 语义：`Str` 按内容比较；`Boxed` 比较点内值（与 Rust `Box: PartialEq` 一致）；
-  `Ref` 解引用后比较
-- `Ref` 句柄不可逃逸：仅由 `MakeRefLocal` 在实参准备时生成，只读、不可存储、
-  随调用结束消亡（越界读取 → `RuntimeError::BorrowOutOfRange`，防御性）
-- `Value` 不落盘：常量池无 `Ref` / `Boxed` / `Ok` / `Err` 形态
+Rules:
+- Values are **self-describing**: the VM uses this for fast dispatch of arithmetic instructions
+- An arithmetic instruction with mismatched types (e.g. `int + string`) is a **VM error** (`RuntimeError`), but correctly compiled bytecode should never contain one — that is `typeck`'s responsibility
+- **Ownership discipline is statically guaranteed by typeck**; on the VM side, Rust's move/drop semantics are the runtime implementation,
+  with `Drop` performed deterministically (frame-destruction truncation, slot overwrite, `Pop`), no GC
+- `Eq` semantics: `Str` compares by content; `Boxed` compares the value inside the box (consistent with Rust's `Box: PartialEq`);
+  `Ref` is dereferenced before comparing
+- `Ref` handles cannot escape: they are only produced by `MakeRefLocal` during argument preparation, are read-only, cannot be stored,
+  and die when the call ends (out-of-range read → `RuntimeError::BorrowOutOfRange`, defensive)
+- `Value` is never serialized: the constant pool has no `Ref` / `Boxed` / `Ok` / `Err` variants
 
-> **0.0.2 决定**：0.0.1 的 `Str(Rc<str>)` 是临时决策——字符串不可变、无循环引用风险，
-> `Rc` 的确定性析构不算 GC。引入 `move` / `clone` 后 `Rc` 的共享语义与所有权模型冲突
-> （`clone` 是深拷贝，`Rc::clone` 是计数 +1），已按 `docs/0.0.2/PLAN.md` §5.3
-> 替换为 `Str(Box<str>)`：`clone` 是深拷贝，计数共享不复存在。
+> **0.0.2 decision**: 0.0.1's `Str(Rc<str>)` was a temporary decision — strings are immutable with no
+> reference-cycle risk, and `Rc`'s deterministic destruction is not GC. After introducing `move` / `clone`,
+> `Rc`'s shared semantics conflicted with the ownership model
+> (`clone` is a deep copy, while `Rc::clone` is a refcount increment), so per `docs/0.0.2/PLAN.md` §5.3
+> it was replaced with `Str(Box<str>)`: `clone` is a deep copy, and refcounted sharing is gone.
 
-### 3.3 调用约定
+### 3.3 Calling Convention
 
-- **直接调用**：按顺序将 `params` 个实参压栈 → 执行 `Call FuncId`
-- **间接调用（一等值）**：先压 `f: Func(FuncId)`，再按顺序压实参 → 执行 `CallValue argc`（`argc = params`）
-- **被调方**：实参占据本帧 `slot 0..params`，多余的槽是局部变量；`f` 留在调用方栈上，由 `CallValue` 消耗
-- **返回**：`Return` 弹出栈顶 1 个值作为返回值，弹出整个调用帧，返回值**压回调用方栈顶**
-- `unit` 返回值的函数也必须显式 `Return`（压入 `Unit` 再返回）——保持约定统一
-- **内置函数调用**：被调函数 `is_builtin == true` 时，VM 不建立普通帧执行 `code`，而由宿主按预导入映射执行（如 `print` → `println!`），再按普通调用约定把返回值压回调用方栈
+- **Direct call**: push the `params` arguments in order → execute `Call FuncId`
+- **Indirect call (first-class value)**: first push `f: Func(FuncId)`, then push the arguments in order → execute `CallValue argc` (`argc = params`)
+- **Callee side**: the arguments occupy this frame's `slot 0..params`; the remaining slots are locals; `f` stays on the caller's stack and is consumed by `CallValue`
+- **Return**: `Return` pops 1 value from the top of the stack as the return value, pops the entire call frame, and **pushes the return value back onto the caller's stack top**
+- Functions returning `unit` must also `Return` explicitly (push `Unit` then return) — keeping the convention uniform
+- **Builtin function calls**: when the callee has `is_builtin == true`, the VM does not build a normal frame to run `code`; instead the host executes it via a preloaded mapping (e.g. `print` → `println!`), then pushes the return value back onto the caller's stack per the normal calling convention
 
-### 3.4 VM 错误
+### 3.4 VM Errors
 
 ```rust
 pub enum RuntimeError {
-    StackUnderflow,          // 操作数栈下溢
-    InvalidOpcode(u8),       // 未知指令
+    StackUnderflow,          // operand stack underflow
+    InvalidOpcode(u8),       // unknown instruction
     ConstOutOfRange(ConstId),
     FuncOutOfRange(FuncId),
     GlobalOutOfRange(GlobalId),
-    ImmutableGlobal(GlobalId),   // 对 const 全局赋值
-    ArithTypeMismatch,       // 类型不匹配的算术
+    ImmutableGlobal(GlobalId),   // assignment to a const global
+    ArithTypeMismatch,       // arithmetic on mismatched types
     DivisionByZero,
-    CallDepthExceeded,       // 递归深度上限
+    CallDepthExceeded,       // recursion depth limit
 }
 ```
 
-规则：
-- VM 错误**不可捕获**（对应语言设计：panic 仅用于不可恢复错误）
-- `CallDepthExceeded` 上限默认 `1024` 层，防止无限递归爆栈
+Rules:
+- VM errors **cannot be caught** (matching the language design: panic is only for unrecoverable errors)
+- The `CallDepthExceeded` limit defaults to `1024` frames, preventing unbounded recursion from blowing the stack
 
 ---
 
-## 4. 指令编码
+## 4. Instruction Encoding
 
-### 4.1 编码规则
+### 4.1 Encoding Rules
 
-- `opcode`：1 字节（`u8`）
-- 操作数：
-  - `u8`：1 字节，小端
-  - `u16`：2 字节，小端
-  - `u32`：4 字节，小端
-  - `i64` / `f64`：8 字节，小端
-- 指令总长 = 1 + 各操作数字节数之和，**变长但可静态确定**（解码时按 opcode 查表得知长度）
+- `opcode`: 1 byte (`u8`)
+- Operands:
+  - `u8`: 1 byte, little-endian
+  - `u16`: 2 bytes, little-endian
+  - `u32`: 4 bytes, little-endian
+  - `i64` / `f64`: 8 bytes, little-endian
+- Total instruction length = 1 + the sum of operand sizes, **variable-length but statically determinable** (the decoder looks up the length by opcode)
 
-### 4.2 编号分配
+### 4.2 Number Allocation
 
-按功能分组预留编号空间，方便扩展（0.0.2+ 的 `box` / `move` 等指令插入组内空位）：
+Number space is reserved by functional group for easy extension (0.0.2+ instructions such as `box` / `move` fit into gaps within their groups):
 
 ```
-0x00–0x0F  常量与栈操作
-0x10–0x1F  局部变量 / 全局变量
-0x20–0x2F  算术（int）
-0x30–0x3F  算术（float）
-0x40–0x4F  比较 / 逻辑
-0x50–0x5F  控制流
-0x60–0x6F  函数调用
-0x70–0x7F  选择（choose 辅助）
-0x80–0x83  box / ref（0.0.2，§5.9）
-0x84–0x8F  预留
-0x90–0x93  move / clone（0.0.2，§5.10）
-0x94–0x9F  预留
-0xA0–0xA4  Result / 错误处理（0.0.2，§5.11）
-0xA5       `as` 转换 `ToStr`（0.0.2 U13，F8 §3.6）
-0xA6–0xFF  预留
+0x00–0x0F  Constants and stack operations
+0x10–0x1F  Locals / globals
+0x20–0x2F  Arithmetic (int)
+0x30–0x3F  Arithmetic (float)
+0x40–0x4F  Comparison / logic
+0x50–0x5F  Control flow
+0x60–0x6F  Function calls
+0x70–0x7F  Selection (choose helpers)
+0x80–0x83  box / ref (0.0.2, §5.9)
+0x84–0x8F  Reserved
+0x90–0x93  move / clone (0.0.2, §5.10)
+0x94–0x9F  Reserved
+0xA0–0xA4  Result / error handling (0.0.2, §5.11)
+0xA5       `as` conversion `ToStr` (0.0.2 U13, F8 §3.6)
+0xA6–0xFF  Reserved
 ```
 
 ---
 
-## 5. 指令集（v0.0.1 基础 + v0.0.2 增量）
+## 5. Instruction Set (v0.0.1 base + v0.0.2 additions)
 
-### 5.1 常量与栈操作
+### 5.1 Constants and Stack Operations
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `Const` | `u32` (ConstId) | 5 | `→ v` | 从常量池加载 int/float/string |
-| `True` | — | 1 | `→ true` | 压入 bool true |
-| `False` | — | 1 | `→ false` | 压入 bool false |
-| `Unit` | — | 1 | `→ unit` | 压入空值 |
-| `Pop` | — | 1 | `v →` | 丢弃栈顶（丢弃语句值） |
-| `Dup` | — | 1 | `v → v v` | 复制栈顶 |
+| `Const` | `u32` (ConstId) | 5 | `→ v` | Load int/float/string from the constant pool |
+| `True` | — | 1 | `→ true` | Push bool true |
+| `False` | — | 1 | `→ false` | Push bool false |
+| `Unit` | — | 1 | `→ unit` | Push the empty value |
+| `Pop` | — | 1 | `v →` | Discard the stack top (discarding a statement's value) |
+| `Dup` | — | 1 | `v → v v` | Duplicate the stack top |
 
-### 5.2 变量
+### 5.2 Variables
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `LoadLocal` | `u16` (slot) | 3 | `→ v` | 读局部变量 `stack_base + slot` |
-| `StoreLocal` | `u16` (slot) | 3 | `v →` | 写局部变量 `stack_base + slot` |
-| `LoadGlobal` | `u16` (GlobalId) | 3 | `→ v` | 读全局变量 |
-| `StoreGlobal` | `u16` (GlobalId) | 3 | `v →` | 写全局变量（const 则 VM 错误） |
+| `LoadLocal` | `u16` (slot) | 3 | `→ v` | Read local at `stack_base + slot` |
+| `StoreLocal` | `u16` (slot) | 3 | `v →` | Write local at `stack_base + slot` |
+| `LoadGlobal` | `u16` (GlobalId) | 3 | `→ v` | Read a global |
+| `StoreGlobal` | `u16` (GlobalId) | 3 | `v →` | Write a global (VM error if const) |
 
-### 5.3 算术（int）
+### 5.3 Arithmetic (int)
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `IAdd` | — | 1 | `a b → a+b` | int 加法，溢出为 VM 错误（见下） |
-| `ISub` | — | 1 | `a b → a-b` | int 减法 |
-| `IMul` | — | 1 | `a b → a*b` | int 乘法 |
-| `IDiv` | — | 1 | `a b → a/b` | int 除法，除以 0 → `DivisionByZero` |
-| `IMod` | — | 1 | `a b → a%b` | int 取模，符号随被除数（Rust `%` 语义） |
+| `IAdd` | — | 1 | `a b → a+b` | int addition; overflow is a VM error (see below) |
+| `ISub` | — | 1 | `a b → a-b` | int subtraction |
+| `IMul` | — | 1 | `a b → a*b` | int multiplication |
+| `IDiv` | — | 1 | `a b → a/b` | int division; division by 0 → `DivisionByZero` |
+| `IMod` | — | 1 | `a b → a%b` | int modulo; sign follows the dividend (Rust `%` semantics) |
 
-**整数溢出**：`IAdd` / `ISub` / `IMul` 使用 `checked_*`，溢出为 VM 错误。理由：显式、可预测——静默回绕违背「安」的哲学。（后续版本可加 `unchecked` 变体放 `unsafe` 块内。）
+**Integer overflow**: `IAdd` / `ISub` / `IMul` use `checked_*`; overflow is a VM error. Rationale: explicit and predictable — silent wraparound violates the "Safe" philosophy. (Later versions may add `unchecked` variants inside `unsafe` blocks.)
 
-### 5.4 算术（float）
+### 5.4 Arithmetic (float)
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `FAdd` | — | 1 | `a b → a+b` | IEEE 754 加法 |
+| `FAdd` | — | 1 | `a b → a+b` | IEEE 754 addition |
 | `FSub` | — | 1 | `a b → a-b` | |
 | `FMul` | — | 1 | `a b → a*b` | |
-| `FDiv` | — | 1 | `a b → a/b` | 除以 0 产生 `inf`/`NaN`（IEEE 语义，非错误） |
+| `FDiv` | — | 1 | `a b → a/b` | Division by 0 yields `inf`/`NaN` (IEEE semantics, not an error) |
 
-### 5.5 比较 / 逻辑
+### 5.5 Comparison / Logic
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `Eq` | — | 1 | `a b → bool` | 相等 |
-| `Ne` | — | 1 | `a b → bool` | 不等 |
-| `Lt` | — | 1 | `a b → bool` | 小于 |
-| `Gt` | — | 1 | `a b → bool` | 大于 |
-| `Le` | — | 1 | `a b → bool` | 小于等于 |
-| `Ge` | — | 1 | `a b → bool` | 大于等于 |
-| `Not` | — | 1 | `b → !b` | 逻辑非（一元 `!`） |
-| `NegI` | — | 1 | `a → -a` | int 取负（一元 `-`） |
-| `NegF` | — | 1 | `a → -a` | float 取负 |
+| `Eq` | — | 1 | `a b → bool` | Equal |
+| `Ne` | — | 1 | `a b → bool` | Not equal |
+| `Lt` | — | 1 | `a b → bool` | Less than |
+| `Gt` | — | 1 | `a b → bool` | Greater than |
+| `Le` | — | 1 | `a b → bool` | Less than or equal |
+| `Ge` | — | 1 | `a b → bool` | Greater than or equal |
+| `Not` | — | 1 | `b → !b` | Logical negation (unary `!`) |
+| `NegI` | — | 1 | `a → -a` | int negation (unary `-`) |
+| `NegF` | — | 1 | `a → -a` | float negation |
 
-规则：
-- **没有 `And` / `Or` 指令**：`and` / `or` 必须短路求值，由控制流指令实现（见 §5.6 与 §6.3）
+Rules:
+- **There are no `And` / `Or` instructions**: `and` / `or` must short-circuit, implemented by control-flow instructions (see §5.6 and §6.3)
 
-### 5.6 控制流
+### 5.6 Control Flow
 
-跳转操作数 `u16` 是**目标指令的绝对字节偏移**（相对 `code` 起始）。
+The jump operand `u16` is the **absolute byte offset of the target instruction** (relative to the start of `code`).
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `Jump` | `u16` | 3 | `→` | 无条件跳转 |
-| `JumpIfFalse` | `u16` | 3 | `b →` | 栈顶为 false 则跳转（并弹出） |
-| `JumpIfTrue` | `u16` | 3 | `b →` | 栈顶为 true 则跳转（并弹出） |
+| `Jump` | `u16` | 3 | `→` | Unconditional jump |
+| `JumpIfFalse` | `u16` | 3 | `b →` | Jump if the stack top is false (and pop it) |
+| `JumpIfTrue` | `u16` | 3 | `b →` | Jump if the stack top is true (and pop it) |
 
-规则：
-- 跳转目标必须**落在指令边界上**（不对齐 → VM 错误），`fleen-verify` 负责静态校验
-- `JumpIfTrue` 用于 `or` 短路，`JumpIfFalse` 用于 `if` 条件与 `and` 短路
-- 无 `for` / `break` / `continue` 指令（0.0.1 无此语法）
+Rules:
+- Jump targets must **land on instruction boundaries** (misaligned → VM error); `fleen-verify` performs the static check
+- `JumpIfTrue` is used for `or` short-circuiting; `JumpIfFalse` for `if` conditions and `and` short-circuiting
+- No `for` / `break` / `continue` instructions (0.0.1 has no such syntax)
 
-### 5.7 函数调用
+### 5.7 Function Calls
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `Call` | `u16` (FuncId) | 3 | `args... → ret` | 调用函数（见 §3.3） |
-| `LoadFunc` | `u16` (FuncId) | 3 | `→ Func(id)` | 函数作为一等值压栈 |
-| `CallValue` | `u8` (argc) | 2 | `f args... → ret` | 间接调用栈上的函数值 |
-| `Return` | — | 1 | `ret →` | 返回（见 §3.3） |
+| `Call` | `u16` (FuncId) | 3 | `args... → ret` | Call a function (see §3.3) |
+| `LoadFunc` | `u16` (FuncId) | 3 | `→ Func(id)` | Push a function as a first-class value |
+| `CallValue` | `u8` (argc) | 2 | `f args... → ret` | Indirectly call the function value on the stack |
+| `Return` | — | 1 | `ret →` | Return (see §3.3) |
 
-规则：
-- `Call` 用于**直接调用**（编译期已知目标，typeck 解析后 MIR 保证）
-- `CallValue` 用于**一等值调用**（`f(a, b)` 其中 `f` 是变量），`argc` 为实参个数
-- **栈上顺序**：`f` 必须在实参之前压栈，即 `f arg0 arg1 ...`（`f` 在栈底方向，实参在栈顶方向）
-- 0.0.1 `argc` 用 `u8`（最多 255 参数）；语言层后续若需要更多，加 `CallValueWide`，不改现有编码
-- **变参内置函数**（`print`）：`Call` 弹出恰好 `callee.params` 个实参，
-  因此每个观测到的调用参数个数对应函数表中一个独立实例（`params = argc`，
-  按 `print` 名称由宿主分派，U09 修正）——共享单一 `params == 1` 实例
-  会让多余实参残留在栈上
+Rules:
+- `Call` is for **direct calls** (target known at compile time, guaranteed by MIR after typeck resolution)
+- `CallValue` is for **first-class calls** (`f(a, b)` where `f` is a variable); `argc` is the number of arguments
+- **Stack order**: `f` must be pushed before the arguments, i.e. `f arg0 arg1 ...` (`f` toward the bottom of the stack, arguments toward the top)
+- 0.0.1 uses `u8` for `argc` (up to 255 arguments); if the language later needs more, add `CallValueWide` without changing the existing encoding
+- **Variadic builtin** (`print`): `Call` pops exactly `callee.params` arguments,
+  so each observed call arity corresponds to a distinct instance in the function table (`params = argc`,
+  dispatched by the host under the `print` name, fixed by U09) — sharing a single
+  `params == 1` instance would leave excess arguments stranded on the stack
 
-### 5.8 choose 辅助
+### 5.8 choose Helpers
 
-`choose` 的模式匹配在 MIR 层被展平为**比较链 + 跳转**（见 §6.4），仅需要一个辅助指令绑定守卫变量：
+`choose`'s pattern matching is flattened at the MIR level into a **comparison chain + jumps** (see §6.4); only one helper instruction is needed to bind the guard variable:
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `BindMatch` | `u16` (slot) | 3 | `v → v` | 复制栈顶绑定到守卫槽（`when x if ...` 的 `x`） |
+| `BindMatch` | `u16` (slot) | 3 | `v → v` | Copy the stack top into the guard slot (the `x` of `when x if ...`) |
 
-规则：
-- `BindMatch` 不弹出栈顶：被匹配值还要参与后续比较或作为分支值来源
+Rules:
+- `BindMatch` does not pop the stack top: the matched value still participates in later comparisons or serves as the source of the branch value
 
-### 5.9 box / ref（v0.0.2）
+### 5.9 box / ref (v0.0.2)
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `AllocBox` | — | 1 | `v → b` | 堆分配，值的所有权转入 box |
-| `DerefBox` | — | 1 | `b → b v` | 读点内值（副本/深拷贝），box 仍在栈上 |
-| `StoreDerefBox` | — | 1 | `b v →` | 写点内值，旧值释放 |
-| `MakeRefLocal` | `u16` (slot) | 3 | `→ ref` | 生成借用句柄指向本帧 `stack_base + slot`（实参准备） |
+| `AllocBox` | — | 1 | `v → b` | Heap-allocate; ownership of the value moves into the box |
+| `DerefBox` | — | 1 | `b → b v` | Read the value inside the box (copy/deep copy); the box stays on the stack |
+| `StoreDerefBox` | — | 1 | `b v →` | Write the value inside the box; the old value is released |
+| `MakeRefLocal` | `u16` (slot) | 3 | `→ ref` | Produce a borrow handle pointing at this frame's `stack_base + slot` (argument preparation) |
 
-规则：
-- `box` 唯一所有权：**没有**"移出 box"指令——读取产生副本，需要值由语言层
-  `clone deref b`（`DerefBox`）承担
-- `MakeRefLocal` 的 slot 校验同 `LoadLocal`/`StoreLocal`（slot < `locals`）；
-  句柄值 `Ref { base, slot }` 中的 `base` 由 VM 在调用时绑定调用方帧，
-  不是编码的一部分
-- `MakeRefLocal` 的**转发**：目标槽已持有句柄（`ref` 参数再传给下一个
-  `ref` 参数）时原样再压该句柄，不得再包一层（句柄套句柄无法解引用穿透）
-- 编译器对局部 box 的 `deref b = v` 生成 `v; AllocBox; StoreLocal b; Unit`
-  （U09 修正；尾随 `Unit` 是赋值表达式的值，作语句时由 `Pop` 丢弃）：
-  `StoreDerefBox` 的契约是弹出 box 写入后丢弃，而
-  `LoadLocal` 取出的是深拷贝，写入无法落回槽内 box；唯一所有权下
-  点内替换与整 box 替换观测等价。`StoreDerefBox` 保留给手写字节码与
-  写穿透句柄的路径（0.0.2 编译器不再生成该指令）
+Rules:
+- `box` has unique ownership: there is **no** "move out of box" instruction — reading produces a copy;
+  obtaining the value is done at the language level via `clone deref b` (`DerefBox`)
+- `MakeRefLocal`'s slot is validated like `LoadLocal`/`StoreLocal` (slot < `locals`);
+  the `base` in the handle value `Ref { base, slot }` is bound by the VM at call time to the caller's frame
+  and is not part of the encoding
+- **Forwarding** for `MakeRefLocal`: when the target slot already holds a handle (a `ref` argument passed on to the next
+  `ref` argument), push that same handle as-is; do not wrap it again (a handle wrapping a handle cannot be dereferenced through)
+- For a local box, the compiler generates `v; AllocBox; StoreLocal b; Unit` for `deref b = v`
+  (fixed by U09; the trailing `Unit` is the value of the assignment expression, discarded by `Pop` when used as a statement):
+  `StoreDerefBox`'s contract is to pop the box, write into it, and discard it, while
+  `LoadLocal` produces a deep copy, so the write cannot land back in the slot's box; under unique ownership,
+  replacing the value inside the box and replacing the whole box are observationally equivalent. `StoreDerefBox` is kept for
+  hand-written bytecode and for paths that write through handles (the 0.0.2 compiler no longer emits it)
 
-### 5.10 move / clone（v0.0.2）
+### 5.10 move / clone (v0.0.2)
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `DupDeep` | — | 1 | `v → v v` | 深拷贝栈顶（`clone` 的栈上形态） |
-| `MoveLocal` | `u16` (slot) | 3 | `→ v` | **消耗性读**：取出槽值，槽清为 `Unit` |
-| `CloneLocal` | `u16` (slot) | 3 | `→ v` | 非消耗读：深拷贝槽值，槽不动 |
-| `CloneGlobal` | `u16` (GlobalId) | 3 | `→ v` | 非消耗读全局（owned 全局的唯一读法） |
+| `DupDeep` | — | 1 | `v → v v` | Deep-copy the stack top (`clone`'s on-stack form) |
+| `MoveLocal` | `u16` (slot) | 3 | `→ v` | **Consuming read**: take the slot's value and clear the slot to `Unit` |
+| `CloneLocal` | `u16` (slot) | 3 | `→ v` | Non-consuming read: deep-copy the slot's value; the slot is untouched |
+| `CloneGlobal` | `u16` (GlobalId) | 3 | `→ v` | Non-consuming read of a global (the only way to read an owned global) |
 
-规则：
-- 0.0.1 的 `LoadLocal` / `LoadGlobal`（非消耗读、浅复制）**保持不变**，
-  仅用于 Copy 类型；owned 类型的消耗性读用 `MoveLocal`、非消耗读用
-  `CloneLocal`/`CloneGlobal`，由 codegen 按静态类型选择
-- "已移动"槽位的内容对 VM 不可见（typeck 保证不再读取）；`MoveLocal` 用
-  `mem::replace` 清槽，避免旧值延迟到帧销毁才释放
-- **`CloneGlobal` 不做句柄解引用**（U09 决策，与 `CloneLocal`/`DupDeep` 不同）：
-  typeck 禁止把 `Ref` 存入全局，全局槽只会持有 owned 值，拷贝点无需解引用；
-  手写字节码把句柄存进全局时，兜底在**消费点**（`Eq`/`Ne`、序比较、`print`
-  实参、`DupDeep`、`DerefBox` 的 `read_ref`），越界即 `BorrowOutOfRange`
+Rules:
+- 0.0.1's `LoadLocal` / `LoadGlobal` (non-consuming read, shallow copy) **remain unchanged**,
+  used only for Copy types; owned types use `MoveLocal` for consuming reads and
+  `CloneLocal`/`CloneGlobal` for non-consuming reads, chosen by codegen based on the static type
+- The contents of an "already moved" slot are invisible to the VM (typeck guarantees it is not read again); `MoveLocal` uses
+  `mem::replace` to clear the slot, avoiding the old value lingering until frame destruction
+- **`CloneGlobal` does not dereference handles** (U09 decision, unlike `CloneLocal`/`DupDeep`):
+  typeck forbids storing a `Ref` in a global, so a global slot only ever holds owned values and the copy point needs no dereference;
+  if hand-written bytecode stores a handle into a global, the fallback is at the **consumption point**
+  (`Eq`/`Ne`, ordering comparisons, `print` arguments, `DupDeep`, and `DerefBox`'s `read_ref`); out of range → `BorrowOutOfRange`
 
-### 5.11 Result / 错误处理（v0.0.2）
+### 5.11 Result / Error Handling (v0.0.2)
 
-| 助记符 | 操作数 | 字节 | 栈效果 | 说明 |
+| Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
-| `PackOk` | — | 1 | `v → ok(v)` | 构造 `Ok` |
-| `PackErr` | — | 1 | `v → err(e)` | 构造 `Err` |
-| `IsErr` | — | 1 | `r → bool` | 测试 `Err` |
-| `UnwrapOk` | — | 1 | `r → v` | 取出 Ok payload（转移） |
-| `UnwrapErr` | — | 1 | `r → e` | 取出 Err payload（转移） |
+| `PackOk` | — | 1 | `v → ok(v)` | Construct `Ok` |
+| `PackErr` | — | 1 | `v → err(e)` | Construct `Err` |
+| `IsErr` | — | 1 | `r → bool` | Test for `Err` |
+| `UnwrapOk` | — | 1 | `r → v` | Extract the Ok payload (moving) |
+| `UnwrapErr` | — | 1 | `r → e` | Extract the Err payload (moving) |
 
-规则：
-- `UnwrapOk` 遇 `Err`（或反之）→ `RuntimeError::ResultMismatch`（防御性，
-  合法编译产物不会出现——分支由 `IsErr` + 跳转保证）
-- payload 的取出是**转移**：`Result` 值被消耗
+Rules:
+- `UnwrapOk` on an `Err` (or vice versa) → `RuntimeError::ResultMismatch` (defensive;
+  legitimately compiled output never hits this — the branches are guaranteed by `IsErr` + jumps)
+- Payload extraction is a **move**: the `Result` value is consumed
 
 ---
 
-## 6. 源码构造 → 字节码对照
+## 6. Source Constructs → Bytecode Mapping
 
-> **分号说明**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI 落地、分号可选——
-> 分号的有无在 AST 之后不可见，本节对照不受影响。
-> **函数声明不加分号**：`func` 声明末尾无分号，语法见 `SYNTAX.ebnf`。
-> **返回值**：函数体最后一个表达式无分号，否则会丢弃返回值。
+> **Semicolon note**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 ASI lands and semicolons become optional —
+> the presence or absence of semicolons is invisible after the AST, so the mappings in this section are unaffected.
+> **No semicolon after function declarations**: a `func` declaration has no trailing semicolon; see `SYNTAX.ebnf` for the grammar.
+> **Return value**: the last expression of a function body has no semicolon; otherwise the return value is discarded.
 
-### 6.1 表达式语句
+### 6.1 Expression Statements
 
 ```fleen
 fib(3);
 ```
 
 ```text
-Const    3            ; 实参
+Const    3            ; argument
 Call     fib
-Pop                   ; 语句值被丢弃
+Pop                   ; the statement's value is discarded
 ```
 
-### 6.2 绑定与赋值
+### 6.2 Binding and Assignment
 
 ```fleen
 x = 42;
@@ -457,15 +463,15 @@ x = 43;
 
 ```text
 Const    42
-StoreLocal 0          ; x 绑定到 slot 0
+StoreLocal 0          ; x bound to slot 0
 Const    43
-StoreLocal 0          ; x 赋值（同一 slot）
+StoreLocal 0          ; x assigned (same slot)
 ```
 
-规则：
-- **遮蔽（shadowing）在编译期处理**：新绑定分配新 slot，旧 slot 不再引用——VM 无需感知遮蔽
+Rules:
+- **Shadowing is handled at compile time**: a new binding allocates a new slot and the old slot is no longer referenced — the VM need not know about shadowing
 
-### 6.3 if / and / or 短路
+### 6.3 if / and / or Short-Circuiting
 
 ```fleen
 if a and b { 1 } else { 2 }
@@ -473,9 +479,9 @@ if a and b { 1 } else { 2 }
 
 ```text
 LoadLocal a
-JumpIfFalse L_else    ; and 左侧短路
+JumpIfFalse L_else    ; and short-circuits on the left operand
 LoadLocal b
-JumpIfFalse L_else    ; and 右侧短路
+JumpIfFalse L_else    ; and short-circuits on the right operand
 True
 Jump       L_end
 L_else:
@@ -489,9 +495,9 @@ Const 2
 L3:
 ```
 
-规则：
-- `if` 链：条件 `JumpIfFalse` → 下一分支；分支末 `Jump` 到出口
-- 无 `else` 且条件不成立时，`if` 表达式值为 `Unit`
+Rules:
+- `if` chain: the condition's `JumpIfFalse` → next branch; at the end of a branch, `Jump` to the exit
+- When there is no `else` and the condition fails, the `if` expression's value is `Unit`
 
 ### 6.4 while
 
@@ -513,7 +519,7 @@ IAdd
 StoreLocal x
 Jump     L_cond
 L_end:
-Unit                  ; while 表达式值为 Unit
+Unit                  ; the while expression's value is Unit
 ```
 
 ### 6.5 choose
@@ -526,7 +532,7 @@ choose value {
 };
 ```
 
-**分号规则**：`when` 子句和 `otherwise` 子句本身不带分号，只有 `choose` 整体作为语句使用时末尾加分号。
+**Semicolon rule**: the `when` and `otherwise` clauses themselves take no semicolons; only when the whole `choose` is used as a statement does it get a trailing semicolon.
 
 ```text
 LoadLocal value
@@ -535,12 +541,12 @@ Dup
 Const    0
 Eq
 JumpIfFalse L_m1
-Pop                       ; 丢弃原始被匹配值（bool 已被 JumpIfFalse 消耗）
+Pop                       ; discard the original matched value (the bool was consumed by JumpIfFalse)
 Const    "zero"
 Jump      L_end
 
 L_m1:                     ; when x if x > 10
-BindMatch 1               ; 绑定到守卫 slot 1
+BindMatch 1               ; bind to guard slot 1
 LoadLocal 1
 Const    10
 Gt
@@ -554,24 +560,24 @@ Const    "other"
 L_end:
 ```
 
-规则：
-- 展平为**比较链**，每个 `when` 一个比较 + `JumpIfFalse`
-- 守卫 `if` 紧跟在模式比较之后
-- 无 `otherwise` 且全部不匹配 → 表达式值为 `Unit`（穷尽性由 `typeck` 检查）
+Rules:
+- Flattened into a **comparison chain**: one comparison + `JumpIfFalse` per `when`
+- The guard `if` immediately follows the pattern comparison
+- No `otherwise` and nothing matches → the expression's value is `Unit` (exhaustiveness is checked by `typeck`)
 
-> **标签约定**：文档中的 `L_m0`、`L_m1`、`L_end` 等标签仅是记法。
-> 字节码二进制里**没有标签**——跳转操作数是函数内**绝对字节偏移**（§5.6）。
-> Codegen 内部用单调递增计数器生成全局唯一标签（`L0`、`L1`、`L2` …），
-> 嵌套 `choose` 也只是继续递增编号，天然不会重名。最终汇编阶段将标签解析为偏移量。
+> **Label convention**: labels such as `L_m0`, `L_m1`, `L_end` in this document are merely notation.
+> The bytecode binary has **no labels** — jump operands are **absolute byte offsets** within the function (§5.6).
+> Codegen internally generates globally unique labels with a monotonically increasing counter (`L0`, `L1`, `L2` …);
+> nested `choose` blocks simply keep incrementing the counter and can never collide by construction. The final assembly stage resolves labels into offsets.
 
-### 6.6 函数定义
+### 6.6 Function Definitions
 
 ```fleen
 func add(a: int, b: int): int = a + b
 ```
 
 ```text
-; 函数表中 Func { name: "add", params: 2, locals: 2, code: ... }
+; in the function table: Func { name: "add", params: 2, locals: 2, code: ... }
 LoadLocal 0
 LoadLocal 1
 IAdd
@@ -585,21 +591,21 @@ func greet(name: string) {
 ```
 
 ```text
-; 函数表中 Func { name: "greet", params: 1, locals: 1, code: ... }
+; in the function table: Func { name: "greet", params: 1, locals: 1, code: ... }
 LoadLocal 0
 Call     print
-Unit                  ; unit 函数显式压入 Unit
+Unit                  ; unit function pushes Unit explicitly
 Return
 ```
 
-### 6.7 `?` 传播（v0.0.2）
+### 6.7 `?` Propagation (v0.0.2)
 
 ```fleen
 q = div(a, b)?;
 ```
 
 ```text
-<eval div(a, b)>      ; r: Result<int, string>（string 载荷 owned → DupDeep）
+<eval div(a, b)>      ; r: Result<int, string> (owned string payload → DupDeep)
 DupDeep               ; r r
 IsErr                 ; r bool
 JumpIfTrue  L_err
@@ -609,16 +615,16 @@ Jump        L_cont
 L_err:
 UnwrapErr             ; r → e
 PackErr               ; e → err(e)
-Return                ; 提前返回 Err（函数级）
+Return                ; early return of the Err (function level)
 L_cont:
 ```
 
-> **Dup vs DupDeep**：`?` 的复制指令按操作数类型的所有权选择——
-> `Result<T, E>` 中 `T` / `E` 任一 owned（`string` / `box<T>`）即整型 owned，
-> 用 `DupDeep`；纯 Copy 载荷（如 `Result<int, int>`）用 `Dup`。
-> 上例 `string` 载荷 owned，故为 `DupDeep`。
+> **Dup vs DupDeep**: the `?` duplication instruction is chosen by the operand type's ownership —
+> if either `T` or `E` in `Result<T, E>` is owned (`string` / `box<T>`), the whole type is owned
+> and `DupDeep` is used; purely Copy payloads (e.g. `Result<int, int>`) use `Dup`.
+> In the example above the `string` payload is owned, hence `DupDeep`.
 
-### 6.8 choose（Result scrutinee，v0.0.2）
+### 6.8 choose (Result scrutinee, v0.0.2)
 
 ```fleen
 choose div(10, 2) {
@@ -628,33 +634,33 @@ choose div(10, 2) {
 ```
 
 ```text
-<eval div(10, 2)>     ; r: Result<int, string>（string 载荷 owned → DupDeep）
+<eval div(10, 2)>     ; r: Result<int, string> (owned string payload → DupDeep)
 DupDeep
 IsErr
 JumpIfTrue  L_err
-UnwrapOk              ; payload v（转移）
-StoreLocal v          ; when Ok(v) 绑定
-<ok arm body>         ; 尾值
+UnwrapOk              ; payload v (moved)
+StoreLocal v          ; when Ok(v) binding
+<ok arm body>         ; tail value
 Jump        L_end
 L_err:
-UnwrapErr             ; payload e（转移）
+UnwrapErr             ; payload e (moved)
 StoreLocal e
 <err arm body>
 L_end:
 ```
 
-规则：
-- `Ok`/`Err` 臂的 payload 由 `UnwrapOk`/`UnwrapErr` **转移**后 `StoreLocal` 绑定，
-  无需 `BindMatch`（被匹配值已被消耗，不再参与比较链）
-- 带 guard（`when Ok(x) if x > 0`）时，lower 需在 guard 求值前保留 payload
-  供后续臂使用（实现期确定具体序列，验收标准：语义等价 + verify 通过）。
-  注意：guard 臂不计入穷尽性（DESIGN §10.5），故必须另有**无 guard 的重复**
-  `Ok` / `Err` 臂或 `otherwise` 兜底，否则 typeck 报 `ChooseNotExhaustive`。
-- 穷尽性由 `typeck` 检查：**无 guard** 的 `Ok` + `Err` 两臂齐即穷尽
+Rules:
+- The payloads of the `Ok`/`Err` arms are **moved** out by `UnwrapOk`/`UnwrapErr` and then bound via `StoreLocal`;
+  no `BindMatch` is needed (the matched value has already been consumed and no longer participates in the comparison chain)
+- With a guard (`when Ok(x) if x > 0`), lowering must preserve the payload before the guard is evaluated
+  for use by later arms (the exact sequence is settled during implementation; acceptance criteria: semantic equivalence + verify passes).
+  Note: guard arms do not count toward exhaustiveness (DESIGN §10.5), so there must additionally be a **guard-free duplicate**
+  `Ok` / `Err` arm or an `otherwise` fallback; otherwise typeck reports `ChooseNotExhaustive`.
+- Exhaustiveness is checked by `typeck`: **guard-free** `Ok` + `Err` arms alone are exhaustive
 
 ---
 
-## 7. 完整示例
+## 7. Complete Example
 
 ```fleen
 func fib(n: int): int {
@@ -664,7 +670,7 @@ func fib(n: int): int {
 }
 ```
 
-函数表：
+Function table:
 
 | FuncId | name | params | locals |
 |--------|------|--------|--------|
@@ -700,40 +706,40 @@ IAdd                   ; fib(n-1) + fib(n-2)
 Return
 ```
 
-常量池：
+Constant pool:
 
-| ConstId | 值 |
+| ConstId | Value |
 |---------|-----|
 | 0 | `1` |
 | 1 | `2` |
 
 ---
 
-## 8. fleen-verify 的职责
+## 8. Responsibilities of fleen-verify
 
-`fleen-verify` 静态校验字节码模块，**不执行**：
+`fleen-verify` statically validates a bytecode module without **executing** it:
 
-- [ ] 所有 `Const` / `LoadFunc` / `Call` 的索引在范围内
-- [ ] 所有跳转目标落在**指令边界**上
-- [ ] 每个函数每条路径以 `Return` 结束（无掉出函数底的执行路径）
-- [ ] **操作数栈深度不下溢**：对每个函数做**全控制流抽象栈深度分析**——
-  - 每条指令的栈效果（`Δdepth`）静态已知（见 §5 指令表）
-  - 从函数入口（栈深 = 0）开始，按控制流图传播抽象栈深
-  - 合并分支时：若所有前驱栈深一致，取该深度；**不一致即 verify 失败**（不做“取最大/最小”的保守近似）
-  - 每条指令执行前的栈深 ≥ 该指令所需最小栈深
-- [ ] `StoreGlobal` 的目标全部 `mutable: true`，**唯一例外**：入口函数（全局初始化的 `__init__`）中对全局的初始化写（用于给 `const` 全局赋初值）
-- [ ] 常量池无重复项
-- [ ] 每个函数 `locals >= params`，且所有 `LoadLocal` / `StoreLocal` / `BindMatch` /
-      `MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot 操作数 < `locals`；
-      `CloneGlobal` 的 gid 在全局表范围内（0.0.2 U07）
-- [ ] **v2 指令不得出现在 version=1 模块**：v1 编号全部 < 0x80，v2 全部 ≥ 0x80
-      （§4.2），因此一次比较即可判定（verify 的 `V2OpcodeInV1Module`）
+- [ ] All indices of `Const` / `LoadFunc` / `Call` are in range
+- [ ] All jump targets land on **instruction boundaries**
+- [ ] Every path through every function ends with `Return` (no execution path falls off the bottom of a function)
+- [ ] **Operand stack depth never underflows**: for each function, perform a **full control-flow abstract stack-depth analysis** —
+  - Each instruction's stack effect (`Δdepth`) is statically known (see the instruction tables in §5)
+  - Starting from the function entry (depth = 0), propagate the abstract stack depth along the control-flow graph
+  - When merging branches: if all predecessors agree on the depth, use that depth; **a mismatch is a verify failure** (no conservative "take max/min" approximation)
+  - The depth before each instruction executes is ≥ that instruction's minimum required depth
+- [ ] All `StoreGlobal` targets are `mutable: true`, with **one exception**: initialization writes to globals inside the entry function (the `__init__` for global initialization), used to give `const` globals their initial value
+- [ ] The constant pool has no duplicate entries
+- [ ] Every function has `locals >= params`, and all `LoadLocal` / `StoreLocal` / `BindMatch` /
+      `MakeRefLocal` / `MoveLocal` / `CloneLocal` slot operands are < `locals`;
+      `CloneGlobal`'s gid is within the global table's range (0.0.2 U07)
+- [ ] **v2 instructions must not appear in a version=1 module**: all v1 opcodes are < 0x80 and all v2 opcodes are ≥ 0x80
+      (§4.2), so a single comparison suffices (verify's `V2OpcodeInV1Module`)
 
-### 每指令栈深效果（Δdepth）
+### Per-Instruction Stack Depth Effect (Δdepth)
 
-栈深分析以一张静态表为准（`n` 为操作数个数）：
+The stack-depth analysis is based on a static table (`n` is the operand count):
 
-| 指令 | Δdepth | 最小执行前深度 |
+| Instruction | Δdepth | Minimum depth before execution |
 |------|--------|----------------|
 | `Const` / `True` / `False` / `Unit` / `LoadLocal` / `LoadGlobal` / `LoadFunc` | +1 | 0 |
 | `Pop` | -1 | 1 |
@@ -743,103 +749,104 @@ Return
 | `Not` / `NegI` / `NegF` | 0 | 1 |
 | `Jump` | 0 | 0 |
 | `JumpIfFalse` / `JumpIfTrue` | -1 | 1 |
-| `Call` | 1 - p（p 为被调函数 `params` 数） | p |
+| `Call` | 1 - p (p is the callee's `params` count) | p |
 | `CallValue` | -(argc + 1) + 1 = -argc | argc + 1 |
 | `BindMatch` | 0 | 1 |
-| `AllocBox` | **0**（`v → b`：值被消耗并替换为 box） | 1 |
+| `AllocBox` | **0** (`v → b`: the value is consumed and replaced by the box) | 1 |
 | `DerefBox` / `DupDeep` | +1 | 1 |
 | `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` | +1 | 0 |
 | `StoreDerefBox` | -2 | 2 |
 | `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` | 0 | 1 |
-| `ToStr` | 0（`v → s`） | 1 |
-| `Return` | 视为路径终止 | 1（返回值在栈顶） |
+| `ToStr` | 0 (`v → s`) | 1 |
+| `Return` | treated as a path terminator | 1 (the return value is on the stack top) |
 
-> **U07 勘误**：`AllocBox` 的净效果是 **0**（`v → b`，值被装箱替换），
-> 与 §5.9 的栈效果列和 Lower 的深度表一致；规划期把它与 `DupDeep` 同行
-> 写成 `+1` 是笔误，会让 verify 把 `box e` 之后的所有深度算错 1。
-> 该不一致由 U07 的"编译产物必须过 verify"全链测试发现并修正。
+> **U07 erratum**: `AllocBox`'s net effect is **0** (`v → b`: the value is replaced by the box),
+> consistent with the stack-effect column in §5.9 and Lower's depth table; during planning it was
+> mistakenly written as `+1` on the same row as `DupDeep`, which would make verify compute every
+> depth after `box e` off by 1.
+> The inconsistency was found and fixed by U07's end-to-end test "compiler output must pass verify".
 
-规则：
-- `Call` 的最小深度为被调函数的 `params` 个数；被调函数的返回值一定压栈，故净效果 `1 - params`。
-- `CallValue` 需要栈上 `f` 加 `argc` 个实参，弹出后压入返回值，净效果 `-argc`。
-- `Return` 要求执行前栈深恰好为 1（只剩返回值），多余残留视为 verify 失败。
+Rules:
+- `Call`'s minimum depth is the callee's `params` count; the callee's return value is always pushed, so the net effect is `1 - params`.
+- `CallValue` needs `f` plus `argc` arguments on the stack; after popping them it pushes the return value, so the net effect is `-argc`.
+- `Return` requires the depth before execution to be exactly 1 (only the return value remains); any residue is a verify failure.
 
-规则：
-- 该分析是**精确的而非保守的**：字节码指令栈效果固定，分析能证明不下溢
-- `StackUnderflow` 在 VM 里纯粹是**防御性兜底**（verify 有 bug、或字节码经手工篡改）
-- `codegen` 输出必须能通过 `fleen-verify`——这是 codegen 的验收标准
+Rules:
+- The analysis is **exact, not conservative**: bytecode instructions have fixed stack effects, so the analysis can prove no underflow
+- In the VM, `StackUnderflow` is purely a **defensive fallback** (a verify bug, or hand-tampered bytecode)
+- `codegen` output must pass `fleen-verify` — this is codegen's acceptance criterion
 
 ---
 
-## 9. 二进制序列化（`.flnc`）
+## 9. Binary Serialization (`.flnc`)
 
-0.0.1 定义内存 `Module` 的二进制落盘格式，扩展名 `.flnc`。所有整数**小端**，多字节字段按下述宽度。
-0.0.2 **零布局变更**：`version` 升为 `2`，读取端接受 `{1, 2}`；`span_map` 自 0.0.2 起填充（§2）。
+0.0.1 defines the on-disk binary format of the in-memory `Module`, with the extension `.flnc`. All integers are **little-endian**; multi-byte fields use the widths below.
+0.0.2 makes **zero layout changes**: `version` is bumped to `2`, readers accept `{1, 2}`; `span_map` is populated from 0.0.2 on (§2).
 
-### 文件头
+### File Header
 
-| 字段 | 宽度 | 值 |
+| Field | Width | Value |
 |------|------|-----|
-| magic | 4 B | `"FLNC"`（0x46 0x4C 0x4E 0x43） |
-| version | u16 | 字节码版本：0.0.2 编译器写入 `2`，读取端接受 `{1, 2}` |
+| magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
+| version | u16 | bytecode version: the 0.0.2 compiler writes `2`, readers accept `{1, 2}` |
 
-### 常量池
+### Constant Pool
 
-`constants_len: u32`，随后逐条：
+`constants_len: u32`, then one entry at a time:
 
-| tag | 含义 | 后续字段 |
+| tag | Meaning | Following fields |
 |-----|------|----------|
 | 0 | `Int` | `v: i64` |
-| 1 | `Float` | `bits: u64`（f64 的 bit pattern） |
-| 2 | `Str` | `len: u32` + UTF-8 字节 |
+| 1 | `Float` | `bits: u64` (the f64 bit pattern) |
+| 2 | `Str` | `len: u32` + UTF-8 bytes |
 
-### 函数表
+### Function Table
 
-`functions_len: u32`，随后逐条：
+`functions_len: u32`, then one entry at a time:
 
-| 字段 | 宽度 |
+| Field | Width |
 |------|------|
 | `name` (ConstId) | u32 |
 | `params` | u16 |
 | `locals` | u16 |
-| `is_builtin` | u8（0/1） |
+| `is_builtin` | u8 (0/1) |
 | `code_len` | u32 |
-| `code` | `code_len` 字节 |
+| `code` | `code_len` bytes |
 | `span_map_len` | u32 |
-| `span_map` | 每条 `offset: u32, start: u32, end: u32` |
+| `span_map` | each entry `offset: u32, start: u32, end: u32` |
 
-### 全局变量表
+### Global Variable Table
 
-`globals_len: u32`，随后逐条：
+`globals_len: u32`, then one entry at a time:
 
-| 字段 | 宽度 |
+| Field | Width |
 |------|------|
 | `name` (ConstId) | u32 |
-| `mutable` | u8（0/1） |
+| `mutable` | u8 (0/1) |
 
-### 入口
+### Entry
 
-`entry: u32`（FuncId）。
+`entry: u32` (FuncId).
 
-规则：
-- 读写必须通过同一实现（`codegen::flnc::{to_bytes, from_bytes}`），不允许手写解析。
-- 版本号不匹配、magic 不符、索引越界、长度截断均为反序列化错误。
-- `is_builtin` / `mutable` 只接受 `0` 或 `1`，其他字节视为格式错误。
-- 常量池 `tag` 只接受 `0/1/2`，其他视为格式错误。
-- 后续版本（2+）只在**末尾追加**新表；已有表的字段顺序与宽度保持稳定。
-- `version` 接受 `{1, 2}`（0.0.2 起）；v2 不改变任何 v1 已有表的字段顺序与宽度。
+Rules:
+- Reading and writing must go through the same implementation (`codegen::flnc::{to_bytes, from_bytes}`); hand-written parsers are not allowed.
+- Version mismatch, bad magic, out-of-range indices, and truncated lengths are all deserialization errors.
+- `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
+- The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
+- Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
+- `version` accepts `{1, 2}` (from 0.0.2 on); v2 does not change the field order or widths of any existing v1 tables.
 
 ---
 
-## 10. 版本规范
+## 10. Versioning
 
-| 字节码版本 | 对应语言版本 | 内容 |
+| Bytecode version | Language version | Contents |
 |-----------|-------------|------|
-| 1 | 0.0.1 | 本文档定义的指令集 |
-| 2 | 0.0.2 | + 所有权指令 `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal`（0x80–0x83）、`DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal`（0x90–0x93）、Result 指令（0xA0–0xA4）、`ToStr`（0xA5，`as` 转换）；`span_map` 开始填充（§5.9–5.11、§2） |
-| 3 | 0.0.3 | + `struct` / 数组指令 |
+| 1 | 0.0.1 | The instruction set defined in this document |
+| 2 | 0.0.2 | + ownership instructions `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal` (0x80–0x83), `DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal` (0x90–0x93), Result instructions (0xA0–0xA4), `ToStr` (0xA5, `as` conversion); `span_map` starts being populated (§5.9–5.11, §2) |
+| 3 | 0.0.3 | + `struct` / array instructions |
 
-规则：
-- 字节码版本随语言版本**单调递增**
-- 新指令只插入预留编号组，**不改变已有指令的编号和编码**
-- VM 拒绝执行超出其支持版本的模块
+Rules:
+- The bytecode version increases **monotonically** with the language version
+- New instructions only occupy reserved number groups; **the numbers and encodings of existing instructions never change**
+- The VM refuses to execute modules whose version exceeds what it supports

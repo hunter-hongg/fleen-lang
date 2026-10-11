@@ -1,15 +1,16 @@
 # Changelog
 
-所有显著变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/)，
-版本语义遵循 [SPEC.md](SPEC.md) §13（`0.0.x` = 早期开发，API 不稳定）。
+All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
+and version semantics follow [SPEC.md](SPEC.md) §13 (`0.0.x` = early development, unstable API).
 
 ## 0.0.2 — Hermit Crab (2026-10-11) 🐚
 
-所有权起步：**堆上的值开始有主人，错误开始流动，分号开始退休。**
-值有了唯一所有者与显式的 `move` / `clone`；错误有了 `?` 传播与 `Ok` / `Err`
-模式匹配；分号交给自动插入（ASI），显式分号仍然合法。
+The beginning of ownership: **heap values get owners, errors start to flow, and semicolons
+start to retire.** Values now have a single owner with explicit `move` / `clone`; errors gain
+`?` propagation and `Ok` / `Err` pattern matching; semicolons are handed to automatic
+insertion (ASI), while explicit semicolons remain perfectly legal.
 
-### 语言一览
+### Language at a Glance
 
 ```fleen
 func div(a: int, b: int): Result<int, string> {
@@ -17,21 +18,21 @@ func div(a: int, b: int): Result<int, string> {
 }
 
 func safe_half(a: int): Result<int, string> {
-    q = div(a, 2)?          // Err 时整函数立即返回该 Err
+    q = div(a, 2)?          // on Err, the whole function returns that Err immediately
     Ok(q)
 }
 
 func main(): Result<int, string> {
     s = "hello"
-    t = move s              // 所有权转移，此后 s 不可用
+    t = move s              // ownership moves; s is no longer usable
 
     n = choose safe_half(10) {
         when Ok(v) { v }
         when Err(e) { 0 - 1 }
     }
 
-    b = box n               // 堆分配，b: box<int>
-    deref b = deref b + 1   // 写点内值
+    b = box n               // heap allocation; b: box<int>
+    deref b = deref b + 1   // write the value inside the box
 
     print(t, " world: ", (n + deref b) as string)
     Ok(0)
@@ -43,103 +44,116 @@ $ fleen-vm showcase.fln
 hello world: 11
 ```
 
-分号不再必填（ASI，跨行续接与语句边界规则见 `docs/0.0.2/ASI.md`），
-0.0.1 的显式分号风格仍然完全合法。
+Semicolons are no longer required (ASI; see `docs/0.0.2/ASI.md` for cross-line continuation
+and statement-boundary rules), and the explicit-semicolon style of 0.0.1 remains fully legal.
 
-### ✨ 语言特性
+### ✨ Language Features
 
-**所有权系统**
+**Ownership System**
 
-- `string` / `box<T>` 拥有唯一所有者；`move x` 显式转移、`clone x` 深拷贝
-- Copy 类型（`int` / `float` / `bool` / `unit` / 函数值）不受影响，照旧按值复制
-- 任何路径上使用已移动的绑定在编译期拒绝（`UseAfterMove`、
-  `MaybeMovedAfterBranch` 等），循环内 move 后回边再用同样被拒绝
-- owned 值赋值 / 传参必须显式 `move` 或 `clone`（`OwnedArgRequiresMove`，
-  help 提示两种选择）
+- `string` / `box<T>` have a single owner; `move x` transfers explicitly, `clone x` deep-copies
+- Copy types (`int` / `float` / `bool` / `unit` / function values) are unaffected and keep copying by value
+- Using a moved binding on any path is rejected at compile time (`UseAfterMove`,
+  `MaybeMovedAfterBranch`, etc.); moving inside a loop and using the value again after the
+  back-edge is rejected too
+- Assigning/passing owned values requires an explicit `move` or `clone`
+  (`OwnedArgRequiresMove`, with help text offering both options)
 
-**`box<T>` 与 `deref`**
+**`box<T>` and `deref`**
 
-- `box expr` 堆分配（`b: box<int>`），`deref b` 读点内值（副本，owned 深拷贝）、
-  `deref b = v` 写点内值；点内类型允许集合：`int` / `float` / `bool` /
-  `string` / `box<U>` / `Result<T, E>`
-- **不可移出 box**：`move deref b` 编译错误，需要值请 `clone deref b`
-- `deref b = v` 的 `b` 必须是**局部 box**（全局 box 写点内值报
-  `DerefAssignOfGlobalBox`）；确定性释放，无 GC
+- `box expr` heap-allocates (`b: box<int>`); `deref b` reads the value inside the box
+  (a copy, a deep owned clone); `deref b = v` writes it; allowed pointee types:
+  `int` / `float` / `bool` / `string` / `box<U>` / `Result<T, E>`
+- **Values cannot be moved out of a box**: `move deref b` is a compile error —
+  use `clone deref b` if you need the value
+- In `deref b = v`, `b` must be a **local box** (writing through a global box reports
+  `DerefAssignOfGlobalBox`); deallocation is deterministic, with no GC
 
-**`ref T` 只读借用（仅参数位置）**
+**`ref T` Read-Only Borrowing (parameter position only)**
 
-- `func shout(s: ref string): int { print(s); 42 }` —— 只读、零拷贝
-- 句柄不能逃逸：不能赋值、存储、返回 → 无需借用检查器，没有悬垂的可能
-- 实参必须是变量（局部 / 全局 / 另一 ref 参数）；全局实参经临时槽复制承接，
-  全局初始化器不支持 ref 实参（`RefArgInGlobalInit`）
+- `func shout(s: ref string): int { print(s); 42 }` — read-only, zero-copy
+- Handles cannot escape: they cannot be assigned, stored, or returned → no borrow checker
+  needed, and no possibility of dangling
+- Arguments must be variables (local / global / another ref parameter); global arguments are
+  copied via a temporary slot, and global initializers do not support ref arguments
+  (`RefArgInGlobalInit`)
 
-**错误处理**
+**Error Handling**
 
-- `Ok(v)` / `Err(e)` 构造；`choose` 的 `Ok` / `Err` pattern，两臂齐即穷尽
-  （带守卫的臂不计入穷尽性——与 Bool scrutinee 同一条规则）
-- `?` 传播运算符：`q = div(a, 2)?` —— Err 时整函数立即返回该 Err
-- 入口函数（`main`）可返回 `Result`：尾随 `Err` 打印 payload 到 stderr
-  并以退出码 1 结束（退出码契约不变：`0` 成功 / `1` 错误 / `2` 用法·IO）
+- `Ok(v)` / `Err(e)` constructors; `Ok` / `Err` patterns in `choose` — both arms together
+  are exhaustive (guarded arms do not count toward exhaustiveness — the same rule as a
+  Bool scrutinee)
+- The `?` propagation operator: `q = div(a, 2)?` — on Err, the whole function returns
+  that Err immediately
+- The entry function (`main`) may return a `Result`: a trailing `Err` prints its payload
+  to stderr and exits with code 1 (the exit code contract is unchanged:
+  `0` success / `1` error / `2` usage·IO)
 
-**ASI：分号可选**
+**ASI: Semicolons Are Optional**
 
-- 换行敏感：同行语句拼接仍然非法；跨行续接（二元运算符、`?` 链、`as`）
-  与语句边界由独立的 ASI pass 判定（`docs/0.0.2/ASI.md`）
-- 显式分号处处合法，0.0.1 程序无需改动
+- Line-break sensitive: joining statements on one line is still illegal; cross-line
+  continuation (binary operators, `?` chains, `as`) and statement boundaries are decided by
+  a dedicated ASI pass (`docs/0.0.2/ASI.md`)
+- Explicit semicolons are legal everywhere — no 0.0.1 program needs to change
 
-**`as` 类型转换（0.0.2 临时，泛型后重审）**
+**`as` Type Casts (temporary in 0.0.2, to be revisited after generics)**
 
-- 白名单仅三条：`int as string`（十进制含负号）、`float as string`
-  （与 print 输出一致）、`bool as string`（`"true"` / `"false"`）；
-  其余一切（含恒等转换）报 `UnsupportedCast { from, to }`
-- 结果是新鲜 owned string，消费位置无需 `move` / `clone`
-- print 与 `as` 共用同一格式化 helper（`fleen-vm/src/fmt.rs`），两条路径不会漂移
+- The whitelist has exactly three entries: `int as string` (decimal, with a minus sign),
+  `float as string` (matching print output), and `bool as string` (`"true"` / `"false"`);
+  everything else (including identity casts) reports `UnsupportedCast { from, to }`
+- The result is a fresh owned string — no `move` / `clone` needed at the point of consumption
+- print and `as` share the same formatting helper (`fleen-vm/src/fmt.rs`), so the two
+  paths cannot drift apart
 
 ### ⚠️ Breaking
 
-- owned 值（`string` / `box<T>`）赋值 / 传参需显式 `move` 或 `clone`
-  （0.0.1 的 `t = s` 是浅共享复制，现在是编译错误）
-- `move` / `clone` / `deref` / `as` 成为保留字（0.0.1 可用作标识符）
-- `print(函数值)` 由 0.0.1 的放行改为编译错误
+- Assigning/passing owned values (`string` / `box<T>`) requires an explicit `move` or `clone`
+  (in 0.0.1, `t = s` was a shallow shared copy; it is now a compile error)
+- `move` / `clone` / `deref` / `as` become reserved words (in 0.0.1 they could be used as identifiers)
+- `print(function value)`, allowed in 0.0.1, is now a compile error
 
-### 🛠 工具链
+### 🛠 Toolchain
 
 ```
-showcase.fln ─► Lex ─► ASI ─► Parse ─► Resolve ─► Typeck(含所有权) ─► Lower ─► Codegen ─► showcase.flnc
+showcase.fln ─► Lex ─► ASI ─► Parse ─► Resolve ─► Typeck(with ownership) ─► Lower ─► Codegen ─► showcase.flnc
                                                                                           │
-                                                        fleen-verify 静态验证（v1+v2 规则）◄─┘
+                                  fleen-verify static checks (v1+v2 rules) ◄─────────────┘
                                                                                           │
-                                                                                    fleen-vm 执行
+                                                                               fleen-vm executes
 ```
 
-| 组件 | 0.0.2 变化 |
+| Component | Changes in 0.0.2 |
 |------|------------|
-| `fleen-compiler` | ASI 独立 pass；typeck 含所有权检查子遍历（`typeck/ownership.rs`，仍属同一阶段）；MIR 指令携带 Span 并下沉到字节码 |
-| `fleen-verify` | v2 指令栈深分析（`AllocBox` 净效果 0 等）；v2 指令禁止出现在 version=1 模块（一次比较判定）；拒绝空函数体（0.0.1 曾 panic，现报 `EmptyFunctionBody`） |
-| `fleen-vm` | 字节码 v2 执行（所有权 0x80–0x93、Result 0xA0–0xA4、`ToStr` 0xA5）；`Value::Str` 由 `Rc<str>` 改为 `Box<str>`（独占所有权）；v1 字节码保持可执行 |
+| `fleen-compiler` | ASI as a dedicated pass; typeck includes an ownership-checking sub-pass (`typeck/ownership.rs`, still part of the same phase); MIR instructions carry Spans that are lowered into bytecode |
+| `fleen-verify` | Stack depth analysis for v2 instructions (`AllocBox` has a net effect of 0, etc.); v2 instructions are forbidden in version=1 modules (checked in a single comparison); empty function bodies are rejected (0.0.1 panicked; it now reports `EmptyFunctionBody`) |
+| `fleen-vm` | Bytecode v2 execution (ownership 0x80–0x93, Result 0xA0–0xA4, `ToStr` 0xA5); `Value::Str` changed from `Rc<str>` to `Box<str>` (exclusive ownership); v1 bytecode remains executable |
 
-- **运行时诊断**：`span_map` 转正——`.fln` 模式下运行时错误携带源码行列；
-  经调用链传播的错误指向调用点（0.0.2 U10）
-- **`print` 获得真实签名**：`(string...) -> unit`，非 string 实参报
-  `ArgTypeMismatch` 并提示 `as string`；0.0.1 的 typeck 特判（已知 Hack）移除，
-  `DESIGN.md` §18 已知 Hack 清空
-- **字节码 v2 与 v1 兼容**：v2 模块可执行 v1 指令流；编号只增不改
-  （规范见 `docs/BYTECODE.md` §10）
-- **安全性修复**：`.flnc` 解码器不再对恶意表长度做无界预分配
-  （0.0.1 起超大长度会触发进程 abort，现降级为解码错误）
+- **Runtime diagnostics**: `span_map` is promoted to a first-class component — in `.fln` mode,
+  runtime errors carry source line/column; errors propagated through a call chain point to
+  the call site (0.0.2 U10)
+- **`print` gets a real signature**: `(string...) -> unit`; non-string arguments report
+  `ArgTypeMismatch` with a hint to use `as string`; the 0.0.1 typeck special case
+  (a known Hack) is removed, and the known-Hacks list in `DESIGN.md` §18 is now empty
+- **Bytecode v2 is compatible with v1**: v2 modules can execute v1 instruction streams;
+  opcodes are only added, never changed (specification: `docs/BYTECODE.md` §10)
+- **Security fixes**: the `.flnc` decoder no longer preallocates unboundedly for malicious
+  table lengths (since 0.0.1 an oversized length would abort the process; it is now
+  downgraded to a decode error)
 
-### 🧪 质量保障
+### 🧪 Quality Assurance
 
-- **608 测试**（0.0.1 为 321）：单元测试 + 各阶段 valid/invalid 文件驱动的
-  集成测试 + 端到端测试（驱动真实二进制，比对 stdout、退出码与 stderr）
-- 所有权/借用/Result/`?`/cast 的错误路径均有专项 invalid fixture；
-  0.0.1 全部 E2E（含显式分号版 `fib.fln`）在 0.0.2 下逐字节回归通过
-- 门禁四件套：`cargo fmt --check` · `cargo clippy -D warnings` ·
-  `cargo test` · `cargo doc`（GitHub Actions 已配置）
+- **608 tests** (up from 321 in 0.0.1): unit tests + integration tests driven by per-stage
+  valid/invalid fixture files + end-to-end tests (driving the real binaries and comparing
+  stdout, exit codes, and stderr)
+- Dedicated invalid fixtures cover the error paths for ownership/borrowing/Result/`?`/casts;
+  every 0.0.1 E2E test (including the explicit-semicolon `fib.fln`) passes under 0.0.2
+  byte-for-byte
+- A four-piece quality gate: `cargo fmt --check` · `cargo clippy -D warnings` ·
+  `cargo test` · `cargo doc` (configured in GitHub Actions)
 
-### 📦 安装
+### 📦 Installation
 
-从源码构建（需要 Rust 1.85+，2024 edition）：
+Build from source (requires Rust 1.85+, 2024 edition):
 
 ```bash
 git clone https://github.com/hunter-hongg/fleen-lang.git
@@ -148,19 +162,19 @@ cargo build --release
 ./target/release/fleen-vm showcase.fln
 ```
 
-预编译二进制：release 附件提供 linux x86_64 压缩包
-（含 `fleen-compiler` / `fleen-verify` / `fleen-vm` 三个可执行文件），
-解压即用：`./fleen-vm showcase.fln`。
+Prebuilt binaries: the release assets include a linux x86_64 archive
+(containing the `fleen-compiler` / `fleen-verify` / `fleen-vm` executables) —
+just unpack and run: `./fleen-vm showcase.fln`.
 
-仓库内提供单命令入口：
+A single-command entry point is provided in the repository:
 
 ```bash
-cargo fln showcase.fln     # 编译 → 验证 → 执行，一步到位
-cargo fln showcase.flnc    # 也可以直接运行字节码
+cargo fln showcase.fln     # compile → verify → execute, all in one step
+cargo fln showcase.flnc    # you can also run bytecode directly
 ```
 
-### 🔜 下一步
+### 🔜 What's Next
 
-0.0.3：`struct` / `for` / 迭代器（届时重审嵌套 owned 与完整转换矩阵）；
-完整路线见 `docs/DESIGN.md` §18，0.0.2 的规划与实现决议记录见
-`docs/0.0.2/PLAN.md` 与 `docs/0.0.2/TICKETS.md`。
+0.0.3: `struct` / `for` / iterators (nested owned types and the full cast matrix will be
+revisited then); see `docs/DESIGN.md` §18 for the full roadmap, and `docs/0.0.2/PLAN.md`
+and `docs/0.0.2/TICKETS.md` for 0.0.2 planning and implementation decisions.

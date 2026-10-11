@@ -83,7 +83,7 @@ impl Parser {
 
         // Block-like heads return before operator climbing resumes, so a
         // following `(`/`[`/`?`/binary operator continues the expression
-        // (ASI.md §4 #3: 运算符续接优先，`if c { 1 }` ⏎ `- 2` ⇒ `(if) - 2`).
+        // (ASI.md §4 #3: operator continuation wins, `if c { 1 }` ⏎ `- 2` ⇒ `(if) - 2`).
         if !crate::parser::asi::can_continue_expr(self.current_kind()) {
             return Ok(head);
         }

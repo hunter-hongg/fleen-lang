@@ -10,7 +10,7 @@ use std::path::Path;
 
 #[test]
 fn hello_fln_compiles_to_bytecode() {
-    let path = Path::new("../examples/hello.fln");
+    let path = Path::new("../examples/0.0.1/hello.fln");
     let src = std::fs::read_to_string(path).expect("read example");
     let tokens = tokenize(&src).expect("lex");
     let ast = parse(tokens).expect("parse");

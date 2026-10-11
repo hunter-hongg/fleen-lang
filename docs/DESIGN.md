@@ -1,47 +1,49 @@
-# Fleen 语言草案 v0.0.1（修订）
+# Fleen Language Draft v0.0.1 (Revised)
 
-> **快、简、安、直觉**
-> 编译运行都快 · 简洁清晰 · 内存安全 · 直觉友好
+> **Fast, Simple, Safe, Intuitive**
+> Fast to compile and run · Concise and clear · Memory safe · Intuitive and friendly
 >
-> **0.0.2 增量**：所有权（`move` / `clone` / `box<T>` / `ref`）、`?` 与 `Ok`/`Err`、
-> ASI（分号可选）已定稿 —— 决议与细则见 `docs/0.0.2/ASI.md`（权威），
-> `docs/0.0.2/PLAN.md` §3.5 为摘要，
-> 正文相应小节已同步标注（标注"0.0.2"的内容实现落地前不代表当前工具链行为）。
+> **0.0.2 additions**: ownership (`move` / `clone` / `box<T>` / `ref`), `?` and `Ok`/`Err`,
+> and ASI (optional semicolons) are finalized — see `docs/0.0.2/ASI.md` for decisions
+> and details (authoritative), `docs/0.0.2/PLAN.md` §3.5 for a summary.
+> The corresponding sections below have been annotated accordingly
+> (content marked "0.0.2" does not reflect current toolchain behavior until implemented).
 
 ---
 
-## 1. 定位
+## 1. Positioning
 
-Fleen 是一门静态类型、编译到字节码的编程语言。语法学 Python，所有权学 Rust，设计哲学是**显式、简洁、无魔法**。
+Fleen is a statically typed language that compiles to bytecode. Its syntax follows Python, its ownership model follows Rust, and its design philosophy is **explicit, concise, no magic**.
 
-> **注意**：0.0.1 要求显式分号 `;`；0.0.2 起 ASI（自动分号插入）落地，分号可选
-> （显式分号仍合法），判定规则见 §3.9。
+> **Note**: 0.0.1 requires explicit semicolons `;`; starting with 0.0.2, ASI (automatic
+> semicolon insertion) is in place and semicolons are optional (explicit semicolons
+> remain legal). See §3.9 for the decision rules.
 
-- **文件后缀**：`.fln`
-- **编译目标**：字节码 + VM
-- **编程风格**：DOP + FP，拒绝 OOP
-- **内存模型**：无 GC，所有权 + 借用
+- **File extension**: `.fln`
+- **Compilation target**: bytecode + VM
+- **Programming style**: DOP + FP, no OOP
+- **Memory model**: no GC, ownership + borrowing
 
 ---
 
-## 2. 词法
+## 2. Lexical Structure
 
-### 注释
+### Comments
 
 ```fleen
-// 单行注释
-/* 多行注释 */
+// single-line comment
+/* multi-line comment */
 ```
 
-### 标识符
+### Identifiers
 
-| 类别 | 风格 | 示例 |
-|------|------|------|
-| 变量/函数 | `snake_case` | `some_var` |
-| 类型/结构 | `PascalCase` | `SomeType` |
-| 模块 | `foo.bar` | `std.io` |
+| Category | Style | Example |
+|----------|-------|---------|
+| Variables/functions | `snake_case` | `some_var` |
+| Types/structs | `PascalCase` | `SomeType` |
+| Modules | `foo.bar` | `std.io` |
 
-### 字面量
+### Literals
 
 ```fleen
 42           // int
@@ -50,7 +52,7 @@ true / false // bool
 "hello"      // string
 ```
 
-### 关键字
+### Keywords
 
 ```
 func  const  if  elif  else  while  choose
@@ -58,116 +60,117 @@ when  otherwise  return  import  unsafe  trusted
 box  ref  deref  move  clone  as  true  false
 ```
 
-> `deref` 为 0.0.2 新增关键字（box 点内值读写，见 §10.3）；
-> `as` 为 0.0.2 新增保留字（类型转换，见 §9"类型转换 as"）。
+> `deref` is a new keyword in 0.0.2 (reads/writes the value inside a box, see §10.3);
+> `as` is a new reserved word in 0.0.2 (type conversion, see §9 "Type Conversion `as`").
 
 ---
 
-## 3. 变量与绑定
+## 3. Variables and Bindings
 
-### 3.1 核心原则
+### 3.1 Core Principle
 
-**绑定和赋值是同一类操作。**
+**Binding and assignment are the same kind of operation.**
 
-`=` 就是“让左边是右边”。编译器区分首次出现（绑定）和再次出现（赋值），但**用户不需要知道这个区别**。
+`=` means "make the left side be the right side." The compiler distinguishes a first occurrence (binding) from a subsequent occurrence (assignment), but **users do not need to know the difference**.
 
 ```fleen
-x = 42;        // 让 x 为 42
-x = 43;        // 让 x 为 43
+x = 42;        // make x be 42
+x = 43;        // make x be 43
 ```
 
-### 3.2 可变绑定
+### 3.2 Mutable Bindings
 
 ```fleen
 x = 42;
 ```
 
-- 默认可变
-- 可重新赋值
-- 可带类型标注：`x: int = 42;`
+- Mutable by default
+- Can be reassigned
+- May carry a type annotation: `x: int = 42;`
 
-### 3.3 不可变绑定
+### 3.3 Immutable Bindings
 
 ```fleen
 const y = 42;
 ```
 
-- `const` 修饰名字
-- 不可重新赋值
-- 可带类型标注：`const y: int = 42;`
+- `const` decorates the name
+- Cannot be reassigned
+- May carry a type annotation: `const y: int = 42;`
 
-### 3.4 赋值
-
-```fleen
-x = 43;       // x 已存在且可变
-```
-
-- 对不可变变量赋值 → 编译错误
-- 赋值不能带类型标注
-
-### 3.5 规则汇总
-
-| 操作 | 语法 | 条件 |
-|------|------|------|
-| 可变绑定 | `x = 42;` | 当前位置未绑定 `x` |
-| 不可变绑定 | `const x = 42;` | 当前位置未绑定 `x` |
-| 赋值 | `x = 43;` | 当前位置已绑定 `x` 且可变 |
-| 循环体内赋值 | `while c { x = x + 1; }` | 循环体内已有外层 `x` → **赋值**，不是遮蔽（§4.5） |
-| 类型标注 | `x: int = 42;` | 仅首次绑定 |
-| 对 `const` 赋值 | `y = 43` | ❌ 编译错误 |
-| 赋值带类型 | `x: int = 43` | ❌ 编译错误（已是赋值） |
-| `const` 重新绑定 | `const x = 43` | ❌ 编译错误（同作用域已有 `x`） |
-| 同名重复声明 | `func f` × 2、`func f(a, a)` | ❌ 编译错误（一个名字一个绑定） |
-
-### 3.6 `=` 的三义性判定
-
-`=` 有三种含义，编译器按以下顺序判定，**只有一条判定路径**：
+### 3.4 Assignment
 
 ```fleen
-x = 42;    // ① 绑定：当前位置（当前作用域，或循环体内可见的外层）没有 x
-x = 43;    // ② 赋值：当前位置已经有 x
-x = 44;    // ② 赋值：同上，同一个绑定
+x = 43;       // x already exists and is mutable
 ```
 
-| 位置 | 有无同名绑定 | 含义 |
-|------|------------|------|
-| 语句位置 | 当前作用域没有 | ① 绑定（若外层可见同名 → 遮蔽，见 §4.3） |
-| 语句位置 | 当前作用域有 | ② 赋值（必须可变、不带类型标注） |
-| 语句位置（循环体内） | 外层（至函数边界）有可变绑定 | ② **赋值**（不是遮蔽，见 §4.5） |
-| 表达式位置 | 当前作用域有 | ② 赋值 |
-| 表达式位置 | 没有 | ❌ 错误（表达式位置的 `=` **从不绑定**） |
+- Assigning to an immutable variable → compile error
+- Assignment cannot carry a type annotation
 
-**表达式位置的 `=` 只有赋值一种含义**，且目标查找**不跨越函数边界**：
+### 3.5 Rule Summary
+
+| Operation | Syntax | Condition |
+|-----------|--------|-----------|
+| Mutable binding | `x = 42;` | `x` is not bound at the current position |
+| Immutable binding | `const x = 42;` | `x` is not bound at the current position |
+| Assignment | `x = 43;` | `x` is already bound at the current position and is mutable |
+| Assignment inside a loop body | `while c { x = x + 1; }` | A mutable outer `x` already visible inside the loop body → **assignment**, not shadowing (§4.5) |
+| Type annotation | `x: int = 42;` | First binding only |
+| Assigning to a `const` | `y = 43` | ❌ compile error |
+| Assignment with a type annotation | `x: int = 43` | ❌ compile error (already an assignment) |
+| Rebinding a `const` | `const x = 43` | ❌ compile error (`x` already exists in the same scope) |
+| Duplicate declaration of the same name | `func f` × 2, `func f(a, a)` | ❌ compile error (one name, one binding) |
+
+### 3.6 Disambiguating the Three Meanings of `=`
+
+`=` has three meanings. The compiler decides them in the following order — **there is exactly one decision path**:
+
+```fleen
+x = 42;    // (1) binding: no x at the current position (current scope, or a visible outer one inside a loop body)
+x = 43;    // (2) assignment: x already exists at the current position
+x = 44;    // (2) assignment: same as above, the same binding
+```
+
+| Position | Same-name binding present? | Meaning |
+|----------|---------------------------|---------|
+| Statement position | Not in current scope | (1) binding (if a same-name binding is visible in an outer scope → shadowing, see §4.3) |
+| Statement position | In current scope | (2) assignment (must be mutable, no type annotation) |
+| Statement position (inside a loop body) | A mutable binding exists in an outer scope (up to the function boundary) | (2) **assignment** (not shadowing, see §4.5) |
+| Expression position | In current scope | (2) assignment |
+| Expression position | Not present | ❌ error (`=` in expression position **never binds**) |
+
+**In expression position, `=` has only one meaning: assignment**, and the target lookup **does not cross function boundaries**:
 
 ```fleen
 x = 1;
 func f() {
-    y = (x = 2);   // ❌ 错误：x 不在 f 的作用域链内，函数边界不可穿透
+    y = (x = 2);   // ❌ error: x is not in f's scope chain; function boundaries are impenetrable
 }
 ```
 
-链式赋值同理，右侧目标必须已存在：
+Chained assignment works the same way — the target on the right must already exist:
 
 ```fleen
 b = 5;
-a = b = 3;        // ✅ b 已绑定 → 赋值
-a = b = 5;        // ❌ 错误：b 未绑定
+a = b = 3;        // ✅ b is bound → assignment
+a = b = 5;        // ❌ error: b is not bound
 ```
 
-> **关于 `x = x + 1`**：首次出现时报错（绑定前使用，§3.1）；已绑定时是正常赋值（②）。循环体内的 `x = x + 1` 是对**外层** `x` 的赋值，见 §4.5。
+> **About `x = x + 1`**: an error on first occurrence (use before binding, §3.1); once bound, it is a normal assignment (2). Inside a loop body, `x = x + 1` is an assignment to the **outer** `x`; see §4.5.
 
-> **分号说明**：0.0.1 要求语句末尾显式写分号 `;`。0.0.2 起 ASI（自动分号插入）
-> 落地，分号可省略（显式分号仍合法），判定规则见 §3.9。
+> **Semicolon note**: 0.0.1 requires an explicit semicolon `;` at the end of statements.
+> Starting with 0.0.2, ASI (automatic semicolon insertion) is in place and semicolons
+> may be omitted (explicit semicolons remain legal). See §3.9 for the decision rules.
 >
-> **表达式语句分号规则**：
-> - if、while、choose 等控制流表达式作为语句使用时，0.0.1 必须加分号（0.0.2 起可省略）
-> - choose-when 结构中，`when` 子句和 `otherwise` 子句本身不带分号
-> - 只有 `choose` 整体作为表达式语句使用时，末尾才加分号
-> - 函数体内的尾表达式（返回值）不加分号
+> **Semicolon rules for expression statements**:
+> - When control-flow expressions such as if, while, or choose are used as statements, 0.0.1 requires a trailing semicolon (optional from 0.0.2 on)
+> - In a choose-when construct, `when` clauses and the `otherwise` clause themselves take no semicolon
+> - Only when the `choose` expression as a whole is used as an expression statement does it take a trailing semicolon
+> - A trailing expression in a function body (the return value) takes no semicolon
 
-### 3.7 错误信息
+### 3.7 Error Messages
 
-#### 对 `const` 赋值
+#### Assigning to a `const`
 
 ```
 error: cannot assign to immutable variable
@@ -181,7 +184,7 @@ error: cannot assign to immutable variable
 help: use `y = 43` without `const` if you need mutability
 ```
 
-#### 赋值带类型标注
+#### Assignment with a type annotation
 
 ```
 error: type annotation not allowed on assignment
@@ -194,234 +197,237 @@ error: type annotation not allowed on assignment
 help: remove the type annotation: `x = 43`
 ```
 
-### 3.8 所有权与绑定（0.0.2）
+### 3.8 Ownership and Bindings (0.0.2)
 
-值分三类（完整模型见 §10.1）：
+Values fall into three categories (see §10.1 for the full model):
 
-| 类别 | 类型 | 绑定/赋值/传参语义 |
-|------|------|--------------------|
-| Copy | `int` `float` `bool` `unit` 函数值 | 隐式按位复制，一切照旧（0.0.1 规则不变） |
-| Owned | `string` `box<T>`、含 owned 分量的 `Result<T, E>` | 唯一所有者；转移需 `move`，复制需 `clone` |
-| Borrow | `ref T`（仅函数参数位置，§10.4） | 只读借用，不转移 |
+| Category | Types | Binding/assignment/parameter-passing semantics |
+|----------|-------|------------------------------------------------|
+| Copy | `int` `float` `bool` `unit`, function values | Implicit bitwise copy; everything as before (0.0.1 rules unchanged) |
+| Owned | `string` `box<T>`, `Result<T, E>` containing an owned component | Single owner; moving requires `move`, copying requires `clone` |
+| Borrow | `ref T` (function parameter position only, §10.4) | Read-only borrow, no transfer |
 
-**绑定视角的核心规则：**
+**Core rules from the binding perspective:**
 
 ```fleen
-s = "hello";       // 绑定 owned 值（RHS 是新值，无需关键字）
-t = move s;        // 转移：s 之后不可再用
-t = clone t;       // 深拷贝：原值仍可用
-y = fib(n);        // 合法：函数返回值是新鲜值，天然转移
+s = "hello";       // binds an owned value (the RHS is a fresh value, no keyword needed)
+t = move s;        // move: s is no longer usable afterwards
+t = clone t;       // deep copy: the original value remains usable
+y = fib(n);        // legal: a function's return value is a fresh value, naturally transferred
 ```
 
-1. Copy 类型的使用**永远**不需要 `move` / `clone`；
-2. owned 局部变量进入**消费位置**（绑定/赋值 RHS 顶层、实参、`choose` scrutinee）
-   必须显式 `move` / `clone`，裸写是编译错误（help 提示补关键字）；
-3. **产出位置隐式转移**：函数尾、块尾、if/choose 分支尾的值顺"出口"流走；
-   分支尾的转移是条件性转移，之后使用报"可能已移动"；
-4. 比较运算与 `print` 实参是**只读使用**：自动复制，不转移；
-5. 禁止 `move deref b`（移出 box）、`move g`（移出全局——owned 全局读取即深拷贝、
-   写入即替换）、`move s`（s 为 `ref` 参数）。
+1. Copy types **never** require `move` / `clone`;
+2. An owned local variable entering a **consumption position** (top level of a binding/assignment RHS, an actual argument, a `choose` scrutinee)
+   must be explicitly `move`-ed / `clone`-ed; writing it bare is a compile error (the help message suggests the missing keyword);
+3. **Production positions transfer implicitly**: values at the end of a function, a block, or an if/choose branch flow out through the "exit";
+   a transfer at the end of a branch is conditional, and later use reports "possibly moved";
+4. Comparison operators and `print` arguments are **read-only uses**: copied automatically, never transferred;
+5. Forbidden: `move deref b` (moving out of a box), `move g` (moving out of a global — reading an owned global is a deep copy and writing it replaces it),
+   `move s` (where s is a `ref` parameter).
 
-所有权检查在 typeck 内做流敏感分析（`typeck/ownership.rs`，0.0.2 新增），
-以函数为单位、不穿越函数边界。
+Ownership checking is a flow-sensitive analysis inside typeck (`typeck/ownership.rs`, new in 0.0.2),
+per function, never crossing function boundaries.
 
-### 3.9 分号与 ASI（0.0.2）
+### 3.9 Semicolons and ASI (0.0.2)
 
-0.0.2 起分号可选，语义为**换行敏感**：语句边界在换行处判定，同行语句拼接非法。
-架构上，Lex 与 Parse 之间增加独立的 **ASI pass**（`parser/asi.rs` 纯函数）：
-消费全部 `Newline` token，在语句边界插入显式 `;`，对既不能续接也不能起始
-语句的 token 报错 `ExpectedSemiOrNewStmt`。pass 输出的 Token 流与 0.0.1
-同构（分号齐全），Parse 阶段沿用原有逻辑。
+Starting with 0.0.2, semicolons are optional and the semantics are **newline-sensitive**: statement boundaries are decided at newlines, and joining statements on one line is illegal.
+Architecturally, a separate **ASI pass** (a pure function in `parser/asi.rs`) is inserted between Lex and Parse:
+it consumes all `Newline` tokens, inserts explicit `;` at statement boundaries, and reports `ExpectedSemiOrNewStmt`
+for tokens that can neither continue nor start a statement. The token stream the pass emits is isomorphic
+to 0.0.1's (all semicolons present), so the Parse phase keeps its existing logic.
 
-> 语句完成后（换行或 EOF 处）——
-> 1. 下一 token ∈ **隐式结束集** → 插入 `;`（断句）；
-> 2. 下一 token ∈ **续接集** 或构造延续集（`else` `elif` `when` `otherwise`）→ 不断句，续接优先；
-> 3. 上一 token 不能结尾语句（运算符、`=`、`,`、前缀关键字之后）→ 不断句，跨行续接；
-> 4. 其余 → 报错 `ExpectedSemiOrNewStmt`（带 Span 与期望提示）。
+> Once a statement is complete (at a newline or EOF) —
+> 1. If the next token is in the **implicit terminator set** → insert `;` (terminate the statement);
+> 2. If the next token is in the **continuation set** or a constructor continuation set (`else` `elif` `when` `otherwise`) → do not terminate; continuation takes precedence;
+> 3. If the previous token cannot end a statement (after an operator, `=`, `,`, or a prefix keyword) → do not terminate; continue across lines;
+> 4. Otherwise → error `ExpectedSemiOrNewStmt` (with a Span and a hint about what was expected).
 
-| 集合 | 成员 |
-|------|------|
-| 新语句起始集 | `func` `const` `if` `while` `choose` `import`、标识符、字面量、`box` `deref` `move` `clone` `not` `!` `-` `(` `{` |
-| 续接集 | `+` `-` `*` `/` `%` `==` `!=` `<` `>` `<=` `>=` `and` `or` `?` `.` `[` `(` |
-| 终止集 | `}` EOF |
+| Set | Members |
+|-----|---------|
+| New-statement start set | `func` `const` `if` `while` `choose` `import`, identifiers, literals, `box` `deref` `move` `clone` `not` `!` `-` `(` `{` |
+| Continuation set | `+` `-` `*` `/` `%` `==` `!=` `<` `>` `<=` `>=` `and` `or` `?` `.` `[` `(` |
+| Terminator set | `}` EOF |
 
-> 隐式结束集 = 起始集 ∖ {`(`, `-`, `{`} ∪ {`}`, EOF}：`(` `-` 续接优先，
-> `{` 的豁免使 Allman 风格不断句（代价：块表达式语句需前导分号）。
+> Implicit terminator set = start set ∖ {`(`, `-`, `{`} ∪ {`}`, EOF}: `(` and `-` favor continuation,
+> and the exemption of `{` keeps Allman style from terminating a statement (the cost: block expression
+> statements need a leading semicolon).
 
-**陷阱用例**（必须进规范与测试）：
+**Trap cases** (must go into the spec and tests):
 
-| 代码 | 解析结果 | 说明 |
-|------|---------|------|
-| `x = 1` ⏎ `y = 2` | 两条语句 | 标识符 ∈ 起始集 |
-| `x = 1 y = 2`（同行） | 语法错误 | 换行敏感：同行拼接非法，typo 不被静默吞掉 |
-| `x = 1` ⏎ `- 2` | `x = (1 - 2)` | `-` ∈ 续接集，二元续接优先 |
-| `f()` ⏎ `(g())` | `f()(g())` 调用链 | `(` ∈ 续接集（调用）；想分开请写 `;` |
-| `f()` ⏎ `[0]` | `f()[0]` 索引 | `[` ∈ 续接集 |
-| `x = 1` ⏎ `!flag` | 两条语句 | `!` 非二元续接，`!flag` ∈ 起始集 |
-| `if c { 1 }` ⏎ `else { 2 }` | 一个 if-else 表达式 | `else` 归属该 if（跨行连接合法） |
-| `if c { 1 };` ⏎ `else { 2 }` | 语法错误 | `else` 不续接**已完结**（有分号）的 if 语句 |
-| `{ x = 1 }` | 合法（绑定语句） | `}` 前免分号，由 parser 结构区分尾表达式与绑定 |
-| `x = 1` ⏎ `{ print(1) }` | 语法错误 | 以 `{` 开头的块表达式语句需前导分号（`{` 不在隐式结束集，亦是 Allman 风格安全的代价） |
+| Code | Parse result | Explanation |
+|------|--------------|-------------|
+| `x = 1` ⏎ `y = 2` | Two statements | Identifiers are in the start set |
+| `x = 1 y = 2` (same line) | Syntax error | Newline-sensitive: joining on one line is illegal, so typos are not silently swallowed |
+| `x = 1` ⏎ `- 2` | `x = (1 - 2)` | `-` is in the continuation set; binary continuation takes precedence |
+| `f()` ⏎ `(g())` | `f()(g())` call chain | `(` is in the continuation set (call); write `;` to separate them |
+| `f()` ⏎ `[0]` | `f()[0]` index | `[` is in the continuation set |
+| `x = 1` ⏎ `!flag` | Two statements | `!` is not a binary continuation; `!flag` is in the start set |
+| `if c { 1 }` ⏎ `else { 2 }` | One if-else expression | `else` attaches to that if (cross-line joining is legal) |
+| `if c { 1 };` ⏎ `else { 2 }` | Syntax error | `else` does not continue an if statement that is **already terminated** (by a semicolon) |
+| `{ x = 1 }` | Legal (a binding statement) | No semicolon before `}`; the parser distinguishes a trailing expression from a binding structurally |
+| `x = 1` ⏎ `{ print(1) }` | Syntax error | A block expression statement starting with `{` needs a leading semicolon (`{` is not in the implicit terminator set — this is also the cost of keeping Allman style safe) |
 
-不变量：`func` 声明后无分号、块尾表达式无分号、`when`/`otherwise` 无分号的规则不变；
-分号的有无在 AST 之后不可见（不影响 MIR 与字节码）。
-架构、集合精确定义与完整陷阱表见 **`docs/0.0.2/ASI.md`**（权威设计）。
+Invariants: the rules that a `func` declaration takes no trailing semicolon, a block's trailing
+expression takes no semicolon, and `when`/`otherwise` take no semicolon are unchanged;
+the presence or absence of semicolons is invisible after the AST (it does not affect MIR or bytecode).
+For the architecture, the precise definitions of the sets, and the full trap table, see
+**`docs/0.0.2/ASI.md`** (the authoritative design).
 
 ---
 
-## 4. 作用域与遮蔽
+## 4. Scopes and Shadowing
 
-### 4.1 块作用域
+### 4.1 Block Scopes
 
-每个 `{}` 是一个**新作用域**。
+Every `{}` is a **new scope**.
 
 ```fleen
 if cond {
-    x = 42;      // 块内绑定
+    x = 42;      // binding inside the block
 };
-print(x);        // 错误：x 不在作用域内
+print(x);        // error: x is not in scope
 ```
 
-### 4.2 函数作用域
+### 4.2 Function Scopes
 
-函数体是**独立作用域**。
+A function body is an **independent scope**.
 
 ```fleen
 x = 42;
 func foo() {
-    x = 43;      // 新绑定，与外部 x 无关
+    x = 43;      // a new binding, unrelated to the outer x
 }
 ```
 
-### 4.3 遮蔽
+### 4.3 Shadowing
 
-#### 允许遮蔽
+#### Shadowing is allowed
 
-内层可以重新绑定同名变量。
+An inner scope may rebind a variable with the same name.
 
 ```fleen
 x = 42;
 if cond {
-    x = 43;      // 新绑定，遮蔽外层 x
+    x = 43;      // a new binding, shadowing the outer x
 };
-print(x);        // 42（外层 x 未被修改）
+print(x);        // 42 (the outer x was not modified)
 ```
 
-#### 可变性必须一致
+#### Mutability must match
 
-**遮蔽时，内层和外层的可变性必须相同。**
+**When shadowing, the inner and outer bindings must have the same mutability.**
 
-| 外层 | 内层 | 允许？ |
-|------|------|--------|
-| 可变 | 可变 | ✅ |
+| Outer | Inner | Allowed? |
+|-------|-------|----------|
+| Mutable | Mutable | ✅ |
 | `const` | `const` | ✅ |
-| 可变 | `const` | ❌ |
-| `const` | 可变 | ❌ |
+| Mutable | `const` | ❌ |
+| `const` | Mutable | ❌ |
 
 ```fleen
-// 允许
+// allowed
 x = 42;
 if cond {
-    x = 43;          // 可变遮蔽可变
+    x = 43;          // mutable shadowing mutable
 };
 
 const x = 42;
 if cond {
-    const x = 43;    // 不可变遮蔽不可变
+    const x = 43;    // immutable shadowing immutable
 };
 
-// 不允许
+// not allowed
 x = 42;
 if cond {
-    const x = 43;    // 错误：可变性不一致
+    const x = 43;    // error: mutability mismatch
 };
 
 const x = 42;
 if cond {
-    x = 43;          // 错误：可变性不一致
+    x = 43;          // error: mutability mismatch
 };
 ```
 
-#### 遮蔽的语义
+#### Semantics of shadowing
 
-**遮蔽是“同类型替换”，不是“新变量随便定义”。**
+**Shadowing is "replacement of the same kind", not "define new variables however you like".**
 
-- 内层 `x = 43` 是**新绑定**，不影响外层
-- 外层 `x` 仍然存在，但在内层不可见
-- 退出内层后，外层 `x` 恢复可见
+- The inner `x = 43` is a **new binding** and does not affect the outer one
+- The outer `x` still exists but is not visible in the inner scope
+- After leaving the inner scope, the outer `x` becomes visible again
 
-#### 函数不生效
+#### Functions do not participate
 
-函数体是独立作用域，**不受外层用户变量的遮蔽规则约束**。函数边界**不穿透**：函数内的绑定不与函数外的同名用户变量做遮蔽对比。
+A function body is an independent scope and is **not subject to the outer shadowing rules for user variables**. Function boundaries are **impenetrable**: bindings inside a function are never compared for shadowing against same-named user variables outside it.
 
 ```fleen
 x = 42;
 func foo() {
-    const x = 43;    // 合法：函数内是新作用域，不是遮蔽
+    const x = 43;    // legal: inside a function is a new scope, not shadowing
 }
 ```
 
-#### 参数可被遮蔽（函数内例外）
+#### Parameters may be shadowed (an in-function exception)
 
-函数参数是函数体内的绑定，**不受"函数不生效"保护**。函数参数可以在函数体内用同名的新绑定遮蔽，**不做可变性一致性检查**（参数不是外层用户声明）：
+Function parameters are bindings within the function body and are **not protected by the "functions do not participate" rule**. A function parameter may be shadowed inside the body by a new binding of the same name, with **no mutability-consistency check** (a parameter is not an outer user declaration):
 
 ```fleen
 func f(x: int): int {
-    x = 2;      // 合法：函数体内是对参数的遮蔽，不是赋值
+    x = 2;      // legal: inside the function body this shadows the parameter, not an assignment
     x
 }
 ```
 
-#### 遮蔽的例外：内建函数名
+#### Exception to shadowing: builtin function names
 
-内建函数（如 `print`）的同名用户绑定不算冲突，直接覆盖：用户可以用 `print = 42;` 声明自己的 `print`，之后该名字指向用户绑定。
+A user binding with the same name as a builtin function (such as `print`) does not count as a conflict and simply overrides it: the user may declare their own `print` with `print = 42;`, after which the name refers to the user binding.
 
 ---
 
-### 4.5 循环体内的赋值规则
+### 4.5 Assignment Rules Inside Loop Bodies
 
-`while`（及未来的 `for`）的循环体是**循环作用域**。循环体内（含其嵌套块）出现 `x = expr` 时：
+The body of a `while` (and of a future `for`) is a **loop scope**. When `x = expr` appears inside a loop body (including its nested blocks):
 
-- 若当前作用域（循环体本身）已有 `x` → ② 赋值（和平常一样）
-- 否则，若**当前函数作用域内、当前位置之前已可见**的 `x` 存在，且它是**可变的用户变量** → ② **赋值**，而不是遮蔽
-- 否则 → ① 绑定（新遮蔽或首次绑定）
+- If `x` already exists in the current scope (the loop body itself) → (2) assignment (as usual)
+- Otherwise, if an `x` that is **already visible within the current function scope before the current position** exists and is a **mutable user variable** → (2) **assignment**, not shadowing
+- Otherwise → (1) binding (a new shadow or a first binding)
 
-这使计数器惯用法按预期工作：
+This makes the counter idiom work as expected:
 
 ```fleen
 x = 0;
 while x < 10 {
-    x = x + 1;    // 对外层的 x 进行赋值，不是遮蔽
+    x = x + 1;    // an assignment to the outer x, not shadowing
 };
 ```
 
-反之，若外层 `x` 不可变（`const` 或参数），循环体内的 `x = expr` 是**编译错误**（赋值给不可变绑定）：
+Conversely, if the outer `x` is immutable (`const` or a parameter), `x = expr` inside the loop body is a **compile error** (assignment to an immutable binding):
 
 ```fleen
 const x = 0;
 while x < 10 {
-    x = 1;      // ❌ 编译错误：不能赋值给 const
+    x = 1;      // ❌ compile error: cannot assign to a const
 };
 ```
 
-循环作用域的查找不会穿透函数边界：函数体内的循环不能赋值给全局或同名的外层绑定。若函数内没有对应的局部绑定，`x = 1` 就是对**循环作用域内的新绑定**（遮蔽语义），不是对外层变量的赋值：
+Lookup in a loop scope does not cross function boundaries: a loop inside a function body cannot assign to a global or to a same-named outer binding. If the function has no corresponding local binding, `x = 1` is a **new binding within the loop scope** (shadowing semantics), not an assignment to the outer variable:
 
 ```fleen
-x = 0;          // 全局 x
+x = 0;          // global x
 func f() {
     while true {
-        x = 1;  // 新绑定（循环体内），不写全局 x
+        x = 1;  // a new binding (inside the loop body); does not write the global x
     };
 }
 ```
 
-表达式位置的 `=` 在函数内**不能**绑定全局：`y = (x = 1);` 中若 `x` 未在函数内声明，是编译错误（§3.6）。
+In expression position, `=` inside a function **cannot** bind a global: in `y = (x = 1);`, if `x` is not declared inside the function, it is a compile error (§3.6).
 
-> 循环体内的遮蔽仍然可用，但**只能在循环体的嵌套块中**发生。外层 `const` 时，`while c { const x = ... }` 是可变性不一致的遮蔽错误（§4.3）。
+> Shadowing inside a loop body is still available, but can only occur **in nested blocks of the loop body**. When the outer binding is `const`, `while c { const x = ... }` is a shadowing error due to a mutability mismatch (§4.3).
 
-### 4.4 遮蔽错误信息
+### 4.4 Shadowing Error Messages
 
-#### 可变性不一致的遮蔽
+#### Shadowing with a mutability mismatch
 
 ```
 error: shadowing must preserve mutability
@@ -437,39 +443,39 @@ help: use `x = 43` for a mutable shadow, or rename the variable
 
 ---
 
-## 5. 函数
+## 5. Functions
 
 ```fleen
-// 单行函数
+// single-line function
 func add(a: int, b: int): int = a + b
 
-// 多行函数
+// multi-line function
 func fib(n: int): int {
     if n < 2 { n }
     elif n == 2 { 1 }
     else { fib(n - 1) + fib(n - 2) }
 }
 
-// 无返回值
+// no return value
 func greet(name: string) {
     print("Hello, ", name);
 }
 
-// 函数是一等值
+// functions are first-class values
 func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
 result = apply(add, 1, 2);
 ```
 
-**规则：**
-- `func` 关键字定义函数
-- 单行：`= expr`
-- 多行：`{ block }`，最后表达式自动返回
-- 函数是一等值，可赋值、传递、返回
-- 无 `return` 关键字（0.0.1 暂不做提前返回）
+**Rules:**
+- The `func` keyword defines a function
+- Single-line: `= expr`
+- Multi-line: `{ block }`, where the last expression is returned automatically
+- Functions are first-class values: they can be assigned, passed, and returned
+- No `return` keyword (0.0.1 does not implement early returns for now)
 
 ---
 
-## 6. 控制流
+## 6. Control Flow
 
 ### if / elif / else
 
@@ -483,7 +489,7 @@ if x > 0 {
 };
 ```
 
-`if` 是表达式，有返回值。**注意：0.0.1 要求表达式语句末尾加分号（0.0.2 起 ASI 使其可选，§3.9）。**
+`if` is an expression and has a return value. **Note: 0.0.1 requires a semicolon at the end of expression statements (from 0.0.2 on, ASI makes it optional, §3.9).**
 
 ### while
 
@@ -493,13 +499,13 @@ while x < 10 {
 };
 ```
 
-**注意：0.0.1 要求表达式语句末尾加分号（0.0.2 起 ASI 使其可选，§3.9）。**
+**Note: 0.0.1 requires a semicolon at the end of expression statements (from 0.0.2 on, ASI makes it optional, §3.9).**
 
-**0.0.1 只做 `while`，`for` 依赖迭代器，后做。**
+**0.0.1 only implements `while`; `for` depends on iterators and comes later.**
 
 ---
 
-## 7. 模式匹配：choose
+## 7. Pattern Matching: choose
 
 ```fleen
 choose value {
@@ -510,15 +516,15 @@ choose value {
 };
 ```
 
-**规则：**
-- 无 `fallthrough`
-- `otherwise` 必须存在（或编译器能证明穷尽）
-- 支持守卫条件 `if`
-- `when` pattern 支持字面量（含负数）、标识符绑定
-- 无 `match` / `switch`
-- **分号规则**：`when` 子句和 `otherwise` 子句本身不带分号，只有 `choose` 整体作为语句使用时末尾加分号
+**Rules:**
+- No `fallthrough`
+- `otherwise` must be present (or the compiler can prove exhaustiveness)
+- Guard conditions with `if` are supported
+- `when` patterns support literals (including negative numbers) and identifier bindings
+- No `match` / `switch`
+- **Semicolon rules**: `when` clauses and the `otherwise` clause themselves take no semicolon; only when the `choose` expression as a whole is used as a statement does it take a trailing semicolon
 
-**pattern 语法（P5 补充）：**
+**Pattern syntax (P5 addition):**
 ```text
 pattern = neg_pattern | literal | ident
 neg_pattern = "-" , (int_lit | float_lit)
@@ -526,7 +532,7 @@ neg_pattern = "-" , (int_lit | float_lit)
 
 ---
 
-## 8. 错误处理
+## 8. Error Handling
 
 ```fleen
 func div(a: int, b: int): Result<int, string> {
@@ -535,7 +541,7 @@ func div(a: int, b: int): Result<int, string> {
 }
 
 func ratio(a: int, b: int): Result<int, string> {
-    q = div(a, b)?;      // Err 则整函数立即返回该 Err
+    q = div(a, b)?;      // on Err, the whole function returns that Err immediately
     r = div(q, 2)?;
     Ok(r)
 }
@@ -549,36 +555,38 @@ res = choose ratio(10, 2) {
 };
 ```
 
-> **版本说明**：0.0.1 无 `Ok`/`Err` 构造语法与 pattern（`Result<T, E>` 仅有类型，
-> 须用空值绑定 + otherwise 显式处理）；上例语法与 `?` 自 **0.0.2** 起转正
-> （决议见 `docs/0.0.2/PLAN.md` §3.4）。
+> **Version note**: 0.0.1 has no `Ok`/`Err` constructor syntax or patterns (`Result<T, E>` is
+> type-only and requires a nil binding + explicit handling via otherwise); the syntax in the
+> example above and `?` were officially adopted in **0.0.2**
+> (see `docs/0.0.2/PLAN.md` §3.4 for the decision).
 >
-> **词法定性**（0.0.2）：`move` / `clone` / `deref` 是**关键字**
-> （`is_keyword()` 返回 true，从合法标识符变为保留字，"保留字用作绑定名"
-> 由 parser 在期望标识符处报错）；`?` 是**标点 token**（`TokenKind::Question`，
-> `is_keyword()` 返回 false），不参与保留字判定。
+> **Lexical classification** (0.0.2): `move` / `clone` / `deref` are **keywords**
+> (`is_keyword()` returns true; they change from legal identifiers to reserved words, and
+> "using a reserved word as a binding name" is reported by the parser where an identifier is
+> expected); `?` is a **punctuation token** (`TokenKind::Question`,
+> `is_keyword()` returns false) and does not participate in reserved-word checks.
 
-**0.0.2 语义：**
+**0.0.2 semantics:**
 
-- `Ok(expr)` / `Err(expr)` 是内建构造表达式（可被用户遮蔽，机制同 `print`），
-  类型由**上下文**确定（函数返回类型标注、绑定类型标注、`?` 所在函数返回类型、
-  choose scrutinee）；无上下文 → 编译错误，提示补类型标注
-- `choose` 支持 `when Ok(v)` / `when Err(e)` pattern，绑定按**转移**语义；
-  `Ok` + `Err` 两臂齐即穷尽，无需 `otherwise`；带 guard 的臂不计入穷尽
-- `?` 后缀运算符：操作数类型为 `Result<T, E>`，所在函数返回类型须为
-  `Result<T2, E>`（`E` 完全相等，0.0.2 无错误类型转换）；`Err` 时整函数立即返回该 `Err`
-- 表达式语句的值类型为 `Result<T, E>` → 编译错误（`UnhandledResult`）：
-  Result 不允许静默丢弃，提示绑定或加 `?`
-- `main` 可返回 `Result<T, E>`：VM 收到 `Err` 时打印 stderr 并以退出码 1 结束
-- 无 `return` 关键字（§5）：`?` 是唯一的提前返回机制
-- `Result<T, E>` 是轻量代数类型（尖括号，与 EBNF 一致）；错误必须显式处理；
-  `panic` 仅用于不可恢复错误，不可捕获
+- `Ok(expr)` / `Err(expr)` are builtin constructor expressions (users may shadow them, same mechanism as `print`);
+  their types are determined by **context** (a function's return type annotation, a binding's type annotation, the containing function's return type for `?`,
+  or the choose scrutinee); with no context → compile error, with a hint to add a type annotation
+- `choose` supports the `when Ok(v)` / `when Err(e)` patterns, with bindings following **move** semantics;
+  an `Ok` + `Err` pair is exhaustive on its own, no `otherwise` needed; guarded arms do not count toward exhaustiveness
+- The `?` postfix operator: the operand type must be `Result<T, E>`, and the containing function's return type must be
+  `Result<T2, E>` (`E` must be exactly equal; 0.0.2 has no error type conversion); on `Err`, the whole function returns that `Err` immediately
+- If an expression statement's value type is `Result<T, E>` → compile error (`UnhandledResult`):
+  Results may not be silently discarded; the hint is to bind it or add `?`
+- `main` may return `Result<T, E>`: when the VM receives an `Err`, it prints to stderr and exits with code 1
+- No `return` keyword (§5): `?` is the only early-return mechanism
+- `Result<T, E>` is a lightweight algebraic type (angle brackets, consistent with the EBNF); errors must be handled explicitly;
+  `panic` is only for unrecoverable errors and cannot be caught
 
 ---
 
-## 9. 类型
+## 9. Types
 
-### 基本类型
+### Primitive Types
 
 ```fleen
 int
@@ -588,22 +596,22 @@ string
 unit
 ```
 
-### 复合类型
+### Composite Types
 
 ```fleen
-[T]              // 数组（0.0.3）
-box<T>           // 堆指针，唯一所有权；box expr 分配、deref 读写（0.0.2，§10.3）
-ref T            // 只读借用，仅函数参数（0.0.2，§10.4）
-Result<T, E>     // 错误处理（0.0.2 起 Ok/Err/? 转正，§8）
+[T]              // array (0.0.3)
+box<T>           // heap pointer, single ownership; box expr allocates, deref reads/writes (0.0.2, §10.3)
+ref T            // read-only borrow, function parameters only (0.0.2, §10.4)
+Result<T, E>     // error handling (Ok/Err/? officially adopted in 0.0.2, §8)
 ```
 
-### 函数类型
+### Function Types
 
 ```fleen
 (int, int) -> int
 ```
 
-### 类型转换 `as`（0.0.2 临时，泛型后重审）
+### Type Conversion `as` (temporary in 0.0.2, to be revisited after generics)
 
 ```fleen
 x = 42 as string;    // "42"
@@ -611,74 +619,75 @@ f = 1.5 as string;   // "1.5"
 b = true as string;  // "true"
 ```
 
-- **优先级**：`as` 介于一元前缀与二元运算符之间（同 Rust）：
-  `deref b as string` = `(deref b) as string`；`1 + 2 as string` = `1 + (2 as string)`；
+- **Precedence**: `as` sits between unary prefix and binary operators (same as Rust):
+  `deref b as string` = `(deref b) as string`; `1 + 2 as string` = `1 + (2 as string)`;
   `box 1 as string` = `box (1 as string)`
-- **白名单（仅此三条）**：`int as string`（十进制，含负号）、
-  `float as string`（与 print 的 float 输出一致）、`bool as string`（`"true"` / `"false"`）。
-  其余一切（`string as string`、`int as float`、`box<T> as …`、`ref T` 操作数、恒等转换）
+- **Whitelist (only these three)**: `int as string` (decimal, including the minus sign),
+  `float as string` (matching print's float output), `bool as string` (`"true"` / `"false"`).
+  Everything else (`string as string`, `int as float`, `box<T> as …`, `ref T` operands, identity conversions)
   → `UnsupportedCast { from, to }`
-- **结果是新鲜 owned string**：消费位置无需 `move` / `clone`（与"RHS 是新值"一致）
-- **临时性**：0.0.2 白名单仅为 print 修复的最小配套；完整转换矩阵与
-  From-like 机制随泛型（0.1.0）再议，0.0.2 不引入任何隐式数值转换
-- **print 仅接受 string 也是临时的**：0.0.2 print 对非 string 实参报
-  `ArgTypeMismatch` 并提示 `as string`；print 的格式化与 `as string` 共用
-  同一 helper（`fleen-vm/src/fmt.rs`），两条路径不会漂移
+- **The result is a fresh owned string**: no `move` / `clone` is needed in a consumption position (consistent with "the RHS is a fresh value")
+- **Temporary nature**: the 0.0.2 whitelist is only the minimal support needed to fix print; the full
+  conversion matrix and a From-like mechanism will be revisited with generics (0.1.0), and 0.0.2 introduces no implicit numeric conversions
+- **print accepting only strings is also temporary**: in 0.0.2, print reports `ArgTypeMismatch` for non-string
+  arguments with a hint to use `as string`; print's formatting and `as string` share the same helper
+  (`fleen-vm/src/fmt.rs`), so the two paths cannot drift apart
 
 ---
 
-## 10. 指针与所有权
+## 10. Pointers and Ownership
 
-> **版本说明**：0.0.1 不做；`box<T>` / `deref` / `ref` / `move` / `clone` 自 **0.0.2** 起
-> 转正（决议与细则见 `docs/0.0.2/PLAN.md` §3.1–3.3）。
-> `ptr` / `addr` / `unsafe` 仍不做（0.0.5）。
+> **Version note**: not in 0.0.1; `box<T>` / `deref` / `ref` / `move` / `clone` were officially
+> adopted in **0.0.2** (see `docs/0.0.2/PLAN.md` §3.1–3.3 for decisions and details).
+> `ptr` / `addr` / `unsafe` remain unimplemented (0.0.5).
 
 ```fleen
-box<T>    // 堆指针，安全，唯一所有权（0.0.2）
-ref T     // 只读借用，仅函数参数（0.0.2）
-ptr<T>    // 裸指针，unsafe（0.0.5）
-addr x    // 取地址（0.0.5）
+box<T>    // heap pointer, safe, single ownership (0.0.2)
+ref T     // read-only borrow, function parameters only (0.0.2)
+ptr<T>    // raw pointer, unsafe (0.0.5)
+addr x    // take the address (0.0.5)
 ```
 
-### 10.1 所有权模型
+### 10.1 Ownership Model
 
-值分三类（`is_copy(T)` 由 typeck 判定）：
+Values fall into three categories (`is_copy(T)` is determined by typeck):
 
-| 类别 | 类型 | 赋值/传参语义 |
-|------|------|---------------|
-| Copy | `int` `float` `bool` `unit` 函数值 | 隐式按位复制，一切照旧 |
-| Owned | `string` `box<T>`、含 owned 分量的 `Result<T, E>` | 唯一所有者；转移需 `move`，复制需 `clone` |
-| Borrow | `ref T`（仅参数位置） | 只读借用，不转移 |
+| Category | Types | Assignment/parameter-passing semantics |
+|----------|-------|----------------------------------------|
+| Copy | `int` `float` `bool` `unit`, function values | Implicit bitwise copy; everything as before |
+| Owned | `string` `box<T>`, `Result<T, E>` containing an owned component | Single owner; moving requires `move`, copying requires `clone` |
+| Borrow | `ref T` (parameter position only) | Read-only borrow, no transfer |
 
 ### 10.2 move / clone
 
-| 表达式 | 效果 |
-|--------|------|
-| `move x` | 转移 `x` 的所有权，此后 `x` 不可再用（`UseAfterMove`） |
-| `clone x` | 深拷贝，`x` 仍可用 |
-| `clone deref b` | 深拷贝 box 点内值，box 不动 |
-| `clone g`（g 为全局） | 深拷贝（owned 全局的读取语义即深拷贝，见规则 5） |
+| Expression | Effect |
+|------------|--------|
+| `move x` | Transfers ownership of `x`; afterwards `x` is no longer usable (`UseAfterMove`) |
+| `clone x` | Deep copy; `x` remains usable |
+| `clone deref b` | Deep copy of the value inside the box; the box is untouched |
+| `clone g` (g is a global) | Deep copy (reading an owned global is by definition a deep copy; see rule 5) |
 
-**核心规则：**
+**Core rules:**
 
-1. Copy 类型永远不需要 `move` / `clone`
-2. owned 局部变量进入**消费位置**（绑定/赋值 RHS 顶层、实参、`choose` scrutinee）
-   必须显式 `move` / `clone`；裸写是编译错误（help 提示补关键字）
-3. **产出位置隐式转移**：函数尾、块尾、if/choose 分支尾的值顺"出口"流走，
-   无需关键字；分支尾的转移是条件性转移，之后使用报"可能已移动"
-   > **语句位置的块尾/分支尾**（如 `{ … t };` 或 `if c { … t } else { … u };`
-   > 单独成句）同样产出值，随后立即丢弃。这是保守语义（与 Rust 的表达式
-   > 语句一致）：值照常生成、转移规则不变，只是无人接收；不因为"在语句
-   > 位置"就免除非 Copy 消费
-4. 比较运算与 `print` 实参是**只读使用**：自动复制，不转移
-5. 禁止：`move deref b`（不可移出 box）、`move g`（不可移出全局——owned 全局
-   读取即深拷贝、写入即替换）、`move s`（s 为 `ref` 参数）
-6. `move` / `clone` 作用于 Copy 类型 → 编译错误，提示去掉关键字
+1. Copy types never need `move` / `clone`
+2. An owned local variable entering a **consumption position** (top level of a binding/assignment RHS, an actual argument, a `choose` scrutinee)
+   must be explicitly `move`-ed / `clone`-ed; writing it bare is a compile error (the help message suggests the missing keyword)
+3. **Production positions transfer implicitly**: values at the end of a function, a block, or an if/choose branch flow out through the "exit",
+   no keyword needed; a transfer at the end of a branch is conditional, and later use reports "possibly moved"
+   > **Block/branch tails in statement position** (e.g. `{ … t };` or `if c { … t } else { … u };`
+   > standing alone as a statement) also produce a value, which is then immediately discarded. This is conservative
+   > semantics (consistent with Rust's expression statements): the value is produced as usual and the transfer
+   > rules are unchanged — nobody receives it, but the non-Copy consumption is not waived merely
+   > because of "statement position"
+4. Comparison operators and `print` arguments are **read-only uses**: copied automatically, never transferred
+5. Forbidden: `move deref b` (cannot move out of a box), `move g` (cannot move out of a global — reading an owned
+   global is a deep copy and writing it replaces it), `move s` (where s is a `ref` parameter)
+6. Applying `move` / `clone` to a Copy type → compile error, with a hint to remove the keyword
 
 ```fleen
 s = "hello";
-t = move s;        // 转移，s 之后不可用
-t = clone t;       // 深拷贝，t 仍可用
+t = move s;        // move; s is no longer usable afterwards
+t = clone t;       // deep copy; t remains usable
 ```
 
 ```
@@ -696,77 +705,77 @@ help: clone the value if you still need it: `t = clone s;`
 ### 10.3 box<T>
 
 ```fleen
-b = box 42;            // b: box<int>，堆分配
-n = deref b;           // 读：副本（owned 点内值为深拷贝）
-deref b = n + 1;       // 写：替换点内值，旧值释放
-c = clone b;           // 新 box + 新点内值
+b = box 42;            // b: box<int>, heap-allocated
+n = deref b;           // read: a copy (an owned inner value is deep-copied)
+deref b = n + 1;       // write: replaces the inner value, the old value is released
+c = clone b;           // a new box + a new inner value
 s = box "heap";
-t = clone deref s;     // 深拷贝点内值，box 本身不动
+t = clone deref s;     // deep copy of the inner value; the box itself is untouched
 ```
 
-- `box expr` 前缀关键字分配（类型位置 `box<T>` 与表达式位置按语法位置区分）；
-  `deref` 前缀关键字读写；赋值目标可为 `deref b`（不可带类型标注）
-- `deref b` 读取产生点内值的**副本**（`T: Copy` 按位复制，owned 深拷贝）——
-  box 拥有点内值，读取不等于取走所有权；"显式 clone"规则只约束变量位置
-- 点内类型允许集合（0.0.2）：`int` `float` `bool` `string` `box<U>` `Result<T, E>`
-- **不可移出 box**：`move deref b` 编译错误，需要值请 `clone deref b`
-- **`deref` 赋值目标**：`deref b = v` 的 `b` 必须是**局部 box 变量**；
-  对 owned 全局 box 写点内值是编译错误（0.0.2 无全局可变别名安全路径，
-  `DerefAssignOfGlobalBox`），可先把 box `clone` 到局部再写
-- **确定性释放（无 GC）**：持有者离开作用域、被重新赋值、值被丢弃时立即释放；
-  无循环引用可能（box 唯一所有权、`ref` 不可存储）→ 不需要 GC，与 §14 一致
+- The `box expr` prefix keyword allocates (the type-position `box<T>` and the expression position are distinguished by syntactic position);
+  the `deref` prefix keyword reads and writes; the assignment target may be `deref b` (no type annotation allowed)
+- Reading `deref b` produces a **copy** of the inner value (`T: Copy` is copied bitwise, owned values are deep-copied) —
+  the box owns the inner value, so reading is not the same as taking ownership; the "explicit clone" rule only constrains variable positions
+- Allowed inner types (0.0.2): `int` `float` `bool` `string` `box<U>` `Result<T, E>`
+- **Cannot move out of a box**: `move deref b` is a compile error; if you need the value, use `clone deref b`
+- **`deref` as an assignment target**: in `deref b = v`, `b` must be a **local box variable**;
+  writing the inner value of an owned global box is a compile error (0.0.2 has no safe path for mutable aliasing of
+  globals, `DerefAssignOfGlobalBox`); you may first `clone` the box into a local and then write it
+- **Deterministic release (no GC)**: released immediately when the holder leaves scope, is reassigned, or the value is discarded;
+  no reference cycles are possible (a box has a single owner and `ref` cannot be stored) → no GC needed, consistent with §14
 
-### 10.4 ref：只读借用（仅函数参数）
+### 10.4 ref: Read-Only Borrow (Function Parameters Only)
 
 ```fleen
 func shout(s: ref string): int {
-    print(s);          // 只读使用
+    print(s);          // read-only use
     42
 }
 
 func main(): int {
     name = "fleen";
-    shout(name);       // 传借用，name 仍可用
-    shout(name);       // 再借一次，合法
+    shout(name);       // pass a borrow; name remains usable
+    shout(name);       // borrow again; legal
     0
 }
 ```
 
-- `ref T` 只能出现在**函数参数类型**位置；`ref` 局部变量、`ref` 全局、
-  返回 `ref`、嵌套 `ref ref T` 一律编译错误（`RefNotAllowedHere`）
-- ref 参数只读：赋值（`AssignToRefParam`）、`move`（`MoveOfBorrowed`）均错误；
-  `clone s` 得到 owned `T`；可作为 `ref T` 实参转发（句柄流动，零拷贝）
-- 实参**不转移**：传局部/全局/另一 ref 参数均可，不需要 `move`/`clone`；
-  不支持借用 box 内部（`deref b` 作 ref 实参）
-  > 实参必须是**变量**（局部 / 全局 / 另一 ref 参数）。字面量、`clone s`、
-  > 调用结果等临时值报 `RefArgNotAVariable`：借用没有可引用的槽位，
-  >  borrowed 值在调用返回后无处可寻
-- `ref T` 是独立类型（`ref string ≠ string`）：把 `ref string` 赋给 `string`
-  绑定是类型错误，提示 `clone s`；传 `move x` 给 `ref` 参数报错（借用不接受转移）
-- **无需借用检查器**：句柄只存活于一次调用——被借槽位调用期间不被改写
-  （调用方挂起）、句柄无法逃逸（不能赋值/存储/返回）→ 没有悬垂的可能
+- `ref T` may only appear in the **function parameter type** position; a `ref` local variable, a `ref` global,
+  returning a `ref`, or nested `ref ref T` are all compile errors (`RefNotAllowedHere`)
+- ref parameters are read-only: assignment (`AssignToRefParam`) and `move` (`MoveOfBorrowed`) are both errors;
+  `clone s` yields an owned `T`; a ref parameter can be forwarded as a `ref T` argument (the handle flows along, zero copy)
+- Arguments are **not transferred**: locals, globals, and other ref parameters can all be passed without `move`/`clone`;
+  borrowing into a box is not supported (`deref b` as a ref argument)
+  > The argument must be a **variable** (a local, a global, or another ref parameter). Literals, `clone s`,
+  > call results, and other temporaries report `RefArgNotAVariable`: a borrow has no slot to reference,
+  > and a borrowed value has nowhere to be found after the call returns
+- `ref T` is a distinct type (`ref string ≠ string`): assigning a `ref string` to a `string`
+  binding is a type error, with a hint to use `clone s`; passing `move x` to a `ref` parameter is an error (a borrow does not accept a move)
+- **No borrow checker needed**: a handle lives only for a single call — the borrowed slot is not overwritten during
+  the call (the caller is suspended), and the handle cannot escape (it cannot be assigned/stored/returned) → no dangling is possible
 
-### 10.5 0.0.2 U06 实现说明（lower 端限制）
+### 10.5 0.0.2 U06 Implementation Notes (lower-side restrictions)
 
-- **result `choose` 的守卫**：带 `if <guard>` 的臂**不计入穷尽性**——与 Bool
-  scrutinee 同一条规则：guard 运行时可能为假，无法覆盖其模式。因此
-  `when Ok(v) if g {…}` + `when Err(e) {…}` 被 typeck 判为缺少 Ok 臂而拒绝
-  （`ChooseNotExhaustive { missing_patterns: ["Ok"] }`）。要写 guard，必须另配
-  一个**无 guard 的重复** `Ok` / `Err` 臂，或用 `otherwise` 兜底。守卫臂与
-  `otherwise` 的**降载延后到 U09 / 独立票**（U07 决定维持延后，见
-  `docs/0.0.2/TICKETS.md` U07「范围决定」）：需要把 Result-choose 从
-  "Ok/Err 双臂、无兜底块"重构成通用臂链 + no-match 兜底，并在 guard 求值前
-  保留 payload。在此之前 U06/U07 的 lower 只降载无守卫的 `when Ok(..)` /
-  `when Err(..)` 臂，遇到 guard 或 `otherwise` 报 `UnsupportedFeature`
-  （`ChooseResultNeedsOkErrArms` 是 typeck 门后的防御性检查）。
-- **ref 实参为全局时**：借用必须指向局部槽位。U06 在为**函数体内**调用传全局
-  ref 实参时，用临时槽 `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` 承接；
-  **全局初始化器**（`lower_global_init`）没有可借用其槽位的帧，故含 ref 实参
-  的全局初始化调用直接报 `RefArgInGlobalInit`（typeck 通过、lower 拒绝）。
+- **Guards on a result `choose`**: arms with `if <guard>` **do not count toward exhaustiveness** — the same rule as
+  for a Bool scrutinee: a guard may evaluate false at runtime, so it cannot cover its pattern. Therefore
+  `when Ok(v) if g {…}` + `when Err(e) {…}` is rejected by typeck as missing an Ok arm
+  (`ChooseNotExhaustive { missing_patterns: ["Ok"] }`). To write a guard, you must pair it with
+  another **unguarded duplicate** `Ok` / `Err` arm, or fall back to `otherwise`. Lowering of guard arms and
+  `otherwise` is **deferred to U09 / a separate ticket** (U07 decided to keep it deferred; see
+  `docs/0.0.2/TICKETS.md` U07 "scope decision"): this requires refactoring Result-choose from
+  "an Ok/Err pair of arms with no fallback block" into a general arm chain + no-match fallback, while
+  preserving the payload before the guard is evaluated. Until then, the U06/U07 lower only lowers unguarded
+  `when Ok(..)` / `when Err(..)` arms and reports `UnsupportedFeature` on encountering a guard or `otherwise`
+  (`ChooseResultNeedsOkErrArms` is a defensive check behind the typeck gate).
+- **When a ref argument is a global**: the borrow must point to a local slot. When U06 lowers a call **inside a
+  function body** that passes a global ref argument, it uses a temporary slot `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` to receive it;
+  a **global initializer** (`lower_global_init`) has no frame that could borrow its slot, so a global-initializer
+  call containing ref arguments reports `RefArgInGlobalInit` directly (typeck passes, lower rejects).
 
 ---
 
-## 11. 模块与导入
+## 11. Modules and Imports
 
 ```fleen
 import std.io;
@@ -774,10 +783,10 @@ import std.io;
 std.io.print("hello");
 ```
 
-**规则：**
-- `import` 无头文件重复解析
-- 模块名点分小写
-- 无 C FFI 导入
+**Rules:**
+- `import` performs no repeated header-file parsing
+- Module names are dot-separated lowercase
+- No C FFI imports
 
 ---
 
@@ -785,54 +794,54 @@ std.io.print("hello");
 
 ```fleen
 unsafe raw_op = () => {
-    // 不安全操作
+    // unsafe operation
 }
 
 trusted safe_wrapper = () => {
-    // 作者确认安全
+    // the author has verified this is safe
 }
 
 func normal() {
-    safe_wrapper()      // 可以调用 trusted
-    // raw_op()         // 错误：不能调用 unsafe
+    safe_wrapper()      // calling trusted is allowed
+    // raw_op()         // error: cannot call unsafe
 }
 ```
 
-**0.0.1 不做（0.0.5）。**
+**Not implemented in 0.0.1 (0.0.5).**
 
 ---
 
-## 13. 命名风格
+## 13. Naming Style
 
-| 类别 | 风格 | 示例 |
-|------|------|------|
-| 变量/函数 | `snake_case` | `some_var` |
-| 类型/结构 | `PascalCase` | `SomeType` |
-| 模块 | `foo.bar` | `std.io` |
+| Category | Style | Example |
+|----------|-------|---------|
+| Variables/functions | `snake_case` | `some_var` |
+| Types/structs | `PascalCase` | `SomeType` |
+| Modules | `foo.bar` | `std.io` |
 
-**不支持函数重载，支持运算符重载（后续版本）。**
+**Function overloading is not supported; operator overloading will be supported (in a later version).**
 
-**分号规则**：0.0.1 需显式写分号 `;`；0.0.2 起 ASI 落地，分号可选（显式仍合法，见 §3.9）。
-
----
-
-## 14. 明确拒绝
-
-| 特性 | 原因 |
-|------|------|
-| 垃圾回收 | 不可预测延迟 |
-| `panic` 捕获 | 不应作为控制流 |
-| `match` / `switch` | 符号繁复 / fallthrough 反直觉 |
-| `try` / `catch` / `finally` | 异常跳转破坏线性心流 |
-| `goto` | 破坏结构化编程 |
-| 全局可变变量 | 并发数据竞争 |
-| OOP | 拒绝 `class`、继承 |
-| `let` / `var` / `:=` | 绑定统一用 `=` |
-| **C FFI 导入** | 保持语言纯粹，不引入外部不安全 |
+**Semicolon rules**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 on, ASI is in place and semicolons are optional (explicit semicolons remain legal, see §3.9).
 
 ---
 
-## 15. 完整示例
+## 14. Explicit Rejections
+
+| Feature | Reason |
+|---------|--------|
+| Garbage collection | Unpredictable latency |
+| `panic` catching | Should not be used as control flow |
+| `match` / `switch` | Symbol-heavy / fallthrough is counterintuitive |
+| `try` / `catch` / `finally` | Exception jumps break linear flow |
+| `goto` | Breaks structured programming |
+| Global mutable variables | Concurrent data races |
+| OOP | Rejects `class` and inheritance |
+| `let` / `var` / `:=` | Bindings uniformly use `=` |
+| **C FFI imports** | Keeps the language pure; no external unsafety is introduced |
+
+---
+
+## 15. Complete Example
 
 ```fleen
 func fib(n: int): int {
@@ -856,113 +865,113 @@ func main(): int {
 
 ---
 
-## 16. 设计理由
+## 16. Design Rationale
 
-### 16.1 为什么绑定和赋值是同一操作
+### 16.1 Why binding and assignment are the same operation
 
-**人的意愿就是“让 x 为 42”“让 x 为 43”。**
+**A person's intent is simply "make x be 42" and "make x be 43".**
 
-用户不需要区分“定义”和“赋值”。编译器知道区别，但用户不感知。
+Users do not need to distinguish "definition" from "assignment". The compiler knows the difference, but users never perceive it.
 
-这符合**直觉友好**原则。
+This follows the **intuitive and friendly** principle.
 
-### 16.2 为什么默认可变
+### 16.2 Why mutable by default
 
-Python 风格：变量是“名字到值的引用”，名字本身没有“不可变”属性。
+Python style: a variable is "a reference from a name to a value"; the name itself has no "immutable" property.
 
-可变是默认，`const` 是显式标记。
+Mutable is the default; `const` is the explicit marker.
 
-这符合**简洁清晰**原则。
+This follows the **concise and clear** principle.
 
-### 16.3 为什么遮蔽必须可变性一致
+### 16.3 Why shadowing must preserve mutability
 
-**避免歧义。**
+**To avoid ambiguity.**
 
 ```fleen
 x = 42;
 if cond {
-    const x = 43;    // 内层不可变，外层可变
+    const x = 43;    // the inner one is immutable, the outer one is mutable
 };
-x = 44;              // 改的是哪个？
+x = 44;              // which one does this change?
 ```
 
-如果允许，读者会问：内层 `const x` 是“新变量”，还是“把外层 `x` 变成不可变”？
+If this were allowed, the reader would have to ask: is the inner `const x` a "new variable", or does it "turn the outer `x` immutable"?
 
-**没有清晰答案。所以不允许。**
+**There is no clear answer. So it is not allowed.**
 
-这符合**内存安全**和**直觉友好**原则。
+This follows the **memory safe** and **intuitive and friendly** principles.
 
-### 16.4 为什么函数不生效
+### 16.4 Why functions do not participate
 
-**函数体是独立作用域，不是“内层”。**
+**A function body is an independent scope, not an "inner scope".**
 
-函数内的变量和外层变量无关。函数不应该受外层变量的可变性影响。
+Variables inside a function are unrelated to outer variables. A function should not be affected by the mutability of outer variables.
 
-这符合**简洁清晰**原则。
+This follows the **concise and clear** principle.
 
 ---
 
-## 17. 特性范围
+## 17. Feature Matrix
 
-| 特性 | 0.0.1 | 0.0.2 |
-|------|-------|-------|
-| `=` 绑定/赋值 | ✅ | ✅ |
-| `const` 不可变 | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅（string 转为 owned 语义） |
-| `func` 单行 / 多行 | ✅ | ✅ |
+| Feature | 0.0.1 | 0.0.2 |
+|---------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) |
+| `func` single-line / multi-line | ✅ | ✅ |
 | `if` / `elif` / `else` | ✅ | ✅ |
 | `while` | ✅ | ✅ |
-| `choose` | ✅ | ✅（+ `Ok`/`Err` pattern） |
-| `Result` | ✅（仅类型） | ✅（+ `Ok`/`Err` 构造、`?`） |
-| 函数类型 | ✅ | ✅ |
-| 分号 `;` | ✅ 必填 | ✅ 可选（ASI） |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) |
+| Function types | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) |
 | `?` | ❌ | ✅ |
 | `move` / `clone` | ❌ | ✅ |
 | `box<T>` | ❌ | ✅ |
-| `ref` | ❌ | ✅（仅参数） |
-| `struct` | ❌ | ❌（0.0.3） |
-| `for` | ❌ | ❌（0.0.3） |
-| `async` | ❌ | ❌（0.0.4） |
+| `ref` | ❌ | ✅ (parameters only) |
+| `struct` | ❌ | ❌ (0.0.3) |
+| `for` | ❌ | ❌ (0.0.3) |
+| `async` | ❌ | ❌ (0.0.4) |
 | FFI | ❌ | ❌ |
-| 泛型 | ❌ | ❌（0.1.0） |
-| 运算符重载 | ❌ | ❌（0.1.0） |
-| 指针 `ptr` / `addr` | ❌ | ❌（0.0.5） |
+| Generics | ❌ | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ (0.1.0) |
+| Pointers `ptr` / `addr` | ❌ | ❌ (0.0.5) |
 
-**0.0.1 目标：Fibonacci 能跑。**
+**0.0.1 goal: Fibonacci runs.**
 
-**0.0.2 目标：所有权起步 —— 规划见 `docs/0.0.2/PLAN.md`。**
+**0.0.2 goal: ownership foundations — see `docs/0.0.2/PLAN.md` for the plan.**
 
 ---
 
-## 18. 后续路线
+## 18. Roadmap
 
-| 版本 | 内容 |
-|------|------|
-| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` —— **已实现，规划与实现记录见 `docs/0.0.2/PLAN.md`** |
-| 0.0.3 | `struct` / `for` / 迭代器 |
+| Version | Contents |
+|---------|----------|
+| 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
+| 0.0.3 | `struct` / `for` / iterators |
 | 0.0.4 | `async` / `await` |
 | 0.0.5 | `unsafe` / `trusted` |
-| 0.1.0 | 泛型 / 运算符重载 |
+| 0.1.0 | Generics / operator overloading |
 
-### 已知 Hack
+### Known Hacks
 
-无。（0.0.1 的 `print` 特判已在 0.0.2 U04/U13 移除：`print` 获得真实签名
-`(string...) -> unit`，内建签名表见 `fleen-compiler/src/typeck/builtins.rs`，
-非 string 实参报 `ArgTypeMismatch` 并提示 `as string`。）
+None. (The 0.0.1 `print` special case was removed in 0.0.2 U04/U13: `print` now has a real signature
+`(string...) -> unit`; the builtin signature table is in `fleen-compiler/src/typeck/builtins.rs`,
+and non-string arguments report `ArgTypeMismatch` with a hint to use `as string`.)
 
 ---
 
-## 19. 誓言
+## 19. Creed
 
-> 信任程序员，
-> 但不考验程序员的记忆。
-> 少一个皱眉的符号，
-> 多一份直觉的简洁。
-> 不追求全能，
-> 但追求：
-> 用最简洁语法，
-> 表达最安全语义，
-> 生成最高效代码。
-> Fleen 不是任何语言的简化版，
-> Fleen 就是 Fleen，
-> 一门，为未来而生的语言。
+> Trust the programmer,
+> but do not test the programmer's memory.
+> One fewer furrowed-brow symbol,
+> one more measure of intuitive simplicity.
+> Do not strive for omnipotence,
+> but strive for:
+> expressing the safest semantics
+> with the most concise syntax,
+> generating the most efficient code.
+> Fleen is not a simplified version of any language;
+> Fleen is Fleen,
+> a language born for the future.

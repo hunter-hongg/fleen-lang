@@ -615,7 +615,8 @@ mod tests {
 
     #[test]
     fn newline_not_emitted_at_file_start() {
-        // ASI 契约（ASI.md §2）：源码开头的换行不发 Newline。
+        // ASI contract (ASI.md §2): newlines at the start of the source
+        // produce no Newline token.
         let tokens = tokenize("\n\n  foo").unwrap();
         assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "foo"));
         assert!(!tokens.iter().any(|t| t.kind == TokenKind::Newline));
@@ -623,7 +624,8 @@ mod tests {
 
     #[test]
     fn newline_collapses_blank_lines() {
-        // 连续空白/空行折叠为单个 Newline（ASI.md §2）。
+        // Runs of whitespace/blank lines collapse into a single Newline
+        // (ASI.md §2).
         let tokens = tokenize("foo\n\n  \nbar").unwrap();
         assert_eq!(tokens[1].kind, TokenKind::Newline);
         assert_eq!(tokens[2].kind, TokenKind::Ident("bar".to_string()));
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     fn crlf_is_single_newline() {
-        // `\r\n` 视为一个换行（ASI.md §2）。
+        // `\r\n` counts as a single newline (ASI.md §2).
         let tokens = tokenize("foo\r\nbar").unwrap();
         assert_eq!(tokens[1].kind, TokenKind::Newline);
         assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "bar"));
@@ -639,7 +641,8 @@ mod tests {
 
     #[test]
     fn newline_inside_block_comment_not_emitted() {
-        // 块注释内的换行不发；行注释末尾的照发（见 tokenize_comments）。
+        // Newlines inside block comments are not emitted; ones at the end of
+        // line comments still are (see tokenize_comments).
         let tokens = tokenize("foo /* a\nb */ bar").unwrap();
         assert!(!tokens.iter().any(|t| t.kind == TokenKind::Newline));
     }

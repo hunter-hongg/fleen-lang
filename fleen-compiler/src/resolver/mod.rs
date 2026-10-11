@@ -15,7 +15,7 @@
 //! - **Expression position**: `x = expr` is *assignment only*; it never binds.
 //!   Targets follow the same rules, so it never writes through a function boundary.
 //! - **Function scope** (§4.2/§4.3): the function body is independent; declarations
-//!   inside it do not shadow-check against enclosing scopes ("函数不生效").
+//!   inside it do not shadow-check against enclosing scopes ("functions have no effect").
 //! - **Forward references**: function names are collected before bodies are
 //!   resolved, so a function may be called before its declaration. Variables cannot.
 
@@ -581,7 +581,7 @@ impl Resolver {
         }
 
         // Shadow-check up to the function boundary only (DESIGN.md §4.3:
-        // "函数不生效"); parameters/functions/builtins are exempt.
+        // "functions have no effect"); parameters/functions/builtins are exempt.
         let new_mutable = false; // const is immutable
         if let Some(outer) = self.scopes.find_shadow_domain(&c.name)
             && outer.kind.shadow_checks()

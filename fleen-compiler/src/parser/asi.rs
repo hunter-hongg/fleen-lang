@@ -12,10 +12,11 @@
 use crate::lexer::{Span, Token, TokenKind};
 use crate::parser::error::{ParseError, ParseErrorKind};
 
-/// 该 token 能否开启一条新语句（块起始位置用，含 `(` `-` `!`/`not` `{`）。
+/// Whether this token can start a new statement (used at block starts;
+/// includes `(` `-` `!`/`not` `{`).
 ///
-/// `not` 与 `!` 是同一运算符的两种拼写，集合同时收录两者；
-/// `{` 用于块表达式语句（`{ 42 }`）。
+/// `not` and `!` are two spellings of the same operator, so the set
+/// includes both; `{` is for block-expression statements (`{ 42 }`).
 pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -43,11 +44,14 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
     )
 }
 
-/// 语句完成后，该 token 是否意味着"隐式结束"（pass 据此插入分号）。
+/// After a statement is complete, whether this token implies an "implicit
+/// end" (the pass inserts a semicolon based on this).
 ///
-/// 起始集 ∖ {`(`, `-`, `{`} ∪ {`}`, EOF}——`(` 与 `-` 同属续接集，续接优先，
-/// 不可据此结束语句（`x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`）；`{` 不在其中，
-/// 使 Allman 风格（`if c` ⏎ `{`）不断句（ASI.md §3.2、§5 #4）。
+/// The start set ∖ {`(`, `-`, `{`} ∪ {`}`, EOF} — `(` and `-` are also in
+/// the continuation set, and continuation wins, so a statement cannot end
+/// on them (`x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`); `{` is not included so that
+/// Allman style (`if c` ⏎ `{`) does not split a statement (ASI.md §3.2,
+/// §5 #4).
 pub(crate) fn implies_stmt_end(kind: &TokenKind) -> bool {
     match kind {
         TokenKind::Minus | TokenKind::LParen | TokenKind::LBrace => false,
@@ -56,7 +60,8 @@ pub(crate) fn implies_stmt_end(kind: &TokenKind) -> bool {
     }
 }
 
-/// 该 token 是否续接当前表达式（二元运算符 / `?` / `.` / `[` / `(` / `as`）。
+/// Whether this token continues the current expression (binary operator /
+/// `?` / `.` / `[` / `(` / `as`).
 pub(crate) fn can_continue_expr(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -81,10 +86,13 @@ pub(crate) fn can_continue_expr(kind: &TokenKind) -> bool {
     )
 }
 
-/// 该 token 能否作为一条语句的最后一个 token（pass 规则 3 的 p 侧判定）。
+/// Whether this token can be the last token of a statement (the `p` side
+/// check of pass rule 3).
 ///
-/// 0.0.2 U13：类型关键字也在此处——`e as string` 的语句以 `string` 结尾，
-/// 不收录则 EOF/换行处补不上分号，错误会前移到 parser 而不是 typeck。
+/// 0.0.2 U13: type keywords are included here too — the statement
+/// `e as string` ends with `string`; without them no semicolon could be
+/// inserted at EOF/newline, and the error would move earlier to the parser
+/// instead of typeck.
 fn can_end_stmt(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -106,7 +114,7 @@ fn can_end_stmt(kind: &TokenKind) -> bool {
     )
 }
 
-/// 未闭合括号种类（pass 的栈元素）。
+/// Kind of unclosed bracket (the pass's stack element).
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum OpenBracket {
     Paren,
@@ -114,23 +122,28 @@ enum OpenBracket {
     Brace,
 }
 
-/// 换行边界处的动作。
+/// Action at a newline boundary.
 enum Boundary {
-    /// 丢弃换行，不断句。
+    /// Discard the newline; do not split.
     Drop,
-    /// 插入一个显式 `Semi`。
+    /// Insert one explicit `Semi`.
     InsertSemi,
 }
 
-/// ASI pass：消费全部 `Newline`，在语句边界插入显式 `Semi`。
+/// ASI pass: consumes all `Newline` tokens and inserts explicit `Semi` at
+/// statement boundaries.
 ///
-/// 判定规则（ASI.md §3.1，换行或 EOF 处，`p` 前一 token、`n` 后一 token）：
-/// 1. 最内层未闭合括号是 `(` 或 `[` → 丢弃（`{` 内 ASI 照常生效）；
-/// 2. `n` 是 `}` → 丢弃（永不在 `}` 前插——尾表达式 vs 绑定由 parser 结构区分）；
-/// 3. `p` 不能结尾语句 → 丢弃（跨行续接）；
-/// 4. `n` ∈ 隐式结束集 → 插入 `Semi`；
-/// 5. `n` ∈ 续接集 ∪ 构造延续集 ∪ {`;`} → 丢弃（续接优先）；
-/// 6. 其余 → 报 `ExpectedSemiOrNewStmt`。
+/// Decision rules (ASI.md §3.1; at a newline or EOF, `p` is the previous
+/// token and `n` the next):
+/// 1. innermost unclosed bracket is `(` or `[` → drop (ASI still applies
+///    inside `{`);
+/// 2. `n` is `}` → drop (never insert before `}` — trailing expression vs
+///    binding is distinguished structurally by the parser);
+/// 3. `p` cannot end a statement → drop (continuation across lines);
+/// 4. `n` ∈ implicit-end set → insert `Semi`;
+/// 5. `n` ∈ continuation set ∪ construct-continuation set ∪ {`;`} → drop
+///    (continuation wins);
+/// 6. otherwise → report `ExpectedSemiOrNewStmt`.
 pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError> {
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut stack: Vec<OpenBracket> = Vec::new();
@@ -138,8 +151,9 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
 
     while let Some(tok) = iter.next() {
         if matches!(tok.kind, TokenKind::Newline) {
-            // 折叠连续换行（lexer 已折叠空白，防御性再兜一层），
-            // 决策所用的 `n` 是换行后第一个真实 token。
+            // Collapse runs of newlines (the lexer already collapses
+            // whitespace; this is a defensive second layer). The `n` used
+            // for the decision is the first real token after the newline.
             let next = loop {
                 match iter.peek() {
                     Some(t) if matches!(t.kind, TokenKind::Newline) => {
@@ -171,10 +185,12 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
             TokenKind::RBrace if stack.last() == Some(&OpenBracket::Brace) => {
                 stack.pop();
             }
-            // 不匹配的闭括号不碰栈——parser 随后会在正确的位置报错
+            // Mismatched closing brackets leave the stack untouched — the
+            // parser reports the error at the right place afterwards
             TokenKind::Eof => {
-                // EOF 是触发点：`x = 1` EOF 也需要补分号。out 为空（空文件）
-                // 或前一 token 是 `;` 时自然落入 Drop 分支。
+                // EOF is a trigger point: `x = 1` EOF also needs a semicolon.
+                // With `out` empty (empty file), or the previous token being
+                // `;`, it naturally falls into the Drop branch.
                 match boundary(&stack, out.last(), Some(&tok))? {
                     Boundary::Drop => {}
                     Boundary::InsertSemi => {
@@ -191,14 +207,16 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
     Ok(out)
 }
 
-/// 换行（或 EOF）边界判定。`prev` 是 pass 输出流当前的最后一个 token，
-/// `next` 是边界后的第一个 token（EOF 触发点时为 `Some(&Eof)`）。
+/// Boundary decision at a newline (or EOF). `prev` is the current last
+/// token of the pass's output stream, `next` the first token after the
+/// boundary (`Some(&Eof)` for the EOF trigger point).
 fn boundary(
     stack: &[OpenBracket],
     prev: Option<&Token>,
     next: Option<&Token>,
 ) -> Result<Boundary, ParseError> {
-    // 规则 1：`( `/`[` 内没有语句边界（花括号是语句上下文，不受此条压制）。
+    // Rule 1: no statement boundary inside `(`/`[` (braces are statement
+    // context and are not suppressed by this rule).
     if matches!(
         stack.last(),
         Some(OpenBracket::Paren) | Some(OpenBracket::Bracket)
@@ -207,24 +225,28 @@ fn boundary(
     }
     let next = match next {
         Some(t) => t,
-        // 换行后没有 token——畸形流，交给 parser 报 UnexpectedEof。
+        // No token after the newline — malformed stream; let the parser
+        // report UnexpectedEof.
         None => return Ok(Boundary::Drop),
     };
-    // 规则 2：永不在 `}` 前插（`{ 42 }` 尾表达式 vs `{ x = 1 }` 绑定）。
+    // Rule 2: never insert before `}` (trailing expression `{ 42 }` vs
+    // binding `{ x = 1 }`).
     if matches!(next.kind, TokenKind::RBrace) {
         return Ok(Boundary::Drop);
     }
-    // 规则 3：前一 token 不能结尾语句——表达式未完，跨行续接。
+    // Rule 3: the previous token cannot end a statement — the expression is
+    // incomplete, continue across the line break.
     if !prev.is_some_and(|t| can_end_stmt(&t.kind)) {
         return Ok(Boundary::Drop);
     }
-    // 规则 4：隐式结束集——插入显式分号。
+    // Rule 4: implicit-end set — insert an explicit semicolon.
     if implies_stmt_end(&next.kind) {
         return Ok(Boundary::InsertSemi);
     }
-    // 规则 5：续接优先；`else`/`elif`/`when`/`otherwise` 是构造延续
-    // （`}` ⏎ `else`、`}` ⏎ `when` 不能断句）；`{` 起始的块表达式语句
-    // / Allman 风格构造体不能断句；显式 `;` 自行断句。
+    // Rule 5: continuation wins; `else`/`elif`/`when`/`otherwise` are
+    // construct continuations (`}` ⏎ `else`, `}` ⏎ `when` must not split);
+    // block-expression statements starting with `{` / Allman-style
+    // constructs must not split; an explicit `;` splits on its own.
     if can_continue_expr(&next.kind)
         || matches!(
             next.kind,
@@ -238,7 +260,7 @@ fn boundary(
     {
         return Ok(Boundary::Drop);
     }
-    // 规则 6：既不能续接也不能起始——报错。
+    // Rule 6: neither a continuation nor a start — report an error.
     Err(ParseError {
         kind: ParseErrorKind::ExpectedSemiOrNewStmt {
             found: next.kind.clone(),
@@ -277,7 +299,7 @@ mod tests {
         !kinds.iter().any(|k| matches!(k, TokenKind::Newline))
     }
 
-    // ========== 谓词函数：对每个 TokenKind 变体的判定表 ==========
+    // ========== Predicate functions: decision table for every TokenKind variant ==========
 
     #[test]
     fn can_start_stmt_table() {
@@ -353,7 +375,8 @@ mod tests {
 
     #[test]
     fn implies_stmt_end_table() {
-        // 起始集内的 token 全部隐式结束，除了 `(` 与 `-`（续接优先）。
+        // Every token in the start set implies an end, except `(` and `-`
+        // (continuation wins).
         assert!(implies_stmt_end(&TokenKind::Func));
         assert!(implies_stmt_end(&TokenKind::Ident(String::new())));
         assert!(implies_stmt_end(&TokenKind::IntLit(0)));
@@ -372,10 +395,10 @@ mod tests {
         assert!(!implies_stmt_end(&TokenKind::Minus));
         assert!(!implies_stmt_end(&TokenKind::LParen));
         assert!(!implies_stmt_end(&TokenKind::LBrace));
-        // 终止集。
+        // Terminator set.
         assert!(implies_stmt_end(&TokenKind::RBrace));
         assert!(implies_stmt_end(&TokenKind::Eof));
-        // 非起始、非终止 → 否。
+        // Neither start nor terminator → no.
         assert!(!implies_stmt_end(&TokenKind::Plus));
         assert!(!implies_stmt_end(&TokenKind::Else));
         assert!(!implies_stmt_end(&TokenKind::Semi));
@@ -428,7 +451,7 @@ mod tests {
 
     #[test]
     fn can_end_stmt_boundary() {
-        // 可结尾集：语句可能在此完结。
+        // Endable set: a statement may finish here.
         assert!(can_end_stmt(&TokenKind::Ident(String::new())));
         assert!(can_end_stmt(&TokenKind::IntLit(0)));
         assert!(can_end_stmt(&TokenKind::StringLit(String::new())));
@@ -437,10 +460,11 @@ mod tests {
         assert!(can_end_stmt(&TokenKind::RBracket));
         assert!(can_end_stmt(&TokenKind::RBrace));
         assert!(can_end_stmt(&TokenKind::Question));
-        // 0.0.2 U13: cast 表达式以类型关键字结尾，必须能收尾语句。
+        // 0.0.2 U13: cast expressions end with a type keyword, which must be
+        // able to close a statement.
         assert!(can_end_stmt(&TokenKind::StringType));
         assert!(can_end_stmt(&TokenKind::IntType));
-        // 不可结尾：表达式必然未完。
+        // Not endable: the expression is necessarily incomplete.
         assert!(!can_end_stmt(&TokenKind::Plus));
         assert!(!can_end_stmt(&TokenKind::Assign));
         assert!(!can_end_stmt(&TokenKind::Move));
@@ -451,11 +475,11 @@ mod tests {
         assert!(!can_end_stmt(&TokenKind::Else));
     }
 
-    // ========== pass：golden 用例（ASI.md §5.1 表） ==========
+    // ========== Pass: golden cases (ASI.md §5.1 table) ==========
 
     #[test]
     fn inserts_semi_between_stmts() {
-        // `x = 1` ⏎ `y = 2` → 两条语句：换行处插入一个 Semi。
+        // `x = 1` ⏎ `y = 2` → two statements: one Semi inserted at the newline.
         let ks = kinds("x = 1\ny = 2\n");
         assert_eq!(semi_count(&ks), 2);
         assert!(has_no_newline(&ks));
@@ -463,101 +487,108 @@ mod tests {
 
     #[test]
     fn keeps_explicit_semis() {
-        // 显式分号永远合法，pass 不重复插入（`;` 后换行不断句、EOF 不补）。
+        // Explicit semicolons are always legal; the pass does not insert
+        // duplicates (a newline after `;` does not split, EOF adds nothing).
         let ks = kinds("x = 1;\ny = 2;\n");
         assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]
     fn no_semi_before_closing_brace() {
-        // `{ x = 1` ⏎ `}` —— 永不在 `}` 前插（parser 侧绑定容忍兜底）。
+        // `{ x = 1` ⏎ `}` — never insert before `}` (parser-side binding
+        // tolerance is the safety net).
         let ks = kinds("func f() {\nx = 1\n}\n");
-        // 仅 EOF 处补 1。
+        // Only 1 added at EOF.
         assert_eq!(semi_count(&ks), 1);
     }
 
     #[test]
     fn no_semi_inside_parens() {
-        // 括号内没有语句边界：实参跨行不断句。
+        // No statement boundary inside parens: multi-line arguments do not split.
         let ks = kinds("f(a,\nb)\n");
-        assert_eq!(semi_count(&ks), 1); // 仅末尾 EOF 处一个
+        assert_eq!(semi_count(&ks), 1); // only the one at trailing EOF
     }
 
     #[test]
     fn semi_inside_braces_in_parens() {
-        // `{` 内 ASI 照常生效，即使外层是 `(`（ASI.md §3.1 规则 1）。
+        // ASI still applies inside `{`, even when the outer delimiter is `(`
+        // (ASI.md §3.1 rule 1).
         let ks = kinds("f({\nx = 1\ny = 2\n})\n");
-        // `y = 2` 前插入一个；`}` 前不插；`)` 后 EOF 处补 1。
+        // One inserted before `y = 2`; none before `}`; 1 added at EOF after `)`.
         assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]
     fn join_binary_operator_across_lines() {
-        // `x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`：`-` 续接优先，不断句。
+        // `x = 1` ⏎ `- 2` ⇒ `x = (1 - 2)`: `-` continues, no split.
         let ks = kinds("x = 1\n- 2\n");
-        assert_eq!(semi_count(&ks), 1); // 仅 EOF 处
+        assert_eq!(semi_count(&ks), 1); // only at EOF
     }
 
     #[test]
     fn join_call_paren_across_lines() {
-        // `f()` ⏎ `(g())` ⇒ 调用链。
+        // `f()` ⏎ `(g())` ⇒ call chain.
         let ks = kinds("f()\n(g())\n");
         assert_eq!(semi_count(&ks), 1);
     }
 
     #[test]
     fn join_as_cast_across_lines() {
-        // `x = 42` ⏎ `as string` ⇒ `x = 42 as string`（`as` 续接，不断句）。
+        // `x = 42` ⏎ `as string` ⇒ `x = 42 as string` (`as` continues, no split).
         let ks = kinds("x = 42\nas string\n");
-        assert_eq!(semi_count(&ks), 1); // 仅末尾 EOF 处一个
+        assert_eq!(semi_count(&ks), 1); // only the one at trailing EOF
     }
 
     #[test]
     fn join_index_across_lines() {
-        // `f()` ⏎ `[0]` ⇒ `f()[0]`（ASI.md §5.1 表：`[` ∈ 续接集）。
+        // `f()` ⏎ `[0]` ⇒ `f()[0]` (ASI.md §5.1 table: `[` ∈ continuation set).
         let ks = kinds("f()\n[0]\n");
         assert_eq!(semi_count(&ks), 1);
     }
 
     #[test]
     fn split_before_bang() {
-        // `x = 1` ⏎ `!flag` → 两条语句（`!` 非续接）。
+        // `x = 1` ⏎ `!flag` → two statements (`!` is not a continuation).
         let ks = kinds("x = 1\n!flag\n");
         assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]
     fn no_semi_before_else() {
-        // `if c { 1 }` ⏎ `else { 2 }` 是一个 if-else：构造延续不断句。
+        // `if c { 1 }` ⏎ `else { 2 }` is one if-else: construct continuation
+        // does not split.
         let ks = kinds("if c { 1 }\nelse { 2 }\n");
-        assert_eq!(semi_count(&ks), 1); // 仅末尾 if-else 语句完结处
+        assert_eq!(semi_count(&ks), 1); // only where the if-else statement ends
     }
 
     #[test]
     fn no_semi_before_when_arm() {
-        // `}` ⏎ `when` —— choose 臂延续不断句。
+        // `}` ⏎ `when` — choose arm continuation does not split.
         let ks = kinds("choose x {\nwhen 0 { a }\nwhen 1 { b }\n}\n");
-        // 仅 choose 语句完结处（EOF）一个。
+        // Only one, where the choose statement ends (EOF).
         assert_eq!(semi_count(&ks), 1);
     }
 
     #[test]
     fn semi_after_if_stmt_followed_by_stmt() {
-        // `if c { 1 }` ⏎ `y = 2` —— if 语句完结后插分号。
+        // `if c { 1 }` ⏎ `y = 2` — a semicolon is inserted after the if
+        // statement completes.
         let ks = kinds("if c { 1 }\ny = 2\n");
         assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]
     fn semi_at_eof() {
-        // EOF 是触发点：`x = 1` EOF 补分号；`x = 1;` EOF 不重复。
+        // EOF is a trigger point: `x = 1` EOF adds a semicolon; `x = 1;` EOF
+        // does not duplicate.
         assert_eq!(semi_count(&kinds("x = 1")), 1);
         assert_eq!(semi_count(&kinds("x = 1;")), 1);
     }
 
     #[test]
     fn prefix_keyword_joins_across_lines() {
-        // `move` / `!` 等前缀不能结尾语句，跨行连上操作数。
+        // `move` / `!` and other prefixes cannot end a statement, so the
+        // operand joins across the line break.
         let ks = kinds("y = move\nx\n");
         assert_eq!(semi_count(&ks), 1);
     }
@@ -571,7 +602,7 @@ mod tests {
 
     #[test]
     fn rejects_boundary_garbage() {
-        // `x = 1` ⏎ `)` —— 既不能续接也不能起始。
+        // `x = 1` ⏎ `)` — neither a continuation nor a start.
         let err = kinds_err("x = 1\n)");
         assert!(matches!(
             err.kind,
@@ -581,14 +612,15 @@ mod tests {
 
     #[test]
     fn double_semicolon_passes_through_to_parser() {
-        // `;;` 的两个分号都保留；报错由 parser 的语句入口 guard 给出。
+        // Both semicolons of `;;` are preserved; the error is raised by the
+        // parser's statement-entry guard.
         let ks = kinds("x = 1;;\n");
         assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]
     fn empty_and_trivial_inputs() {
-        // 空文件、单个换行：不插入、不报错。
+        // Empty file, single newline: nothing inserted, no error.
         assert!(has_no_newline(&kinds("")));
         assert_eq!(semi_count(&kinds("\n")), 0);
     }

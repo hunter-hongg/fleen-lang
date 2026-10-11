@@ -24,7 +24,8 @@ pub fn analyze(
     let mut depth_at: Vec<Option<i64>> = vec![None; code.len() + 1];
     depth_at[0] = Some(0);
     let mut worklist = vec![0usize];
-    // pc -> 解码指令索引，O(1) 定位（at 由 0 起结构解码，故 pc 单调唯一）。
+    // pc -> decoded-instruction index, O(1) lookup (at is structurally
+    // decoded from 0, so pc is monotonically unique).
     let mut by_pc: Vec<Option<&Decoded>> = vec![None; code.len()];
     for d in at {
         by_pc[d.pc] = Some(d);
@@ -32,9 +33,10 @@ pub fn analyze(
 
     while let Some(pc) = worklist.pop() {
         let current = depth_at[pc].ok_or(VerifyError::TruncatedInstruction { pc })?;
-        // 不变量：worklist 中的 pc 必来自结构解码结果 `at`。用 `.get()` 取而非索引，
-        // 使 `at` 与 code 不一致时（或 code 为空、`at` 为空而 pc 0 已入栈）返回
-        // 错误而不是 panic。
+        // Invariant: a pc on the worklist must come from the structural decode
+        // result `at`. Using `.get()` instead of indexing makes an inconsistency
+        // between `at` and code (or an empty code/`at` with pc 0 already pushed)
+        // return an error instead of panicking.
         let d = *by_pc
             .get(pc)
             .copied()
@@ -51,7 +53,8 @@ pub fn analyze(
         }
 
         if d.opcode == Opcode::Return {
-            // `Return` 要求执行前栈深恰好为 1（只剩返回值）。
+            // `Return` requires the stack depth to be exactly 1 before it
+            // executes (only the return value remains).
             if current != 1 {
                 return Err(VerifyError::ReturnDepthWrong { pc, depth: current });
             }

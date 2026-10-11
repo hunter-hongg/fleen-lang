@@ -300,8 +300,9 @@ impl fmt::Display for TokenKind {
             TokenKind::RBracket => write!(f, "]"),
             TokenKind::Arrow => write!(f, "->"),
             TokenKind::Eof => write!(f, "EOF"),
-            // 关键字的拼写只在 keyword_str() 里维护一份；上方已穷举全部
-            // 非关键字变体，能落到此臂的必然是关键字
+            // Keyword spellings are maintained only in keyword_str(); all
+            // non-keyword variants are matched exhaustively above, so any
+            // arm falling through here must be a keyword
             other => match other.keyword_str() {
                 Some(kw) => f.write_str(kw),
                 None => unreachable!("non-keyword variants are all matched above"),

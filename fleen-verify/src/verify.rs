@@ -360,7 +360,7 @@ pub fn stack_effect(
             (-argc, argc + 1)
         }
         Opcode::BindMatch => (0, 1),
-        Opcode::Return => (0, 1), // 视为路径终止；深度相等性在分析中单独校验
+        Opcode::Return => (0, 1), // treated as path termination; depth equality is checked separately in the analysis
     })
 }
 

@@ -78,7 +78,7 @@ fn valid_unit_return() {
         vec![],
         0,
     );
-    // Unit 使深度 +1，Return 前恰好为 1。
+    // Unit makes depth +1; exactly 1 before Return.
     assert!(crate::verify(&m).is_ok());
 }
 
@@ -118,7 +118,7 @@ fn const_index_out_of_range() {
 
 #[test]
 fn jump_into_instruction_middle() {
-    // pc0: Jump 1 ; pc3: Return —— target 1 在 Const(5B) 内部
+    // pc0: Jump 1 ; pc3: Return — target 1 is inside Const (5 bytes)
     let code = vec![JUMP, 1, 0, RETURN];
     let m = module(
         vec![Const::Str("main".into())],
@@ -179,8 +179,8 @@ fn stack_depth_mismatch_at_join() {
     // pc1: Dup         1->2
     // pc2: JumpIfFalse 9   2->1: pc5 d=1, pc9 d=1
     // pc5: Dup         1->2
-    // pc6: Jump 9      2->2, target pc9 得 2 != 1 → Mismatch
-    // pc9: Return      JIF 路径深度 1，先通过 Return；Jump 路径到达时深度不一致
+    // pc6: Jump 9      2->2, target pc9 arrives at 2 != 1 → Mismatch
+    // pc9: Return      the JIF path has depth 1 and passes Return first; the Jump path arrives with a mismatched depth
     let code = vec![TRUE, DUP, JUMP_IF_FALSE, 9, 0, DUP, JUMP, 9, 0, RETURN];
     let m = module(
         vec![Const::Str("main".into())],
@@ -196,12 +196,12 @@ fn stack_depth_mismatch_at_join() {
 
 #[test]
 fn loop_back_edge_with_consistent_depth() {
-    // while 等价结构：header pc5 深度恒为 1。
+    // while-equivalent structure: header pc5 always has depth 1.
     // pc0:  Const id1      0->1
     // pc5:  NegI           1->1
     // pc6:  JumpIfFalse 17 1->0: fallthrough pc9 d=0, target pc17 d=0
     // pc9:  Const id1      0->1
-    // pc14: Jump 5         1->1  → pc5 前驱深度一致 (1, 1)
+    // pc14: Jump 5         1->1  → pc5 predecessors agree on depth (1, 1)
     // pc17: Const id1      0->1
     // pc22: Return         depth 1 ✓
     let mut code = vec![CONST_INT];
@@ -227,9 +227,10 @@ fn loop_back_edge_with_consistent_depth() {
 
 #[test]
 fn store_global_const_rejected() {
-    // main 里 StoreGlobal 一个 mutable: false 的全局。
+    // main does a StoreGlobal on a global with mutable: false.
     let code = vec![UNIT, Opcode::StoreGlobal as u8, 0, 0, UNIT, RETURN];
-    // 深度: Unit +1, StoreGlobal -1 → 0, Unit +1, Return ✓ 但 StoreGlobal 目标 const。
+    // Depths: Unit +1, StoreGlobal -1 → 0, Unit +1, Return ✓ but the
+    // StoreGlobal target is const.
     let m = module(
         vec![Const::Str("main".into())],
         vec![func(ConstId(0), 0, 0, code)],
@@ -251,7 +252,7 @@ fn store_global_const_rejected() {
 
 #[test]
 fn init_function_may_store_const_globals() {
-    // entry = __init__：初始化写 const 全局是允许的。
+    // entry = __init__: writing a const global during initialization is allowed.
     let mut init = vec![CONST_INT];
     init.extend_from_slice(&u32le(1));
     init.push(STORE_GLOBAL);
@@ -327,7 +328,7 @@ fn duplicate_constants() {
 
 #[test]
 fn call_stack_effect() {
-    // main: Call main_like(params=1) → depth 1 → Return。
+    // main: Call main_like(params=1) → depth 1 → Return.
     let mut caller = vec![CONST_INT];
     caller.extend_from_slice(&u32le(2)); // const arg
     caller.push(Opcode::Call as u8);
@@ -349,7 +350,8 @@ fn call_stack_effect() {
 
 #[test]
 fn valid_to_str_cast() {
-    // 0.0.2 U13：Const 压标量，ToStr 换成新鲜 string（Δ0，min 1），Return 前深度仍为 1。
+    // 0.0.2 U13: Const pushes a scalar, ToStr swaps in a fresh string
+    // (Δ0, min 1), depth is still 1 before Return.
     let mut code = vec![CONST_INT];
     code.extend_from_slice(&u32le(1));
     code.push(TO_STR);
@@ -365,7 +367,8 @@ fn valid_to_str_cast() {
 
 #[test]
 fn to_str_on_empty_stack() {
-    // ToStr min_depth_before = 1：空栈上执行须报 StackUnderflow。
+    // ToStr min_depth_before = 1: executing on an empty stack must report
+    // StackUnderflow.
     let code = vec![TO_STR, RETURN];
     let m = module(
         vec![Const::Str("main".into())],

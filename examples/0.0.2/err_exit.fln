@@ -1,7 +1,7 @@
-// 0.0.2：入口函数返回 Result 的 Err 路径。
-// 运行：cargo fln examples/0.0.2/err_exit.fln
-// 预期：payload 打印到 stderr，进程退出码 1（打印到 stdout 的是 Err 之前
-// 已执行的输出）。
+// 0.0.2: Err path of an entry point returning Result.
+// Run: cargo fln examples/0.0.2/err_exit.fln
+// Expected: the payload is printed to stderr and the process exits with code 1
+// (anything printed to stdout comes from code that ran before the Err).
 func find_user(id: int): Result<string, string> {
     if id == 42 { Ok("answer") } else { Err("no such user") }
 }

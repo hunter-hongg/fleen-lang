@@ -1,82 +1,82 @@
-# Fleen 0.0.1 实现任务拆解
+# Fleen 0.0.1 Implementation Task Breakdown
 
-> **目标**：Fibonacci 能跑
-> **依据**：`SPEC.md §6` 编译阶段、`DESIGN.md §15` 特性范围、`BYTECODE.md` 指令集
+> **Goal**: Fibonacci can run
+> **Basis**: `SPEC.md §6` compilation stages, `DESIGN.md §15` feature scope, `BYTECODE.md` instruction set
 
 ---
 
-## 总览
+## Overview
 
-| 票号 | 板块 | 阶段 | crate | 模块 | 产出 | 依赖 |
-|------|------|------|-------|------|------|------|
+| Ticket | Block | Stage | crate | Module | Output | Dependencies |
+|--------|-------|-------|-------|--------|--------|--------------|
 | T01 | B1 | Lex | fleen-compiler | `lexer/` | `Vec<Token>` | — |
 | T02 | B2 | Parse | fleen-compiler | `parser/` | `Ast` | T01 |
 | T03 | B3 | Resolve | fleen-compiler | `resolver/` | `Hir` | T02 |
-| T04 | B3.5 | BindCheck | fleen-compiler | — | — | （已并入 T03 Resolver，不再单列） |
+| T04 | B3.5 | BindCheck | fleen-compiler | — | — | (merged into T03 Resolver, no longer a separate ticket) |
 | T05 | B4 | Typeck | fleen-compiler | `typeck/` | `TypedHir` | T03 |
 | T06 | B5 | Lower | fleen-compiler | `lower/` | `Mir` | T05 |
 | T07 | B6 | Codegen | fleen-compiler | `codegen/` | `Bytecode` | T06 |
-| T08 | B7 | Verify | fleen-verify | `src/` | PASS/FAIL | T07 (同步) |
-| T09 | B8 | Execute | fleen-vm | `src/` | 运行结果 | T07+T08 |
-| T10 | E2E | 集成 | tests/ | `e2e/fib.fln` | 输出匹配 | T09 |
+| T08 | B7 | Verify | fleen-verify | `src/` | PASS/FAIL | T07 (in sync) |
+| T09 | B8 | Execute | fleen-vm | `src/` | Run result | T07+T08 |
+| T10 | E2E | Integration | tests/ | `e2e/fib.fln` | Output match | T09 |
 
 ---
 
-## T01: B1 Lexer — 词法分析
+## T01: B1 Lexer — Lexical Analysis
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/lexer/
 ├── mod.rs          # pub fn lex(source: &str) -> Result<Vec<Token>, LexError>
 ├── token.rs        # TokenKind, Token { kind, span }, LexError, Span
-└── tests.rs        # 单元测试
+└── tests.rs        # Unit tests
 ```
 
-### TokenKind 定义（对应 `SYNTAX.ebnf`）
+### TokenKind Definition (corresponds to `SYNTAX.ebnf`)
 
-> 实际定义见 `fleen-compiler/src/lexer/token.rs`。要点：
-> - 关键字：`Func, Const, If, Elif, Else, While, Choose, When, Otherwise, Import`
-> - 类型关键字：`IntType, FloatType, BoolType, StringType, UnitType, ResultType, BoxType, RefType`（类型由专属 token 携带，而非通用 `Ident`）
-> - `True`/`False` 是关键字 token（而非 `BoolLit`）
-> - 字面量带载荷：`Ident(String), IntLit(i64), FloatLit(f64), StringLit(String)`
-> - 运算符：`Plus, Minus, Star, Slash, Percent, Eq, Ne, Lt, Gt, Le, Ge, Assign, Bang`（`!`）、`And, Or, Not`（`not`）
-> - 分隔符：`LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Colon, Dot, Arrow, Semi`
-> - 特殊：`Eof, Error`
-> - 0.0.1 **不**实现的关键字（`Return, Unsafe, Trusted, Box, Ref, Move, Clone, BoolLit`）不在 TokenKind 中。
-> - `Semi` 即 TICKETS 早期草案中的 `Semicolon`；0.0.1 必填，ASI 在后续版本实现。
+> Actual definition in `fleen-compiler/src/lexer/token.rs`. Key points:
+> - Keywords: `Func, Const, If, Elif, Else, While, Choose, When, Otherwise, Import`
+> - Type keywords: `IntType, FloatType, BoolType, StringType, UnitType, ResultType, BoxType, RefType` (types are carried by dedicated tokens, not a generic `Ident`)
+> - `True`/`False` are keyword tokens (not `BoolLit`)
+> - Literals carry payloads: `Ident(String), IntLit(i64), FloatLit(f64), StringLit(String)`
+> - Operators: `Plus, Minus, Star, Slash, Percent, Eq, Ne, Lt, Gt, Le, Ge, Assign, Bang` (`!`), `And, Or, Not` (`not`)
+> - Delimiters: `LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Colon, Dot, Arrow, Semi`
+> - Special: `Eof, Error`
+> - Keywords **not** implemented in 0.0.1 (`Return, Unsafe, Trusted, Box, Ref, Move, Clone, BoolLit`) are absent from TokenKind.
+> - `Semi` is the `Semicolon` from early TICKETS drafts; mandatory in 0.0.1, ASI arrives in a later version.
 ```rust
-// 关键字
+// Keywords
 Func, Const, If, Elif, Else, While, Choose,
 When, Otherwise, Return, Import, Unsafe, Trusted,
 Box, Ref, Move, Clone, True, False,
 
-// 标识符/字面量
+// Identifiers/literals
 Ident, IntLit, FloatLit, BoolLit, StringLit,
 
-// 运算符/分隔符
+// Operators/delimiters
 Plus, Minus, Star, Slash, Percent,
 Eq, Ne, Lt, Gt, Le, Ge,
 Assign,
 And, Or, Not,
 LParen, RParen, LBrace, RBrace, LBracket, RBracket,
 Comma, Colon, Dot, Arrow, // -> for func type
-Semicolon, // 0.0.1 必填，ASI 在后续版本实现
+Semicolon, // mandatory in 0.0.1, ASI arrives in a later version
 
-// 特殊
+// Special
 Eof, Error,
 ```
 
-### 实现要求
-- **预分配**：`Vec::with_capacity(source.len() / 4)`
-- **Span**：`struct Span { start: u32, end: u32 }`（字节偏移，行列可后算）
-- **错误**：`LexError { kind: LexErrorKind, span }`，`kind ∈ { InvalidChar(char), UnterminatedString, UnterminatedComment, InvalidEscape(char), InvalidNumber(String), IntOverflow, FloatOverflow }`；消息由 `Display` 生成
-- **跳过注释**：`// ...` 和 `/* ... */`（不嵌套）
+### Implementation Requirements
+- **Preallocation**: `Vec::with_capacity(source.len() / 4)`
+- **Span**: `struct Span { start: u32, end: u32 }` (byte offsets; line/column can be computed later)
+- **Errors**: `LexError { kind: LexErrorKind, span }`, `kind ∈ { InvalidChar(char), UnterminatedString, UnterminatedComment, InvalidEscape(char), InvalidNumber(String), IntOverflow, FloatOverflow }`; messages produced by `Display`
+- **Skip comments**: `// ...` and `/* ... */` (non-nesting)
 
-### 测试
-- `tests/lexer/valid/*.fln`：每个 token 类型 ≥1 用例
-- `tests/lexer/invalid/*.fln`：错误位置准确、消息可读
+### Tests
+- `tests/lexer/valid/*.fln`: at least 1 case per token type
+- `tests/lexer/invalid/*.fln`: accurate error positions, readable messages
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler lexer::tests
 cargo fmt -- --check && cargo clippy -- -D warnings
@@ -84,31 +84,31 @@ cargo fmt -- --check && cargo clippy -- -D warnings
 
 ---
 
-## T02: B2 Parser — 语法分析
+## T02: B2 Parser — Syntax Analysis
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/parser/
 ├── mod.rs          # pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError>
-├── ast.rs          # AST 节点定义
-├── expr.rs         # 表达式解析（优先级 climbing）
-├── stmt.rs         # 语句/声明解析
+├── ast.rs          # AST node definitions
+├── expr.rs         # Expression parsing (precedence climbing)
+├── stmt.rs         # Statement/declaration parsing
 ├── error.rs        # ParseError { span, message, expected, found }
 └── tests.rs
 ```
 
-### AST 节点（对应 `SYNTAX.ebnf`，命名按 `SPEC.md §3`：`ExprIf`、`StmtLet` 等）
+### AST Nodes (correspond to `SYNTAX.ebnf`, named per `SPEC.md §3`: `ExprIf`, `StmtLet`, etc.)
 ```rust
-// 程序
+// Program
 pub struct Ast { pub items: Vec<Item>, pub span: Span }
 
 pub enum Item {
     Import(ImportDecl),
     Decl(Decl),
-    Expr(Expr), // 表达式语句
+    Expr(Expr), // Expression statement
 }
 
-// 声明
+// Declarations
 pub enum Decl {
     Func(FuncDecl),
     VarBinding(VarBinding),
@@ -144,17 +144,17 @@ pub struct ConstDecl {
     pub span: Span,
 }
 
-// 类型
+// Types
 pub enum Type {
     Base(BaseType),           // int, float, bool, string, unit
     Array(Box<Type>),         // [T]
-    Box(Box<Type>),           // box<T> (0.0.1 解析但不生成指令)
-    Ref(Box<Type>),           // ref T (0.0.1 解析但不生成指令)
+    Box(Box<Type>),           // box<T> (parsed in 0.0.1 but generates no instructions)
+    Ref(Box<Type>),           // ref T (parsed in 0.0.1 but generates no instructions)
     Result(Box<Type>, Box<Type>), // Result<T, E>
     Func(Vec<Type>, Box<Type>),   // (T...) -> T
 }
 
-// 表达式（按优先级从低到高）
+// Expressions (low to high precedence)
 pub enum Expr {
     Assign(Box<Expr>, Box<Expr>),  // lhs = rhs
     If(ExprIf),
@@ -215,7 +215,7 @@ pub struct ChooseArm {
 
 pub enum Pattern {
     Literal(Expr), // int/float/bool/string
-    Ident(Ident),  // 绑定变量
+    Ident(Ident),  // Bound variable
 }
 
 pub struct Block { pub stmts: Vec<Stmt>, pub span: Span }
@@ -226,16 +226,16 @@ pub enum Stmt {
 }
 ```
 
-### 实现要求
-- **递归下降 + 优先级 climbing**（`expr.rs`）
-- **错误恢复**：遇到错误继续解析，收集多个错误（可选，MVP 只报第一个）
-- **Span 传递**：每个节点带 `span`
+### Implementation Requirements
+- **Recursive descent + precedence climbing** (`expr.rs`)
+- **Error recovery**: keep parsing after errors, collect multiple errors (optional; MVP reports only the first)
+- **Span propagation**: every node carries a `span`
 
-### 测试
-- `tests/parser/valid/*.fln`：每条文法规则 ≥1 用例，AST 结构断言
-- `tests/parser/invalid/*.fln`：错误带正确 Span
+### Tests
+- `tests/parser/valid/*.fln`: at least 1 case per grammar rule, with AST structure assertions
+- `tests/parser/invalid/*.fln`: errors carry correct Spans
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler parser::tests
 cargo fmt -- --check && cargo clippy -- -D warnings
@@ -243,56 +243,56 @@ cargo fmt -- --check && cargo clippy -- -D warnings
 
 ---
 
-## T03: B3 Resolver — 名字解析 / 作用域
+## T03: B3 Resolver — Name Resolution / Scopes
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/resolver/
-├── mod.rs          # pub fn resolve(ast: Ast) -> Result<Hir, ResolveError>；import 解析内联
-├── scope.rs        # 作用域栈、绑定表
-├── hir.rs          # HIR 节点（带 BindingId）
-└── error.rs        # 错误类型
+├── mod.rs          # pub fn resolve(ast: Ast) -> Result<Hir, ResolveError>; import resolution is inlined
+├── scope.rs        # Scope stack, binding table
+├── hir.rs          # HIR nodes (with BindingId)
+└── error.rs        # Error types
 
 fleen-compiler/tests/
-└── resolver_integration.rs  # 集成测试（内联 + 目录测试）
+└── resolver_integration.rs  # Integration tests (inline + directory tests)
 ```
 
-### 核心类型
+### Core Types
 ```rust
-// ID newtypes（按 SPEC.md §5）
+// ID newtypes (per SPEC.md §5)
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct BindingId(u32);
 
-// 绑定信息
+// Binding info
 pub struct Binding {
     pub id: BindingId,
     pub kind: BindingKind,  // Variable | Parameter | Function | Builtin
     pub mutable: bool,      // const = false
-    pub span: Span,         // 声明处的 span
+    pub span: Span,         // Span of the declaration site
     pub hir_id: HirId,
 }
 
-// 作用域栈
+// Scope stack
 pub struct ScopeStack {
     scopes: Vec<Scope>,
-    function_stack: Vec<usize>,  // 函数边界位置（嵌套保存/恢复）
+    function_stack: Vec<usize>,  // Function boundary positions (saved/restored on nesting)
 }
 ```
 
-ScopeKind 有四种：`Global` / `Function` / `Loop` / `Block`。`Loop` 是 `while` 体的作用域，§4.5 的赋值规则在其中生效。
+ScopeKind has four variants: `Global` / `Function` / `Loop` / `Block`. `Loop` is the scope of a `while` body, where the §4.5 assignment rule applies.
 
-### HIR 节点（AST → HIR：Ident 变为已解析的 Ident）
+### HIR Nodes (AST → HIR: Ident becomes a resolved Ident)
 ```rust
 pub enum ExprHir {
     Int(i64, Span),
     Float(f64, Span),
     Bool(bool, Span),
     Str(String, Span),
-    Ident { name: String, binding_id: BindingId, hir_id: HirId, span: Span },  // ← 关键变化
-    // ... 其他同 AST 但子节点是 ExprHir
+    Ident { name: String, binding_id: BindingId, hir_id: HirId, span: Span },  // ← key change
+    // ... others same as AST but children are ExprHir
 }
 
-// 函数声明带 BindingId
+// Function declarations carry a BindingId
 pub struct FuncDeclHir {
     pub name: String,
     pub params: Vec<ParamHir>,
@@ -303,19 +303,19 @@ pub struct FuncDeclHir {
 }
 ```
 
-### 实现要求
-- **名字解析**：把 `Ident` → `Ident { name, binding_id, hir_id, span }`（HIR 中每个标识带**使用处** span）
-- **`=` 三义性判定**：绑定 / 赋值 / 遮蔽，**只有一条判定路径**（§3.6）；语句位置与表达式位置共享同一套目标查找
-- **循环体赋值**（§4.5）：`while` 体（含嵌套块）中对外层可变用户绑定的 `x = e` 是**赋值**，不是遮蔽
-- **遮蔽可变性一致性**（§4.3，原 T04 的 B3.5 范围已并入 B3）：同名遮蔽变量时内层/外层可变性必须相同
-- **const 语义检查**（原 T04 范围）：const 重新绑定、const 被赋值、赋值带类型标注均为错误
-- **同一作用域重复声明**：`func`、参数、`const`、变量重复 → `DuplicateBinding { name, first_span }`
-- **函数边界**：遮蔽检查与循环赋值目标查找均不穿越函数边界（"函数不生效"）
-- **作用域栈健壮**：错误路径（尾 expr 失败、单 expr 函数体失败）后作用域必须正确退出，不得泄漏
-- **导入**：记录 `import std.io` → `ImportDecl { path: Vec<String> }`，不加载模块（0.0.1 无模块系统）
-- **错误必须带真实 Span**：不得使用 `Span::new(0, 0)` 占位（SPEC §4/§11）。唯一例外：错误恢复路径的占位符节点（`StmtHir::Error`、`PatternHir::Error`）使用 `HirId(0)` 和 `Span::new(0, 0)`，因为错误已记录，HIR 整体被丢弃
+### Implementation Requirements
+- **Name resolution**: turn `Ident` into `Ident { name, binding_id, hir_id, span }` (every identifier in the HIR carries the **use site** span)
+- **`=` three-way disambiguation**: binding / assignment / shadowing has **exactly one decision path** (§3.6); statement position and expression position share the same target lookup
+- **Loop body assignment** (§4.5): inside a `while` body (including nested blocks), `x = e` targeting an outer mutable user binding is an **assignment**, not shadowing
+- **Shadowing mutability consistency** (§4.3; the old T04 B3.5 scope has been merged into B3): when shadowing a variable of the same name, inner/outer mutability must match
+- **const semantic checks** (old T04 scope): rebinding a const, assigning to a const, and assignments with type annotations are all errors
+- **Duplicate declaration in the same scope**: duplicate `func`, parameter, `const`, or variable → `DuplicateBinding { name, first_span }`
+- **Function boundaries**: shadowing checks and loop-assignment target lookup never cross function boundaries ("functions are opaque")
+- **Robust scope stack**: after error paths (tail expr failure, single-expr function body failure), scopes must be exited correctly with no leaks
+- **Imports**: record `import std.io` → `ImportDecl { path: Vec<String> }`, do not load modules (0.0.1 has no module system)
+- **Errors must carry real Spans**: do not use `Span::new(0, 0)` as a placeholder (SPEC §4/§11). Sole exception: placeholder nodes on error-recovery paths (`StmtHir::Error`, `PatternHir::Error`) use `HirId(0)` and `Span::new(0, 0)`, because the error is already recorded and the HIR is discarded as a whole
 
-### 错误
+### Errors
 - `ResolveErrorKind::UndeclaredVariable { name }`
 - `ResolveErrorKind::DuplicateBinding { name, first_span }`
 - `ResolveErrorKind::AssignToImmutable { name }`
@@ -323,10 +323,10 @@ pub struct FuncDeclHir {
 - `ResolveErrorKind::ShadowingMutabilityMismatch { outer_mutable, inner_mutable }`
 - `ResolveErrorKind::InvalidAssignmentTarget`
 
-### 测试
-- 作用域嵌套、遮蔽（含可变性校验）、函数边界屏障、循环体赋值、错误路径作用域泄漏、Span 正确性
+### Tests
+- Scope nesting, shadowing (with mutability validation), function boundary barriers, loop body assignment, scope leaks on error paths, Span correctness
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler resolver
 cargo fmt -- --check && cargo clippy --all-targets -- -D warnings
@@ -334,15 +334,17 @@ cargo fmt -- --check && cargo clippy --all-targets -- -D warnings
 
 ---
 
-## T04: B3.5 BindCheck — 遮蔽/Const 语义检查（已并入 T03）
+## T04: B3.5 BindCheck — Shadowing/Const Semantic Checks (merged into T03)
 
-> **状态：已合并进 T03，不再独立实现。**
+> **Status: merged into T03, no longer implemented separately.**
 >
-> 遮蔽可变性一致性（DESIGN.md §4.3）与 const 赋值/重复声明检查（§3.5）
-> 已在 `resolver/mod.rs` 中一并完成（统一的 `=` 三义性判定路径），
-> 不再单列 `binder/` crate。理由：这些检查的措辞（`ShadowingMutabilityMismatch`、
-> `AssignToImmutable`、`DuplicateBinding`）直接依赖 resolver 判定的是"绑定还是赋值"，
-> 拆到独立阶段会让同一份 scope 状态被遍历两次且容易漂移。错误信息格式如下：
+> Shadowing mutability consistency (DESIGN.md §4.3) and const assignment/duplicate
+> declaration checks (§3.5) are done together in `resolver/mod.rs` (the unified
+> `=` three-way disambiguation path), so there is no separate `binder/` crate.
+> Rationale: the wording of these checks (`ShadowingMutabilityMismatch`,
+> `AssignToImmutable`, `DuplicateBinding`) directly depends on the resolver's
+> decision of "binding or assignment"; splitting them into a separate stage
+> would traverse the same scope state twice and easily drift. Error message format:
 
 ```
 error: shadowing must preserve mutability
@@ -354,27 +356,27 @@ error: shadowing must preserve mutability
    |     ^^^^^ inner `const` does not match outer mutability
 ```
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler resolver
 ```
 
 ---
 
-## T05: B4 Typeck — 类型推导 & 检查
+## T05: B4 Typeck — Type Inference & Checking
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/typeck/
 ├── mod.rs          # pub fn typeck(hir: Hir) -> Result<TypedHir, Vec<TypeckError>>
-├── infer.rs        # 类型推导（单向、Hindley-Milner 子集）+ choose 穷尽检查
+├── infer.rs        # Type inference (one-way, Hindley-Milner subset) + choose exhaustiveness check
 ├── error.rs        # TypeckError / TypeckErrorKind
-├── typed_hir.rs    # TypedHIR（每节点带 Type）
-├── unify.rs        # 类型统一
+├── typed_hir.rs    # TypedHIR (every node carries a Type)
+├── unify.rs        # Type unification
 └── tests.rs
 ```
 
-### 类型系统（0.0.1）
+### Type System (0.0.1)
 ```rust
 pub enum Type {
     Int,
@@ -384,61 +386,61 @@ pub enum Type {
     Unit,
     Func(Vec<Type>, Box<Type>),   // (params...) -> ret
     Result(Box<Type>, Box<Type>), // Result<T, E>
-    Array(Box<Type>),           // 解析支持，类型检查保留，codegen 报 UnsupportedType
-    Box(Box<Type>),             // 同上
-    Ref(Box<Type>),             // 同上
-    Unsupported(String),        // 不支持特性的占位
+    Array(Box<Type>),           // Parsing supported, kept in type checking, codegen reports UnsupportedType
+    Box(Box<Type>),             // Same as above
+    Ref(Box<Type>),             // Same as above
+    Unsupported(String),        // Placeholder for unsupported features
 }
 ```
 
-### 推导规则
-- **字面量**：已知类型
-- **标识符**：查绑定的类型（Resolver 已绑定）
-- **二元运算**：两侧类型必须一致，结果类型同侧
-- **比较**：两侧类型一致，结果 `Bool`
-- **逻辑**：两侧 `Bool`，结果 `Bool`
-- **一元 `-`**：`Int`/`Float` → 同类型
-- **一元 `!`**：`Bool` → `Bool`
-- **函数调用**：实参类型匹配形参，返回函数返回类型
-- **If**：条件 `Bool`，then/elif/else 类型必须统一（或可隐式转换，0.0.1 要求完全一致）
-- **While**：条件 `Bool`，体类型忽略（值为 `Unit`）
-- **Choose**：scrutinee 类型 `T`，每个 when pattern 类型兼容 `T`，所有 arm 体类型统一
-- **Result**：`Ok(v)` → `Result<T, E>` where `v: T`，`Err(e)` → `Result<T, E>` where `e: E`（0.0.1 无 `Ok`/`Err` 构造语法，此规则推迟到后续版本）
+### Inference Rules
+- **Literals**: type is known
+- **Identifiers**: look up the bound type (Resolver already bound it)
+- **Binary operators**: both sides must have the same type; result type matches
+- **Comparisons**: both sides must have the same type; result is `Bool`
+- **Logical**: both sides `Bool`; result `Bool`
+- **Unary `-`**: `Int`/`Float` → same type
+- **Unary `!`**: `Bool` → `Bool`
+- **Function calls**: argument types match parameters; result is the function's return type
+- **If**: condition is `Bool`; then/elif/else types must unify (or implicitly convert; 0.0.1 requires exact match)
+- **While**: condition is `Bool`; body type is ignored (value is `Unit`)
+- **Choose**: scrutinee type `T`; every when pattern's type is compatible with `T`; all arm body types unify
+- **Result**: `Ok(v)` → `Result<T, E>` where `v: T`, `Err(e)` → `Result<T, E>` where `e: E` (0.0.1 has no `Ok`/`Err` constructor syntax; this rule is deferred to a later version)
 
-### Choose 穷尽性检查（关键）
-- **模式类型**：
-  - 字面量模式 → 该字面量类型（如 `0` → `Int`）
-  - 标识符模式 → 绑定变量，类型为 scrutinee 类型（绑定模式）
-- **穷尽判定**：
-  - 有 `otherwise` → 穷尽
-  - 无 `otherwise`：仅当 scrutinee 类型为 `Bool` 且覆盖 `true`/`false` 视为穷尽；0.0.1 无用户定义枚举，故只有 `Bool` 情况
-  - 0.0.1 暂无 `Ok`/`Err` pattern 语法，因此 `Result<T, E>` scrutinee 也必须写 `otherwise`（`Ok`/`Err` pattern 与穷尽识别计划在后续版本实现）
-  - 带 guard 的 arm 不计入穷尽判定（守卫可能不成立）
+### Choose Exhaustiveness Check (key)
+- **Pattern types**:
+  - Literal pattern → the literal's type (e.g. `0` → `Int`)
+  - Identifier pattern → bound variable, with the scrutinee's type (binding pattern)
+- **Exhaustiveness decision**:
+  - Has `otherwise` → exhaustive
+  - No `otherwise`: exhaustive only when the scrutinee type is `Bool` and both `true`/`false` are covered; 0.0.1 has no user-defined enums, so `Bool` is the only case
+  - 0.0.1 has no `Ok`/`Err` pattern syntax yet, so a `Result<T, E>` scrutinee must also be given an `otherwise` (`Ok`/`Err` patterns and exhaustiveness recognition are planned for a later version)
+  - Arms with guards do not count toward exhaustiveness (the guard may not hold)
 
-### 错误
-- 错误类型：`TypeckError { kind: TypeckErrorKind, span: Span }`，收集为 `Vec`
-- 主要 kind：`TypeMismatch { expected, found }`、`AssignTypeMismatch { expected, found }`、`ChooseNotExhaustive { scrutinee_type, missing_patterns }`、`ArgTypeMismatch { index, expected, found }`、`ArityMismatch { expected, found }`、`ConditionNotBool { found }`、`InvalidOperand { op, ty }`、`NotCallable { ty }`、`UnsupportedType { ty }`、`UnsupportedFeature { feature }`、`UndefinedVariable { name }`、`InternalError { message }`（后两种为不变量兜底：resolver/typeck 不一致时报错而非静默）
+### Errors
+- Error type: `TypeckError { kind: TypeckErrorKind, span: Span }`, collected into a `Vec`
+- Main kinds: `TypeMismatch { expected, found }`, `AssignTypeMismatch { expected, found }`, `ChooseNotExhaustive { scrutinee_type, missing_patterns }`, `ArgTypeMismatch { index, expected, found }`, `ArityMismatch { expected, found }`, `ConditionNotBool { found }`, `InvalidOperand { op, ty }`, `NotCallable { ty }`, `UnsupportedType { ty }`, `UnsupportedFeature { feature }`, `UndefinedVariable { name }`, `InternalError { message }` (the last two are invariant backstops: report instead of failing silently when resolver/typeck disagree)
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler typeck::tests
 ```
 
 ---
 
-## T06: B5 Lower — 控制流展平 → MIR
+## T06: B5 Lower — Control-Flow Flattening → MIR
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/lower/
 ├── mod.rs          # pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError>
-├── mir.rs          # MIR 指令、基本块、函数体
-├── cfg.rs          # 控制流图构建
-├── slots.rs        # 局部变量栈槽分配（无 SSA）
+├── mir.rs          # MIR instructions, basic blocks, function bodies
+├── cfg.rs          # Control-flow graph construction
+├── slots.rs        # Local variable stack-slot allocation (no SSA)
 └── tests.rs
 ```
 
-### MIR 设计（栈式、按 `BYTECODE.md §6` 形态）
+### MIR Design (stack-based, shaped per `BYTECODE.md §6`)
 ```rust
 pub struct Mir {
     pub funcs: Vec<MirFunc>,
@@ -449,10 +451,10 @@ pub struct MirFunc {
     pub func_id: FuncId,
     pub name: String,
     pub params: u16,
-    pub locals: u16,           // 总槽数（含参数 slot 0..params-1）
+    pub locals: u16,           // Total slot count (including parameter slots 0..params-1)
     pub entry: BlockId,
     pub blocks: Vec<MirBlock>,
-    pub is_builtin: bool,      // print 等内置函数（VM 宿主侧执行）
+    pub is_builtin: bool,      // Builtins like print (executed on the VM host side)
     pub ret_type: Type,
 }
 
@@ -461,7 +463,7 @@ pub struct MirGlobal {
     pub name: String,
     pub mutable: bool,
     pub ty: Type,
-    pub init: Vec<MirInstr>,   // 留一个初始值在栈顶
+    pub init: Vec<MirInstr>,   // Leaves one initial value on top of the stack
 }
 
 pub struct MirBlock {
@@ -471,87 +473,87 @@ pub struct MirBlock {
 }
 
 pub enum Terminator {
-    Return,                    // 返回
-    Jump(BlockId),             // 无条件跳转
-    JumpIfFalse(BlockId),      // 栈顶 bool，false 跳转
-    JumpIfTrue(BlockId),       // 栈顶 bool，true 跳转
-    // 0.0.1 无 Switch/Call terminator（Call 是普通指令）
+    Return,                    // Return
+    Jump(BlockId),             // Unconditional jump
+    JumpIfFalse(BlockId),      // Top-of-stack bool; jump if false
+    JumpIfTrue(BlockId),       // Top-of-stack bool; jump if true
+    // 0.0.1 has no Switch/Call terminator (Call is a plain instruction)
 }
 
 pub enum MirInstr {
-    // 常量
+    // Constants
     ConstInt(i64),
     ConstFloat(f64),
     ConstStr(String),
     True,
     False,
     Unit,
-    // 栈操作
+    // Stack operations
     Pop,
     Dup,
-    // 局部变量（栈槽）
+    // Local variables (stack slots)
     LoadLocal(u16),   // slot
     StoreLocal(u16),
-    // 全局变量
+    // Global variables
     LoadGlobal(u16),  // GlobalId
     StoreGlobal(u16),
-    // 算术 Int
+    // Int arithmetic
     IAdd, ISub, IMul, IDiv, IMod,
-    // 算术 Float
+    // Float arithmetic
     FAdd, FSub, FMul, FDiv,
-    // 比较/逻辑
+    // Comparison/logic
     Eq, Ne, Lt, Gt, Le, Ge,
     Not,
     NegI, NegF,
-    // 函数调用
-    Call(FuncId),         // 直接调用
-    LoadFunc(FuncId),     // 函数值压栈
-    CallValue(u8),        // 间接调用，argc
-    // choose 辅助
-    BindMatch(u16),       // 守卫变量绑定到 slot
+    // Function calls
+    Call(FuncId),         // Direct call
+    LoadFunc(FuncId),     // Push a function value
+    CallValue(u8),        // Indirect call, argc
+    // choose helpers
+    BindMatch(u16),       // Bind the guard variable to a slot
 }
 ```
 
-### Lower 规则（对应 `BYTECODE.md §6`）
-- **if/elif/else** → 条件 `JumpIfFalse` → 下一分支；分支末 `Jump` 到合流块
-- **while** → 条件块 `JumpIfFalse` 退出，体末 `Jump` 回条件块
-- **choose** → 比较链：每个 `when` 生成比较 + `JumpIfFalse`；守卫 `if` 紧跟比较后
-- **绑定/赋值** → `StoreLocal(slot)`，**遮蔽在编译期处理**：新绑定分配新 slot
-- **函数** → 参数占 `slot 0..params-1`，局部变量从 `params` 开始分配
-- **表达式语句** → 计算值 → `Pop`
+### Lower Rules (correspond to `BYTECODE.md §6`)
+- **if/elif/else** → condition `JumpIfFalse` → next branch; branch end `Jump` to the merge block
+- **while** → condition block `JumpIfFalse` exits; body end `Jump` back to the condition block
+- **choose** → comparison chain: each `when` emits a comparison + `JumpIfFalse`; the guard `if` comes right after the comparison
+- **Binding/assignment** → `StoreLocal(slot)`; **shadowing is handled at compile time**: a new binding gets a new slot
+- **Functions** → parameters occupy `slot 0..params-1`; locals are allocated starting from `params`
+- **Expression statements** → compute the value → `Pop`
 
-### 栈槽分配（无 SSA）
-- 遍历函数体，收集所有绑定（含遮蔽），每个绑定分配唯一 slot
-- 同一作用域内同名遮蔽 → 新 slot，旧 slot 不再使用
-- 参数固定在 `0..params-1`
+### Stack-Slot Allocation (no SSA)
+- Walk the function body, collect all bindings (including shadowed ones), allocate a unique slot per binding
+- Same-name shadowing within one scope → new slot; the old slot is no longer used
+- Parameters are fixed at `0..params-1`
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler lower::tests
-# 对比生成的 MIR 与 BYTECODE.md §6 示例形态一致
+# Compare the generated MIR against the example shape in BYTECODE.md §6
 ```
 
 ---
 
-## T07: B6 Codegen — MIR → 字节码
+## T07: B6 Codegen — MIR → Bytecode
 
-### 文件创建
+### Files to Create
 ```
 fleen-compiler/src/codegen/
 ├── mod.rs          # pub fn codegen(mir: Mir) -> Bytecode
-├── bytecode.rs     # Bytecode 结构、指令编码
-├── encoder.rs      # MIR 指令 → 字节流、常量池去重、跳转偏移解析
+├── bytecode.rs     # Bytecode structure, instruction encoding
+├── encoder.rs      # MIR instruction → byte stream, constant pool dedup, jump offset resolution
 └── tests.rs
 ```
 
-### Bytecode 结构（按 `BYTECODE.md §2`）
+### Bytecode Structure (per `BYTECODE.md §2`)
 ```rust
 pub struct Module {
     pub version: u16,           // = 1
-    pub constants: Vec<Const>,  // 常量池（去重）
+    pub constants: Vec<Const>,  // Constant pool (deduplicated)
     pub functions: Vec<Func>,
     pub globals: Vec<Global>,
-    pub entry: FuncId,          // main，或有全局时合成的 __init__
+    pub entry: FuncId,          // main, or a synthesized __init__ when globals exist
 }
 
 pub enum Const {
@@ -565,8 +567,8 @@ pub struct Func {
     pub params: u16,
     pub locals: u16,
     pub code: Box<[u8]>,
-    pub span_map: Box<[SpanEntry]>, // 0.0.1 留空 Box::new([])
-    pub is_builtin: bool,           // 宿主内置（print），VM 直接执行、忽略 code
+    pub span_map: Box<[SpanEntry]>, // left empty in 0.0.1: Box::new([])
+    pub is_builtin: bool,           // Host builtin (print); the VM executes it directly and ignores code
 }
 
 pub struct Global {
@@ -575,55 +577,55 @@ pub struct Global {
 }
 ```
 
-### 指令编码（按 `BYTECODE.md §4-5`）
-- `opcode: u8` + 操作数（小端）
-- 跳转操作数 = **目标指令绝对字节偏移**（相对 `code` 起始）
-- 两遍编码：第一遍生成指令+占位标签，第二遍解析标签为偏移
+### Instruction Encoding (per `BYTECODE.md §4-5`)
+- `opcode: u8` + operands (little-endian)
+- Jump operands = **absolute byte offset of the target instruction** (relative to the start of `code`)
+- Two-pass encoding: first pass emits instructions + placeholder labels; second pass resolves labels to offsets
 
-### 实现要点
-- **常量池去重**：`HashMap<Const, ConstId>`（需 `Const` 实现 `Hash/Eq`）
-- **span_map**：`Box::new([])`（0.0.1 不生成）
-- **入口点**：查找名为 `main` 的函数，若无则报错
-- **全局初始化**：有全局变量时合成 `__init__`（`params=0`、`locals=0`、`is_builtin=false`），按声明顺序发出各 `MirGlobal::init` + `StoreGlobal`，末尾 `Call main` + `Return`，并令 `entry = __init__`；无全局时 `entry = main`
-- **内置函数**：把 `MirFunc::is_builtin` 原样写入 `Func::is_builtin`（`print` 等由 VM 宿主执行）
+### Implementation Notes
+- **Constant pool dedup**: `HashMap<Const, ConstId>` (requires `Const` to implement `Hash/Eq`)
+- **span_map**: `Box::new([])` (not generated in 0.0.1)
+- **Entry point**: look up a function named `main`; error if absent
+- **Global initialization**: when globals exist, synthesize `__init__` (`params=0`, `locals=0`, `is_builtin=false`), emit each `MirGlobal::init` + `StoreGlobal` in declaration order, then `Call main` + `Return` at the end, and set `entry = __init__`; with no globals, `entry = main`
+- **Builtin functions**: copy `MirFunc::is_builtin` verbatim into `Func::is_builtin` (`print` etc. are executed by the VM host)
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler codegen::tests
-# 输出字节码通过 fleen-verify (T08)
+# The output bytecode passes fleen-verify (T08)
 ```
 
 ---
 
-## T08: B7 Verify — 静态字节码校验
+## T08: B7 Verify — Static Bytecode Validation
 
-### 文件创建
+### Files to Create
 ```
 fleen-verify/src/
-├── main.rs         # CLI：读 .flnc → verify → 退出码
-├── verify.rs       # 7 条校验规则
-├── stack_analysis.rs # 抽象栈深度精确分析
+├── main.rs         # CLI: read .flnc → verify → exit code
+├── verify.rs       # The 7 validation rules
+├── stack_analysis.rs # Exact abstract stack-depth analysis
 └── tests.rs
 ```
 
-### 7 条校验规则（`BYTECODE.md §8`）
-1. 所有 `Const`/`LoadFunc`/`Call` 索引在范围内
-2. 所有跳转目标落在**指令边界**上
-3. 每个函数每条路径以 `Return` 结束（无掉出函数底）
-4. **操作数栈深度不下溢**：精确抽象栈深度分析
-   - 每条指令静态 `Δdepth` 已知
-   - 从入口（深度 0）按 CFG 传播
-   - 合并分支时：**所有前驱深度必须一致**，不一致即失败
-   - 每指令执行前深度 ≥ 指令所需最小深度
-5. `StoreGlobal` 目标全部 `mutable: true`（例外：入口函数 `__init__` 中对全局的初始化写）
-6. 常量池无重复项
-7. 函数 `locals` ≥ `params`，且所有 `LoadLocal/StoreLocal` slot < `locals`
+### The 7 Validation Rules (`BYTECODE.md §8`)
+1. All `Const`/`LoadFunc`/`Call` indices are in range
+2. All jump targets land on **instruction boundaries**
+3. Every path in every function ends with `Return` (no falling off the bottom of a function)
+4. **Operand stack depth never underflows**: exact abstract stack-depth analysis
+   - Each instruction has a statically known `Δdepth`
+   - Propagated from the entry (depth 0) along the CFG
+   - When merging branches: **all predecessor depths must agree**; any mismatch is a failure
+   - The depth before executing each instruction is ≥ the instruction's minimum required depth
+5. All `StoreGlobal` targets are `mutable: true` (exception: initialization writes to globals inside the entry function `__init__`)
+6. No duplicate entries in the constant pool
+7. Function `locals` ≥ `params`, and all `LoadLocal/StoreLocal` slots are < `locals`
 
-### 栈深度分析算法
+### Stack-Depth Analysis Algorithm
 ```rust
-// 工作列表算法
+// Worklist algorithm
 fn analyze(func: &Func) -> Result<Vec<u32>, VerifyError> {
-    let mut depth_at = vec![u32::MAX; func.code.len() + 1]; // 每字节偏移的深度
+    let mut depth_at = vec![u32::MAX; func.code.len() + 1]; // depth per byte offset
     depth_at[0] = 0;
     let mut worklist = vec![0];
     
@@ -632,7 +634,7 @@ fn analyze(func: &Func) -> Result<Vec<u32>, VerifyError> {
         let instr = decode_at(&func.code, pc);
         let (next_pc, delta) = instr.stack_effect();
         
-        // 检查前置深度
+        // Check the prerequisite depth
         if current_depth < instr.min_stack_depth() {
             return Err(StackUnderflow { pc });
         }
@@ -646,7 +648,7 @@ fn analyze(func: &Func) -> Result<Vec<u32>, VerifyError> {
                 expected: depth_at[next_pc], actual: next_depth });
         }
         
-        // 跳转目标也要传播
+        // Propagate to jump targets too
         for target in instr.jump_targets() {
             if depth_at[target] == u32::MAX {
                 depth_at[target] = next_depth;
@@ -660,54 +662,54 @@ fn analyze(func: &Func) -> Result<Vec<u32>, VerifyError> {
 }
 ```
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-verify
-# 对 T07 产出的所有字节码 PASS
+# PASS on all bytecode produced by T07
 ```
 
 ---
 
-## T09: B8 VM — 字节码执行
+## T09: B8 VM — Bytecode Execution
 
-### 文件创建
+### Files to Create
 ```
 fleen-vm/src/
-├── main.rs         # CLI：读字节码 → Verify → 执行 → 打印结果
-├── vm.rs           # 核心解释循环
-├── value.rs        # Value 枚举、运算实现
-├── frame.rs        # CallFrame、栈操作
+├── main.rs         # CLI: read bytecode → Verify → execute → print result
+├── vm.rs           # Core interpreter loop
+├── value.rs        # Value enum, operation implementations
+├── frame.rs        # CallFrame, stack operations
 ├── error.rs        # RuntimeError
 └── tests.rs
 ```
 
-### 值表示（`BYTECODE.md §3.2`）
+### Value Representation (`BYTECODE.md §3.2`)
 ```rust
 pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(Rc<str>),   // 0.0.1 不可变共享
+    Str(Rc<str>),   // 0.0.1: immutable sharing
     Unit,
-    Func(FuncId),   // 一等值
+    Func(FuncId),   // First-class value
 }
 ```
 
-### 执行模型
-- **操作数栈**：`Vec<Value>`
-- **调用栈**：`Vec<CallFrame>`
-- **全局变量表**：`Vec<Value>`（按 `GlobalId` 索引）
-- **指令分派**：大 `match opcode` 循环
+### Execution Model
+- **Operand stack**: `Vec<Value>`
+- **Call stack**: `Vec<CallFrame>`
+- **Global variable table**: `Vec<Value>` (indexed by `GlobalId`)
+- **Instruction dispatch**: one big `match opcode` loop
 
-### 调用约定（`BYTECODE.md §3.3`）
-- **直接调用**：压实参 → `Call FuncId`
-- **间接调用**：压 `Func(FuncId)` → 压实参 → `CallValue argc`
-- **返回**：弹返回值 → 弹调用帧 → 压返回值到调用方栈
+### Calling Convention (`BYTECODE.md §3.3`)
+- **Direct call**: push args → `Call FuncId`
+- **Indirect call**: push `Func(FuncId)` → push args → `CallValue argc`
+- **Return**: pop the return value → pop the call frame → push the return value onto the caller's stack
 
-### 错误处理
-- 所有 `RuntimeError` 直接退出，打印错误信息，**不可捕获**
+### Error Handling
+- All `RuntimeError`s exit directly with the error message printed; **not catchable**
 
-### 入口
+### Entry Point
 ```rust
 fn main() {
     let bytecode = read_bytecode(args[1]);
@@ -717,21 +719,21 @@ fn main() {
 }
 ```
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-vm
-# 运行 tests/e2e/fib.fln 编译后的字节码，输出匹配 fib.expected
+# Run the bytecode compiled from tests/e2e/fib.fln; output matches fib.expected
 ```
 
 ---
 
-## T10: E2E 集成测试 — Fibonacci 跑通
+## T10: E2E Integration Test — Fibonacci End to End
 
-### 测试文件
+### Test Files
 ```
 tests/e2e/
-├── fib.fln         # 完整 Fibonacci 程序
-└── fib.expected    # 期望输出（每行一个数字）
+├── fib.fln         # Complete Fibonacci program
+└── fib.expected    # Expected output (one number per line)
 ```
 
 ### fib.fln
@@ -769,36 +771,36 @@ func main(): int {
 34
 ```
 
-### 运行脚本
+### Run Script
 ```bash
-# 一站式：编译 + 验证 + 执行（推荐）
+# One-stop: compile + verify + execute (recommended)
 cargo fln tests/e2e/valid/fib.fln
-# 等价：cargo run -q -p fleen-vm -- tests/e2e/valid/fib.fln
+# Equivalent: cargo run -q -p fleen-vm -- tests/e2e/valid/fib.fln
 
-# 分步：单独编译（-o 指定输出路径）
+# Step by step: compile alone (-o sets the output path)
 cargo run -p fleen-compiler -- tests/e2e/valid/fib.fln -o /tmp/fib.flnc
 
-# 验证
+# Verify
 cargo run -p fleen-verify -- /tmp/fib.flnc
 
-# 执行字节码
+# Execute the bytecode
 cargo run -p fleen-vm -- /tmp/fib.flnc > /tmp/fib.out
 
-# 对比
+# Compare
 diff /tmp/fib.out tests/e2e/valid/fib.expected
 ```
 
-> **状态**（2026-10-06）：已完成。E2E 由 `fleen-vm/tests/e2e.rs` 驱动，`cargo test`
-> 即覆盖；用例布局 `tests/e2e/valid/`（stdout 比对）+ `tests/e2e/invalid/`
-> （退出码 `.exit` + stderr 关键字 `.stderr`），覆盖编译期四阶段错误与运行期
-> 除零/溢出/超递归深度。
+> **Status** (2026-10-06): Done. E2E is driven by `fleen-vm/tests/e2e.rs` and covered
+> by plain `cargo test`; cases live in `tests/e2e/valid/` (stdout comparison) and
+> `tests/e2e/invalid/` (exit code `.exit` + stderr keyword `.stderr`), covering
+> all four compile-stage errors plus runtime division by zero / overflow / excessive recursion depth.
 
-### CI 集成
-- `cargo test` 包含 E2E 测试（单独跑：`cargo test -p fleen-vm --test e2e`）
+### CI Integration
+- `cargo test` includes the E2E tests (run alone: `cargo test -p fleen-vm --test e2e`)
 
 ---
 
-## 依赖关系与并行化
+## Dependency Graph and Parallelization
 
 ```
 T01 (Lexer)
@@ -807,13 +809,13 @@ T02 (Parser)
     ↓
 T03 (Resolver) ←─────────────┐
     ↓                         │
-T04 (BindCheck)              │ 可并行：T03/T04 同人可串行，不同人可并行
+T04 (BindCheck)              │ Parallelizable: T03/T04 run serially for one person, in parallel across people
     ↓                         │
 T05 (Typeck)                 │
     ↓                         │
 T06 (Lower)                  │
     ↓                         │
-T07 (Codegen) ←──────────────┼── T08 (Verify) 同步开发，Codegen 产出即 Verify
+T07 (Codegen) ←──────────────┼── T08 (Verify) developed in sync; Verify starts as soon as Codegen produces output
     ↓                         │
 T09 (VM) ────────────────────┘
     ↓
@@ -822,37 +824,37 @@ T10 (E2E)
 
 ---
 
-## 质量闸（每票必须过）
+## Quality Gates (every ticket must pass)
 
 ```bash
-# 格式
+# Format
 cargo fmt -- --check
 
 # Lint
 cargo clippy -- -D warnings
 
-# 单元测试
+# Unit tests
 cargo test -p <crate> <module>::tests
 
-# 文档
+# Docs
 cargo doc --no-deps
 ```
 
 ---
 
-## 里程碑
+## Milestones
 
-| 里程碑 | 包含票号 | 标志 |
-|--------|----------|------|
-| M1: 前端完备 | T01–T04 | `Ast` → `CheckedHir` 无误 |
-| M2: 类型系统完备 | T05 | `TypedHir` 所有类型已知 |
-| M3: 后端完备 | T06–T08 | 字节码通过 Verify |
-| M4: 端到端跑通 | T09–T10 | `fib.fln` 正确输出 |
+| Milestone | Included Tickets | Marker |
+|-----------|------------------|--------|
+| M1: Frontend complete | T01–T04 | `Ast` → `CheckedHir` without errors |
+| M2: Type system complete | T05 | `TypedHir` with all types known |
+| M3: Backend complete | T06–T08 | Bytecode passes Verify |
+| M4: End-to-end running | T09–T10 | `fib.fln` produces correct output |
 
 ---
 
-## 备注
+## Notes
 
-- **0.0.1 不实现**：`box<T>`/`ref` 指令、`?` 语法糖、`struct`、`for`、`async`、泛型、FFI、`unsafe`/`trusted`
-- **0.0.1 解析但不生成指令**：`box<T>`、`ref T`、`[T]` 类型（Parser/Resolver/Typeck 识别，Lower/Codegen 遇到报 `Unimplemented`）
-- **print 函数**：内置在 VM 预导入模块，`std.io.print` 调用映射到宿主 `println!`
+- **Not implemented in 0.0.1**: `box<T>`/`ref` instructions, `?` sugar, `struct`, `for`, `async`, generics, FFI, `unsafe`/`trusted`
+- **Parsed but generates no instructions in 0.0.1**: `box<T>`, `ref T`, `[T]` types (recognized by Parser/Resolver/Typeck; Lower/Codegen report `Unimplemented` on encountering them)
+- **print function**: builtin in the VM's prelude module; `std.io.print` calls map to the host's `println!`

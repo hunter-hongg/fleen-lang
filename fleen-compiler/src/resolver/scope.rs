@@ -5,7 +5,7 @@
 //! Scope kinds (per `DESIGN.md §4`):
 //! - `Global`: top-level scope.
 //! - `Function`: function body scope, independent of enclosing scopes;
-//!   shadow checks never cross it ("函数不生效", DESIGN.md §4.3).
+//!   shadow checks never cross it ("functions have no effect", DESIGN.md §4.3).
 //! - `Loop`: the body block of a `while` (future: `for`) loop. Inside a loop
 //!   body (including nested blocks, up to the function boundary), `x = e`
 //!   *assigns* to an existing outer binding instead of shadowing it
@@ -112,8 +112,8 @@ impl BindingKind {
 
     /// Whether a shadowing declaration must match this binding's mutability
     /// (DESIGN.md §4.3). Only user variables participate: parameters are
-    /// exempt (DESIGN.md §4.3, "参数可被遮蔽"), function names and builtins
-    /// are not shadow-checked.
+    /// exempt (DESIGN.md §4.3, "parameters may be shadowed"), function names
+    /// and builtins are not shadow-checked.
     pub fn shadow_checks(self) -> bool {
         matches!(self, BindingKind::Variable | BindingKind::Const)
     }

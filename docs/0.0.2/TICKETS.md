@@ -1,90 +1,92 @@
-# Fleen 0.0.2 实现任务拆解
+# Fleen 0.0.2 Implementation Ticket Breakdown
 
-> **目标**：所有权起步 —— `move` / `clone` / `box<T>` / `ref` / `?`（含 `Ok`/`Err`）/ ASI 端到端跑通，
-> 外加临时 `as` 类型转换（U13，print 修复的前置），偿还 0.0.1 的 print Hack、`Rc<str>`、`span_map` 三笔债务
-> **依据**：`docs/0.0.2/PLAN.md`（已定稿，决策点 D1–D8 冻结）、`docs/BYTECODE.md` v0.0.2、
-> `docs/DESIGN.md` §3.8–3.9 / §8 / §10、`docs/0.0.1/TICKETS.md`（实现现状）
-> **状态**（2026-10-10）：U01–U07、U13 已完成。U06 在 `lower/` 落地：MirInstr 携带
-> Span、13 个新 MIR 指令、box/deref/move/clone/`?`/Ok/Err/Result-choose 降载、ref 实参
-> （全局走临时槽）、全局 ref 实参拒绝（`RefArgInGlobalInit`）。
-> U07 在 `codegen/` + `fleen-verify` 落地：13 条 v2 指令编码（0x80–0xA4）、`Module.version = 2`、
-> `span_map` 逐指令生成、`flnc` 接受 `{1,2}`、verify 栈效果表 + slot/gid 校验 + 版本门。
-> **U07 期间的发现**（详见 U07 节"实现说明"）：`AllocBox` 的栈效果应为 `v → b`（净 0），
-> PLAN §5.2 / BYTECODE.md §8 原表写成 `+1` 是笔误，已勘误；v2 指令在 v1 模块中由
-> `V2OpcodeInV1Module` 显式拒绝（不是"自然成立"）；VM 侧需通配 opcode 分支 + 版本门放开
-> `{1,2}`，否则 `Opcode` 新增变体使 fleen-vm 编译失败。
-> **U07 审查加固**（实现说明第 5–6 条）：修掉 0.0.1 起遗留的两处畸形输入缺陷——
-> verify 空函数体 panic（改报 `EmptyFunctionBody`）与 `flnc` 解码无界预分配
-> （改 `capacity_hint` 钳制）；补 VM `InvalidOpcode` 锁定测试与 verify 逐指令
-> 合法/畸形用例。
-> **Result-choose 的 guard / `otherwise`**：U07 决定**继续延后**（见 U07 节"范围决定"），
-> 随 U09 或独立票做通用臂链重写。
-> 规范文档已在规划阶段同步完毕，U12 仅剩实现后的收尾（版本号、正式 CHANGELOG）；
-> `DESIGN.md` §18 Hack 清空已于 U07 审查时提前完成（见 U12 勾选）。
+> **Goal**: Ownership foundations — get `move` / `clone` / `box<T>` / `ref` / `?` (including `Ok`/`Err`) / ASI working end-to-end,
+> plus the temporary `as` type cast (U13, a prerequisite for the print fix), and pay down three debts from 0.0.1: the print hack, `Rc<str>`, and `span_map`.
+> **Basis**: `docs/0.0.2/PLAN.md` (finalized, decision points D1–D8 frozen), `docs/BYTECODE.md` v0.0.2,
+> `docs/DESIGN.md` §3.8–3.9 / §8 / §10, `docs/0.0.1/TICKETS.md` (current implementation state)
+> **Status** (2026-10-10): U01–U07 and U13 are complete. U06 landed in `lower/`: MirInstr carries
+> Span, 13 new MIR instructions, lowering of box/deref/move/clone/`?`/Ok/Err/Result-choose, ref arguments
+> (globals go through a temporary slot), and rejection of global ref arguments (`RefArgInGlobalInit`).
+> U07 landed in `codegen/` + `fleen-verify`: encoding of 13 v2 instructions (0x80–0xA4), `Module.version = 2`,
+> per-instruction `span_map` generation, `flnc` accepting `{1,2}`, verify stack-effect table + slot/gid validation + version gate.
+> **Findings during U07** (see the "Implementation notes" in the U07 section): the stack effect of `AllocBox`
+> should be `v → b` (net 0); the original table in PLAN §5.2 / BYTECODE.md §8 writing `+1` was a typo and has been corrected;
+> v2 instructions inside a v1 module are explicitly rejected by `V2OpcodeInV1Module` (not "naturally fine");
+> the VM side needs a wildcard opcode arm + the version gate widened to `{1,2}`, otherwise the new
+> `Opcode` variants break the fleen-vm build.
+> **U07 review hardening** (implementation notes items 5–6): fixed two malformed-input defects dating back to 0.0.1 —
+> verify panicking on an empty function body (now reports `EmptyFunctionBody`) and unbounded preallocation in
+> `flnc` decoding (now clamped via `capacity_hint`); added a VM `InvalidOpcode` regression test and per-instruction
+> valid/malformed verify cases.
+> **Result-choose guard / `otherwise`**: the U07 decision is to **defer further** (see "Scope decision" in the U07 section);
+> it will be done with U09 or a separate ticket as a general arm-chain rewrite.
+> Spec docs were synced during planning; U12 only has post-implementation wrap-up left (version numbers, the official CHANGELOG);
+> the `DESIGN.md` §18 Hack section was emptied early during the U07 review (see the U12 checkboxes).
 
 ---
 
-## 总览
+## Overview
 
-| 票号 | 板块 | 阶段 | crate | 模块 | 产出 | 依赖 |
+| Ticket | Area | Phase | Crate | Module | Deliverable | Depends on |
 |------|------|------|-------|------|------|------|
-| U01 | 词法 | Lex | fleen-compiler | `lexer/` | Move/Clone/Deref/Question token | — |
-| U02 | 语法 | Parse | fleen-compiler | `parser/` | 新 AST 节点 + EBNF 对齐 | U01 |
-| U03 | F5 ASI | Lex + Parse | fleen-compiler | `lexer/` + `parser/asi.rs` | 分号可选（前置 pass，换行敏感，见 ASI.md） | U02 |
-| U13 | F8 `as` 转换（临时） | 全阶段 | fleen-compiler, fleen-vm | `lexer/` `parser/` `typeck/` `lower/` `codegen/` verify `vm.rs` | `As` token、cast 层、`ToStr`（0xA5）、白名单检查 | U02（**实现顺序在 U04 前**） |
-| U04 | F4+F6 | Typeck | fleen-compiler | `typeck/` | Ok/Err 构造、Result pattern、`?`、print 修复 | U02, U13 |
-| U05 | F1 所有权 | Typeck | fleen-compiler | `typeck/ownership.rs` | is_copy + 流敏感仿射检查 | U04 |
-| U06 | 基础 | Lower | fleen-compiler | `lower/` | 新 MIR 指令 + MirInstr 携带 Span | U04, U05 |
-| U07 | 基础 | Codegen/Verify | fleen-compiler, fleen-verify | `codegen/`, `verify.rs` | 字节码 v2 + span_map 生成 + 栈效果表 | U06 |
-| U08 | 基础 | VM-Value | fleen-vm | `value.rs` 等 | Value 所有权表示重构 | —（可与 U01–U05 并行） |
-| U09 | F1–F4 执行 | Execute | fleen-vm | `vm.rs` | 13 条新指令执行 + 入口 Err | U07, U08 |
-| U10 | F7 诊断 | Codegen/VM | fleen-vm | `diag.rs`（新） | 运行时错误携带源码行列 | U07 |
-| U11 | 测试 | 集成 | tests/, 各 crate | 全仓 | 测试矩阵 + E2E + v1 fixture | U09 |
-| U12 | 收尾 | 发布 | 全仓 | 文档/Cargo.toml | 0.0.2 发布 | U11 |
+| U01 | Lexing | Lex | fleen-compiler | `lexer/` | Move/Clone/Deref/Question tokens | — |
+| U02 | Parsing | Parse | fleen-compiler | `parser/` | New AST nodes + EBNF alignment | U01 |
+| U03 | F5 ASI | Lex + Parse | fleen-compiler | `lexer/` + `parser/asi.rs` | Optional semicolons (prerequisite pass, newline-sensitive, see ASI.md) | U02 |
+| U13 | F8 `as` cast (temporary) | All phases | fleen-compiler, fleen-vm | `lexer/` `parser/` `typeck/` `lower/` `codegen/` verify `vm.rs` | `As` token, cast layer, `ToStr` (0xA5), whitelist checks | U02 (**implemented before U04**) |
+| U04 | F4+F6 | Typeck | fleen-compiler | `typeck/` | Ok/Err construction, Result patterns, `?`, print fix | U02, U13 |
+| U05 | F1 ownership | Typeck | fleen-compiler | `typeck/ownership.rs` | is_copy + flow-sensitive affinity checks | U04 |
+| U06 | Foundation | Lower | fleen-compiler | `lower/` | New MIR instructions + MirInstr carries Span | U04, U05 |
+| U07 | Foundation | Codegen/Verify | fleen-compiler, fleen-verify | `codegen/`, `verify.rs` | Bytecode v2 + span_map generation + stack-effect table | U06 |
+| U08 | Foundation | VM-Value | fleen-vm | `value.rs` etc. | Value ownership representation refactor | — (can run in parallel with U01–U05) |
+| U09 | F1–F4 execution | Execute | fleen-vm | `vm.rs` | Execution of 13 new instructions + entry Err | U07, U08 |
+| U10 | F7 diagnostics | Codegen/VM | fleen-vm | `diag.rs` (new) | Runtime errors carry source line/column | U07 |
+| U11 | Testing | Integration | tests/, all crates | Whole repo | Test matrix + E2E + v1 fixture | U09 |
+| U12 | Wrap-up | Release | Whole repo | Docs/Cargo.toml | 0.0.2 release | U11 |
 
-> **阶段边界不变**（SPEC §6）：所有权检查是 Typeck 内的子遍历（`typeck/ownership.rs`），
-> ASI 是 Parser 内的判定逻辑，都不新增独立阶段。
+> **Phase boundaries unchanged** (SPEC §6): the ownership check is a sub-pass within Typeck
+> (`typeck/ownership.rs`) and ASI is decision logic within the Parser; neither adds a new independent phase.
 
 ---
 
-## U01: Lex — 新关键字与 `?`
+## U01: Lex — New Keywords and `?`
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/lexer/
-├── token.rs         # TokenKind 新增 4 个变体
-└── lexer_impl.rs    # 关键字/标点映射表 + 单元测试（mod tests）
+├── token.rs         # 4 new TokenKind variants
+└── lexer_impl.rs    # keyword/punctuation mapping tables + unit tests (mod tests)
 ```
 
-> 注：0.0.1 起测试就位于 `lexer_impl.rs` 的 `mod tests`，无独立 `tests.rs`。
+> Note: since 0.0.1 the tests live in `lexer_impl.rs`'s `mod tests`; there is no separate `tests.rs`.
 
-### TokenKind 新增
+### New TokenKind entries
 ```rust
-/// `move` 关键字（0.0.2：所有权转移）
+/// `move` keyword (0.0.2: ownership transfer)
 Move,
-/// `clone` 关键字（0.0.2：深拷贝）
+/// `clone` keyword (0.0.2: deep copy)
 Clone,
-/// `deref` 关键字（0.0.2：box 点内值读写）
+/// `deref` keyword (0.0.2: read/write the value inside a box)
 Deref,
-/// `?`（0.0.2：Result 传播后缀）
+/// `?` (0.0.2: Result propagation suffix)
 Question,
 ```
 
-### 实现要求
-- `lexer_impl.rs`：`"move" => Move`、`"clone" => Clone`、`"deref" => Deref`；`'?' => Question`
-- `BoxType`（`box`）/ `RefType`（`ref`）已存在，**不动**；表达式位置的 `box` 复用
-  `BoxType` token（parser 按语法位置区分，见 U02）
-- `is_keyword()` / `keyword_str()` / `Display` 同步补齐
-- **破坏性变更**：`move` / `clone` / `deref` 从合法标识符变为保留字
-  （`box` / `ref` 在 0.0.1 已是保留字）。lexer 本身只产出 keyword token 不报错，
-  "保留字用作绑定名"（`move = 1;`）由 parser 在"期望标识符"处报错，
-  用例放 `tests/parser/invalid/`（见 U02）
+### Implementation requirements
+- `lexer_impl.rs`: `"move" => Move`, `"clone" => Clone`, `"deref" => Deref`; `'?' => Question`
+- `BoxType` (`box`) / `RefType` (`ref`) already exist, **leave them alone**; `box` in expression
+  position reuses the `BoxType` token (the parser distinguishes by syntactic position, see U02)
+- `is_keyword()` / `keyword_str()` / `Display` updated accordingly
+- **Breaking change**: `move` / `clone` / `deref` change from valid identifiers to reserved words
+  (`box` / `ref` have been reserved words since 0.0.1). The lexer itself only emits keyword tokens
+  without erroring; "reserved word used as a binding name" (`move = 1;`) is reported by the parser
+  where an identifier is expected, with cases in `tests/parser/invalid/` (see U02)
 
-### 测试
-- `tests/lexer/valid/`：每个新 token ≥1 用例（含 `?` 紧跟表达式的形态 `x?`）
-- 既有 lexer 测试全部原样通过（无 token 编码变化）
+### Tests
+- `tests/lexer/valid/`: at least 1 case per new token (including the `?` immediately following an
+  expression, i.e. `x?`)
+- All existing lexer tests pass unchanged (no token encoding changes)
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler lexer
 cargo fmt -- --check && cargo clippy --all-targets -- -D warnings
@@ -92,184 +94,197 @@ cargo fmt -- --check && cargo clippy --all-targets -- -D warnings
 
 ---
 
-## U02: Parse — 新表达式、Result pattern、deref 赋值目标
+## U02: Parse — New Expressions, Result Patterns, deref Assignment Targets
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/parser/
-├── ast.rs           # 新 AST 节点
-├── expr.rs          # 一元前缀 + ? 后缀 + 赋值目标
-├── stmt.rs          # pattern 扩展
-├── error.rs         # （如需）新 ParseErrorKind
+├── ast.rs           # new AST nodes
+├── expr.rs          # unary prefix + ? suffix + assignment targets
+├── stmt.rs          # pattern extension
+├── error.rs         # new ParseErrorKind (if needed)
 └── tests.rs
 ```
 
-### AST 新增节点
-> 实现说明（as-built）：沿用 0.0.1 既有 AST 风格——简单节点用 tuple 变体
-> （`Expr::Move(Box<Expr>, Span)`），结构化节点用命名结构体（`ExprIf` 等）。
+### New AST nodes
+> Implementation note (as-built): follows the existing 0.0.1 AST style — simple nodes use tuple
+> variants (`Expr::Move(Box<Expr>, Span)`), structured nodes use named structs (`ExprIf` etc.).
 
 ```rust
-// 一元前缀（与 Neg/Not 同层，右结合）
-Expr::Move(Box<Expr>, Span),    // move <unary>，span 覆盖整个表达式
+// Unary prefix (same level as Neg/Not, right-associative)
+Expr::Move(Box<Expr>, Span),    // move <unary>, span covers the whole expression
 Expr::Clone(Box<Expr>, Span),   // clone <unary>
 Expr::Box(Box<Expr>, Span),     // box <expr>
-Expr::Deref(Box<Expr>, Span),   // deref <unary>（同 - / !，操作数为一元层）
+Expr::Deref(Box<Expr>, Span),   // deref <unary> (like - / !, operand at the unary level)
 
-// postfix（与 Call/Index/Field 同层）
+// postfix (same level as Call/Index/Field)
 Expr::Question(Box<Expr>, Span), // <expr>?
 ```
 
-> **parser 只认形态，语义归 typeck**（SPEC §11：不在 parser 做类型检查）：
-> - `move` 的操作数接受任意一元表达式，typeck 校验必须是 `Ident`（U05）；
-> - `clone` 的操作数校验为 `Ident` 或 `ExprDeref`（U05）；
-> - `box` 复用 `TokenKind::BoxType`：类型位置（`box<T>`）走既有类型解析，
->   表达式位置（`box expr`）走一元前缀分支，二者无歧义。
+> **The parser only recognizes form; semantics belong to typeck** (SPEC §11: no type checking in
+> the parser):
+> - The operand of `move` accepts any unary expression; typeck verifies it must be an `Ident` (U05);
+> - The operand of `clone` is verified to be an `Ident` or `ExprDeref` (U05);
+> - `box` reuses `TokenKind::BoxType`: in type position (`box<T>`) it goes through the existing
+>   type parsing; in expression position (`box expr`) it goes through the unary-prefix branch —
+>   the two are unambiguous.
 
-### Pattern 扩展
+### Pattern extension
 ```rust
 pub enum Pattern {
     Literal(Expr),
     Ident(Ident),
-    NegLiteral(...),                       // 0.0.1 P5 已有
-    ResultCtor { ctor: ResultCtor, binding: Ident, span },  // 0.0.2 新增
+    NegLiteral(...),                       // already present since 0.0.1 P5
+    ResultCtor { ctor: ResultCtor, binding: Ident, span },  // new in 0.0.2
 }
 
 pub enum ResultCtor { Ok, Err }
 ```
-- 语法形态：`Ok(ident)` / `Err(ident)`；parser 不绑定 `Ok`/`Err` 的语义
-  （它们仍是 `Ident`，typeck 在 pattern 检查时识别形态）
+- Syntactic form: `Ok(ident)` / `Err(ident)`; the parser does not attach semantics to `Ok`/`Err`
+  (they remain `Ident`s; typeck recognizes the form during pattern checking)
 
-### 赋值目标扩展
-- 赋值 LHS 合法集合从 `{ Ident }` 扩为 `{ Ident, ExprDeref }`
-  （`deref b = expr;` 写 box 点内值）；`InvalidAssignmentTarget` 判定同步更新
-- `deref b = expr` 不可带类型标注（与 §3.4 一致，parser/Resolver 拒绝）
+### Assignment target extension
+- The legal set of assignment LHS grows from `{ Ident }` to `{ Ident, ExprDeref }`
+  (`deref b = expr;` writes the value inside a box); the `InvalidAssignmentTarget` check is
+  updated accordingly
+- `deref b = expr` cannot carry a type annotation (consistent with §3.4; rejected by
+  parser/Resolver)
 
-### 优先级（写入 `expr.rs` 并与 `SYNTAX.ebnf` v0.0.2 对齐）
+### Precedence (written into `expr.rs`, aligned with `SYNTAX.ebnf` v0.0.2)
 ```text
-...（0.0.1 各层不变）
-postfix:  primary { call | index | field | "?" }     ← ? 最高（后缀）
+... (all 0.0.1 layers unchanged)
+postfix:  primary { call | index | field | "?" }     ← ? is highest (suffix)
 unary:    [ box | deref | move | clone | - | ! ] postfix
 ```
-- `clone deref b` = `clone(deref(b))`（前缀右结合天然成立）
-- `x?` 是后缀，绑定比一元紧：`deref b?` = `deref(b?)`
+- `clone deref b` = `clone(deref(b))` (prefix right-associativity gives this naturally)
+- `x?` is a postfix and binds tighter than unary: `deref b?` = `deref(b?)`
 
-### 测试
-- `tests/parser/valid/`：前缀链（`clone deref b`、`box box 1`）、`?` 链
-  （`f(x)??`——嵌套 Result）、`deref b = v`、`Ok(v)`/`Err(e)` pattern、
-  `move`/`clone` 作实参 `f(move x)`、unary 操作数边界（`deref -x`、`move move x`）
-- `tests/parser/invalid/`：悬空 `?`、`move`（无操作数）、`deref`（无操作数）、
-  `deref b: int = v`（带类型标注）、`Ok()`/`Ok(v, w)`/`Ok(v`（Result pattern
-  形态错误）、`box = 1`/`ref = 1`/`move: int = 1`（保留字作绑定名）
-- 既有 parser 测试全部原样通过
+### Tests
+- `tests/parser/valid/`: prefix chains (`clone deref b`, `box box 1`), `?` chains
+  (`f(x)??` — nested Result), `deref b = v`, `Ok(v)`/`Err(e)` patterns,
+  `move`/`clone` as arguments `f(move x)`, unary operand boundaries (`deref -x`, `move move x`)
+- `tests/parser/invalid/`: dangling `?`, `move` (no operand), `deref` (no operand),
+  `deref b: int = v` (with type annotation), `Ok()`/`Ok(v, w)`/`Ok(v` (malformed
+  Result patterns), `box = 1`/`ref = 1`/`move: int = 1` (reserved words as binding names)
+- All existing parser tests pass unchanged
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler parser
 ```
 
 ---
 
-## U03: Parse — ASI（分号可选，前置 pass）
+## U03: Parse — ASI (Optional Semicolons, Prerequisite Pass)
 
-> **权威设计见 `docs/0.0.2/ASI.md`**。架构：Lex → **ASI pass** → Parse，
-> 语义为**换行敏感**（语句边界在换行处判定，同行拼接非法）。
-> lexer 新增 `Newline` token；pass 消费全部 Newline、在语句边界插入显式
-> `Semi`，输出的 Token 流与 0.0.1 同构，Parse 沿用原逻辑 + 四处配套。
+> **The authoritative design is in `docs/0.0.2/ASI.md`**. Architecture: Lex → **ASI pass** → Parse,
+> with **newline-sensitive** semantics (statement boundaries are decided at newlines; joining
+> statements on one line is illegal).
+> The lexer gains a `Newline` token; the pass consumes all Newlines and inserts explicit
+> `Semi` at statement boundaries; the output token stream is isomorphic to 0.0.1's, and Parse
+> keeps its original logic plus four companion changes.
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/
 ├── lexer/
-│   ├── token.rs           # 新增 TokenKind::Newline
-│   └── lexer_impl.rs      # 发射 Newline（折叠、文件起始不发、块注释内不发）
+│   ├── token.rs           # new TokenKind::Newline
+│   └── lexer_impl.rs      # emit Newline (collapse; none at file start; none inside block comments)
 └── parser/
-    ├── asi.rs             # 新增：ASI pass（纯函数）+ 三个谓词函数（可独立单测）
-    ├── mod.rs             # parse() 接 pass；绑定/const 贴 } 免分号；语句入口 guard；统一 finish
-    ├── expr.rs            # postfix 后缀提取；block-like 头续接爬升；choose pattern 后跳过插入分号
-    ├── error.rs           # 新增 ExpectedSemiOrNewStmt
+    ├── asi.rs             # new: ASI pass (pure function) + three predicate functions (independently unit-testable)
+    ├── mod.rs             # parse() runs the pass; bindings/const hugging } skip the semicolon; statement-entry guard; unified finish
+    ├── expr.rs            # postfix suffix extraction; climb after block-like headers; skip inserted semicolon after choose patterns
+    ├── error.rs           # new ExpectedSemiOrNewStmt
     └── tests.rs
 ```
 
-### asi.rs（新文件，纯函数）
+### asi.rs (new file, pure functions)
 ```rust
-/// ASI pass：消费 Newline，在语句边界插入 Semi（见 ASI.md §3）。
+/// ASI pass: consumes Newlines and inserts Semi at statement boundaries (see ASI.md §3).
 pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>;
 
-/// 该 token 能否开启一条新语句（块起始位置用，含 `(` `-` `!` `{`）。
+/// Whether this token can start a new statement (used at block start; includes `(` `-` `!` `{`).
 pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool;
 
-/// 语句完成后该 token 是否意味着"隐式结束"（插入分号）。
-/// 起始集 ∖ { LParen, Minus, LBrace } ∪ { RBrace, Eof }。
+/// After a statement completes, whether this token implies an "implicit end" (insert a semicolon).
+/// Start set ∖ { LParen, Minus, LBrace } ∪ { RBrace, Eof }.
 pub(crate) fn implies_stmt_end(kind: &TokenKind) -> bool;
 
-/// 该 token 是否续接当前表达式（二元运算符 / `?` / `.` / `[` / `(`）。
+/// Whether this token continues the current expression (binary operator / `?` / `.` / `[` / `(`).
 pub(crate) fn can_continue_expr(kind: &TokenKind) -> bool;
 ```
 
-### 判定规则（换行或 EOF 处；`p` 前一 token，`n` 后一 token）
+### Decision rules (at a newline or EOF; `p` is the previous token, `n` the next)
 ```text
-1. 最内层未闭合括号是 ( 或 [     → 丢弃换行（{ 内 ASI 照常生效）
-2. n 是 RBrace                   → 丢弃（永不在 } 前插）
-3. p ∉ 可结尾集                  → 丢弃（跨行续接）
-4. implies_stmt_end(n)           → 插入 Semi
-5. can_continue_expr(n) ∪ {Else, Elif, When, Otherwise, LBrace, Semi} → 丢弃（续接优先）
-6. 其余                          → 报 ExpectedSemiOrNewStmt { span, found }
+1. Innermost unclosed bracket is ( or [      → discard the newline (ASI inside { works as usual)
+2. n is RBrace                               → discard (never insert before })
+3. p ∉ the endable set                       → discard (continuation across lines)
+4. implies_stmt_end(n)                       → insert Semi
+5. can_continue_expr(n) ∪ {Else, Elif, When, Otherwise, LBrace, Semi} → discard (continuation wins)
+6. Otherwise                                 → report ExpectedSemiOrNewStmt { span, found }
 ```
 
-### Parse 侧配套（ASI.md §4）
-- `parse_var_binding` / `parse_const_decl`：next 为 RBrace 时免 `;`
-- `parse_block` 尾表达式判定：Assign 形态（含 `deref b = v`）不作尾表达式
-- `parse_expr_or`：if/while/choose 头之后补后缀 + 二元续接爬升
-- `parse_program` / `parse_block` 语句入口 guard：不能起始语句 → `ExpectedSemiOrNewStmt`
-- `parse_choose`：pattern 之后跳过 pass 插入的分号（guard 可跨行）
+### Companion changes on the Parse side (ASI.md §4)
+- `parse_var_binding` / `parse_const_decl`: skip `;` when next is RBrace
+- Tail-expression determination in `parse_block`: Assign-shaped statements (including
+  `deref b = v`) are not treated as tail expressions
+- `parse_expr_or`: after if/while/choose headers, resume the postfix + binary continuation climb
+- Statement-entry guard in `parse_program` / `parse_block`: cannot start a statement →
+  `ExpectedSemiOrNewStmt`
+- `parse_choose`: skip the semicolon the pass inserted after a pattern (guards may span lines)
 
-### 实现要求
-- `func` 声明后、块尾表达式、`when`/`otherwise` 的"无分号"规则**不变**
-- `;;` 在第二个 `;` 处报 `ExpectedSemiOrNewStmt`（0.0.1 亦报错，基准不变）
-- 分号的有无在 AST 之后不可见：`has_semi` 字段保留，
-  pass 补齐后表达式语句恒 `true`（唯一 `false`：Assign 贴 `}`），MIR/字节码不变
-- `tokenize()` 输出新增 `Newline`（公开 API 契约变化，文档标注）
+### Implementation requirements
+- The "no semicolon" rules for `func` declarations, block tail expressions, and
+  `when`/`otherwise` are **unchanged**
+- `;;` reports `ExpectedSemiOrNewStmt` at the second `;` (0.0.1 also errors; the baseline is unchanged)
+- Semicolon presence is invisible after the AST: the `has_semi` field is kept;
+  after the pass fills it in, expression statements are always `true` (the only `false`:
+  Assign hugging `}`); MIR/bytecode unchanged
+- `tokenize()` output gains `Newline` (public API contract change; document it)
 
-### 测试（陷阱用例逐条，见 `ASI.md` §5.1 表）
-- valid：`x = 1` ⏎ `y = 2`；`while { x = x + 1 }` 无分号；when/otherwise 无分号；
-  `{ x = 1 }` 绑定贴 `}`；`{ 42 }` 尾表达式；Allman 风格（`if c` ⏎ `{`）；
-  `if c { 1 }` ⏎ `else { 2 }`（跨行 if-else 合法）；`when Ok(v)` ⏎ guard 跨行；
-  显式分号混合风格；0.0.1 全部 valid 用例原样通过（回归底线）
-- invalid：`x = 1` ⏎ `)`（不可续接不可起始）报 `ExpectedSemiOrNewStmt`；
-  `x = 1 y = 2`（同行拼接）；`if c { 1 };` ⏎ `else { 2 }`（已完结 if 后的 else）；
-  `x = 1` ⏎ `{ print(1) }`（块表达式语句需前导分号）；`;;`
-- 专项单测：三个谓词函数对每个 `TokenKind` 的穷举判定表 + pass golden 用例
-- 迁移：原 `missing_semicolon*.fln` 在 EOF 插分号后翻转为合法 → 改写
+### Tests (pitfall cases one by one, see the §5.1 table in `ASI.md`)
+- valid: `x = 1` ⏎ `y = 2`; `while { x = x + 1 }` without semicolons; when/without semicolons;
+  `{ x = 1 }` binding hugging `}`; `{ 42 }` tail expression; Allman style (`if c` ⏎ `{`);
+  `if c { 1 }` ⏎ `else { 2 }` (cross-line if-else is legal); `when Ok(v)` ⏎ guard across lines;
+  mixed styles with explicit semicolons; all 0.0.1 valid cases pass unchanged (regression floor)
+- invalid: `x = 1` ⏎ `)` (can neither continue nor start) reports `ExpectedSemiOrNewStmt`;
+  `x = 1 y = 2` (same-line joining); `if c { 1 };` ⏎ `else { 2 }` (else after a completed if);
+  `x = 1` ⏎ `{ print(1) }` (a block expression statement needs a leading semicolon); `;;`
+- Dedicated unit tests: exhaustive decision tables for the three predicates over every
+  `TokenKind` + pass golden cases
+- Migration: the original `missing_semicolon*.fln` cases flip to legal once a semicolon is
+  inserted at EOF → rewrite them
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler parser
-cargo test   # 0.0.1 全量回归
+cargo test   # full 0.0.1 regression
 ```
 
 ---
 
-## U04: Typeck — Ok/Err 构造、Result pattern、`?`、print 修复
+## U04: Typeck — Ok/Err Construction, Result Patterns, `?`, print Fix
 
-> **依赖 U13**：print 修复定稿为严格 string 检查（PLAN §6）——非 string 实参
-> 报 `ArgTypeMismatch` 并提示 `as string`，配套用例依赖 `as` 已落地，先做 U13。
+> **Depends on U13**: the print fix is finalized as a strict string check (PLAN §6) — a non-string
+> argument reports `ArgTypeMismatch` with a hint to use `as string`; the companion cases depend on
+> `as` being in place, so U13 comes first.
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/typeck/
-├── infer.rs         # 移除 print 特判；新增构造/`?` 检查
-├── builtins.rs      # 新增：内建签名表
-├── typed_hir.rs     # TypedExprHir::Question 等新节点
-├── error.rs         # 新 TypeckErrorKind
-└── tests.rs         # check_builtin_print_wrong_arg 回正
+├── infer.rs         # remove the print special case; add construction/`?` checks
+├── builtins.rs      # new: builtin signature table
+├── typed_hir.rs     # TypedExprHir::Question and other new nodes
+├── error.rs         # new TypeckErrorKind entries
+└── tests.rs         # restore check_builtin_print_wrong_arg
 ```
 
-### builtins.rs（新文件：内建签名表，替代 print 特判）
+### builtins.rs (new file: builtin signature table, replacing the print special case)
 ```rust
 pub enum BuiltinParam {
-    /// 单一固定类型序列（未来内建扩展用）
+    /// A single fixed type sequence (for future builtin extension)
     Fixed(&'static [Type]),
-    /// 可变元数，每个参数 ∈ 集合
+    /// Variable arity; each argument ∈ the set
     Variadic(&'static [Type]),
 }
 
@@ -280,58 +295,62 @@ pub struct BuiltinSig {
 }
 
 pub const BUILTINS: &[BuiltinSig] = &[
-    // print: (string...) -> unit；0.0.2 严格 string 检查（PLAN §6）
-    // 非 string 实参报 ArgTypeMismatch，help: `x as string`（U13）
+    // print: (string...) -> unit; 0.0.2 strict string check (PLAN §6)
+    // A non-string argument reports ArgTypeMismatch, help: `x as string` (U13)
     BuiltinSig { name: "print", param: Variadic(&[Type::String]), ret: Type::Unit },
 ];
 ```
-- `typeck_call` 改查此表：实参非 string（`print(1)` / `print(fib)` / `print(box)` /
-  `print(Ok(..))`）→ `ArgTypeMismatch`，help 提示显式 `x as string`（U13）；
-  元数不限（`print()` 合法）
-- **移除 `infer.rs` 中 `print` 的特判分支与 HACK 注释**
-- `check_builtin_print_wrong_arg` 测试拆分回正：
-  `print("a")` / `print("a", "b")` / `print(42 as string)` → Ok；
-  `print(1)` / `print(fib)`（非 string）→ `ArgTypeMismatch`
+- `typeck_call` consults this table: a non-string argument (`print(1)` / `print(fib)` /
+  `print(box)` / `print(Ok(..))`) → `ArgTypeMismatch`, help suggests explicit `x as string` (U13);
+  arity unrestricted (`print()` is legal)
+- **Remove the `print` special-case branch and HACK comment from `infer.rs`**
+- Split and restore the `check_builtin_print_wrong_arg` test:
+  `print("a")` / `print("a", "b")` / `print(42 as string)` → Ok;
+  `print(1)` / `print(fib)` (non-string) → `ArgTypeMismatch`
 
-### Ok / Err 构造检查（双向检查最小实现）
-0.0.1 的推导是单向的（先推后比）；`Ok(v)`/`Err(e)` 需要上下文类型
-（PLAN D6）。实现为**期望类型线程**（checking mode），只穿三条路径：
+### Ok / Err construction checks (minimal bidirectional checking)
+0.0.1's inference is one-directional (infer first, then compare); `Ok(v)`/`Err(e)` need the
+contextual type (PLAN D6). This is implemented as **expected-type threading** (checking mode),
+through only three paths:
 
 ```rust
-// typeck_expr 增加 expected 参数（None = 纯推导）
+// typeck_expr gains an expected parameter (None = pure inference)
 fn typeck_expr(&mut self, expr: ExprHir, expected: Option<&Type>) -> Result<TypedExprHir, ()>
 ```
-1. **函数体**（块尾与单表达式体）：expected = 声明的返回类型（有标注时）；
-   expected 沿 `if/elif/else` 分支尾、`choose` 臂尾、块尾继续下传
-2. **带类型标注的绑定初始化**：`res: Result<int, string> = Ok(42);`
-3. **`?` 的操作数**：自身类型已是 `Result`（无 expected 需求）
+1. **Function bodies** (block tails and single-expression bodies): expected = the declared return
+   type (when annotated); expected continues to flow through the tails of `if/elif/else` branches,
+   the tails of `choose` arms, and block tails
+2. **Annotated binding initializers**: `res: Result<int, string> = Ok(42);`
+3. **The operand of `?`**: its own type is already `Result` (no expected needed)
 
-`Ok(arg)` / `Err(arg)` 检查规则：
-- expected = `Result<T, E>` → `Ok` 校验 `arg: T`，`Err` 校验 `arg: E`；
-- expected = None → `CannotInferResultType { span }`，help 提示补标注
-- 实参个数为 0 或 ≥2 → `ArityMismatch`
-- `Ok`/`Err` 被用户遮蔽（§4.3 内建遮蔽规则）→ 按普通函数调用处理，不报错
+Checking rules for `Ok(arg)` / `Err(arg)`:
+- expected = `Result<T, E>` → `Ok` checks `arg: T`, `Err` checks `arg: E`;
+- expected = None → `CannotInferResultType { span }`, help suggests adding an annotation
+- Arity 0 or ≥2 → `ArityMismatch`
+- `Ok`/`Err` shadowed by the user (§4.3 builtin shadowing rules) → treated as a normal function
+  call, no error
 
-### Result pattern（choose）
-- scrutinee 类型 = `Result<T, E>` 时：`ResultCtor::Ok` 绑定 `v: T`、
-  `Err` 绑定 `e: E`（转移语义，U05 登记）；guard 可用绑定
-- **穷尽性**：`Ok` + `Err` 两臂齐（guard 臂不计）→ 穷尽，无需 `otherwise`；
-  只有其一 → `ChooseNotExhaustive { missing_patterns: [Ok/Err] }`
-- scrutinee 非 `Result` 却写 `Ok/Err` pattern → `PatternTypeMismatch`
+### Result patterns (choose)
+- When the scrutinee type = `Result<T, E>`: `ResultCtor::Ok` binds `v: T`,
+  `Err` binds `e: E` (transfer semantics, registered by U05); guards can use the bindings
+- **Exhaustiveness**: both `Ok` + `Err` arms present (guard arms don't count) → exhaustive,
+  no `otherwise` needed; only one → `ChooseNotExhaustive { missing_patterns: [Ok/Err] }`
+- A `Result`-less scrutinee with an `Ok/Err` pattern → `PatternTypeMismatch`
 
-### `?` 检查
-- 操作数类型 `Result<T, E>`，否则 `QuestionOnNonResult { found }`
-- 所在函数返回类型标注必须为 `Result<T2, E>` 且 `E` **完全相等**（D6）：
-  - 函数无返回标注 / 非 Result → `QuestionOutsideResultFn`（help：改函数返回类型
-    或用 `choose` 显式处理）
-  - `E` 不等 → `QuestionTypeMismatch { expected, found }`
-- `main` 返回 `Result<int, string>` 时 `?` 合法（入口 Err 行为见 U09）
+### `?` checks
+- Operand type `Result<T, E>`, otherwise `QuestionOnNonResult { found }`
+- The enclosing function's return type annotation must be `Result<T2, E>` with `E` **exactly
+  equal** (D6):
+  - Function without a return annotation / not a Result → `QuestionOutsideResultFn` (help:
+    change the function return type or handle it explicitly with `choose`)
+  - `E` differs → `QuestionTypeMismatch { expected, found }`
+- `?` is legal in `main` returning `Result<int, string>` (entry Err behavior, see U09)
 
 ### UnhandledResult
-- 表达式语句（`Stmt::Expr`）的值类型为 `Result<T, E>` → `UnhandledResult`
-  （Result 不允许静默丢弃）；提示：绑定、`choose` 消化，或加 `?` 传播
+- An expression statement (`Stmt::Expr`) whose value type is `Result<T, E>` → `UnhandledResult`
+  (a Result may not be silently discarded); hint: bind it, consume it with `choose`, or add `?` to propagate
 
-### 新 TypeckErrorKind
+### New TypeckErrorKind entries
 ```rust
 QuestionOutsideResultFn,
 QuestionOnNonResult { found },
@@ -339,68 +358,69 @@ QuestionTypeMismatch { expected, found },
 CannotInferResultType { ctor },          // ctor: Ok | Err
 UnhandledResult { ty },
 PatternTypeMismatch { pattern, found },
-ArgTypeMismatch { .. },                  // 复用既有（print 回正后重新可用）
+ArgTypeMismatch { .. },                  // reuse the existing kind (usable again after the print fix)
 ```
 
-### 测试
-- valid：`div/ratio` 链（PLAN §3.4 示例逐字）、带标注绑定、`main` 返回 Result、
-  `print("x")`、`print(1 as string)`、`print()`、用户遮蔽 `Ok`
-- invalid：无上下文 `Ok(1)`、`?` 在 int main、E 不匹配、丢弃 Result、
-  `print(1)` / `print(fib)`（非 string）、Result scrutinee 不穷尽
-- **回归底线**：`check_builtin_print` 等既有 typeck 测试语义不变
+### Tests
+- valid: the `div/ratio` chain (PLAN §3.4 example verbatim), annotated bindings, `main` returning
+  Result, `print("x")`, `print(1 as string)`, `print()`, user shadowing `Ok`
+- invalid: context-free `Ok(1)`, `?` in an int main, E mismatch, discarding a Result,
+  `print(1)` / `print(fib)` (non-string), non-exhaustive Result scrutinee
+- **Regression floor**: existing typeck tests like `check_builtin_print` keep their semantics
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler typeck
-grep -n "print" src/typeck/infer.rs   # 仅剩正常调用路径，无特判/HACK
+grep -n "print" src/typeck/infer.rs   # only the normal call path remains; no special case/HACK
 ```
 
 ---
 
-## U05: Typeck — 所有权检查器
+## U05: Typeck — Ownership Checker
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/typeck/
-├── ownership.rs     # 新增：流敏感仿射检查（本票核心）
-├── typed_hir.rs     # Ident 节点增加 access 标注
-├── infer.rs         # is_copy()、类型判定接入
-├── error.rs         # 新错误族
+├── ownership.rs     # new: flow-sensitive affinity check (the core of this ticket)
+├── typed_hir.rs     # Ident nodes gain an access annotation
+├── infer.rs         # is_copy(), type predicates wired in
+├── error.rs         # new error family
 └── tests.rs
 ```
 
-### 类型判定（infer.rs）
+### Type predicates (infer.rs)
 ```rust
 impl Type {
-    /// Copy 类型：int/float/bool/unit/函数值；Result<T,E> = is_copy(T) && is_copy(E)
+    /// Copy types: int/float/bool/unit/function values; Result<T,E> = is_copy(T) && is_copy(E)
     pub fn is_copy(&self) -> bool;
-    /// owned：string、box<_>、含 owned 分量的 Result
+    /// owned: string, box<_>, and Results containing an owned component
     pub fn is_owned(&self) -> bool;
 }
 ```
-- `Type::Box` / `Type::Ref` 从"解析但 Unsupported"转正：
-  移除 `UnsupportedType` 相关特判（0.0.1 的 `codegen`/`lower` 遇 box/ref 报错
-  的路径由 U06 的真实降载替代）
+- `Type::Box` / `Type::Ref` graduate from "parsed but Unsupported": remove the
+  `UnsupportedType` special cases (the 0.0.1 paths where `codegen`/`lower` errored on box/ref
+  are replaced by U06's real lowering)
 
-### 访问标注（typed_hir.rs）
+### Access annotations (typed_hir.rs)
 ```rust
-/// Ident 节点新增字段：本次使用的所有权访问形态
+/// New field on Ident nodes: the ownership access form of this use
 pub enum Access {
-    Copy,    // Copy 类型读取（默认）
-    Move,    // move x（消耗性，槽清空）
-    Clone,   // clone x / owned 的只读使用（深拷贝，槽不动）
+    Copy,    // read of a Copy type (default)
+    Move,    // move x (consuming, slot emptied)
+    Clone,   // clone x / read-only use of an owned value (deep copy, slot untouched)
 }
 // TypedExprHir::Ident { name, binding_id, hir_id, span, access }
 ```
-- 由 ownership 检查器回填；lower（U06）据此选择 `MoveLocal`/`CloneLocal`/`LoadLocal`
-- ref 实参不需要 Access：lower 在 `Call` 处按被调参数类型决定发 `MakeRefLocal`
+- Back-filled by the ownership checker; lower (U06) uses it to choose `MoveLocal`/`CloneLocal`/`LoadLocal`
+- ref arguments need no Access: lower decides to emit `MakeRefLocal` at `Call` based on the
+  callee's parameter type
 
-### 所有权状态机（ownership.rs）
+### Ownership state machine (ownership.rs)
 ```rust
 enum MoveState {
     Alive,
-    Moved { span: Span },          // 确定已移动
-    MaybeMoved { spans: Vec<Span> }, // 部分分支已移动
+    Moved { span: Span },          // definitely moved
+    MaybeMoved { spans: Vec<Span> }, // moved on some branches
 }
 
 struct OwnershipChecker {
@@ -409,47 +429,50 @@ struct OwnershipChecker {
 }
 ```
 
-**遍历规则（与 `DESIGN.md` §10.2 六条规则一一对应）：**
+**Traversal rules (one-to-one with the six rules in `DESIGN.md` §10.2):**
 
-| 构造 | 处理 |
+| Construct | Handling |
 |------|------|
-| 绑定/赋值 RHS 顶层为 `move x` | 登记 `x → Moved`；之后读写/移动 `x` → `UseAfterMove`；对 `x` 再赋值 → `AssignToMoved`（错误消息与未绑定区分） |
-| RHS 顶层为 `clone x` / `clone deref b` | 深拷贝语义，状态不变 |
-| RHS 顶层为裸 `x`（owned） | `OwnedArgRequiresMove`（help：`move` 或 `clone`） |
-| 实参为裸 owned `x` | 同上（位于 `Call` 参数检查） |
-| `choose` scrutinee 为裸 owned `x` | 同上（D7）；`move x`/`clone x` 合法 |
-| 函数尾/块尾/分支尾的裸 owned `x` | 产出位置：隐式转移，登记 Moved/条件转移 |
-| `if/elif/else` | 各分支从快照独立推导；汇合：全 Moved → Moved，部分 → MaybeMoved，否则 Alive |
-| `while` | **保守规则**：体内 `move x` ⇒ 出口 `x` 视为 MaybeMoved；体内移动后（含回边处）再用 `x` → `UseAfterMove`；guard 中使用体内会移动的变量 → `MaybeMovedAfterBranch` |
-| `choose` | 同 if（臂顺序汇合）；Result pattern 绑定按转移登记 |
-| 函数边界 | 状态清空，不穿越 |
-| 比较运算 / `print` 实参 | 只读使用（D3）：owned 操作数自动标注 `Access::Clone`，状态不变 |
-| `deref b`（读取） | 副本语义，`b` 状态不变 |
+| Binding/assignment RHS top level is `move x` | Register `x → Moved`; subsequent read/write/move of `x` → `UseAfterMove`; reassigning `x` → `AssignToMoved` (error message distinguished from unbound) |
+| RHS top level is `clone x` / `clone deref b` | Deep-copy semantics, state unchanged |
+| RHS top level is a bare `x` (owned) | `OwnedArgRequiresMove` (help: `move` or `clone`) |
+| Argument is a bare owned `x` | Same as above (checked at `Call` parameters) |
+| `choose` scrutinee is a bare owned `x` | Same as above (D7); `move x`/`clone x` is legal |
+| Bare owned `x` in a function tail/block tail/branch tail | Production position: implicit transfer, register Moved/conditional transfer |
+| `if/elif/else` | Each branch infers independently from a snapshot; at the join: all Moved → Moved, some → MaybeMoved, otherwise Alive |
+| `while` | **Conservative rule**: `move x` in the body ⇒ `x` is MaybeMoved at the exit; using `x` after moving it in the body (including at the back edge) → `UseAfterMove`; using a variable in the guard that the body may move → `MaybeMovedAfterBranch` |
+| `choose` | Same as if (arms joined in order); Result pattern bindings registered as transfers |
+| Function boundaries | State is cleared, does not cross |
+| Comparison operators / `print` arguments | Read-only use (D3): owned operands are automatically annotated `Access::Clone`, state unchanged |
+| `deref b` (read) | Copy semantics, state of `b` unchanged |
 
-**place 合法性：**
+**Place validity:**
 
-| 表达式 | 判定 |
+| Expression | Verdict |
 |--------|------|
-| `move x`（x 为 Copy） | `MoveOfCopyType`（help：去掉 `move`） |
-| `move deref b` | `MoveOutOfBox`（help：`clone deref b`） |
-| `move g`（owned 全局） | `MoveOutOfGlobal`（help：`clone g`） |
-| `move s`（s 为 ref 参数） | `MoveOfBorrowed` |
-| `clone` 操作数非 Ident/ExprDeref | `InvalidClonePlace` |
-| 实参 `move x` 给 ref 参数 | `BorrowArgWithMove`（借用不接受转移） |
-| 给 ref 参数赋值 | `AssignToRefParam` |
-| `ref T` 出现在非参数类型位置 | `RefNotAllowedHere`（局部/全局/返回/嵌套 `ref ref T`；**本票在 Resolver 阶段检查**，见下） |
+| `move x` (x is Copy) | `MoveOfCopyType` (help: drop `move`) |
+| `move deref b` | `MoveOutOfBox` (help: `clone deref b`) |
+| `move g` (owned global) | `MoveOutOfGlobal` (help: `clone g`) |
+| `move s` (s is a ref parameter) | `MoveOfBorrowed` |
+| `clone` operand not an Ident/ExprDeref | `InvalidClonePlace` |
+| Argument `move x` for a ref parameter | `BorrowArgWithMove` (a borrow does not accept a transfer) |
+| Assigning to a ref parameter | `AssignToRefParam` |
+| `ref T` in a non-parameter type position | `RefNotAllowedHere` (local/global/return/nested `ref ref T`; **this ticket checks it at the Resolver stage**, see below) |
 
-**Resolver 分工**：`RefNotAllowedHere` 依赖声明形态（绑定/const/返回类型位置），
-由 `resolver/mod.rs` 在遍历类型标注时检查，错误并入 `ResolveErrorKind`；
-其余所有权错误都在 typeck。
+**Resolver division of labor**: `RefNotAllowedHere` depends on declaration form
+(binding/const/return type position), checked by `resolver/mod.rs` while traversing type
+annotations, with the error folded into `ResolveErrorKind`;
+all other ownership errors live in typeck.
 
-**发现于设计评审的实现限制（本票新增）**：`deref b = v` 的赋值目标必须是
-**局部** box——若 `b` 是 owned 全局，读取即 `CloneGlobal`（复制整个 box），
-写穿透只会改副本。typeck 对全局 box 的 deref 赋值报 `DerefAssignOfGlobalBox`
-（0.0.2 限制；若放开需新增 `StoreGlobalDerefBox` 指令，留待后续版本）。
-U12 将此限制补录 `DESIGN.md` §10.3。
+**Implementation limitation discovered during design review (added by this ticket)**: the
+assignment target of `deref b = v` must be a **local** box — if `b` is an owned global, reading
+it is `CloneGlobal` (copying the whole box), and a write through it would only change the copy.
+Typeck reports `DerefAssignOfGlobalBox` for deref assignment to a global box
+(a 0.0.2 limitation; lifting it would require a new `StoreGlobalDerefBox` instruction, left for a
+later version).
+U12 records this limitation in `DESIGN.md` §10.3.
 
-### 新 TypeckErrorKind / ResolveErrorKind
+### New TypeckErrorKind / ResolveErrorKind entries
 ```rust
 // typeck
 UseAfterMove { name, use_span, moved_span },
@@ -467,42 +490,42 @@ DerefAssignOfGlobalBox,
 RefNotAllowedHere { span, context },
 ```
 
-### 测试
-- valid：PLAN §3.1 全部示例、条件转移后不使用、循环内 move 后循环内不再用、
-  owned 全局读取、`clone deref b`
-- invalid：六条核心规则各 ≥1 用例（对应上表每个错误 kind）、
-  while 回边后使用、`x = move x`、全局 box deref 赋值
-- 穷举 `is_copy`：对每种 `Type` 变体断言
+### Tests
+- valid: all PLAN §3.1 examples, no use after a conditional transfer, no use within the loop
+  after a move inside the loop, reads of owned globals, `clone deref b`
+- invalid: at least 1 case for each of the six core rules (corresponding to every error kind in
+  the tables above), use after the while back edge, `x = move x`, global box deref assignment
+- Exhaustive `is_copy`: assert over every `Type` variant
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler typeck resolver
 ```
 
 ---
 
-## U06: Lower — 新 MIR 指令 + Span 下沉
+## U06: Lower — New MIR Instructions + Span Sinking
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/lower/
-├── mir.rs           # MirInstr 包装重构 + 新指令
-├── mod.rs           # 降载规则
-├── slots.rs         # （如需）owned 绑定的槽位注释
+├── mir.rs           # MirInstr wrapping refactor + new instructions
+├── mod.rs           # lowering rules
+├── slots.rs         # (if needed) slot comments for owned bindings
 └── tests.rs
 ```
 
-### MirInstr 重构（Span 下沉，PLAN §4.5）
+### MirInstr refactor (Span sinking, PLAN §4.5)
 ```rust
-// 由裸 enum 改为 struct 包装：
+// Changed from a bare enum to a struct wrapper:
 pub struct MirInstr {
     pub kind: MirInstrKind,
-    pub span: Span,          // 0.0.1 的 MIR 无 span，本票从 TypedHir 逐指令携带
+    pub span: Span,          // 0.0.1's MIR had no span; this ticket carries it per-instruction from TypedHir
 }
 
 pub enum MirInstrKind {
-    // ……0.0.1 全部变体原样迁入
-    // 0.0.2 新增：
+    // …… all 0.0.1 variants migrated as-is
+    // new in 0.0.2:
     AllocBox,
     DerefBox,
     StoreDerefBox,
@@ -518,65 +541,67 @@ pub enum MirInstrKind {
     UnwrapErr,
 }
 ```
-- 机械重构波及：`lower/mod.rs`、`cfg.rs`、`codegen/encoder.rs`、全部 lower 测试——
-  单独一个 PR 完成，**不改任何断言语义**（0.0.1 回归底线）
+- Mechanical refactor blast radius: `lower/mod.rs`, `cfg.rs`, `codegen/encoder.rs`, all lower
+  tests — done in a single PR, **changing no assertion semantics** (0.0.1 regression floor)
 
-### 降载规则（TypedHir → MIR）
+### Lowering rules (TypedHir → MIR)
 
-| 源构造 | MIR 序列 |
+| Source construct | MIR sequence |
 |--------|----------|
 | `box e` | `<e>`; `AllocBox` |
-| `deref b`（读） | `<b>`; `DerefBox`（box 保留在栈，点内副本压栈） |
+| `deref b` (read) | `<b>`; `DerefBox` (the box stays on the stack, a copy of the inner value is pushed) |
 | `deref b = v` | `<b>`; `<v>`; `StoreDerefBox` |
-| `move x`（Access::Move） | `MoveLocal slot` |
-| `clone x`（Access::Clone） | `CloneLocal slot` |
-| owned 全局读取（只读/clone） | `CloneGlobal gid` |
-| owned 实参（Access::Move/Clone） | `MoveLocal`/`CloneLocal` + `Call`/`CallValue` |
-| ref 实参（place = 局部/全局/ref 参数） | `MakeRefLocal slot` + `Call`（全局则先…见下注） |
-| `x?` | `Dup`; `IsErr`; `JumpIfTrue L_err`; `UnwrapOk`; `Jump L_cont`; `L_err: UnwrapErr`; `Return`; `L_cont:`（`BYTECODE.md` §6.7） |
-| 比较 / print 的 owned 操作数 | 先 `CloneLocal`/`CloneGlobal`（D3 只读使用） |
-| choose（Result scrutinee） | `Dup`; `IsErr`; `JumpIfTrue L_err`; `UnwrapOk`; `StoreLocal v`; 臂体; …（`BYTECODE.md` §6.8） |
+| `move x` (Access::Move) | `MoveLocal slot` |
+| `clone x` (Access::Clone) | `CloneLocal slot` |
+| owned global read (read-only/clone) | `CloneGlobal gid` |
+| owned argument (Access::Move/Clone) | `MoveLocal`/`CloneLocal` + `Call`/`CallValue` |
+| ref argument (place = local/global/ref parameter) | `MakeRefLocal slot` + `Call` (for globals, first… see note below) |
+| `x?` | `Dup`; `IsErr`; `JumpIfTrue L_err`; `UnwrapOk`; `Jump L_cont`; `L_err: UnwrapErr`; `Return`; `L_cont:` (`BYTECODE.md` §6.7) |
+| owned operands of comparisons / print | `CloneLocal`/`CloneGlobal` first (D3 read-only use) |
+| choose (Result scrutinee) | `Dup`; `IsErr`; `JumpIfTrue L_err`; `UnwrapOk`; `StoreLocal v`; arm body; … (`BYTECODE.md` §6.8) |
 
-> **ref 实参指向全局**：`MakeRefLocal` 句柄绑定**本帧** `stack_base + slot`，
-> 无法指全局表。实现：全局 ref 实参先把值**复制**到一个临时局部槽
-> （`CloneGlobal` + `StoreLocal`），再 `MakeRefLocal` —— 语义等价（借用是只读的，
-> 调用方在此期间不会写该全局；复制成本可接受）。此取舍记入 U12 文档核对清单。
+> **A ref argument pointing at a global**: the `MakeRefLocal` handle binds to **this frame's**
+> `stack_base + slot` and cannot point at the global table. Implementation: for a global ref
+> argument, first **copy** the value into a temporary local slot (`CloneGlobal` + `StoreLocal`),
+> then `MakeRefLocal` — semantically equivalent (the borrow is read-only and the caller will not
+> write that global in the meantime; the copy cost is acceptable). This trade-off is recorded in
+> the U12 doc checklist.
 
-### 测试
-- `tests/parser/`… 不涉及；`lower/tests.rs`：每条降载规则 ≥1 用例，
-  与 `BYTECODE.md` §5.9–5.11 / §6.7–6.8 的形态逐指令比对
-- Span 断言：每条 MIR 指令的 span 覆盖对应源码区间
+### Tests
+- `tests/parser/`… not involved; `lower/tests.rs`: at least 1 case per lowering rule,
+  compared instruction-by-instruction against the shapes in `BYTECODE.md` §5.9–5.11 / §6.7–6.8
+- Span assertions: each MIR instruction's span covers the corresponding source range
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler lower
 ```
 
 ---
 
-## U07: Codegen / Verify — 字节码 v2
+## U07: Codegen / Verify — Bytecode v2
 
-> **状态**：已完成（2026-10-10）。规范勘误与实现说明见本节末尾。
+> **Status**: complete (2026-10-10). Spec corrections and implementation notes are at the end of this section.
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/codegen/
-├── bytecode.rs      # Opcode 新增 + Module.version + V2_OPCODE_BASE
-├── encoder.rs       # 编码 + span_map 生成（EncodedFunc）
-├── flnc.rs          # version 接受 {1, 2}
+├── bytecode.rs      # Opcode additions + Module.version + V2_OPCODE_BASE
+├── encoder.rs       # encoding + span_map generation (EncodedFunc)
+├── flnc.rs          # version accepts {1, 2}
 └── tests.rs
 
 fleen-verify/src/
-├── verify.rs        # 新指令校验规则 + 版本门 + slot/gid 校验
-├── stack_analysis.rs # Δdepth 表（经 stack_effect 提供）
+├── verify.rs        # new instruction validation rules + version gate + slot/gid validation
+├── stack_analysis.rs # Δdepth table (provided via stack_effect)
 └── tests.rs
 
-# 票面外但必须同步改动（否则编译不过 / e2e 全红）：
-fleen-vm/src/vm.rs          # `Opcode` match 加通配分支；版本门放开 {1, 2}
-fleen-compiler/src/lexer/token.rs  # Span::SYNTHETIC（span_map 契约）
+# Changes outside the ticket scope but required in lockstep (otherwise it won't compile / all e2e go red):
+fleen-vm/src/vm.rs          # add a wildcard arm to the `Opcode` match; widen the version gate to {1, 2}
+fleen-compiler/src/lexer/token.rs  # Span::SYNTHETIC (span_map contract)
 ```
 
-### Opcode（bytecode.rs，与 `BYTECODE.md` §5.9–5.11 逐字节一致）
+### Opcode (bytecode.rs, byte-for-byte identical to `BYTECODE.md` §5.9–5.11)
 ```rust
 // 0x80–0x83 box / ref
 AllocBox      = 0x80,
@@ -595,119 +620,134 @@ IsErr         = 0xA2,
 UnwrapOk      = 0xA3,
 UnwrapErr     = 0xA4,
 ```
-- 操作数宽度：`MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` =
-  u16（指令 3 字节）；其余 1 字节
-- `Module.version` 写 `2`（`codegen::MODULE_VERSION`）；`flnc::from_bytes` 接受
-  `{1, 2}`（v1 旧文件可读），`to_bytes` 原样写 `m.version`
-- 导出 `V2_OPCODE_BASE = 0x80`：v1 编号全部小于它、v2 全部不小于它，
-  verify 用它做版本门
+- Operand widths: `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal` =
+  u16 (3-byte instruction); the rest are 1 byte
+- `Module.version` written as `2` (`codegen::MODULE_VERSION`); `flnc::from_bytes` accepts
+  `{1, 2}` (old v1 files remain readable), `to_bytes` writes `m.version` as-is
+- Export `V2_OPCODE_BASE = 0x80`: all v1 numbers are below it and all v2 numbers at or above it;
+  verify uses it as the version gate
 
-### span_map 生成（encoder.rs）
-- `encode_func` 返回 `EncodedFunc { code, span_map }`（不再只回字节）；
-  第二遍发射时顺序记录 `(code.len(), span)`，offset 天然精确
-- **契约**（写入 BYTECODE.md §2）：只覆盖 MIR 指令；terminator 无 span 不产生条目；
-  合成胶水指令用 `Span::SYNTHETIC` 不产生条目；builtin 占位体 span_map 恒空；
-  `offset == VM 出错时的 frame.ip`；查不到 offset = 无源码位置（消费方退化）
-- `emit_instr` 返回实际写入字节数并 `debug_assert_eq!` 其等于
-  `Opcode::instr_len()`——防止 operand 表与发射代码漂移（漂移会静默错位
-  jump 偏移与 span_map 偏移）
-- 0.0.1 产物的 `span_map` 恒为空——序列化格式不变，仅从"留空"变"填充"
+### span_map generation (encoder.rs)
+- `encode_func` returns `EncodedFunc { code, span_map }` (no longer just bytes);
+  during the second emission pass it records `(code.len(), span)` in order, so offsets are
+  naturally exact
+- **Contract** (written into BYTECODE.md §2): covers only MIR instructions; a terminator without
+  a span produces no entry; synthetic glue instructions use `Span::SYNTHETIC` and produce no
+  entry; builtin placeholder bodies always have an empty span_map;
+  `offset == frame.ip at the moment of the VM error`; a miss means no source position
+  (consumers degrade gracefully)
+- `emit_instr` returns the number of bytes actually written and `debug_assert_eq!`s it against
+  `Opcode::instr_len()` — preventing drift between the operand table and the emitted code
+  (drift would silently misalign jump offsets and span_map offsets)
+- For 0.0.1 artifacts the `span_map` is always empty — the serialization format is unchanged;
+  it just goes from "left empty" to "filled in"
 
 ### verify.rs / stack_analysis.rs
-- `stack_effect()` 增补（`BYTECODE.md` §8 表，已勘误 `AllocBox`）：
-  - `AllocBox`：**Δ0**（`v → b`），min 1
-  - `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal`：Δ+1，min 0
-  - `DerefBox` / `DupDeep`：Δ+1，min 1
-  - `StoreDerefBox`：Δ−2，min 2
-  - `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` / `ToStr`：Δ0，min 1
-- slot 校验：`MakeRefLocal` / `MoveLocal` / `CloneLocal` 的 slot < `locals`
-  （与 `LoadLocal` 同规则）；`CloneGlobal` 的 gid < globals 表长
-- 版本门：v2 指令出现在 version=1 模块 → **显式** `V2OpcodeInV1Module`
-  （一次比较）；version=2 模块走全量同一套校验
+- `stack_effect()` additions (the `BYTECODE.md` §8 table, `AllocBox` already corrected):
+  - `AllocBox`: **Δ0** (`v → b`), min 1
+  - `MakeRefLocal` / `MoveLocal` / `CloneLocal` / `CloneGlobal`: Δ+1, min 0
+  - `DerefBox` / `DupDeep`: Δ+1, min 1
+  - `StoreDerefBox`: Δ−2, min 2
+  - `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` / `ToStr`: Δ0, min 1
+- Slot validation: slots of `MakeRefLocal` / `MoveLocal` / `CloneLocal` must be < `locals`
+  (same rule as `LoadLocal`); `CloneGlobal`'s gid must be < the globals table length
+- Version gate: a v2 instruction in a version=1 module → **explicit** `V2OpcodeInV1Module`
+  (one comparison); version=2 modules go through the same full set of checks
 
-### 测试
-- codegen：13 条 v2 指令的编号/宽度逐一断言（含 `from_byte` 往返、预留位未知）、
-  u16 操作数小端往返、jump 偏移按 3 字节指令宽推进、span_map 五条
-  （真实 span 入表/合成 span 跳过/terminator 无条目/builtin 空表/`__init__`
-  只留初始化器 span）、flnc `{1,2}` 往返
-- verify：每个新指令的合法/畸形模块（栈不匹配、slot 越界、gid 越界）、
-  v1 模块回归、v2-in-v1 拒绝、**编译产物必须过 verify 的全链 smoke**
-  （覆盖 move/clone/box/deref/ref 实参/`?`/Result-choose/`as` 全部降载路径）
-- 兼容：v1 模块（memory 形态）verify PASS；二进制 fixture 属 U11
+### Tests
+- codegen: assert the numbering/width of all 13 v2 instructions one by one (including `from_byte`
+  round-trips, unknown reserved slots), u16 operand little-endian round-trips, jump offsets
+  advancing by the 3-byte instruction width, the five span_map cases
+  (real span recorded / synthetic span skipped / no entry for terminators / empty table for
+  builtins / `__init__` keeps only the initializer span), flnc `{1,2}` round-trip
+- verify: valid/malformed modules for each new instruction (stack mismatch, slot out of bounds,
+  gid out of bounds), v1 module regression, v2-in-v1 rejection, and a **full-chain smoke requiring
+  compiler output to pass verify**
+  (covering all lowering paths: move/clone/box/deref/ref arguments/`?`/Result-choose/`as`)
+- Compatibility: a v1 module (in-memory form) verify PASSes; binary fixtures belong to U11
 
-### 实现说明（U07 落地时发现，均为规范勘误或接缝修正）
-1. **`AllocBox` 栈效果勘误**：PLAN §5.2 / BYTECODE.md §8 原表把 `AllocBox` 与
-   `DupDeep` 同行写成 `+1`，但降载 `<e>; AllocBox` 要求它**替换**栈顶值（净 0）。
-   Lower 的深度表本来就是 0；verify 按 `+1` 会让 `box e` 之后所有深度多算 1。
-   由"编译产物必须过 verify"全链测试发现，已按 `v → b` 修正并双向勘误文档。
-2. **版本门不是"自然成立"**：`from_byte` 注册 0x80–0xA4 后，v1 模块里的这些字节
-   也能解码，`BadOpcode` 不会触发。要规则成立必须显式比较，已实现为
-   `V2OpcodeInV1Module`。
-3. **票面外的 VM 改动不可避免**：`Opcode` 新增 13 个变体后，`fleen-vm/src/vm.rs`
-   的 `match opcode` 无通配分支会**编译失败**；且 `run()` 的 `version != 1` 门
-   会让一切新编译的 v2 模块拒绝执行（e2e 全红）。最小修复：加
-   `_ => Err(RuntimeError::InvalidOpcode(op))` 通配分支 + 版本门放开 `{1,2}`，
-   v2 指令的**执行**留给 U09（届时表现为 `invalid opcode 0x91` 之类的硬错误，
-   而非静默no-op）。
-4. **span_map offset 契约**：VM `step()` 只在成功路径末尾回写 `frame.ip`，
-   出错时 `ip` 仍指向失败指令首字节。故契约为"`offset == 出错时的 `frame.ip`"，
-   U10 按此查表（原稿写的 `frame.ip - 1` 已更正，本条与 U10 设计一致）。
- 5. **审查发现：verify 对空函数体 panic（0.0.1 既有）**：`walk_function` 对
-    零长 `code` 直接通过（没有指令，也就没有"掉出函数底"的指令可报），随后
-    `stack_analysis` 以空指令表从 pc 0 起步，`by_pc[0]` 越界 panic。
-    `fleen-verify` CLI 与 `fleen-vm` 的 `.flnc` 路径都会崩（exit 101）。
-    已修：`walk_function` 新增 `EmptyFunctionBody` 校验（空体即无 `Return`，
-    正是 §8"每条路径以 Return 结束"的违例），`analyze` 的索引改 `.get()`
-    兜底。回归用例：`empty_function_body_is_rejected`（内存构造）与
-    `empty_function_body_from_bytes_is_rejected`（`.flnc` 解码全链）。
- 6. **审查发现：`flnc::from_bytes` 对不可信长度预分配 → OOM abort（0.0.1 既有）**：
-    四个表长度字段（constants/functions/span_map/globals）直接来自文件，
-    原来 `Vec::with_capacity(n)` 在"数据是否足够"校验之前执行；
-    `n = 0xFFFFFFFF` 时分配失败直接 abort（≈51–275 GB），违反
-    "畸形输入永不 panic"（SPEC §4/§11，e2e 已有 corrupt-bytecode 契约）。
-    已修：`R::capacity_hint(count, min_elem)` 按剩余字节数钳制容量
-    （有效文件预分配粒度不变，超大长度降级为截断错误）。
-    回归用例：`flnc_rejects_oversized_table_lengths`。
+### Implementation notes (discovered while landing U07; all are spec corrections or seam fixes)
+1. **`AllocBox` stack-effect correction**: the original table in PLAN §5.2 / BYTECODE.md §8 put
+   `AllocBox` on the same row as `DupDeep` with `+1`, but the lowering `<e>; AllocBox` requires it
+   to **replace** the top stack value (net 0).
+   Lower's depth table was already 0; verify applying `+1` would over-count every depth after
+   `box e` by 1.
+   Found by the "compiler output must pass verify" full-chain test; fixed to `v → b` and the docs
+   corrected in both places.
+2. **The version gate is not "naturally fine"**: after `from_byte` registers 0x80–0xA4, those
+   bytes in a v1 module also decode and `BadOpcode` never triggers.
+   Making the rule hold requires an explicit comparison; implemented as `V2OpcodeInV1Module`.
+3. **Out-of-scope VM changes are unavoidable**: after `Opcode` gains 13 variants, the
+   `match opcode` in `fleen-vm/src/vm.rs` **fails to compile** without a wildcard arm; and the
+   `version != 1` gate in `run()` would refuse to execute every newly compiled v2 module (all e2e
+   red). Minimal fix: add the `_ => Err(RuntimeError::InvalidOpcode(op))` wildcard arm + widen
+   the version gate to `{1,2}`; **executing** v2 instructions is left to U09 (until then they
+   surface as hard errors like `invalid opcode 0x91`, not silent no-ops).
+4. **span_map offset contract**: the VM's `step()` only writes back `frame.ip` at the end of the
+   success path; on error, `ip` still points at the first byte of the failing instruction. So the
+   contract is "`offset == `frame.ip` at the time of the error",
+   and U10 looks up the table accordingly (the draft's `frame.ip - 1` was corrected; this item is
+   consistent with U10's design).
+ 5. **Review finding: verify panics on an empty function body (pre-existing in 0.0.1)**:
+    `walk_function` lets a zero-length `code` through directly (no instructions, so there is no
+    "fell off the bottom of the function" instruction to report), then `stack_analysis` starts at
+    pc 0 with an empty instruction table and `by_pc[0]` panics out of bounds.
+    Both the `fleen-verify` CLI and `fleen-vm`'s `.flnc` path crash (exit 101).
+    Fixed: `walk_function` adds an `EmptyFunctionBody` check (an empty body means no `Return`,
+    exactly the §8 "every path ends with Return" violation), and `analyze`'s indexing falls back
+    to `.get()`. Regression cases: `empty_function_body_is_rejected` (in-memory construction) and
+    `empty_function_body_from_bytes_is_rejected` (full `.flnc` decode chain).
+ 6. **Review finding: `flnc::from_bytes` preallocates on untrusted lengths → OOM abort (pre-existing in 0.0.1)**:
+    the four table length fields (constants/functions/span_map/globals) come straight from the
+    file, and `Vec::with_capacity(n)` ran before the "is there enough data" check;
+    with `n = 0xFFFFFFFF` the allocation fails and aborts outright (≈51–275 GB), violating
+    "malformed input never panics" (SPEC §4/§11; e2e already has a corrupt-bytecode contract).
+    Fixed: `R::capacity_hint(count, min_elem)` clamps capacity to the remaining byte count
+    (valid files keep the same preallocation granularity; oversized lengths degrade to a
+    truncation error).
+    Regression case: `flnc_rejects_oversized_table_lengths`.
 
-### 范围决定：Result-choose 的 guard / `otherwise` 继续延后
-- 现状（U06 as-built + 工作区改动）：`otherwise`、字面量臂、带 guard 的臂在
-  `lower` 层报 `UnsupportedFeature`；穷尽性规则为"guard 臂不计入"。
-- 本票**不实现**：要把 Result-choose 从"Ok/Err 双臂、无兜底块"重构成
-  **通用臂链 + no-match 兜底**（guard 失败必须能落到后续臂），并处理 guard 前的
-  payload 保留（`DupDeep`）。工作量接近半张票且属 lower 形态变更，超出本票
-  codegen/verify 范围。
-- 决策：**延后到 U09 或独立票**；在此之前 lower 保持拒绝，U11 需为
-  "guard / otherwise" 各补一条 invalid 用例锁死该行为。
+### Scope decision: Result-choose guard / `otherwise` deferred further
+- Current state (U06 as-built + working-tree changes): `otherwise`, literal arms, and guarded
+  arms report `UnsupportedFeature` at the `lower` level; the exhaustiveness rule is "guard arms
+  don't count".
+- This ticket **does not implement**: refactoring Result-choose from "Ok/Err two arms, no
+  fallback block" into a **general arm chain + no-match fallback** (a failed guard must be able
+  to fall through to later arms), plus handling payload retention before the guard (`DupDeep`).
+  The workload approaches half a ticket and is a change to the lower shape, outside this
+  ticket's codegen/verify scope.
+- Decision: **defer to U09 or a separate ticket**; until then lower keeps rejecting, and U11 must
+  add one invalid case each for "guard / otherwise" to lock the behavior in.
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-compiler codegen
 cargo test -p fleen-verify
-cargo test   # 0.0.1 全量回归（fib.fln / cast.fln 逐字节不变）
+cargo test   # full 0.0.1 regression (fib.fln / cast.fln byte-for-byte unchanged)
 ```
 
 ---
 
-## U08: VM — Value 所有权表示重构（可与前端并行）
+## U08: VM — Value Ownership Representation Refactor (can run in parallel with the frontend)
 
-### 涉及文件
+### Files involved
 ```
 fleen-vm/src/
-├── value.rs         # Value 枚举重构
-├── vm.rs            # 受 Rc<str> → Box<str> 影响的路径
-├── error.rs         # 预留两个新变体（U09 使用）
+├── value.rs         # Value enum refactor
+├── vm.rs            # paths affected by Rc<str> → Box<str>
+├── error.rs         # reserve two new variants (used by U09)
 └── tests.rs
 ```
 
-### Value 重构（`BYTECODE.md` §3.2 v0.0.2）
+### Value refactor (`BYTECODE.md` §3.2 v0.0.2)
 ```rust
 pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(Box<str>),                 // ← 由 Rc<str> 改为独占所有权
+    Str(Box<str>),                 // ← changed from Rc<str> to exclusive ownership
     Boxed(Box<Value>),             // box<T>
-    Ref { base: u32, slot: u16 },  // 借用句柄（U09 使用）
+    Ref { base: u32, slot: u16 },  // borrow handle (used by U09)
     Ok(Box<Value>),                // Result
     Err(Box<Value>),
     Unit,
@@ -715,21 +755,23 @@ pub enum Value {
 }
 ```
 
-### 实现要求
-- 移除 `use std::rc::Rc`；`Display` 补齐：`Boxed` 打印点内值、`Ref` 打印
-  `<ref>`、`Ok/Err` 打印 `Ok(v)` / `Err(e)`
-- `Clone` / `PartialEq` derive 保持：`Box<Value>` 自动深拷贝/按结构比较
-  （`Eq` 指令语义：`Str` 按内容、`Boxed` 比点内值、`Ref` 解引用——解引用逻辑
-  在 U09 的指令分派里做，本票只保证 derive 行为不破坏 v1 指令）
-- **v1 语义零变化**：0.0.1 的全部 36 条 opcode 在 `Box<str>` 下行为与 `Rc<str>`
-  可观测等价（字符串不可变、无别名逃逸路径）；全部 0.0.1 VM 测试原样通过
-- `error.rs` 预留：
+### Implementation requirements
+- Remove `use std::rc::Rc`; complete `Display`: `Boxed` prints the inner value, `Ref` prints
+  `<ref>`, `Ok/Err` print `Ok(v)` / `Err(e)`
+- Keep the `Clone` / `PartialEq` derives: `Box<Value>` deep-copies/compares structurally
+  automatically (`Eq` instruction semantics: `Str` by content, `Boxed` by inner value, `Ref` by
+  dereference — the dereference logic happens in U09's instruction dispatch; this ticket only
+  guarantees the derive behavior doesn't break v1 instructions)
+- **Zero v1 semantic change**: all 36 of 0.0.1's opcodes behave observably identically under
+  `Box<str>` as under `Rc<str>` (strings are immutable and no aliasing escape path exists); all
+  0.0.1 VM tests pass unchanged
+- Reserve in `error.rs`:
   ```rust
-  ResultMismatch,      // UnwrapOk 遇 Err（防御）
-  BorrowOutOfRange,    // 句柄 base+slot 越界（防御）
+  ResultMismatch,      // UnwrapOk hit an Err (defensive)
+  BorrowOutOfRange,    // handle base+slot out of bounds (defensive)
   ```
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-vm
 grep -rn "Rc<" src/ | wc -l   # = 0
@@ -737,57 +779,57 @@ grep -rn "Rc<" src/ | wc -l   # = 0
 
 ---
 
-## U09: VM — 新指令执行与入口 Err
+## U09: VM — New Instruction Execution and Entry Err
 
-> **U07 遗留（本票必须处理）**：`Opcode` 现有 13 个 v2 变体只被编码、尚未执行——
-> `vm.rs` 对它们返回 `RuntimeError::InvalidOpcode`。本票把该通配分支替换为
-> 真实实现。已知受影响路径：**owned 局部/全局变量作 `print` 实参**（D3 只读使用 →
-> `CloneLocal` / `CloneGlobal`），例如 verify 全链 smoke 源码里的 `print(u)`
-> （`u = clone t` 之后的 owned 局部）；
-> U07 之后这类程序报 `invalid opcode 0x92` 属预期，不是 U07 回归。
-> 另有 `move` 尾表达式（`MoveLocal` 0x91）、box/deref、`?` 等同样待实现。
+> **Left over from U07 (this ticket must handle it)**: `Opcode` currently has 13 v2 variants that
+> are only encoded, not yet executed — `vm.rs` returns `RuntimeError::InvalidOpcode` for them.
+> This ticket replaces that wildcard arm with real implementations. Known affected paths:
+> **owned local/global variables as `print` arguments** (D3 read-only use →
+> `CloneLocal` / `CloneGlobal`), for example `print(u)` in the verify full-chain smoke source
+> (an owned local after `u = clone t`);
+> after U07 such programs reporting `invalid opcode 0x92` is expected, not an U07 regression.
+> Also pending implementation: `move` tail expressions (`MoveLocal` 0x91), box/deref, `?`, etc.
 
-### 涉及文件
+### Files involved
 ```
 fleen-vm/src/
-├── vm.rs            # step() 分派扩展 + 句柄解引用 helper
-├── error.rs         # ResultMismatch / BorrowOutOfRange 正式启用
-├── main.rs          # 入口 Err → stderr + 退出码 1
+├── vm.rs            # step() dispatch extension + handle dereference helper
+├── error.rs         # ResultMismatch / BorrowOutOfRange go live
+├── main.rs          # entry Err → stderr + exit code 1
 └── tests.rs
 ```
 
-> **实施备注（U09 实际范围超出上表）**：集成中发现两处 U06/U07 的 lower 缺陷，
-> 不修则本票验收（多参 `print`、借用/owned 实参、`deref` 写）跑不通，已随本票
-> 修复并记入 BYTECODE.md §5.7/§5.9"U09 修正"：
-> ① 变参内置函数按观察到的参数个数各实例化一个 `MirFunc`（`Call` 弹恰好
-> `callee.params` 个操作数，共享 `params == 1` 实例会让多余实参残留在栈上）；
-> ② 局部 box 的 `deref b = v` 改发 `v; AllocBox; StoreLocal b`（`LoadLocal`
-> 深拷贝使 `StoreDerefBox` 的写永远落不回槽内 box）。
+> **Implementation note (U09's actual scope exceeded the table above)**: during integration two
+> lower defects in U06/U07 were found; without fixing them this ticket's acceptance (multi-arg
+> `print`, borrow/owned arguments, `deref` writes) could not run, so they were fixed with this
+> ticket and recorded in BYTECODE.md §5.7/§5.9 "U09 corrections":
+> (1) variadic builtins are instantiated as one `MirFunc` per observed argument count (`Call`
+> pops exactly `callee.params` operands; sharing a `params == 1` instance would leave surplus
+> arguments on the stack);
+> (2) `deref b = v` on a local box now emits `v; AllocBox; StoreLocal b` (`LoadLocal` deep-copies,
+> so `StoreDerefBox`'s write never landed back into the box in the slot).
 
-### 指令分派（vm.rs `step()`）
+### Instruction dispatch (vm.rs `step()`)
 
-| 指令 | 实现 |
+| Instruction | Implementation |
 |------|------|
 | `AllocBox` | `let v = pop(); push(Value::Boxed(Box::new(v)))` |
-| `DerefBox` | `let b = peek()`；`push(inner.clone())`——`b` 为 `Ref` 时先解句柄（见下） |
-| `StoreDerefBox` | `let v = pop(); let b = pop()`；`*inner = v`（旧值由赋值 Drop 释放） |
-| `MakeRefLocal` | 目标槽已持有 `Ref` → 原样再压一份（转发借用；实施修正：判槽内容
-  而非栈顶——多 `ref` 实参时栈顶是先前备好的实参）；否则压
-  `Value::Ref { base: frame.stack_base, slot }` |
-| `DupDeep` | `let v = peek().clone(); push(v)`（`Box<Value>` 自动深拷贝） |
+| `DerefBox` | `let b = peek()`; `push(inner.clone())` — when `b` is a `Ref`, resolve the handle first (see below) |
+| `StoreDerefBox` | `let v = pop(); let b = pop()`; `*inner = v` (the old value is released by the assignment's Drop) |
+| `MakeRefLocal` | If the target slot already holds a `Ref` → push another copy as-is (borrow forwarding; implementation fix: check the slot's contents, not the stack top — with multiple `ref` arguments the stack top holds an earlier prepared argument); otherwise push `Value::Ref { base: frame.stack_base, slot }` |
+| `DupDeep` | `let v = peek().clone(); push(v)` (`Box<Value>` deep-copies automatically) |
 | `MoveLocal` | `let v = std::mem::replace(&mut stack[base+slot], Value::Unit); push(v)` |
-| `CloneLocal` | `push(stack[base+slot].clone())`；值为 `Ref` 时深拷贝**句柄目标** |
-| `CloneGlobal` | `push(globals[id].clone())`——**不解句柄**（实施修正：typeck 禁止
-  `Ref` 入全局，兜底在消费点，见 BYTECODE.md §5.10） |
-| `PackOk` / `PackErr` | `pop` 后包 `Ok/Err` 压回 |
+| `CloneLocal` | `push(stack[base+slot].clone())`; when the value is a `Ref`, deep-copy the **handle target** |
+| `CloneGlobal` | `push(globals[id].clone())` — **does not resolve handles** (implementation fix: typeck forbids `Ref` entering globals; the fallback is at the consumption point, see BYTECODE.md §5.10) |
+| `PackOk` / `PackErr` | `pop`, wrap in `Ok/Err`, push back |
 | `IsErr` | `pop r; push(Bool(matches!(r, Err(_))))` |
-| `UnwrapOk` | `pop r`；`Ok(v) → push(v)`；`Err → RuntimeError::ResultMismatch`（防御） |
-| `UnwrapErr` | 对称 |
+| `UnwrapOk` | `pop r`; `Ok(v) → push(v)`; `Err → RuntimeError::ResultMismatch` (defensive) |
+| `UnwrapErr` | Symmetric |
 
-### 句柄解引用（统一 helper）
+### Handle dereference (unified helper)
 ```rust
-/// 只读解引用：Ref → 指向的槽位值；Boxed → 自身；其余 → 自身。
-/// 句柄只允许指向"当前调用链更下方"（base 更小）的帧内槽位。
+/// Read-only dereference: Ref → the slot value it points to; Boxed → itself; anything else → itself.
+/// A handle may only point at a slot in a frame "further down the current call chain" (smaller base).
 fn read_ref(&self, v: &Value) -> Result<&Value, RuntimeError> {
     match v {
         Value::Ref { base, slot } => self.stack.get(*base + *slot as usize)
@@ -796,59 +838,62 @@ fn read_ref(&self, v: &Value) -> Result<&Value, RuntimeError> {
     }
 }
 ```
-- 使用点：`Eq`/`Ne`（两侧）、序比较（两侧）、`exec_builtin`（print 实参）、
-  `CloneLocal`/`DupDeep`/`DerefBox` 的源值——消费 `Ref` 的指令必须先解引用
-  （`CloneGlobal` 例外，见上表）
-- **纪律**：`Ref` 不得出现在 `Boxed` / `Ok` / `Err` 内部（typeck 保证）；
-  违反即在运行时防御性返回 `BorrowOutOfRange`（U09 实施时由 `debug_assert!`
-  升级为无条件检查：`fleen-verify` 对栈上值没有类型视图，release 构建同样
-  需要兜底）
+- Use sites: `Eq`/`Ne` (both sides), ordering comparisons (both sides), `exec_builtin` (print
+  arguments), and the source values of `CloneLocal`/`DupDeep`/`DerefBox` — instructions consuming
+  a `Ref` must dereference first (`CloneGlobal` is the exception, see the table above)
+- **Discipline**: a `Ref` may not appear inside `Boxed` / `Ok` / `Err` (guaranteed by typeck);
+  on violation, defensively return `BorrowOutOfRange` at runtime (during U09 implementation this
+  was upgraded from `debug_assert!` to an unconditional check: `fleen-verify` has no type view of
+  stack values, so release builds need the fallback too)
 
-### Drop 语义核对（无新代码，须验证）
-- 帧销毁：`Return` 后 `stack.truncate(stack_base)` —— Rust 对被截断元素逐个
-  `Drop`，owned 值（`Str`/`Boxed`/`Ok`/`Err`）确定性释放 ✓
-- 槽位覆盖：`StoreLocal`/`StoreGlobal` 索引赋值释放旧值 ✓
-- `Pop` 丢弃语句值：`Vec::pop` Drop ✓
-- 单测：clone 后改写点内值互不影响；move 后原槽为 `Unit`；嵌套 box 深释放
-  （实施备注：VM 无分配计数手段，"深释放"以嵌套深拷贝用例 +
-  `Return` 后 `truncate` 的逐元素 `Drop` 语义作依据，未做直接观察）
+### Drop semantics verification (no new code, must be verified)
+- Frame destruction: after `Return`, `stack.truncate(stack_base)` — Rust `Drop`s the truncated
+  elements one by one, so owned values (`Str`/`Boxed`/`Ok`/`Err`) are released deterministically ✓
+- Slot overwrite: indexed assignment via `StoreLocal`/`StoreGlobal` releases the old value ✓
+- `Pop` discards a statement value: `Vec::pop` Drops ✓
+- Unit tests: after cloning, rewriting the inner value does not affect the other; after a move
+  the original slot is `Unit`; deep release of nested boxes
+  (implementation note: the VM has no allocation-counting mechanism, so "deep release" is
+  evidenced by a nested deep-copy case plus the per-element `Drop` semantics of `truncate` after
+  `Return`; no direct observation was made)
 
-### 入口 Err（main.rs，D8）
+### Entry Err (main.rs, D8)
 ```rust
 match vm.run() {
     Ok(Value::Err(e)) => { eprintln!("error: {e}"); process::exit(1); }
-    Ok(v) => { /* 现行为不变 */ }
-    Err(e) => { /* 现行为不变（U10 起 e 携带 span） */ }
+    Ok(v) => { /* current behavior unchanged */ }
+    Err(e) => { /* current behavior unchanged (from U10 on, e carries a span) */ }
 }
 ```
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-vm
 ```
 
 ---
 
-## U10: 诊断 — span_map 消费与运行时行列
+## U10: Diagnostics — span_map Consumption and Runtime Line/Column
 
-### 涉及文件
+### Files involved
 ```
 fleen-vm/src/
-├── diag.rs          # 新增：字节偏移 → (line, col)
-├── error.rs         # RuntimeError 携带可选 span
-├── vm.rs            # 出错时查 span_map
-└── main.rs          # .fln 模式打印源码位置；.flnc 模式退化为 函数名+偏移
+├── diag.rs          # new: byte offset → (line, col)
+├── error.rs         # RuntimeError carries an optional span
+├── vm.rs            # on error, look up the span_map
+└── main.rs          # .fln mode prints the source position; .flnc mode degrades to function name + offset
 ```
 
-### 设计
+### Design
 ```rust
 // diag.rs
-/// 源码字节偏移 → (1-based line, 1-based col)；O(n) 单遍扫描，错误路径专用。
+/// Source byte offset → (1-based line, 1-based col); O(n) single-pass scan, error-path only.
 pub fn line_col(source: &str, offset: u32) -> (u32, u32);
 ```
-- `RuntimeError` 增加 `span: Option<(u32, u32)>`：出错时按 `frame.ip` 查
-  当前函数 `span_map`（`offset` 单调，二分或线性），构造 `(start, end)`
-- CLI 输出（`.fln` 一站式模式持有源码）：
+- `RuntimeError` gains `span: Option<(u32, u32)>`: on error, look up the current function's
+  `span_map` by `frame.ip` (`offset` is monotonic; binary search or linear), constructing
+  `(start, end)`
+- CLI output (the `.fln` one-stop mode holds the source):
   ```console
   runtime error: division by zero
     --> crash.fln:5:9
@@ -856,76 +901,80 @@ pub fn line_col(source: &str, offset: u32) -> (u32, u32);
    5 |     q = a / b;
      |         ^^^^^
   ```
-- `.flnc` 直接执行：无源码，退化为 `runtime error: … (in `div`, pc 0x12)`
-- **退出码契约不变**（0 成功 / 1 错误 / 2 用法·IO）
+- Running `.flnc` directly: no source, so degrade to `runtime error: … (in `div`, pc 0x12)`
+- **Exit-code contract unchanged** (0 success / 1 error / 2 usage·IO)
 
-### 测试
-- 除零 / 溢出 / 深递归错误的 span 正确性（行列各 ≥1 用例）
-- span_map 为空（v1 模块）时不打印位置、不 panic
-- stderr 快照进 e2e invalid 用例（`.stderr` 关键字）
+### Tests
+- Span correctness for divide-by-zero / overflow / deep-recursion errors (at least 1 case each
+  for line and column)
+- With an empty span_map (v1 module): no position printed, no panic
+- stderr snapshots in e2e invalid cases (`.stderr` keywords)
 
-### 实现说明（U10 落地时发现）
-1. **`RuntimeError` 由 enum 改为 struct**：票面"`RuntimeError` 增加
-   `span: Option<(u32, u32)>`"落地为 `RuntimeError { kind, span, func, pc }`：
-   原枚举更名 `RuntimeErrorKind`（全部变体与文案不变），`func`/`pc` 是
-   `.flnc` 退化输出 `(in `func`, pc 0x..)` 所必需（CLI 在 `Vm::new(module)`
-   后已不持有模块，无法自行取名/取 pc）。`Display` 只输出消息，位置渲染
-   归 CLI；`From<RuntimeErrorKind>` 兜底裸构造。
-2. **span 在 `run()` 出口单一收口**：VM 各内部函数统一返回
-   `RuntimeErrorKind`，`run_inner` 的错误经 `locate_error` 一次性附加位置。
-   依据 U07 契约（`step` 只在成功路径回写 `frame.ip`）：栈顶帧即出错帧；
-   `call` 路径错误（深度超限、builtin）发生在新帧 push 之前，位置自然落在
-   调用点。测试锁定：深递归的 span = 最深递归调用点。
-3. **已知限制：二元表达式的 span 只含左操作数**：AST 二元变体
-   （`Add`/`Div`/…共 13 个）自身无 span，`Expr::span()` 委托 lhs
-   （`parser/ast.rs`），因此 `a / b` 的除零 caret 指向 `a` 而非整个
-   `a / b`（票面样例画的是全表达式）。修复需给二元变体加 span 字段并
-   贯穿 parser/typeck/lower，属编译器侧独立改动，不并入 U10；已有测试
-   锁定现状，扩宽时属有意变更。
-4. **CRLF 列数**：lexer 把 `\r` 当空白（`\r\n` 折叠为一个换行，
-   ASI.md §2），`line_col`/caret 渲染对 `\r` 不计列，与 token span 的
-   字节偏移保持一致。
+### Implementation notes (discovered while landing U10)
+1. **`RuntimeError` changed from enum to struct**: the ticket's "`RuntimeError` gains
+   `span: Option<(u32, u32)>`" landed as `RuntimeError { kind, span, func, pc }`:
+   the original enum was renamed `RuntimeErrorKind` (all variants and messages unchanged), and
+   `func`/`pc` are required for the `.flnc` degraded output `(in `func`, pc 0x..)` (after
+   `Vm::new(module)` the CLI no longer holds the module, so it cannot look up the name/pc itself).
+   `Display` only outputs the message; position rendering belongs to the CLI;
+   `From<RuntimeErrorKind>` covers bare construction.
+2. **The span is attached at a single exit in `run()`**: the VM's internal functions uniformly
+   return `RuntimeErrorKind`, and errors from `run_inner` get their position attached once via
+   `locate_error`. Per the U07 contract (`step` only writes back `frame.ip` on the success path):
+   the top frame is the failing frame; errors on the `call` path (depth exceeded, builtin) happen
+   before the new frame is pushed, so the position naturally lands on the call site. A test locks
+   this in: a deep recursion's span = the deepest recursive call site.
+3. **Known limitation: a binary expression's span covers only the left operand**: the AST binary
+   variants (`Add`/`Div`/… 13 of them) carry no span of their own and `Expr::span()` delegates to
+   the lhs (`parser/ast.rs`), so the divide-by-zero caret for `a / b` points at `a` rather than
+   the whole `a / b` (the ticket's example drew the full expression). Fixing it requires adding a
+   span field to the binary variants and threading it through parser/typeck/lower — an
+   independent compiler-side change, not folded into U10; existing tests lock in the current
+   behavior, and widening it later is an intentional change.
+4. **CRLF column counts**: the lexer treats `\r` as whitespace (`\r\n` collapses into one newline,
+   ASI.md §2), so `line_col`/caret rendering doesn't count `\r` as a column, consistent with the
+   byte offsets of token spans.
 
-### 验收
+### Acceptance
 ```
 cargo test -p fleen-vm
-cargo fln tests/e2e/invalid/e2e_div_zero.fln   # 手工核对输出格式
+cargo fln tests/e2e/invalid/e2e_div_zero.fln   # manually verify the output format
 ```
 
 ---
 
-## U11: 测试 — 矩阵、E2E 与 v1 兼容夹具
+## U11: Testing — Matrix, E2E, and v1 Compatibility Fixtures
 
-### 文件驱动测试（各阶段 valid/invalid，对照 PLAN §8.1）
+### File-driven tests (valid/invalid per phase, per PLAN §8.1)
 ```
-tests/lexer/{valid,invalid}/        # U01 新 token
-tests/parser/{valid,invalid}/       # U02 新语法 + U03 ASI 陷阱表
+tests/lexer/{valid,invalid}/        # U01 new tokens
+tests/parser/{valid,invalid}/       # U02 new syntax + U03 ASI pitfall table
 tests/resolver/{valid,invalid}/     # U05 RefNotAllowedHere
-tests/typeck/{valid,invalid}/       # U04 + U05 全部错误 kind
-tests/e2e/{valid,invalid}/          # 见下
+tests/typeck/{valid,invalid}/       # all error kinds from U04 + U05
+tests/e2e/{valid,invalid}/          # see below
 ```
 
-### E2E 新增
+### New E2E cases
 ```
 tests/e2e/valid/
-├── fib.fln              # 0.0.1 回归：原样通过（显式分号风格）
-├── fib_asi.fln          # 同程序、无分号：输出与 fib.expected 逐字节一致
-├── ownership.fln        # move/clone/条件转移
-├── box_demo.fln         # 分配/读写/clone 独立性/嵌套 box
-├── ref_demo.fln         # 借用传参，原变量仍可用
-├── cast.fln             # as 转换 + print(x as string)（U13/F6）
-└── question.fln         # Ok/Err/?/choose-Result 全链路
+├── fib.fln              # 0.0.1 regression: passes as-is (explicit-semicolon style)
+├── fib_asi.fln          # same program, no semicolons: output byte-for-byte identical to fib.expected
+├── ownership.fln        # move/clone/conditional transfer
+├── box_demo.fln         # allocation/read-write/clone independence/nested boxes
+├── ref_demo.fln         # pass-by-borrow; the original variable remains usable
+├── cast.fln             # as casts + print(x as string) (U13/F6)
+└── question.fln         # Ok/Err/?/choose-Result full chain
 
 tests/e2e/invalid/
-├── use_after_move.fln       # .exit=1 + .stderr 关键字（编译错误）
+├── use_after_move.fln       # .exit=1 + .stderr keyword (compile error)
 ├── owned_assign_without_move.fln
 ├── unhandled_result.fln
 ├── question_in_int_main.fln
 ├── print_func_value.fln
-└── ref_out_of_param.fln     # ref 局部变量
+└── ref_out_of_param.fln     # ref local variable
 ```
 
-**question.fln**（端到端基准程序，兼作文档示例）：
+**question.fln** (the end-to-end benchmark program, doubling as a doc example):
 ```fleen
 func div(a: int, b: int): Result<int, string> {
     if b == 0 { Err("division by zero") } else { Ok(a / b) }
@@ -948,37 +997,39 @@ func main(): int {
     0
 }
 ```
-`question.expected`：`5`
+`question.expected`: `5`
 
-### v1 兼容夹具
-- `tests/fixtures/v1/fib.flnc`：用 **0.0.1 工具链**（当前未动代码前）编译
-  `fib.fln` 产出并提交为二进制 fixture
-- 测试：`fleen-verify` PASS + `fleen-vm` 执行输出 == `fib.expected`
-  —— 锁死"v2 不破坏 v1"的承诺（`BYTECODE.md` §10）
-- 归属：`fleen-vm/tests/v1_compat.rs`（新集成测试文件）
+### v1 compatibility fixture
+- `tests/fixtures/v1/fib.flnc`: compile `fib.fln` with the **0.0.1 toolchain** (before the
+  current code changes) and commit the result as a binary fixture
+- Test: `fleen-verify` PASSes + `fleen-vm` execution output == `fib.expected`
+  — locking in the promise that "v2 does not break v1" (`BYTECODE.md` §10)
+- Home: `fleen-vm/tests/v1_compat.rs` (new integration test file)
 
-### 实现说明（U11 落地时发现）
-1. **v1 夹具必须用 v0.0.1 版的 `fib.fln` 编译**：现行 `fib.fln` 用了
-   `as string`（U13 语法），0.0.1 工具链无法编译。夹具源码取自
-   `git show v0.0.1:tests/e2e/valid/fib.fln`（`print(fib(x))` 形态，当时
-   print 收任意标量）；其输出与现行 `fib.expected` 逐字节一致（运行时
-   标量经 `fmt_scalar` 回退渲染）。生成方式：`git worktree` 检出
-   `v0.0.1` tag 构建 release 编译器，编译后立即移除 worktree。
-2. **二进制夹具保护**：新增根 `.gitattributes`
-   （`tests/fixtures/v1/*.flnc binary`），防止 autocrlf 等文本化改写
-   字节码。
-3. **`box_demo` 的嵌套读法受 place 限制**：`deref` 的操作数必须是
-   box 类型的局部变量（与 `ownership_deref_invalid_operand` 一致），
-   `deref deref nested` 被拒；嵌套 box 的观察走 `clone deref outer`
-   （点内 box 的深拷贝）。夹具按此设计，非缺陷。
-4. **`question_in_int_main` 产生两个错误**：`?` 不在 Result 函数 +
-   `q` 未定义（`?` 被拒后绑定未建立）；`.stderr` needle 只锚定第一条。
+### Implementation notes (discovered while landing U11)
+1. **The v1 fixture must be compiled from the v0.0.1 version of `fib.fln`**: the current
+   `fib.fln` uses `as string` (U13 syntax), which the 0.0.1 toolchain cannot compile. The fixture
+   source is taken from `git show v0.0.1:tests/e2e/valid/fib.fln` (the `print(fib(x))` form; at
+   the time print accepted any scalar); its output is byte-for-byte identical to the current
+   `fib.expected` (runtime scalars are rendered via the `fmt_scalar` fallback). Method: check out
+   the `v0.0.1` tag with `git worktree`, build a release compiler, then remove the worktree
+   immediately after compiling.
+2. **Binary fixture protection**: added a root `.gitattributes`
+   (`tests/fixtures/v1/*.flnc binary`) to prevent autocrlf and other text-normalization from
+   rewriting the bytecode.
+3. **`box_demo`'s nested reads are place-limited**: `deref`'s operand must be a local variable of
+   box type (consistent with `ownership_deref_invalid_operand`), so `deref deref nested` is
+   rejected; nested boxes are observed via `clone deref outer` (a deep copy of the inner box).
+   The fixture is designed this way; not a defect.
+4. **`question_in_int_main` produces two errors**: `?` outside a Result function +
+   `q` undefined (after `?` is rejected the binding is never established); the `.stderr` needle
+   only anchors on the first one.
 
-### 回归底线
-- `cargo test` 全绿，且 0.0.1 的 321 个测试**零语义改动**（仅 mechanical
-  调整允许，如 MirInstr 包装的构造处）
+### Regression floor
+- `cargo test` all green, with 0.0.1's 321 tests **zero semantic change** (only mechanical
+  adjustments allowed, e.g. construction sites of the MirInstr wrapper)
 
-### 验收
+### Acceptance
 ```
 cargo test
 cargo fln tests/e2e/valid/question.fln
@@ -986,31 +1037,34 @@ cargo fln tests/e2e/valid/question.fln
 
 ---
 
-## U12: 收尾 — 文档核对、版本与发布
+## U12: Wrap-up — Doc Verification, Version, and Release
 
-### 文档核对（规划期已同步，实现后核对差异）
-- [x] `DESIGN.md` §10.3 补录 `deref` 赋值目标的"仅局部 box"限制（U05 发现）
-- [x] `DESIGN.md` §10.4 补录"全局 ref 实参经临时槽复制"的取舍（U06 发现；
-  已对照 `lower/mod.rs` 全局 ref 实参 `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` 核实）
-- [x] `DESIGN.md` §18 已知 Hack 节**清空**（print 已修；于 U07 审查时提前完成）
-- [x] `DESIGN.md` 补"类型转换 `as`（0.0.2 临时，泛型后重审）"小节与 print 仅 string 的临时性说明（U13/F6；§9 已在）
-- [x] `docs/0.0.2/ASI.md` §4 续接集补 `As`（U13；已在）
-- [x] `BYTECODE.md` 校对 v2 指令表与最终 opcode/编码一致
-  （U12 核对修正三处：§5.9 `deref b = v` 序列补尾随 `Unit`；
-  §6.7/§6.8 owned Result 示例 `Dup` → `DupDeep`）
-- [x] `SPEC.md` §14 快速参考补 `?` 示例（如实现形态有出入；
-  U12 补 Result/`?`/`as` 示例与优先级表 `as` 行）
-- [x] 新增错误信息样例与实际输出比对（`UseAfterMove` 等）
+### Doc verification (synced during planning; verify the diffs after implementation)
+- [x] `DESIGN.md` §10.3 records the "local box only" limitation of `deref` assignment targets
+  (found by U05)
+- [x] `DESIGN.md` §10.4 records the trade-off of "global ref arguments copied via a temporary
+  slot" (found by U06;
+  verified against `lower/mod.rs`'s global ref argument `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp`)
+- [x] `DESIGN.md` §18 known-hacks section **emptied** (print is fixed; done early during the U07 review)
+- [x] `DESIGN.md` adds the "type cast `as` (0.0.2 temporary, revisit after generics)" subsection
+  and the note that print is string-only as a temporary measure (U13/F6; §9 already in place)
+- [x] `docs/0.0.2/ASI.md` §4 continuation set gains `As` (U13; already in place)
+- [x] `BYTECODE.md` proofread so the v2 instruction table matches the final opcodes/encoding
+  (three U12 verification fixes: §5.9's `deref b = v` sequence gains a trailing `Unit`;
+  §6.7/§6.8's owned Result examples `Dup` → `DupDeep`)
+- [x] `SPEC.md` §14 quick reference gains the `?` example (if the implemented form differs;
+  U12 added Result/`?`/`as` examples and the `as` row of the precedence table)
+- [x] New error message samples compared against actual output (`UseAfterMove` etc.)
 
-### 版本与发布
-- [ ] 三个 crate `Cargo.toml` 版本 → `0.0.2`
-- [ ] `CHANGELOG.md`：`0.0.2 — 未发布（规划）` 改为正式条目
-  （日期、去掉"规划"标注、补实现期间发现的行为细节）
-- [ ] `README.md` 版本行更新（`0.0.2`，可考虑代号——0.0.1 是 Swift Fox 🦊）
-- [ ] `cargo doc --no-deps` 无警告；公开 API（`fleen_vm::Value` 等）文档补齐
-- [ ] CI 四件套全绿后打 tag、出 release 压缩包（沿用 0.0.1 流程）
+### Version and release
+- [ ] Bump the three crates' `Cargo.toml` versions → `0.0.2`
+- [ ] `CHANGELOG.md`: change `0.0.2 — Unreleased (planned)` into a proper entry
+  (date, drop the "planned" marker, add behavioral details discovered during implementation)
+- [ ] `README.md` version line update (`0.0.2`, consider a codename — 0.0.1 was Swift Fox 🦊)
+- [ ] `cargo doc --no-deps` with no warnings; complete docs for public APIs (`fleen_vm::Value` etc.)
+- [ ] After the four CI checks are all green, tag and produce release archives (follow the 0.0.1 process)
 
-### 验收
+### Acceptance
 ```
 cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo test && cargo doc --no-deps
@@ -1018,73 +1072,80 @@ cargo test && cargo doc --no-deps
 
 ---
 
-## U13: 全链 — `as` 类型转换（0.0.2 临时特性，F8）
+## U13: Full Chain — `as` Type Cast (0.0.2 Temporary Feature, F8)
 
-> **实现顺序**：插在 U04 之前——print 修复（严格 string 检查，PLAN §6）依赖本票，
-> 非 string 实参的报错 help 与配套用例都需要 `as string`（PLAN §3.6 / §6）。
-> **临时性**：0.0.2 白名单仅"标量 → string"，为 print 修复的最小配套；
-> 完整转换矩阵与 From-like 机制随泛型（0.1.0）再议，此定位写入 DESIGN.md。
+> **Implementation order**: inserted before U04 — the print fix (strict string check, PLAN §6)
+> depends on this ticket; the non-string argument error help and companion cases both need
+> `as string` (PLAN §3.6 / §6).
+> **Temporariness**: 0.0.2's whitelist is only "scalar → string", the minimal companion to the
+> print fix; the full conversion matrix and a From-like mechanism will be revisited with
+> generics (0.1.0), and this positioning is written into DESIGN.md.
 
-### 涉及文件
+### Files involved
 ```
 fleen-compiler/src/
-├── lexer/token.rs        # TokenKind::As（"as" 成为保留字，Breaking）
+├── lexer/token.rs        # TokenKind::As ("as" becomes a reserved word, Breaking)
 ├── lexer/lexer_impl.rs   # "as" => As + is_keyword/keyword_str/Display
 ├── parser/ast.rs         # Expr::Cast(Box<Expr>, Type, Span)
-├── parser/expr.rs        # cast 层（unary 与二元之间）
-├── parser/asi.rs         # can_continue_expr 补 As（跨行续接）
+├── parser/expr.rs        # cast layer (between unary and binary)
+├── parser/asi.rs         # can_continue_expr gains As (cross-line continuation)
 ├── parser/tests.rs
-├── typeck/infer.rs       # 白名单检查 + UnsupportedCast
+├── typeck/infer.rs       # whitelist check + UnsupportedCast
 ├── lower/                # MirInstrKind::ToStr
-└── codegen/              # Opcode 0xA5 ToStr（1 字节）；span_map 照常携带
+└── codegen/              # Opcode 0xA5 ToStr (1 byte); span_map carried as usual
 
-fleen-verify/src/stack_analysis.rs   # ToStr：Δ0，min 1
+fleen-verify/src/stack_analysis.rs   # ToStr: Δ0, min 1
 fleen-vm/src/
-├── fmt.rs               # 新：标量格式化 helper（print 与 ToStr 共用）
-└── vm.rs                # ToStr 执行
+├── fmt.rs               # new: scalar formatting helper (shared by print and ToStr)
+└── vm.rs                # ToStr execution
 ```
 
-### 语法与优先级（与 `SYNTAX.ebnf` v0.0.2 对齐）
+### Syntax and precedence (aligned with `SYNTAX.ebnf` v0.0.2)
 ```text
-cast:  unary { "as" type }        ← 新层；unary 比 as 紧，as 比二元紧（同 Rust）
+cast:  unary { "as" type }        ← new layer; unary binds tighter than as, as tighter than binary (like Rust)
 ```
-- `deref b as string` = `(deref b) as string`；`1 + 2 as string` = `1 + (2 as string)`；
-  `box 1 as string` = `box (1 as string)`（前缀关键字绑定更紧）
-- ASI：`As` 加入 `can_continue_expr`——`x = 42` ⏎ `as string` 跨行续接，
-  与二元运算符同规则；同步 `ASI.md` §4 续接集一行
-- `as` 后必须是类型，走既有类型解析；`42 as`（缺类型）为 parse 错误
+- `deref b as string` = `(deref b) as string`; `1 + 2 as string` = `1 + (2 as string)`;
+  `box 1 as string` = `box (1 as string)` (the prefix keyword binds tighter)
+- ASI: `As` joins `can_continue_expr` — `x = 42` ⏎ `as string` continues across lines,
+  same rule as binary operators; sync the §4 continuation-set line in `ASI.md`
+- `as` must be followed by a type, parsed with the existing type parser; `42 as` (missing type)
+  is a parse error
 
-### typeck 白名单（仅此三条，其余全拒）
-| 表达式 | 结果 |
+### typeck whitelist (only these three; everything else rejected)
+| Expression | Result |
 |--------|------|
-| `int as string` | 十进制（含负号） |
-| `float as string` | 与 print 的 float 输出一致 |
+| `int as string` | Decimal (including the minus sign) |
+| `float as string` | Identical to print's float output |
 | `bool as string` | `"true"` / `"false"` |
 
-- 其余一切（`string as string`、`int as float`、`box<T> as …`、`ref T` 操作数、
-  恒等转换）→ `UnsupportedCast { from, to }`，
-  help：0.0.2 仅支持标量到 string 的转换，完整转换随泛型版本提供
-- 结果是**新鲜 owned string**：消费位置无需 `move` / `clone`（与"RHS 是新值"一致）
-- 格式化 helper 提取到 `fleen-vm/src/fmt.rs`，print 与 `ToStr` 共用，避免两处漂移
+- Everything else (`string as string`, `int as float`, `box<T> as …`, `ref T` operands,
+  identity casts) → `UnsupportedCast { from, to }`,
+  help: 0.0.2 only supports scalar-to-string casts; the full set arrives with the generics release
+- The result is a **fresh owned string**: consumption sites need no `move` / `clone` (consistent
+  with "the RHS is a new value")
+- The formatting helper is extracted into `fleen-vm/src/fmt.rs`, shared by print and `ToStr`, to
+  avoid drift between the two
 
-### 降载 / 字节码 / VM
-| 构造 | MIR / 字节码 |
+### Lowering / Bytecode / VM
+| Construct | MIR / bytecode |
 |------|--------------|
-| `e as string` | `<e>`; `ToStr`（0xA5，1 字节，`v → s`，Δ0 min 1） |
+| `e as string` | `<e>`; `ToStr` (0xA5, 1 byte, `v → s`, Δ0 min 1) |
 
-- VM 执行：pop 标量 → `fmt` 格式化 → 压 `Value::Str`（新鲜 owned 值）
-- `as` 不引入任何隐式数值转换（0.0.2 无 `int as float`）
+- VM execution: pop the scalar → format via `fmt` → push `Value::Str` (a fresh owned value)
+- `as` introduces no implicit numeric conversions (0.0.2 has no `int as float`)
 
-### 测试
-- lexer：`as` token；`as` 作绑定名（`as = 1;`）进 `tests/parser/invalid/`（保留字）
-- parser valid：优先级三条（上）、`f(x) as string`、ASI 跨行续接（`x = 42` ⏎ `as string`）；
-  invalid：`42 as`（缺类型）
-- typeck valid：白名单三条 ×（绑定 / 实参 / print 就地）；
-  invalid：`1 as float`、`s as string`、`b as string`、`42 as int`（恒等）
-- verify：`ToStr` 栈深分析；vm：三条格式化输出单测（负数、浮点与 print 输出一致）
-- e2e：`tests/e2e/valid/cast.fln`（`as` + `print(x as string)` 全链路）
+### Tests
+- lexer: the `as` token; `as` as a binding name (`as = 1;`) goes into `tests/parser/invalid/`
+  (reserved word)
+- parser valid: the three precedence cases (above), `f(x) as string`, ASI cross-line continuation
+  (`x = 42` ⏎ `as string`); invalid: `42 as` (missing type)
+- typeck valid: the three whitelist entries × (binding / argument / print in place);
+  invalid: `1 as float`, `s as string`, `b as string`, `42 as int` (identity)
+- verify: `ToStr` stack-depth analysis; vm: three formatting-output unit tests (negative numbers,
+  floats matching print's output)
+- e2e: `tests/e2e/valid/cast.fln` (`as` + `print(x as string)` full chain)
 
-### 验收
+### Acceptance
 ```
 cargo test
 cargo fln tests/e2e/valid/cast.fln
@@ -1092,35 +1153,37 @@ cargo fln tests/e2e/valid/cast.fln
 
 ---
 
-## 依赖关系与并行化
+## Dependencies and Parallelization
 
 ```
 U01 (Lex)
   ↓
-U02 (Parse) ──→ U03 (ASI)                    # U03 只依赖 U02，与 U04/U05 并行
+U02 (Parse) ──→ U03 (ASI)                    # U03 only depends on U02, parallel with U04/U05
   ↓
-U13 (as 转换) → U04 (Typeck-签名) ──→ U05 (Typeck-所有权)
+U13 (as cast) → U04 (Typeck-signatures) ──→ U05 (Typeck-ownership)
                      ↓                    ↓
 U06 (MIR+Span) ←────────┘
   ↓
-U07 (Codegen/Verify)                          # U08 全程独立，可最先启动
+U07 (Codegen/Verify)                          # U08 is fully independent, can start first
   ↓                    ┌─────────────┐
-U09 (VM-执行) ←──── U08 (VM-Value)           # U08 完成即可并入了
+U09 (VM-execution) ←──── U08 (VM-Value)           # once U08 is done it can merge in
   ↓                    └─────────────┘
-U10 (诊断) ←── U07                            # 只依赖 span_map 生成
+U10 (diagnostics) ←── U07                            # only depends on span_map generation
   ↓
-U11 (测试) ←── U09 + U10
+U11 (testing) ←── U09 + U10
   ↓
-U12 (收尾)
+U12 (wrap-up)
 ```
 
-- **单人串行建议顺序**：U08 → U01 → U02 → U03 → U13 → U04 → U05 → U06 → U07 → U09 → U10 → U11 → U12
-  （先还 `Rc<str>` 债，VM 基础就绪后前端一路推进；U13 在 U04 之前——print 修复依赖 `as`）
-- **双人并行**：A 走前端 U01–U07，B 走 U08 → 与 A 会合于 U09，B 顺做 U10
+- **Suggested serial order for a solo developer**: U08 → U01 → U02 → U03 → U13 → U04 → U05 → U06 → U07 → U09 → U10 → U11 → U12
+  (pay the `Rc<str>` debt first, then push the frontend straight through once the VM foundation is
+  ready; U13 before U04 — the print fix depends on `as`)
+- **Two developers in parallel**: A takes the frontend U01–U07, B takes U08 → meets A at U09, and
+  B then does U10
 
 ---
 
-## 质量闸（每票必须过）
+## Quality Gates (every ticket must pass)
 
 ```bash
 cargo fmt -- --check
@@ -1129,35 +1192,40 @@ cargo test
 cargo doc --no-deps
 ```
 
-- 禁止事项照旧（SPEC §11）：无 `unwrap()`/`expect()`、无 `Rc`/`RefCell`
-  （`Value::Boxed(Box<Value>)` 用 `Box`，不回退 `Rc`）、错误带 Span
-- **每票合并前跑 0.0.1 全量回归**——`fib.fln` E2E 输出逐字节不变是硬闸
+- The prohibited list still applies (SPEC §11): no `unwrap()`/`expect()`, no `Rc`/`RefCell`
+  (`Value::Boxed(Box<Value>)` uses `Box`, no fallback to `Rc`), errors carry Spans
+- **Run the full 0.0.1 regression before merging every ticket** — `fib.fln` E2E output staying
+  byte-for-byte unchanged is a hard gate
 
 ---
 
-## 里程碑
+## Milestones
 
-| 里程碑 | 票号 | 标志 |
+| Milestone | Tickets | Marker |
 |--------|------|------|
-| M1 前端 | U01–U03 | 新语法可解析；ASI 陷阱用例全绿；0.0.1 回归零变化 |
-| M2 语义 | U13, U04–U05 | `as` 白名单 + Ok/Err/`?`/print 检查完备；所有权检查器 invalid 用例全绿 |
-| M3 后端与运行时 | U06–U09 | `question.fln` / `box_demo.fln` / `ref_demo.fln` 端到端跑通；v1 fixture 通过 |
-| M4 诊断与发布 | U10–U12 | 运行时错误带行列；文档核对完毕；0.0.2 发布 |
+| M1 frontend | U01–U03 | New syntax parses; all ASI pitfall cases green; 0.0.1 regression unchanged |
+| M2 semantics | U13, U04–U05 | `as` whitelist + Ok/Err/`?`/print checks complete; ownership checker invalid cases all green |
+| M3 backend and runtime | U06–U09 | `question.fln` / `box_demo.fln` / `ref_demo.fln` run end-to-end; v1 fixture passes |
+| M4 diagnostics and release | U10–U12 | Runtime errors carry line/column; doc verification complete; 0.0.2 released |
 
 ---
 
-## 备注
+## Notes
 
-- **0.0.2 仍不实现**：`struct` / `for` / 迭代器（0.0.3）、闭包、trait / 运算符重载 /
-  泛型（0.1.0）、用户自定义 `Drop`、`ref` 局部/全局/返回值、借用 box 内部、
-  `addr` / `ptr` / `unsafe`（0.0.5）、错误类型转换（`E` 须完全相等）、
-  完整 `as` 转换矩阵（`int as float` 等；0.0.2 仅标量 → string，泛型后再扩）
-- **决策冻结**：D1–D8 见 `PLAN.md` §2。实现中如需推翻某决策，先改 PLAN 与
-  规范文档，再动代码——不允许代码偏离文档
-- **Breaking 变更清单**（CHANGELOG ⚠️ 小节的实现对照）：
-  owned 赋值需 `move`/`clone`；`move`/`clone`/`deref`/`as` 成为保留字；
-  `print` 非 string 实参（含 `print(1)`、`print(函数值)`）改为编译错误，help: `as string`
-- **v1 兼容承诺**：`.flnc` v1 模块在 0.0.2 verify/VM 上可执行（U07/U11 锁定）；
-  0.0.1 源程序除 Breaking 清单三条外全部原样编译
-- **print 函数**：仍内置于 VM 宿主（`is_builtin` 机制不变）；新增的只是 typeck
-  侧的 `builtins.rs` 签名表
+- **0.0.2 still does not implement**: `struct` / `for` / iterators (0.0.3), closures, trait /
+  operator overloading / generics (0.1.0), user-defined `Drop`, `ref` locals/globals/returns,
+  borrowing into the interior of a box, `addr` / `ptr` / `unsafe` (0.0.5), error type conversions
+  (`E` must be exactly equal), the full `as` conversion matrix (`int as float` etc.; 0.0.2 only
+  scalar → string, extended after generics)
+- **Decisions frozen**: D1–D8, see `PLAN.md` §2. If an implementation needs to overturn a
+  decision, change PLAN and the spec docs first, then the code — code deviating from docs is not
+  allowed
+- **Breaking change list** (the implementation counterpart of the CHANGELOG ⚠️ section):
+  owned assignment requires `move`/`clone`; `move`/`clone`/`deref`/`as` become reserved words;
+  non-string `print` arguments (including `print(1)`, `print(function value)`) become compile
+  errors, help: `as string`
+- **v1 compatibility promise**: `.flnc` v1 modules remain executable on the 0.0.2 verify/VM
+  (locked by U07/U11); 0.0.1 source programs compile as-is except for the three items on the
+  Breaking list
+- **The print function**: still hosted in the VM (the `is_builtin` mechanism is unchanged); the
+  only addition is typeck's `builtins.rs` signature table

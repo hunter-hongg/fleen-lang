@@ -785,9 +785,13 @@ impl<'a> FnBodyCx<'a> {
             }
             TypedExprHir::If(e) => self.lower_if(fb, e)?,
             TypedExprHir::While(e) => {
-                // 独立头块：回边必须只重入"重新求条件"，而不是当前合并块。
-                // 否则首次进入（栈上有上文的汇合值）与回边进入（循环携带深度）
-                // 栈深不一致，verify 会（理应）报 StackDepthMismatch。
+                // Dedicated head block: the back edge must re-enter only
+                // "re-evaluate the condition", not the current merge block.
+                // Otherwise the first entry (carrying the merge value of the
+                // surrounding context on the stack) and a back-edge entry
+                // (carrying the loop-carried depth) would disagree on stack
+                // depth, and the verifier would (rightly) report
+                // StackDepthMismatch.
                 let head = fb.new_block();
                 fb.jump(head);
                 fb.start(head);

@@ -69,7 +69,7 @@ impl std::error::Error for CompileError {}
 /// # Errors
 /// [`CompileError`] describing which stage failed and why.
 ///
-/// # 示例
+/// # Example
 /// ```
 /// let module = fleen_compiler::compile("func main(): int = 42").unwrap();
 /// assert_eq!(module.version, 2);
