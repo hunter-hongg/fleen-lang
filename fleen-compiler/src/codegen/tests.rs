@@ -1,10 +1,11 @@
 use super::*;
 use crate::lexer::Span;
 use crate::lower::mir::*;
+use crate::source_map::FileId;
 use crate::typeck::typed_hir::Type;
 
 fn instr(kind: MirInstrKind) -> MirInstr {
-    MirInstr::new(kind, Span::new(0, 0))
+    MirInstr::new(kind, Span::new(FileId(0), 0, 0))
 }
 
 fn main_func(blocks: Vec<MirBlock>) -> MirFunc {
@@ -830,10 +831,10 @@ fn v2_slot_operands_round_trip_le_u16() {
         vec![MirBlock {
             id: BlockId(0),
             instrs: vec![
-                MirInstr::new(MirInstrKind::CloneGlobal(2), Span::new(0, 1)),
-                MirInstr::new(MirInstrKind::MoveLocal(1), Span::new(0, 1)),
-                MirInstr::new(MirInstrKind::CloneLocal(0), Span::new(0, 1)),
-                MirInstr::new(MirInstrKind::MakeRefLocal(1), Span::new(0, 1)),
+                MirInstr::new(MirInstrKind::CloneGlobal(2), Span::new(FileId(0), 0, 1)),
+                MirInstr::new(MirInstrKind::MoveLocal(1), Span::new(FileId(0), 0, 1)),
+                MirInstr::new(MirInstrKind::CloneLocal(0), Span::new(FileId(0), 0, 1)),
+                MirInstr::new(MirInstrKind::MakeRefLocal(1), Span::new(FileId(0), 0, 1)),
             ],
             terminator: Terminator::Return,
         }],
@@ -864,7 +865,10 @@ fn jump_offsets_account_for_v2_instruction_widths() {
         vec![
             MirBlock {
                 id: BlockId(0),
-                instrs: vec![MirInstr::new(MirInstrKind::MoveLocal(0), Span::new(0, 1))],
+                instrs: vec![MirInstr::new(
+                    MirInstrKind::MoveLocal(0),
+                    Span::new(FileId(0), 0, 1),
+                )],
                 terminator: Terminator::JumpIfFalse(BlockId(1)),
             },
             MirBlock {
@@ -895,8 +899,8 @@ fn span_map_records_instruction_offsets_and_real_spans() {
         vec![MirBlock {
             id: BlockId(0),
             instrs: vec![
-                MirInstr::new(MirInstrKind::ConstInt(7), Span::new(0, 7)),
-                MirInstr::new(MirInstrKind::MoveLocal(0), Span::new(10, 20)),
+                MirInstr::new(MirInstrKind::ConstInt(7), Span::new(FileId(0), 0, 7)),
+                MirInstr::new(MirInstrKind::MoveLocal(0), Span::new(FileId(0), 10, 20)),
             ],
             terminator: Terminator::Return,
         }],
@@ -926,7 +930,7 @@ fn span_map_skips_synthetic_spans() {
         id: BlockId(0),
         instrs: vec![
             MirInstr::new(MirInstrKind::Unit, Span::SYNTHETIC),
-            MirInstr::new(MirInstrKind::ConstInt(1), Span::new(3, 9)),
+            MirInstr::new(MirInstrKind::ConstInt(1), Span::new(FileId(0), 3, 9)),
             MirInstr::new(MirInstrKind::Pop, Span::SYNTHETIC),
         ],
         terminator: Terminator::Return,
@@ -965,7 +969,10 @@ fn builtin_span_map_stays_empty() {
     };
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(0, 1))],
+        instrs: vec![MirInstr::new(
+            MirInstrKind::Unit,
+            Span::new(FileId(0), 0, 1),
+        )],
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
@@ -986,9 +993,9 @@ fn init_func_span_map_keeps_initializer_spans_only() {
     // A global initialized with `2 + 3` keeps the initializer's spans; the
     // synthesized `StoreGlobal` / `Call main` glue is synthetic and absent.
     let init = vec![
-        MirInstr::new(MirInstrKind::ConstInt(2), Span::new(0, 1)),
-        MirInstr::new(MirInstrKind::ConstInt(3), Span::new(4, 5)),
-        MirInstr::new(MirInstrKind::IAdd, Span::new(0, 5)),
+        MirInstr::new(MirInstrKind::ConstInt(2), Span::new(FileId(0), 0, 1)),
+        MirInstr::new(MirInstrKind::ConstInt(3), Span::new(FileId(0), 4, 5)),
+        MirInstr::new(MirInstrKind::IAdd, Span::new(FileId(0), 0, 5)),
     ];
     let g = MirGlobal {
         global_id: GlobalId(0),
@@ -999,7 +1006,10 @@ fn init_func_span_map_keeps_initializer_spans_only() {
     };
     let main = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(20, 25))],
+        instrs: vec![MirInstr::new(
+            MirInstrKind::Unit,
+            Span::new(FileId(0), 20, 25),
+        )],
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {
@@ -1025,7 +1035,10 @@ fn init_func_span_map_keeps_initializer_spans_only() {
 fn span_map_survives_flnc_round_trip() {
     let f = main_func(vec![MirBlock {
         id: BlockId(0),
-        instrs: vec![MirInstr::new(MirInstrKind::ConstInt(7), Span::new(2, 6))],
+        instrs: vec![MirInstr::new(
+            MirInstrKind::ConstInt(7),
+            Span::new(FileId(0), 2, 6),
+        )],
         terminator: Terminator::Return,
     }]);
     let module = codegen(Mir {

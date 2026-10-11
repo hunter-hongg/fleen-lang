@@ -4,6 +4,7 @@ use super::mir::*;
 use crate::lexer::tokenize;
 use crate::parser::parse;
 use crate::resolver::resolve;
+use crate::source_map::FileId;
 use crate::typeck::typeck;
 
 fn lower_src(source: &str) -> Mir {
@@ -1283,7 +1284,7 @@ fn u06_global_box_deref_assign_is_rejected() {
     let kind = super::LowerErrorKind::GlobalBoxDerefAssign {
         name: "global#0".to_string(),
     };
-    let msg = super::LowerError::new(kind, crate::lexer::Span::new(0, 5)).to_string();
+    let msg = super::LowerError::new(kind, crate::lexer::Span::new(FileId(0), 0, 5)).to_string();
     assert!(
         msg.contains("global#0"),
         "message should name the global: {msg}"

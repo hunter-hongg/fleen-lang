@@ -90,8 +90,17 @@ fn render_location(file: &str, source: &str, span: (u32, u32)) -> String {
     let text = text.trim_end_matches('\r');
     let num = line.to_string();
     let bar = " ".repeat(num.len() + 2);
-    let caret_end = (span.1 as usize).min(source.len());
-    let carets = source[span.0 as usize..caret_end]
+    // Caret run: clamp/floor the span ends exactly like `locate` floors its
+    // offset, so an out-of-range or mid-char span renders (worst case one
+    // caret) instead of panicking — diagnostics render best-effort. Must
+    // stay in lockstep with `fleen_compiler`'s `SourceMap::render_location`
+    // (pinned by `compiler_source_map_and_vm_diag_agree` below).
+    let mut start = (span.0 as usize).min(source.len());
+    while start > 0 && !source.is_char_boundary(start) {
+        start -= 1;
+    }
+    let end = (span.1 as usize).min(source.len()).max(start);
+    let carets = source[start..end]
         .lines()
         .next()
         .unwrap_or("")
@@ -248,5 +257,46 @@ mod tests {
         let src = "x = 1;\n";
         let out = render_runtime_error(Path::new("c.fln"), Some(src), &div_err(Some((100, 102))));
         assert_eq!(out, "runtime error: division by zero (in `main`, pc 0x10)");
+    }
+
+    #[test]
+    fn compiler_source_map_and_vm_diag_agree() {
+        // The locate/render logic is deliberately duplicated: the compiler's
+        // `SourceMap` serves multi-file compile-time diagnostics, the VM's
+        // `diag` serves single-file runtime ones (0.0.3 V01). Two copies can
+        // drift silently, so every offset of a tricky-source corpus must
+        // produce identical line/column, line text, and rendered blocks.
+        // V05 wires the VM to the SourceMap; until then this test is the pin.
+        use fleen_compiler::SourceMap;
+        use fleen_compiler::lexer::Span;
+
+        let sources = [
+            "",
+            "x = 1;",
+            "x = 1;\nq = a / b;\n",
+            "héllo\r\nx",
+            "\tindented\tx",
+            "q = a /\nb;",
+            "\n\nz = 3;",
+        ];
+        for src in sources {
+            let mut sm = SourceMap::new();
+            let f = sm.add_file("c.fln", src);
+            for offset in 0..=src.len() as u32 {
+                assert_eq!(
+                    sm.line_col(f, offset),
+                    line_col(src, offset),
+                    "line/col drift in {src:?} at offset {offset}"
+                );
+                let (_, _, sm_text) = sm.locate(f, offset);
+                let (_, _, vm_text) = locate(src, offset);
+                assert_eq!(sm_text, vm_text, "line-text drift in {src:?} at {offset}");
+            }
+            for span in [(0, 1), (4, 9), (0, src.len() as u32)] {
+                let from_map = sm.render_location(Span::new(f, span.0, span.1));
+                let from_vm = super::render_location("c.fln", src, span);
+                assert_eq!(from_map, from_vm, "render drift in {src:?} at {span:?}");
+            }
+        }
     }
 }

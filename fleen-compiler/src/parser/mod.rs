@@ -13,6 +13,7 @@ pub mod tests_mod;
 pub use error::{ParseError, ParseErrorKind};
 
 use crate::lexer::{Span, Token};
+use crate::source_map::FileId;
 use ast::{Ast, Expr};
 
 /// Keywords that cannot be used as identifiers.
@@ -74,13 +75,28 @@ pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
 /// Recursive descent parser with precedence climbing for expressions.
 pub struct Parser {
     tokens: Vec<Token>,
+    /// File every token in the stream was lexed from (0.0.3 V01); spans
+    /// built by the parser carry it.
+    file: FileId,
     pos: usize,
 }
 
 impl Parser {
-    /// Create a new parser from a token stream.
+    /// Create a new parser from a token stream. The stream's file id is
+    /// taken from its first token (the lexer always emits at least EOF;
+    /// the fallback only guards hand-built empty streams in tests).
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        let file = tokens.first().map_or(FileId(0), |t| t.span.file);
+        Self {
+            tokens,
+            file,
+            pos: 0,
+        }
+    }
+
+    /// Build a span in the parsed file from raw byte offsets.
+    fn span(&self, start: u32, end: u32) -> Span {
+        Span::new(self.file, start, end)
     }
 
     /// Get a reference to the current token.
@@ -102,7 +118,7 @@ impl Parser {
         if self.pos > 0 {
             self.tokens[self.pos - 1].span
         } else {
-            Span::new(0, 0)
+            self.span(0, 0)
         }
     }
 
@@ -252,7 +268,7 @@ impl Parser {
         if self.tokens.is_empty() || (self.tokens.len() == 1 && self.is_at_end()) {
             return Ok(Ast {
                 items: vec![],
-                span: crate::lexer::Span::new(0, 0),
+                span: self.span(0, 0),
             });
         }
 
@@ -274,7 +290,7 @@ impl Parser {
         let end = self.tokens.last().map(|t| t.span.end).unwrap_or(start);
         Ok(Ast {
             items,
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 
@@ -370,7 +386,7 @@ impl Parser {
         let end = self.prev_span_end();
         Ok(ast::Item::Import(ast::ImportDecl {
             path,
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         }))
     }
 
@@ -404,7 +420,7 @@ impl Parser {
             name,
             ty,
             init: Box::new(init),
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 
@@ -439,7 +455,7 @@ impl Parser {
             name,
             ty,
             init: Box::new(init),
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 
@@ -496,7 +512,7 @@ impl Parser {
             params,
             ret_type,
             body,
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 
@@ -510,7 +526,7 @@ impl Parser {
         Ok(ast::Param {
             name,
             ty,
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 
@@ -730,7 +746,7 @@ impl Parser {
         Ok(ast::Block {
             stmts,
             tail_expr,
-            span: crate::lexer::Span::new(start, end),
+            span: self.span(start, end),
         })
     }
 }

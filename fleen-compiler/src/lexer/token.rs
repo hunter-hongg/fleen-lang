@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::source_map::FileId;
+
 /// A token with its kind and source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -15,32 +17,44 @@ impl Token {
     }
 }
 
-/// Source code span (byte offset range).
+/// Source code span (file id + byte offset range).
+///
+/// 0.0.3 V01: the span carries the file it belongs to
+/// ([`FileId`]), so diagnostics can name their
+/// file once programs span multiple files. The `Display` output stays
+/// `start..end` on purpose — error-message formats are locked byte-for-byte
+/// by the e2e fixtures; file names are resolved through a
+/// [`SourceMap`](crate::source_map::SourceMap) at rendering time, never
+/// inside `Display`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
+    pub file: FileId,
     pub start: u32,
     pub end: u32,
 }
 
 impl Span {
-    pub fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
+    pub fn new(file: FileId, start: u32, end: u32) -> Self {
+        Self { file, start, end }
     }
 
     /// Sentinel span for synthesized code that has no source location
     /// (e.g. the glue instructions codegen builds around a synthesized
-    /// `__init__`).
+    /// `__init__`, builtin declarations).
     ///
     /// `u32::MAX` cannot be a real byte offset in a source file, so this
     /// is distinguishable from every parser-produced span. Consumers that
     /// map positions back to text must skip such spans rather than render
     /// them.
     pub const SYNTHETIC: Span = Span {
+        file: FileId::SYNTHETIC,
         start: u32::MAX,
         end: u32::MAX,
     };
 
-    /// True for [`Span::SYNTHETIC`] — a span with no source location.
+    /// True for [`Span::SYNTHETIC`] — a span with no source location. The
+    /// file field is irrelevant for the check (`u32::MAX` cannot be a real
+    /// byte offset).
     pub fn is_synthetic(&self) -> bool {
         self.start == u32::MAX
     }
@@ -56,6 +70,7 @@ impl Span {
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Deliberately file-less: see the type-level doc comment.
         write!(f, "{}..{}", self.start, self.end)
     }
 }

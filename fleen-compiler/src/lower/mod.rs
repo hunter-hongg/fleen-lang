@@ -174,7 +174,11 @@ impl LowerCtx {
             entry: BlockId(0),
             blocks: vec![MirBlock {
                 id: BlockId(0),
-                instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(0, 0))],
+                instrs: vec![
+                    // Builtin stub bodies have no source location; the encoder skips
+                    // synthetic spans when building the span_map.
+                    MirInstr::new(MirInstrKind::Unit, Span::SYNTHETIC),
+                ],
                 terminator: Terminator::Return,
             }],
             is_builtin: true,
@@ -206,7 +210,11 @@ impl LowerCtx {
                 entry: BlockId(0),
                 blocks: vec![MirBlock {
                     id: BlockId(0),
-                    instrs: vec![MirInstr::new(MirInstrKind::Unit, Span::new(0, 0))],
+                    instrs: vec![
+                        // Builtin stub bodies have no source location; the encoder skips
+                        // synthetic spans when building the span_map.
+                        MirInstr::new(MirInstrKind::Unit, Span::SYNTHETIC),
+                    ],
                     terminator: Terminator::Return,
                 }],
                 is_builtin: true,

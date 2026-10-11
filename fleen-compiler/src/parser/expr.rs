@@ -144,7 +144,7 @@ impl Parser {
         let mut expr = self.parse_unary()?;
         while self.matches(&TokenKind::As) {
             let ty = self.parse_type()?;
-            let span = Span::new(expr.span().start, self.prev_span_end());
+            let span = self.span(expr.span().start, self.prev_span_end());
             expr = Expr::Cast(Box::new(expr), ty, span);
         }
         Ok(expr)
@@ -180,7 +180,7 @@ impl Parser {
         if matches!(self.current_kind(), TokenKind::BoxType) {
             self.advance();
             let operand = self.parse_cast()?;
-            let span = Span::new(span.start, self.prev_span_end());
+            let span = self.span(span.start, self.prev_span_end());
             return Ok(Expr::Box(Box::new(operand), span));
         }
 
@@ -195,7 +195,7 @@ impl Parser {
         let kind = self.current_kind().clone();
         self.advance();
         let operand = self.parse_unary()?;
-        let span = Span::new(span.start, self.prev_span_end());
+        let span = self.span(span.start, self.prev_span_end());
         let expr = match kind {
             TokenKind::Deref => Expr::Deref(Box::new(operand), span),
             TokenKind::Move => Expr::Move(Box::new(operand), span),
@@ -235,7 +235,7 @@ impl Parser {
                 // (`f(x)??` = `(f(x)?)?`)
                 let end = self.prev_span_end();
                 let start = expr.span().start;
-                expr = Expr::Question(Box::new(expr), Span::new(start, end));
+                expr = Expr::Question(Box::new(expr), self.span(start, end));
             } else {
                 break;
             }
@@ -351,7 +351,7 @@ impl Parser {
             then_branch,
             elif_branches,
             else_branch,
-            span: Span::new(start, end),
+            span: self.span(start, end),
         }))
     }
 
@@ -367,7 +367,7 @@ impl Parser {
         Ok(Expr::While(ExprWhile {
             condition,
             body,
-            span: Span::new(start, end),
+            span: self.span(start, end),
         }))
     }
 
@@ -418,7 +418,7 @@ impl Parser {
         Ok(Expr::Choose(ExprChoose {
             scrutinee,
             arms,
-            span: Span::new(start, end),
+            span: self.span(start, end),
         }))
     }
 
@@ -519,7 +519,7 @@ impl Parser {
         Ok(Pattern::ResultCtor {
             ctor,
             binding,
-            span: Span::new(ctor_span.start, end),
+            span: self.span(ctor_span.start, end),
         })
     }
 }

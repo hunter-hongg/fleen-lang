@@ -153,7 +153,7 @@ impl Resolver {
                     mutable: false,
                     builtin: true,
                     ref_param: false,
-                    span: Span::new(0, 0), // builtins have no source span
+                    span: Span::SYNTHETIC, // builtins have no source span
                     hir_id: HirId(0),
                 },
             );
@@ -377,7 +377,7 @@ impl Resolver {
                     stmts: vec![StmtHir::Error],
                     tail_expr: None,
                     hir_id: self.next_hir_id(),
-                    span: Span::new(0, 0),
+                    span: Span::SYNTHETIC,
                 })),
             },
             FuncBody::Block(block) => self
@@ -393,7 +393,7 @@ impl Resolver {
                 stmts: vec![StmtHir::Error],
                 tail_expr: None,
                 hir_id: HirId(0),
-                span: Span::new(0, 0),
+                span: Span::SYNTHETIC,
             }),
         };
         (hir_params, hir_body)
@@ -810,7 +810,7 @@ impl Resolver {
                 binding_id,
                 rhs: Box::new(rhs_hir),
                 hir_id: self.next_hir_id(),
-                span: Span::new(span.start, rhs_span.end),
+                span: Span::new(span.file, span.start, rhs_span.end),
             }),
         }
     }
@@ -918,7 +918,7 @@ impl Resolver {
                             stmts: vec![StmtHir::Error],
                             tail_expr: None,
                             hir_id: HirId(0),
-                            span: Span::new(0, 0),
+                            span: Span::SYNTHETIC,
                         }),
                     });
                 }

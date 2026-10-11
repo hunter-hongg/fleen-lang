@@ -2,9 +2,12 @@
 
 use crate::lexer::error::LexError;
 use crate::lexer::token::{Span, Token, TokenKind};
+use crate::source_map::FileId;
 
 /// Lexer state for tokenizing Fleen source code.
 pub struct Lexer<'a> {
+    /// File every produced span belongs to (0.0.3 V01).
+    file: FileId,
     chars: std::str::Chars<'a>,
     byte_offset: u32,
     char_offset: usize,
@@ -13,12 +16,14 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    /// Create a new lexer for the given source code.
-    pub fn new(source: &'a str) -> Self {
+    /// Create a new lexer for the given source code; all token spans carry
+    /// `file`.
+    pub fn new(file: FileId, source: &'a str) -> Self {
         let mut chars = source.chars();
         let current_char = chars.next();
         let next_char = chars.next();
         Self {
+            file,
             chars,
             byte_offset: 0,
             char_offset: 0,
@@ -46,7 +51,7 @@ impl<'a> Lexer<'a> {
             if saw_newline && !tokens.is_empty() {
                 tokens.push(Token::new(
                     TokenKind::Newline,
-                    Span::new(ws_start, self.byte_offset),
+                    Span::new(self.file, ws_start, self.byte_offset),
                 ));
             }
 
@@ -69,7 +74,7 @@ impl<'a> Lexer<'a> {
         // Add EOF token
         tokens.push(Token::new(
             TokenKind::Eof,
-            Span::new(self.byte_offset, self.byte_offset),
+            Span::new(self.file, self.byte_offset, self.byte_offset),
         ));
 
         if errors.is_empty() {
@@ -145,7 +150,7 @@ impl<'a> Lexer<'a> {
         // Invalid character
         Err(LexError::invalid_char(
             ch,
-            Span::new(start, start + ch.len_utf8() as u32),
+            Span::new(self.file, start, start + ch.len_utf8() as u32),
         ))
     }
 
@@ -156,7 +161,7 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         let end = self.byte_offset;
-        Token::new(kind, Span::new(start, end))
+        Token::new(kind, Span::new(self.file, start, end))
     }
 
     /// Scan a string literal.
@@ -172,7 +177,7 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 return Ok(Token::new(
                     TokenKind::StringLit(value),
-                    Span::new(start, self.byte_offset),
+                    Span::new(self.file, start, self.byte_offset),
                 ));
             }
 
@@ -190,6 +195,7 @@ impl<'a> Lexer<'a> {
                     // \xHH (hex), \uXXXX (unicode)
                     Some(ch) => {
                         let err_span = Span::new(
+                            self.file,
                             self.byte_offset - 1,
                             self.byte_offset + ch.len_utf8() as u32,
                         );
@@ -197,13 +203,13 @@ impl<'a> Lexer<'a> {
                         return Err(LexError::invalid_escape(ch, err_span));
                     }
                     None => {
-                        let err_span = Span::new(self.byte_offset - 1, self.byte_offset);
+                        let err_span = Span::new(self.file, self.byte_offset - 1, self.byte_offset);
                         return Err(LexError::invalid_escape('\0', err_span));
                     }
                 }
             } else if ch == '\n' {
                 // Unterminated string (newline in string not allowed)
-                let err_span = Span::new(start, self.byte_offset);
+                let err_span = Span::new(self.file, start, self.byte_offset);
                 return Err(LexError::unterminated_string(err_span));
             } else {
                 value.push(ch);
@@ -214,6 +220,7 @@ impl<'a> Lexer<'a> {
 
         // EOF reached without closing quote
         Err(LexError::unterminated_string(Span::new(
+            self.file,
             start,
             self.byte_offset,
         )))
@@ -237,7 +244,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let span = Span::new(start, self.byte_offset);
+        let span = Span::new(self.file, start, self.byte_offset);
 
         // Check for invalid number (e.g., just ".")
         if digits.is_empty() {
@@ -273,7 +280,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let span = Span::new(start, self.byte_offset);
+        let span = Span::new(self.file, start, self.byte_offset);
 
         // Check for keywords
         let kind = match ident.as_str() {
@@ -354,7 +361,7 @@ impl<'a> Lexer<'a> {
                     }
                     if !terminated {
                         // Report unterminated comment error
-                        let err_span = Span::new(comment_start, self.byte_offset);
+                        let err_span = Span::new(self.file, comment_start, self.byte_offset);
                         errors.push(LexError::unterminated_comment(err_span));
                     }
                 }
@@ -383,10 +390,18 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Convenience function to tokenize a source string.
-pub fn tokenize(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
-    let mut lexer = Lexer::new(source);
+/// Tokenize `source` under `file`: every produced span carries that id.
+pub fn tokenize_in_file(file: FileId, source: &str) -> Result<Vec<Token>, Vec<LexError>> {
+    let mut lexer = Lexer::new(file, source);
     lexer.tokenize()
+}
+
+/// Convenience function to tokenize a single source string.
+///
+/// Single-file convention (0.0.3 V01): the file is registered as `FileId(0)`,
+/// matching [`crate::compile`].
+pub fn tokenize(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
+    tokenize_in_file(FileId(0), source)
 }
 
 #[cfg(test)]
@@ -717,6 +732,26 @@ func fib(n: int): int {
             errors[0].kind,
             crate::lexer::error::LexErrorKind::UnterminatedComment
         ));
+    }
+
+    #[test]
+    fn spans_carry_the_lexed_file_id() {
+        // Same source, two file ids: offsets identical, file identity
+        // follows the id passed to the lexer (0.0.3 V01).
+        let a = tokenize_in_file(FileId(0), "x = 1;").unwrap();
+        let b = tokenize_in_file(FileId(2), "x = 1;").unwrap();
+        assert_eq!(a.len(), b.len());
+        for (ta, tb) in a.iter().zip(&b) {
+            assert_eq!(ta.span.file, FileId(0));
+            assert_eq!(tb.span.file, FileId(2));
+            assert_eq!((ta.span.start, ta.span.end), (tb.span.start, tb.span.end));
+        }
+    }
+
+    #[test]
+    fn lex_error_span_carries_the_file_id() {
+        let errors = tokenize_in_file(FileId(3), "@").unwrap_err();
+        assert_eq!(errors[0].span.file, FileId(3));
     }
 
     #[test]

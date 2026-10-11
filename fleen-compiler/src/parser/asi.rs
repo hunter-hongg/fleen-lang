@@ -11,6 +11,7 @@
 
 use crate::lexer::{Span, Token, TokenKind};
 use crate::parser::error::{ParseError, ParseErrorKind};
+use crate::source_map::FileId;
 
 /// Whether this token can start a new statement (used at block starts;
 /// includes `(` `-` `!`/`not` `{`).
@@ -145,6 +146,10 @@ enum Boundary {
 ///    (continuation wins);
 /// 6. otherwise → report `ExpectedSemiOrNewStmt`.
 pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError> {
+    // The pass consumes one token stream = one file; inserted `Semi` spans
+    // belong to that file. (Empty streams never reach an insertion point,
+    // so the fallback is purely defensive.)
+    let file = tokens.first().map_or(FileId(0), |t| t.span.file);
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut stack: Vec<OpenBracket> = Vec::new();
     let mut iter = tokens.into_iter().peekable();
@@ -166,7 +171,7 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
                 Boundary::Drop => {}
                 Boundary::InsertSemi => {
                     let end = out.last().map_or(0, |t| t.span.end);
-                    out.push(Token::new(TokenKind::Semi, Span::new(end, end)));
+                    out.push(Token::new(TokenKind::Semi, Span::new(file, end, end)));
                 }
             }
             continue;
@@ -195,7 +200,7 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
                     Boundary::Drop => {}
                     Boundary::InsertSemi => {
                         let end = out.last().map_or(0, |t| t.span.end);
-                        out.push(Token::new(TokenKind::Semi, Span::new(end, end)));
+                        out.push(Token::new(TokenKind::Semi, Span::new(file, end, end)));
                     }
                 }
             }
