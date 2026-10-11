@@ -116,7 +116,7 @@ cargo fln fib.flnc    # 也可以直接运行字节码
 git clone https://github.com/hunter-hongg/fleen-lang.git
 cd fleen-lang
 cargo build --release
-./target/release/fleen-vm examples/hello.fln
+./target/release/fleen-vm examples/0.0.1/hello.fln
 ```
 
 预编译二进制：release 附件提供 linux x86_64 压缩包
