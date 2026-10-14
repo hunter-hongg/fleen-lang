@@ -27,9 +27,9 @@ use crate::lexer::Span;
 use crate::parser::ast::*;
 use error::{ResolveError, ResolveErrorKind};
 use hir::{
-    BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, ExprChooseHir, ExprHir, ExprIfHir,
-    ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir, ParamHir,
-    PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
+    BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, ExprChooseHir, ExprForHir, ExprHir,
+    ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir,
+    ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
 };
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
@@ -51,6 +51,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Array(el) | Type::Box(el) => type_contains_ref(el),
         Type::Result(ok, err) => type_contains_ref(ok) || type_contains_ref(err),
         Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
+        Type::Range => false,
         Type::Base(_) => false,
         Type::Named(_) => false,
     }
@@ -695,6 +696,7 @@ impl Resolver {
             Expr::Assign(lhs, rhs) => self.resolve_assign(*lhs, *rhs)?,
             Expr::If(if_expr) => ExprHir::If(self.resolve_if_expr(if_expr)?),
             Expr::While(while_expr) => ExprHir::While(self.resolve_while_expr(while_expr)?),
+            Expr::For(for_expr) => ExprHir::For(self.resolve_for_expr(for_expr)?),
             Expr::Choose(choose_expr) => ExprHir::Choose(self.resolve_choose_expr(choose_expr)?),
             Expr::Or(lhs, rhs) => {
                 let l = self.resolve_expr(*lhs)?;
@@ -1019,6 +1021,73 @@ impl Resolver {
             body,
             hir_id: self.next_hir_id(),
             span: while_expr.span,
+        })
+    }
+
+    /// Resolve a `for` expression (0.0.3 V04): `for var in iterable { body }`.
+    ///
+    /// The iterable is resolved in the *enclosing* scope (it must not see the
+    /// loop variable). The loop variable is then declared as an immutable
+    /// binding in a fresh loop scope, and the body is resolved within that
+    /// scope so references to `var` resolve to it (DESIGN.md §4.5 loop-scope
+    /// rules apply to assignments inside the body).
+    fn resolve_for_expr(&mut self, for_expr: ExprFor) -> Result<ExprForHir, ()> {
+        let iterable = self.resolve_expr(*for_expr.iterable)?;
+
+        // Enter the loop scope and declare the loop variable before resolving
+        // the body. We resolve the body statements directly here (rather than
+        // via `resolve_block_inner`, which would open its own nested loop
+        // scope) so the single loop scope holds the loop variable.
+        self.scopes.enter_loop_scope();
+        let var_binding_id = self.next_binding_id();
+        let var_hir_id = self.next_hir_id();
+        if let Err(existing) = self.scopes.declare(
+            for_expr.var.clone(),
+            Binding {
+                id: var_binding_id,
+                kind: BindingKind::Variable,
+                mutable: false, // loop variable is immutable (D4)
+                builtin: false,
+                ref_param: false,
+                span: for_expr.span,
+                hir_id: var_hir_id,
+            },
+        ) {
+            self.add_error(
+                ResolveErrorKind::DuplicateBinding {
+                    name: for_expr.var.clone(),
+                    first_span: existing.span,
+                },
+                for_expr.span,
+            );
+        }
+
+        let mut hir_stmts = Vec::new();
+        for stmt in for_expr.body.stmts {
+            hir_stmts.push(match self.resolve_stmt(stmt) {
+                Ok(s) => s,
+                Err(()) => StmtHir::Error,
+            });
+        }
+        let tail_result: Result<Option<Box<ExprHir>>, ()> = match for_expr.body.tail_expr {
+            Some(expr) => self.resolve_expr(*expr).map(|e| Some(Box::new(e))),
+            None => Ok(None),
+        };
+        self.scopes.exit_scope();
+        let body = BlockHir {
+            stmts: hir_stmts,
+            tail_expr: tail_result?,
+            hir_id: self.next_hir_id(),
+            span: for_expr.body.span,
+        };
+
+        Ok(ExprForHir {
+            var: for_expr.var,
+            var_binding_id,
+            iterable: Box::new(iterable),
+            body,
+            hir_id: self.next_hir_id(),
+            span: for_expr.span,
         })
     }
 

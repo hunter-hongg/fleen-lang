@@ -249,6 +249,10 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::ArrGet => Opcode::ArrGet,
         MirInstrKind::ArrSetLocal(..) => Opcode::ArrSetLocal,
         MirInstrKind::ArrSetGlobal(..) => Opcode::ArrSetGlobal,
+        // 0.0.3 V04: range (bytecode v3, 0xB9–0xBB).
+        MirInstrKind::MakeRange => Opcode::MakeRange,
+        MirInstrKind::RangeStart => Opcode::RangeStart,
+        MirInstrKind::RangeEnd => Opcode::RangeEnd,
     })
 }
 

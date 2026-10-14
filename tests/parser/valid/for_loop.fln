@@ -1,0 +1,29 @@
+// 0.0.3 V04: `for x in iterable { body }` over an array, with ASI.
+func sum_all(xs: [int]): int {
+    total = 0
+    for x in xs {
+        total = total + x
+    }
+    total
+}
+
+func main(): int {
+    // Iterable header spanning lines; the body hugs the `{`.
+    for n
+    in [1, 2, 3]
+    { print(n as string) }
+
+    // Nested loops.
+    for i in [0, 1] {
+        for j in [0, 1] {
+            print((i * 2 + j) as string);
+        }
+    }
+
+    // The loop variable is scoped to the body; a new binding of the same
+    // name afterwards is legal (a distinct BindingId).
+    for x in [1] { print(x as string); }
+    x = 99;
+    print(x as string);
+    0
+}

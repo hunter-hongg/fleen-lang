@@ -290,6 +290,8 @@ impl<'a> Lexer<'a> {
             "elif" => TokenKind::Elif,
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
+            "for" => TokenKind::For,
+            "in" => TokenKind::In,
             "choose" => TokenKind::Choose,
             "when" => TokenKind::When,
             "otherwise" => TokenKind::Otherwise,
@@ -467,6 +469,25 @@ mod tests {
         assert_eq!(tokens[8].kind, TokenKind::Otherwise);
         assert_eq!(tokens[9].kind, TokenKind::Import);
         assert_eq!(tokens[10].kind, TokenKind::Struct);
+    }
+
+    #[test]
+    fn tokenize_loop_keywords() {
+        // 0.0.3 V04: `for` / `in` are reserved words (Breaking — they no
+        // longer lex as identifiers).
+        let tokens = tokenize("for x in a").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::For);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("x".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::In);
+        assert_eq!(tokens[3].kind, TokenKind::Ident("a".to_string()));
+        assert_eq!(TokenKind::For.keyword_str(), Some("for"));
+        assert_eq!(TokenKind::In.keyword_str(), Some("in"));
+        // Neither word can be an identifier any more: the lexer classifies
+        // them as keywords, so `for = 1` / `in = 1` fail in the parser, not
+        // by silently reading `for`/`in` as a variable name.
+        let tokens = tokenize("for = 1").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::For);
+        assert_eq!(tokens[1].kind, TokenKind::Assign);
     }
 
     #[test]

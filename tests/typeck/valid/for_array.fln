@@ -1,0 +1,15 @@
+// 0.0.3 V04: `for` over arrays of different element types, including an
+// empty (annotated) array and a nested loop.
+func main(): int {
+    for s in ["a", "b"] { print(s); }
+
+    for f in [1.5, 2.5] { print(f as string); }
+
+    empty: [int] = [];
+    for e in empty { print(e as string); }
+
+    for i in [0, 1] {
+        for j in [0, 1] { print((i + j) as string); }
+    }
+    0
+}

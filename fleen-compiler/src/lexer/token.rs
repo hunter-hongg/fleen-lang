@@ -91,6 +91,10 @@ pub enum TokenKind {
     Else,
     /// `while` keyword
     While,
+    /// `for` keyword (0.0.3 V04: iteration statement)
+    For,
+    /// `in` keyword (0.0.3 V04: `for x in expr` iterable separator)
+    In,
     /// `choose` keyword
     Choose,
     /// `when` keyword
@@ -224,6 +228,8 @@ impl TokenKind {
                 | TokenKind::Elif
                 | TokenKind::Else
                 | TokenKind::While
+                | TokenKind::For
+                | TokenKind::In
                 | TokenKind::Choose
                 | TokenKind::When
                 | TokenKind::Otherwise
@@ -258,6 +264,8 @@ impl TokenKind {
             TokenKind::Elif => "elif",
             TokenKind::Else => "else",
             TokenKind::While => "while",
+            TokenKind::For => "for",
+            TokenKind::In => "in",
             TokenKind::Choose => "choose",
             TokenKind::When => "when",
             TokenKind::Otherwise => "otherwise",

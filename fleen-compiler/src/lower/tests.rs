@@ -746,6 +746,12 @@ fn stack_delta(
         MirInstrKind::ArrGet => -1,
         MirInstrKind::ArrSetLocal(_) => -2,
         MirInstrKind::ArrSetGlobal(_) => -2,
+        // 0.0.3 V04: range. `MakeRange` pops the two int bounds and pushes
+        // the Range (Δ−1); `RangeStart`/`RangeEnd` are peek-shaped like
+        // `ArrLen` (Δ+1).
+        MirInstrKind::MakeRange => -1,
+        MirInstrKind::RangeStart => 1,
+        MirInstrKind::RangeEnd => 1,
     }
 }
 
@@ -775,6 +781,14 @@ func pick(v: int): int {
         when n if n > 10 { n }
         otherwise { 0 }
     }
+}
+
+func total_all(xs: [int]): int {
+    t = 0;
+    for x in xs {
+        t = t + x;
+    }
+    t
 }
 "#;
     let mir = lower_src(src);
@@ -1668,4 +1682,262 @@ fn lower_index_read_span_covers_the_chain() {
     let line3 = src.rfind("a[1]").expect("source slice");
     assert_eq!(get.span.start, line3 as u32);
     assert_eq!(get.span.end, (line3 + 4) as u32);
+}
+
+// =========================================================================
+// 0.0.3 V04: `for` desugar (PLAN §5.4)
+// =========================================================================
+
+/// Render a block's instruction kinds as a compact string for diffing.
+fn kinds_of(b: &MirBlock) -> Vec<String> {
+    b.instrs
+        .iter()
+        .map(|i| match &i.kind {
+            MirInstrKind::LoadLocal(s) => format!("LoadLocal({s})"),
+            MirInstrKind::StoreLocal(s) => format!("StoreLocal({s})"),
+            MirInstrKind::ConstInt(v) => format!("ConstInt({v})"),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn lower_for_array_desugar_instruction_by_instruction() {
+    // `for x in xs { }` — the exact block/instruction shape of PLAN §5.4:
+    // hoist (iterable, len, index) → head bound check → body element copy →
+    // increment → back edge → end unit.
+    let src = "func f(xs: [int]): int {\n    for x in xs { }\n    0\n}";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+
+    // Hoist block: `__it`, then `__count = len`, then `__i = 0`.
+    let hoist = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ArrLen))
+        })
+        .expect("a hoist block with ArrLen");
+    // Slots: xs=0, x=1 (loop var), __it=2, __i=3, __count=4.
+    // The iterable (owned array param) is accessed as Clone → CloneLocal(0).
+    assert_eq!(
+        hoist.instrs.first().map(|i| &i.kind),
+        Some(&MirInstrKind::CloneLocal(0)),
+        "iterable is cloned for the owned array param (slot 0)"
+    );
+    assert_eq!(
+        kinds_of(hoist),
+        vec![
+            "CloneLocal(0)".to_string(), // xs (iterable evaluated once, cloned)
+            "StoreLocal(2)".to_string(), // __it
+            "LoadLocal(2)".to_string(),  // __it
+            "ArrLen".to_string(),        // → len (peek)
+            "StoreLocal(4)".to_string(), // __count (hoisted; len cannot change)
+            "Pop".to_string(),           // drop the peeked __it
+            "ConstInt(0)".to_string(),   // __i = 0
+            "StoreLocal(3)".to_string(), // __i
+        ]
+    );
+
+    // Head block: `__i < __count`, terminated by a conditional jump.
+    let head = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Terminator::JumpIfFalse(_)))
+        .expect("head block ends with JumpIfFalse");
+    assert_eq!(
+        kinds_of(head),
+        vec![
+            "LoadLocal(3)".to_string(),
+            "LoadLocal(4)".to_string(),
+            "Lt".to_string()
+        ]
+    );
+
+    // Body block: element copy → bind x → body → pop → increment → back edge.
+    let body = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ArrGet))
+        })
+        .expect("body block with ArrGet");
+    let bk = kinds_of(body);
+    assert_eq!(
+        &bk[..4],
+        ["LoadLocal(2)", "LoadLocal(3)", "ArrGet", "StoreLocal(1)"]
+    );
+    // The increment closes the body and jumps back to the head.
+    assert_eq!(
+        &bk[bk.len() - 4..],
+        ["LoadLocal(3)", "ConstInt(1)", "IAdd", "StoreLocal(3)"]
+    );
+    assert_eq!(body.terminator, Terminator::Jump(head.id));
+
+    // End block: the `for` emits `Unit` (yielding unit), then control falls
+    // through to the caller — `lower_block` emits `Pop` to discard the for's
+    // result (it is a statement), and the function tail `0` emits `ConstInt(0)`.
+    let end_id = match head.terminator {
+        Terminator::JumpIfFalse(t) => t,
+        other => panic!("head must end with JumpIfFalse, got {other:?}"),
+    };
+    let end = f
+        .blocks
+        .iter()
+        .find(|b| b.id == end_id)
+        .expect("end block exists");
+    assert_eq!(
+        kinds_of(end),
+        vec![
+            "Unit".to_string(),
+            "Pop".to_string(),
+            "ConstInt(0)".to_string()
+        ]
+    );
+
+    // The head has exactly two predecessors: the entry jump and the body's
+    // back edge — nothing else may re-enter the bound check.
+    let preds = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == head.id))
+        .count();
+    assert_eq!(preds, 2, "entry jump + one back edge");
+}
+
+#[test]
+fn lower_for_range_desugar_uses_range_bounds_once() {
+    // The Range desugar branch: `__i = RangeStart`, `__count = RangeEnd`,
+    // each hoisted before the loop (peek form → the parked Range is popped).
+    // `Range` is not source-constructible until V06 (std.collection.range),
+    // so this HIR is built by hand: `for x in r { }` with a `Range` param.
+    use crate::lexer::Span;
+    use crate::resolver::hir::{BindingId, HirId};
+    use crate::typeck::typed_hir::{
+        Access, Type, TypedBlockHir, TypedDeclHir, TypedExprForHir, TypedExprHir, TypedFuncBodyHir,
+        TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedStmtHir,
+    };
+
+    let span = Span::SYNTHETIC;
+    let range_param = TypedExprHir::Ident {
+        name: "r".to_string(),
+        binding_id: BindingId(0),
+        ty: Type::Range,
+        access: Access::Copy,
+        hir_id: HirId(0),
+        span,
+    };
+    let body = TypedBlockHir {
+        stmts: vec![],
+        tail_expr: None,
+        ty: Type::Int,
+        hir_id: HirId(1),
+        span,
+    };
+    let for_expr = TypedExprHir::For(TypedExprForHir {
+        var: "x".to_string(),
+        var_binding_id: BindingId(1),
+        iterable: Box::new(range_param),
+        elem_ty: Type::Int,
+        body,
+        ty: Type::Unit,
+        hir_id: HirId(2),
+        span,
+    });
+    let typed = TypedHir {
+        items: vec![TypedHirItem::Decl(TypedDeclHir::Func(TypedFuncDeclHir {
+            name: "f".to_string(),
+            params: vec![TypedParamHir {
+                name: "r".to_string(),
+                ty: Type::Range,
+                binding_id: BindingId(0),
+                hir_id: HirId(0),
+                span,
+            }],
+            ret_type: Some(Type::Int),
+            body: TypedFuncBodyHir::Block(TypedBlockHir {
+                stmts: vec![TypedStmtHir::Expr(Box::new(for_expr), false)],
+                tail_expr: Some(Box::new(TypedExprHir::Int(0, span))),
+                ty: Type::Int,
+                hir_id: HirId(3),
+                span,
+            }),
+            hir_id: HirId(4),
+            span,
+        }))],
+        structs: Vec::new(),
+        span,
+    };
+    let mir = super::lower(typed).expect("lower should succeed");
+    let f = find_func(&mir, "f");
+
+    // Hoist: __it = r; __i = RangeStart(__it); pop; __count = RangeEnd; pop.
+    // Slots: r=0, x=1 (loop var), __it=2, __i=3, __count=4.
+    // Range is Copy → LoadLocal(0) for the iterable.
+    let hoist = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::RangeStart))
+        })
+        .expect("a hoist block with RangeStart");
+    assert_eq!(
+        kinds_of(hoist),
+        vec![
+            "LoadLocal(0)".to_string(),  // r (Copy → LoadLocal)
+            "StoreLocal(2)".to_string(), // __it
+            "LoadLocal(2)".to_string(),  // __it
+            "RangeStart".to_string(),    // peek start
+            "StoreLocal(3)".to_string(), // __i = start
+            "Pop".to_string(),           // drop the peeked __it
+            "LoadLocal(2)".to_string(),  // __it
+            "RangeEnd".to_string(),      // peek end
+            "StoreLocal(4)".to_string(), // __count = end (exclusive)
+            "Pop".to_string(),           // drop the peeked __it
+        ]
+    );
+
+    // Body: the element IS the index (no ArrGet); the rest is the int loop.
+    let body = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::StoreLocal(1)))
+        })
+        .expect("body block binding the loop variable");
+    assert!(
+        !body
+            .instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::ArrGet)),
+        "a Range loop never indexes an array"
+    );
+    let bk = kinds_of(body);
+    assert_eq!(&bk[..2], ["LoadLocal(3)", "StoreLocal(1)"]);
+    assert_eq!(
+        &bk[bk.len() - 4..],
+        ["LoadLocal(3)", "ConstInt(1)", "IAdd", "StoreLocal(3)"]
+    );
+}
+
+#[test]
+fn lower_for_iterable_is_evaluated_once() {
+    // The iterable expression appears exactly once in the instruction
+    // stream (in the hoist), before the loop — DESIGN.md §6.
+    let src = "func f(): int {\n    for x in [1, 2] { }\n    0\n}";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let arr_new = flat(f)
+        .iter()
+        .filter(|i| matches!(i.kind, MirInstrKind::ArrNew(_)))
+        .count();
+    assert_eq!(arr_new, 1, "the array literal is built exactly once");
 }

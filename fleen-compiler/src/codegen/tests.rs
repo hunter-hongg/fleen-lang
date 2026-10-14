@@ -1242,8 +1242,9 @@ fn array_opcodes_encode_with_expected_opcode_and_width() {
     assert_eq!(Opcode::ArrSetLocal as u8, 0xB7);
     assert_eq!(Opcode::ArrSetGlobal as u8, 0xB8);
 
-    // Reserved slots past the group stay unknown.
-    assert_eq!(Opcode::from_byte(0xB9), None);
+    // 0xB9–0xBB belong to the V04 range group; the next free byte stays
+    // unknown.
+    assert_eq!(Opcode::from_byte(0xBC), None);
 
     // Round trip through `from_byte` keeps every array opcode decodable.
     for op in [
@@ -1255,6 +1256,65 @@ fn array_opcodes_encode_with_expected_opcode_and_width() {
     ] {
         assert_eq!(Opcode::from_byte(op as u8), Some(op));
     }
+}
+
+// ------------------- 0.0.3 V04: range (bytecode v3, 0xB9–0xBB) -----------
+
+#[test]
+fn range_opcodes_encode_with_expected_opcode_and_width() {
+    // Lock the numbering and the (zero) operand width of the range group, so
+    // a codegen regression is caught (mirrors the array group's test).
+    assert_eq!(Opcode::MakeRange as u8, 0xB9);
+    assert_eq!(Opcode::RangeStart as u8, 0xBA);
+    assert_eq!(Opcode::RangeEnd as u8, 0xBB);
+    for op in [Opcode::MakeRange, Opcode::RangeStart, Opcode::RangeEnd] {
+        assert_eq!(op.operand_len(), 0);
+        assert_eq!(Opcode::from_byte(op as u8), Some(op));
+    }
+}
+
+#[test]
+fn range_instrs_encode_as_single_byte_opcodes() {
+    // `Const 2` / `Const 5` / `MakeRange` / `RangeStart` / `RangeEnd`: the
+    // range instructions carry no operands, so each is exactly one byte.
+    let f = main_func_locals(
+        0,
+        vec![MirBlock {
+            id: BlockId(0),
+            instrs: vec![
+                MirInstr::new(MirInstrKind::ConstInt(2), Span::new(FileId(0), 0, 1)),
+                MirInstr::new(MirInstrKind::ConstInt(5), Span::new(FileId(0), 1, 2)),
+                MirInstr::new(MirInstrKind::MakeRange, Span::new(FileId(0), 2, 3)),
+                MirInstr::new(MirInstrKind::RangeStart, Span::new(FileId(0), 3, 4)),
+                MirInstr::new(MirInstrKind::RangeEnd, Span::new(FileId(0), 4, 5)),
+            ],
+            terminator: Terminator::Return,
+        }],
+    );
+    let module = codegen(Mir {
+        structs: Vec::new(),
+        funcs: vec![f],
+        globals: vec![],
+    })
+    .expect("codegen");
+    let code = &module.functions[0].code;
+    assert_eq!(
+        code.len(),
+        14,
+        "2 x 5-byte Const + 3 x 1-byte range + Return"
+    );
+    // `Const 2` / `Const 5` are interned after the function name, so they
+    // land on pool slots 1 and 2.
+    assert_eq!(&code[0..5], &[Opcode::Const as u8, 1, 0, 0, 0]);
+    assert_eq!(&code[5..10], &[Opcode::Const as u8, 2, 0, 0, 0]);
+    assert_eq!(
+        &code[10..13],
+        &[
+            Opcode::MakeRange as u8,
+            Opcode::RangeStart as u8,
+            Opcode::RangeEnd as u8
+        ]
+    );
 }
 
 #[test]

@@ -11,9 +11,9 @@ use crate::typeck::builtins::{BuiltinParam, find_builtin};
 use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
     Access, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir,
-    TypedDeclHir, TypedExprChooseHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir,
-    TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir,
-    TypedStmtHir, TypedStructDef, TypedVarBindingHir,
+    TypedDeclHir, TypedExprChooseHir, TypedExprForHir, TypedExprHir, TypedExprIfHir,
+    TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir,
+    TypedPatternHir, TypedStmtHir, TypedStructDef, TypedVarBindingHir,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
@@ -57,6 +57,7 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
             collect_named_type_refs(ret, f);
         }
         ast::Type::Base(_) => {}
+        ast::Type::Range => {}
     }
 }
 
@@ -144,6 +145,7 @@ impl TypeChecker {
             ast::Type::Array(elem) => Type::Array(Box::new(self.convert_type(elem, span))),
             ast::Type::Box(inner) => Type::Box(Box::new(self.convert_type(inner, span))),
             ast::Type::Ref(inner) => Type::Ref(Box::new(self.convert_type(inner, span))),
+            ast::Type::Range => Type::Range,
             ast::Type::Named(name) => match self.struct_by_name.get(name) {
                 Some(&id) => {
                     let entry = &self.structs[id.0 as usize];
@@ -333,6 +335,7 @@ impl TypeChecker {
                 None => false,
             },
             ast::Type::Array(_) | ast::Type::Box(_) | ast::Type::Ref(_) => false,
+            ast::Type::Range => true, // Range is Copy: two ints (D5)
             ast::Type::Result(ok, err) => {
                 self.ast_type_is_copy(ok, raw, in_progress)
                     && self.ast_type_is_copy(err, raw, in_progress)
@@ -793,6 +796,7 @@ impl TypeChecker {
 
             ExprHir::If(if_expr) => self.typeck_if_expr(if_expr, expected),
             ExprHir::While(while_expr) => self.typeck_while_expr(while_expr),
+            ExprHir::For(for_expr) => self.typeck_for_expr(for_expr),
             ExprHir::Choose(choose_expr) => self.typeck_choose_expr(choose_expr, expected),
 
             ExprHir::Or(lhs, rhs) => self.typeck_binary_op(*lhs, *rhs, "or", Type::Bool),
@@ -997,6 +1001,68 @@ impl TypeChecker {
             ty: Type::Unit,
             hir_id: while_expr.hir_id,
             span: while_expr.span,
+        }))
+    }
+
+    /// Type check a `for` expression (0.0.3 V04): `for var in iterable { body }`.
+    ///
+    /// The iterable is type-checked once in the *enclosing* scope (it must not
+    /// see the loop variable). The loop variable is then bound immutable with
+    /// the element type (the array's element type, or `int` for a `Range`) in a
+    /// fresh loop scope, and the body is type-checked within that scope. The
+    /// closed iterable set is `{[T], Range}` (D4); anything else is
+    /// `NotIterable`.
+    fn typeck_for_expr(&mut self, for_expr: ExprForHir) -> Result<TypedExprHir, ()> {
+        let typed_iterable = self.typeck_expr(*for_expr.iterable, None)?;
+        let iterable_ty = typed_iterable.ty().clone();
+
+        // Determine the loop-variable (element) type and validate the iterable
+        // is in the closed set.
+        let elem_ty = match &iterable_ty {
+            Type::Array(elem) => (**elem).clone(),
+            Type::Range => Type::Int,
+            other => {
+                self.add_error(
+                    TypeckErrorKind::NotIterable { got: other.clone() },
+                    for_expr.span,
+                );
+                return Err(());
+            }
+        };
+
+        // Enter a loop scope and bind the loop variable with its element type.
+        // `typeck_block` opens its own nested block scope for the body, so the
+        // loop variable (declared here) is visible to body references through
+        // the scope chain. The loop variable is immutable (D4); the
+        // per-iteration write is performed by the lowering desugar.
+        self.scopes.enter_block_scope();
+        let _ = self.scopes.declare(
+            for_expr.var.clone(),
+            Binding {
+                id: for_expr.var_binding_id,
+                kind: BindingKind::Variable,
+                mutable: false,
+                builtin: false,
+                ref_param: false,
+                span: for_expr.span,
+                hir_id: HirId(0),
+            },
+        );
+        self.binding_types
+            .insert(for_expr.var_binding_id, elem_ty.clone());
+
+        let typed_body = self.typeck_block(&for_expr.body, None)?;
+        self.scopes.exit_scope();
+
+        Ok(TypedExprHir::For(TypedExprForHir {
+            var: for_expr.var,
+            var_binding_id: for_expr.var_binding_id,
+            iterable: Box::new(typed_iterable),
+            elem_ty,
+            body: typed_body,
+            ty: Type::Unit,
+            hir_id: for_expr.hir_id,
+            span: for_expr.span,
         }))
     }
 

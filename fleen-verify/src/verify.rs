@@ -423,6 +423,13 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         // for-desugar require the pop.
         Opcode::ArrGet => (-1, 2),
         Opcode::ArrSetLocal | Opcode::ArrSetGlobal => (-2, 2), // v i →
+        // 0.0.3 V04: range (BYTECODE v3, 0xB9–0xBB). `MakeRange` pops the two
+        // int bounds and pushes the Range (start end → r, Δ−1, min 2);
+        // `RangeStart`/`RangeEnd` are peek-shaped like `ArrLen` (r → r int,
+        // Δ+1, min 1) — they read the bounds once, before the `for` loop, and
+        // leave the Range on the stack for the `Pop` the desugar emits.
+        Opcode::MakeRange => (-1, 2),
+        Opcode::RangeStart | Opcode::RangeEnd => (1, 1), // r → r int (peek)
     })
 }
 

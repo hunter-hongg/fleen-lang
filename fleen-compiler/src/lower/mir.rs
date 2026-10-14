@@ -230,4 +230,12 @@ pub enum MirInstrKind {
     ArrSetLocal(u16),
     /// Same, for the array held by global `gid`. Stack effect: v i →.
     ArrSetGlobal(u16),
+    // 0.0.3 V04: Range instructions (bytecode v3, 0xB9–0xBB)
+    /// Build a `Range` value from two ints (start, end). Stack effect:
+    /// start end → r.
+    MakeRange,
+    /// Push a copy of a Range's start bound. Stack effect: r → r int.
+    RangeStart,
+    /// Push a copy of a Range's end bound. Stack effect: r → r int.
+    RangeEnd,
 }

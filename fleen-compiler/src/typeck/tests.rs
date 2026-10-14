@@ -1740,3 +1740,90 @@ fn use_after_element_write_resets_state() {
         "expected AssignToMoved, got {errs:?}"
     );
 }
+
+// ========== For Expression (0.0.3 V04) ==========
+
+#[test]
+fn for_over_array_binds_element_type() {
+    let hir = compile_ok("names = [\"a\", \"b\"];\nfor name in names { print(name); };");
+    // The `for` statement itself is `unit`.
+    let last = hir.items.last().expect("items");
+    match last {
+        TypedHirItem::Expr(e) => assert_eq!(e.ty(), Type::Unit),
+        other => panic!("expected expression item, got {other:?}"),
+    }
+}
+
+#[test]
+fn for_over_non_iterable_is_rejected() {
+    let errs = compile_err("for x in 42 { };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::NotIterable { .. })),
+        "expected NotIterable, got {errs:?}"
+    );
+}
+
+#[test]
+fn for_loop_variable_is_immutable() {
+    // The loop variable is a fresh *immutable* binding (the resolver
+    // declares it with `mutable: false`), so assigning to it inside the body
+    // is `AssignToImmutable` — not a §4.5 loop-scope reassignment. Checked at
+    // the resolver stage, where the diagnostic lives.
+    let tokens = tokenize("for x in [1, 2] { x = 3; };").unwrap();
+    let ast = parse(tokens).unwrap();
+    let err = resolve(ast).expect_err("loop variable must be immutable");
+    assert!(
+        err.iter().any(|e| matches!(
+            &e.kind,
+            crate::resolver::error::ResolveErrorKind::AssignToImmutable { name } if name == "x"
+        )),
+        "expected AssignToImmutable(x), got {err:?}"
+    );
+}
+
+#[test]
+fn for_body_assigns_outer_mutable() {
+    // Assigning a *different* (outer) mutable inside the body follows the
+    // §4.5 loop-scope rules, exactly like a `while` body.
+    compile_ok(
+        "func main(): int {\n    total = 0;\n    for n in [1, 2, 3] { total = total + n; }\n    total\n}",
+    );
+}
+
+#[test]
+fn for_element_use_after_body_is_a_fresh_binding() {
+    // The loop variable is scoped to the body: reading it after the loop is
+    // undefined, not the last iteration's value. The resolver (which owns
+    // scoping) reports it before typeck ever runs.
+    let tokens = tokenize("for x in [1, 2] { };\nx;").unwrap();
+    let ast = parse(tokens).unwrap();
+    let err = resolve(ast).expect_err("loop variable must not outlive the body");
+    assert!(
+        err.iter().any(|e| matches!(
+            &e.kind,
+            crate::resolver::error::ResolveErrorKind::UndeclaredVariable { name } if name == "x"
+        )),
+        "expected UndeclaredVariable(x), got {err:?}"
+    );
+}
+
+#[test]
+fn for_empty_array_iterable_is_typed_by_annotation() {
+    // An empty literal still needs its element type from the annotation, but
+    // once it has one the loop variable is that element type.
+    compile_ok("xs: [int] = [];\nfor x in xs { print(x as string); };");
+}
+
+#[test]
+fn for_over_string_is_not_iterable() {
+    // The closed iterable set is `{ [T], Range }`: a string is not iterable.
+    let errs = compile_err("s = \"hi\";\nfor c in s { };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::NotIterable { .. })),
+        "expected NotIterable, got {errs:?}"
+    );
+}

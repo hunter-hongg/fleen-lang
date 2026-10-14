@@ -1,0 +1,3 @@
+// 0.0.3 V04 invalid: `for` and `in` are reserved words — neither can be a
+// binding name.
+for = 1;

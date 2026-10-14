@@ -27,6 +27,7 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::Const
             | TokenKind::If
             | TokenKind::While
+            | TokenKind::For
             | TokenKind::Choose
             | TokenKind::Import
             | TokenKind::Struct
@@ -91,6 +92,7 @@ pub(crate) fn can_continue_expr(kind: &TokenKind) -> bool {
             | TokenKind::LBracket
             | TokenKind::LParen
             | TokenKind::As
+            | TokenKind::In
     )
 }
 
@@ -320,6 +322,7 @@ mod tests {
             TokenKind::Const,
             TokenKind::If,
             TokenKind::While,
+            TokenKind::For,
             TokenKind::Choose,
             TokenKind::Import,
             TokenKind::Ident(String::new()),
@@ -379,6 +382,7 @@ mod tests {
             TokenKind::RBracket,
             TokenKind::Arrow,
             TokenKind::Eof,
+            TokenKind::In,
         ];
         for k in no {
             assert!(!can_start_stmt(k), "{k} should not start a stmt");
@@ -441,6 +445,7 @@ mod tests {
             TokenKind::LBracket,
             TokenKind::LParen,
             TokenKind::As,
+            TokenKind::In,
         ];
         for k in yes {
             assert!(can_continue_expr(k), "{k} should continue an expr");
@@ -656,6 +661,23 @@ mod tests {
         let ks = kinds("x = 1\n\n\n\ny = 2\n");
         assert_eq!(semi_count(&ks), 2);
         assert!(has_no_newline(&ks));
+    }
+
+    #[test]
+    fn for_header_joins_across_lines() {
+        // 0.0.3 V04: `for x` ⏎ `in names` ⏎ `{ … }` — `in` is a continuation
+        // token, so the whole header is one construct; the body block follows.
+        let ks = kinds("for x\nin names\n{\nprint(x)\n}\n");
+        assert_eq!(semi_count(&ks), 1); // where the for statement ends
+        assert!(has_no_newline(&ks));
+    }
+
+    #[test]
+    fn for_stmt_boundary_after_block() {
+        // `for x in a { }` ⏎ `print(1)` — the statement boundary after the
+        // closing brace inserts a semicolon, exactly like `if`/`while`.
+        let ks = kinds("for x in a { }\nprint(1)\n");
+        assert_eq!(semi_count(&ks), 2);
     }
 
     #[test]

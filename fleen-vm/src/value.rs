@@ -54,6 +54,18 @@ pub enum Value {
     /// (D3 — even `[int]`); `Eq` on an array is a typeck-level error
     /// (defensive error in the VM).
     Arr(Box<[Value]>),
+    /// Range value (0.0.3 V04): an int interval, `start..end` with an
+    /// exclusive `end`. Copy (two `i64`s — no heap). Source-level range
+    /// construction arrives with `std.collection.range` (V06); until then
+    /// the variant exists to give the `for` desugar a well-typed iterable
+    /// (exercised by hand-built bytecode tests, not from `.fln` source).
+    /// `Eq` on a Range is a typeck-level error (defensive error in the VM).
+    Range {
+        /// First value the loop yields.
+        start: i64,
+        /// Exclusive upper bound: `start..end` never yields `end`.
+        end: i64,
+    },
     /// The unit value (no meaningful data).
     Unit,
     /// First-class function reference.
@@ -95,6 +107,8 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            // `start..end`, `end` exclusive (matches `std.collection.range`).
+            Value::Range { start, end } => write!(f, "{start}..{end}"),
             Value::Unit => write!(f, "unit"),
             Value::Func(id) => write!(f, "<func #{}>", id.0),
         }

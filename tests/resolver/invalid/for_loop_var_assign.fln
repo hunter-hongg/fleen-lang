@@ -1,0 +1,4 @@
+// 0.0.3 V04 invalid: the loop variable is immutable (D4).
+for x in [1, 2] {
+    x = 3;
+};

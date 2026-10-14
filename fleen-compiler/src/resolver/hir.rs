@@ -209,6 +209,8 @@ pub enum ExprHir {
     If(ExprIfHir),
     /// While expression
     While(ExprWhileHir),
+    /// For expression (0.0.3 V04)
+    For(ExprForHir),
     /// Choose expression
     Choose(ExprChooseHir),
     /// Binary operators
@@ -274,6 +276,7 @@ impl ExprHir {
             ExprHir::StructLit { span, .. } => *span,
             ExprHir::If(e) => e.span,
             ExprHir::While(e) => e.span,
+            ExprHir::For(e) => e.span,
             ExprHir::Choose(e) => e.span,
             ExprHir::Or(l, _) => l.span(),
             ExprHir::And(l, _) => l.span(),
@@ -324,6 +327,20 @@ pub struct ExprIfHir {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprWhileHir {
     pub condition: Box<ExprHir>,
+    pub body: BlockHir,
+    pub hir_id: HirId,
+    pub span: Span,
+}
+
+/// For expression in HIR (0.0.3 V04).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprForHir {
+    /// Loop variable name (bound immutable, scoped to `body`).
+    pub var: String,
+    /// Resolver-assigned binding for the loop variable.
+    pub var_binding_id: BindingId,
+    /// The iterable expression (resolved in the enclosing scope).
+    pub iterable: Box<ExprHir>,
     pub body: BlockHir,
     pub hir_id: HirId,
     pub span: Span,

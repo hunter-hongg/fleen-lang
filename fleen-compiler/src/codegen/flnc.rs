@@ -269,6 +269,7 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
                     8 => FieldTypeTag::Box,
                     9 => FieldTypeTag::Ref,
                     10 => FieldTypeTag::Struct,
+                    11 => FieldTypeTag::Range,
                     t => return Err(FlncError(format!("bad field type tag {t}"))),
                 };
                 tags.push(tag);

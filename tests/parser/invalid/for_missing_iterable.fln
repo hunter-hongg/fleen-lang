@@ -1,0 +1,3 @@
+// 0.0.3 V04 invalid: `for` with no iterable expression — the body `{`
+// cannot stand in for it.
+for x in { };

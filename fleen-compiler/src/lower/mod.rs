@@ -540,6 +540,28 @@ fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
     }
 }
 
+/// Shape of a `for` iterable, decided once before the desugar.
+///
+/// The closed set `{ [T], Range }` is a typeck invariant (DESIGN.md D4);
+/// any other type reaching lowering is a defensive `UnsupportedFeature`.
+enum IterKind {
+    /// `[T]`: index-driven iteration, element `i` read as a copy.
+    Array,
+    /// `Range`: plain integer loop from start to end.
+    Range,
+}
+
+impl IterKind {
+    /// Classify the iterable expression's type.
+    fn of(iterable: &TypedExprHir) -> Option<IterKind> {
+        match iterable.ty() {
+            Type::Array(_) => Some(IterKind::Array),
+            Type::Range => Some(IterKind::Range),
+            _ => None,
+        }
+    }
+}
+
 /// Per-function lowering context.
 struct FnBodyCx<'a> {
     lcx: &'a mut LowerCtx,
@@ -875,6 +897,9 @@ impl<'a> FnBodyCx<'a> {
                 fb.emit(MirInstr::new(MirInstrKind::Unit, e.span));
                 fb.resolve(c, end);
             }
+            // 0.0.3 V04: `for` — desugared here (never in the parser: parse
+            // emits a real `ExprFor` node, so no phase is skipped).
+            TypedExprHir::For(e) => self.lower_for(fb, e)?,
             TypedExprHir::Choose(e) => self.lower_choose(fb, e)?,
             TypedExprHir::Call(callee, args, _) => {
                 self.lower_call(fb, callee, args, expr.span())?;
@@ -1239,6 +1264,114 @@ impl<'a> FnBodyCx<'a> {
         fb.start(l_cont);
         fb.resolve(c, l_err);
         fb.resolve(j_cont, l_cont);
+        Ok(())
+    }
+
+    /// Lower `for x in <iterable> { body }` (0.0.3 V04, PLAN §5.4).
+    ///
+    /// ```text
+    /// <eval iterable>; StoreLocal __it      ; evaluated once (DESIGN.md §6)
+    /// __i = <start>; __count = <bound>      ; hoisted out of the loop
+    /// L_head: LoadLocal __i; LoadLocal __count; Lt; JumpIfFalse L_end
+    /// L_body: x = <element copy>; <body>; Pop
+    ///         LoadLocal __i; Const 1; IAdd; StoreLocal __i; Jump L_head
+    /// L_end:  Unit
+    /// ```
+    ///
+    /// The head block is dedicated (exactly like `while`) so that the back
+    /// edge re-enters only the bound check — otherwise the first entry
+    /// (carrying the merge value of the surrounding context) and a back-edge
+    /// entry would disagree on stack depth and the verifier would rightly
+    /// report `StackDepthMismatch`.
+    fn lower_for(&mut self, fb: &mut FnBuilder, e: &TypedExprForHir) -> Result<(), LowerError> {
+        // Synthetic slots are allocated by *number* (`fresh`), never by name,
+        // so a user binding can never collide with them — the `__`-prefixed
+        // names in the comments below are documentation only.
+        let it = self.fresh_temp();
+        let idx = self.fresh_temp();
+        let count = self.fresh_temp();
+
+        let kind = IterKind::of(&e.iterable).ok_or_else(|| {
+            LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "for over a type that is neither array nor Range \
+                              (typeck should reject)",
+                },
+                e.span,
+            )
+        })?;
+
+        // The iterable is evaluated once, before the loop (DESIGN.md §6).
+        self.lower_expr_into(fb, &e.iterable)?;
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(it), e.span));
+
+        // `__i` starts at the first element and `__count` holds the exclusive
+        // end. `ArrLen` / `RangeStart` / `RangeEnd` are peek-shaped
+        // (`a → a int`): the operands they read stay on the stack, so the
+        // parked copy of the iterable is dropped with a `Pop` after each
+        // bound is stored.
+        match kind {
+            IterKind::Array => {
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(it), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::ArrLen, e.span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(count), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
+                fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(idx), e.span));
+            }
+            IterKind::Range => {
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(it), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::RangeStart, e.span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(idx), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(it), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::RangeEnd, e.span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(count), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
+            }
+        }
+
+        // The loop variable is a fresh immutable binding per iteration;
+        // `resolve` already gave it a `BindingId`, which owns its slot.
+        let var_slot = self.slots.slot_for(e.var_binding_id);
+
+        let head = fb.new_block();
+        fb.jump(head);
+        fb.start(head);
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(idx), e.span));
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), e.span));
+        fb.emit(MirInstr::new(MirInstrKind::Lt, e.span));
+        let cond = fb.jump_if_false_later();
+
+        let body = fb.new_block();
+        fb.start(body);
+        // Element copy: `ArrGet` copies (deep for owned elements, D3), so the
+        // iteration never consumes the iterable.
+        match kind {
+            IterKind::Array => {
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(it), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(idx), e.span));
+                fb.emit(MirInstr::new(MirInstrKind::ArrGet, e.span));
+            }
+            IterKind::Range => {
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(idx), e.span));
+            }
+        }
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(var_slot), e.span));
+        self.lower_block(fb, &e.body)?;
+        // The body's value (its tail expression) is discarded: `for` is a
+        // statement whose value is `unit`.
+        fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(idx), e.span));
+        fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), e.span));
+        fb.emit(MirInstr::new(MirInstrKind::IAdd, e.span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(idx), e.span));
+        fb.jump(head);
+
+        let end = fb.new_block();
+        fb.start(end);
+        fb.emit(MirInstr::new(MirInstrKind::Unit, e.span));
+        fb.resolve(cond, end);
         Ok(())
     }
 

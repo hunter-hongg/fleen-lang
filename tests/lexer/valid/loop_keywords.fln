@@ -1,0 +1,7 @@
+// 0.0.3 V04 (lexer only): `for` / `in` are reserved keywords — they lex as
+// tokens, never as identifiers.
+for x in items {
+    y = x;
+}
+for a in [1, 2, 3] {
+}

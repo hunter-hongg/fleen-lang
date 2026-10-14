@@ -32,7 +32,7 @@
 use crate::lexer::Span;
 use crate::lexer::TokenKind;
 use crate::parser::Parser;
-use crate::parser::ast::{Expr, ExprChoose, ExprIf, ExprWhile, Pattern, ResultCtor};
+use crate::parser::ast::{Expr, ExprChoose, ExprFor, ExprIf, ExprWhile, Pattern, ResultCtor};
 use crate::parser::error::{ParseError, ParseErrorKind};
 
 /// Parse an expression starting from the current position.
@@ -89,6 +89,7 @@ impl Parser {
         let head = match self.current_kind() {
             TokenKind::If => self.parse_if()?,
             TokenKind::While => self.parse_while()?,
+            TokenKind::For => self.parse_for()?,
             TokenKind::Choose => self.parse_choose()?,
             _ => return self.parse_assign(),
         };
@@ -458,6 +459,49 @@ impl Parser {
         let end = self.prev_span_end();
         Ok(Expr::While(ExprWhile {
             condition,
+            body,
+            span: self.span(start, end),
+        }))
+    }
+
+    /// Parse a `for` expression (0.0.3 V04): `for var in iterable { body }`.
+    ///
+    /// The body is a block; the loop variable is bound immutable and scoped to
+    /// the body. The iterable is parsed with struct literals disabled (like a
+    /// `while` condition) so that `for x in names {` reads `{` as the body,
+    /// never as a `names { … }` struct literal.
+    fn parse_for(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current().span.start;
+
+        self.expect(&TokenKind::For, "expected `for`")?;
+
+        // The loop variable is a single identifier.
+        let var = if let TokenKind::Ident(name) = self.current_kind().clone() {
+            self.advance();
+            name
+        } else {
+            let found = self.current_kind().clone();
+            let span = self.current().span;
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "loop variable name".to_string(),
+                    found,
+                },
+                span,
+            });
+        };
+
+        self.expect(&TokenKind::In, "expected `in` after loop variable")?;
+
+        // Struct literals disabled here (see above) — parse_cond does exactly
+        // that.
+        let iterable = Box::new(self.parse_cond()?);
+        let body = self.parse_block()?;
+
+        let end = self.prev_span_end();
+        Ok(Expr::For(ExprFor {
+            var,
+            iterable,
             body,
             span: self.span(start, end),
         }))

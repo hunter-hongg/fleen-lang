@@ -374,6 +374,79 @@ mod tests {
         assert!(matches!(item, Item::Expr(Expr::While(_))));
     }
 
+    // ========== For Expression (0.0.3 V04) ==========
+
+    #[test]
+    fn parse_for_over_array() {
+        let ast = parse_str("for x in names { print(x); };");
+        let item = &ast.items[0];
+        if let Item::Expr(Expr::For(f)) = item {
+            assert_eq!(f.var, "x");
+            assert!(matches!(&*f.iterable, Expr::Ident(s, _) if s == "names"));
+        } else {
+            panic!("expected For expr, got {:?}", item);
+        }
+    }
+
+    #[test]
+    fn parse_for_over_array_literal() {
+        // The iterable is a full expression, so a leading `[` is a literal.
+        let ast = parse_str("for x in [1, 2, 3] { };");
+        let item = &ast.items[0];
+        if let Item::Expr(Expr::For(f)) = item {
+            assert!(matches!(&*f.iterable, Expr::ArrayLit(..)));
+        } else {
+            panic!("expected For expr, got {:?}", item);
+        }
+    }
+
+    #[test]
+    fn parse_for_header_spanning_lines() {
+        // ASI: the header may span lines, and the body may hug the closing
+        // brace of the iterable (no struct literal is accepted in the
+        // iterable position, so the `{` reads as the body).
+        let ast = parse_str("for x\nin names\n{\nprint(x);\n}");
+        let item = &ast.items[0];
+        assert!(matches!(item, Item::Expr(Expr::For(_))));
+    }
+
+    #[test]
+    fn parse_for_no_semicolon_required_inside_block() {
+        // Inside a block the trailing `;` of the `for` statement is optional
+        // (ASI), and one statement follows on the next line.
+        let ast = parse_str("for x in a { }\nprint(1)");
+        assert_eq!(ast.items.len(), 2);
+        assert!(matches!(ast.items[0], Item::Expr(Expr::For(_))));
+    }
+
+    #[test]
+    fn parse_for_rejects_missing_in() {
+        let e = parse_err("for x names { };");
+        assert!(matches!(e.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_for_rejects_missing_iterable() {
+        let e = parse_err("for x in { };");
+        assert!(matches!(e.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_for_rejects_reserved_words() {
+        // `for` / `in` are reserved: neither can start a binding.
+        assert!(matches!(
+            parse_err("for = 1;").kind,
+            ParseErrorKind::Expected { .. }
+        ));
+        // `in` is a *continuation* token for ASI (it can continue a `for`
+        // header), so a statement may not begin with it either — the parser
+        // rejects it at the statement boundary.
+        assert!(matches!(
+            parse_err("in = 1;").kind,
+            ParseErrorKind::Expected { .. } | ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
     // ========== Choose Expression ==========
 
     #[test]

@@ -39,6 +39,10 @@ pub enum TypeckErrorKind {
     },
     /// Condition must be Bool.
     ConditionNotBool { found: Type },
+    /// `for x in expr` where `expr`'s type is not in the closed iterable set
+    /// (0.0.3 V04: arrays `[T]` and `Range` only; user iterables wait for
+    /// traits in 0.1.0).
+    NotIterable { got: Type },
     /// Assignment type mismatch.
     AssignTypeMismatch { expected: Type, found: Type },
     /// Variable not found (should not happen after resolver).
@@ -217,6 +221,15 @@ impl fmt::Display for TypeckErrorKind {
             }
             TypeckErrorKind::ConditionNotBool { found } => {
                 write!(f, "condition must be `bool`, found `{}`", found.name())
+            }
+            TypeckErrorKind::NotIterable { got } => {
+                write!(
+                    f,
+                    "cannot iterate type `{}` with `for`: the iterable set is \
+                     `[T]` and `Range` (0.0.3); user-defined iterables arrive \
+                     with traits (0.1.0)",
+                    got.name()
+                )
             }
             TypeckErrorKind::AssignTypeMismatch { expected, found } => {
                 write!(

@@ -1,0 +1,3 @@
+// 0.0.3 V04 invalid: a string is not iterable (only [T] and Range).
+s = "hello";
+for c in s { };

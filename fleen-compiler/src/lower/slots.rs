@@ -122,6 +122,11 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
             collect_expr(alloc, &e.condition);
             collect_block(alloc, &e.body);
         }
+        TypedExprHir::For(e) => {
+            collect_expr(alloc, &e.iterable);
+            alloc.slot_for(e.var_binding_id);
+            collect_block(alloc, &e.body);
+        }
         TypedExprHir::Choose(e) => {
             collect_expr(alloc, &e.scrutinee);
             for arm in &e.arms {

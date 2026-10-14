@@ -340,6 +340,13 @@ impl<'a> Cx<'a> {
             }
             TypedExprHir::If(e) => self.walk_if(e),
             TypedExprHir::While(e) => self.walk_while(e),
+            TypedExprHir::For(e) => {
+                // The iterable is a read (never consumed — D4), and the body
+                // is walked as an ordinary block; loop-variable reads resolve
+                // through `walk_ident` like any other binding.
+                self.walk_expr(&mut e.iterable, false);
+                self.walk_block(&mut e.body, false);
+            }
             TypedExprHir::Choose(e) => self.walk_choose(e),
             // Read-only operands: Copy stays Copy, bare owned locals
             // auto-`Clone` (D3), state unchanged.
@@ -769,6 +776,10 @@ fn scan_owned_local_uses(
         TypedExprHir::While(w) => {
             scan_owned_local_uses(&w.condition, out, globals, entry);
             scan_block_owned_local_uses(&w.body, out, globals, entry);
+        }
+        TypedExprHir::For(f) => {
+            scan_owned_local_uses(&f.iterable, out, globals, entry);
+            scan_block_owned_local_uses(&f.body, out, globals, entry);
         }
         TypedExprHir::Choose(c) => {
             scan_owned_local_uses(&c.scrutinee, out, globals, entry);

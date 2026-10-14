@@ -1,0 +1,10 @@
+// 0.0.3 V04: `for` resolves — the iterable is resolved in the enclosing
+// scope, the loop variable is declared inside the loop scope, and the body
+// may assign an outer mutable (DESIGN.md §4.5).
+func main(): int {
+    total = 0;
+    for x in [1, 2, 3] {
+        total = total + x;
+    }
+    total
+}

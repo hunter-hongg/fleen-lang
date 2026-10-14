@@ -53,6 +53,9 @@ pub enum Type {
     Ref(Box<Type>),
     /// User-defined struct type (0.0.3 V02).
     Struct(Box<StructInfo>),
+    /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
+    /// (`range`/`range_from`); iterates `start..end` (end-exclusive). Copy.
+    Range,
     /// Unsupported type (for features not yet implemented).
     Unsupported(String),
 }
@@ -75,6 +78,7 @@ impl Type {
             Type::Box(inner) => format!("box<{}>", inner.name()),
             Type::Ref(inner) => format!("ref {}", inner.name()),
             Type::Struct(info) => info.name.to_string(),
+            Type::Range => "Range".to_string(),
             Type::Unsupported(name) => name.clone(),
         }
     }
@@ -98,6 +102,7 @@ impl Type {
             // D2: a struct is Copy iff every field is Copy — precomputed
             // per declaration by the struct-table pass (dependency order).
             Type::Struct(info) => info.copy,
+            Type::Range => true, // D5: Range is Copy (two ints)
             Type::String | Type::Box(_) | Type::Array(_) | Type::Ref(_) | Type::Unsupported(_) => {
                 false
             }
@@ -268,6 +273,8 @@ pub enum TypedExprHir {
     If(TypedExprIfHir),
     /// While expression
     While(TypedExprWhileHir),
+    /// For expression (0.0.3 V04)
+    For(TypedExprForHir),
     /// Choose expression
     Choose(TypedExprChooseHir),
     /// Binary operators
@@ -405,6 +412,7 @@ impl TypedExprHir {
             TypedExprHir::Assign { ty, .. } => ty.clone(),
             TypedExprHir::If(e) => e.ty.clone(),
             TypedExprHir::While(e) => e.ty.clone(),
+            TypedExprHir::For(e) => e.ty.clone(),
             TypedExprHir::Choose(e) => e.ty.clone(),
             TypedExprHir::Or(_, _) => Type::Bool,
             TypedExprHir::And(_, _) => Type::Bool,
@@ -454,6 +462,7 @@ impl TypedExprHir {
             TypedExprHir::Assign { span, .. } => *span,
             TypedExprHir::If(e) => e.span,
             TypedExprHir::While(e) => e.span,
+            TypedExprHir::For(e) => e.span,
             TypedExprHir::Choose(e) => e.span,
             TypedExprHir::Or(l, _) => l.span(),
             TypedExprHir::And(l, _) => l.span(),
@@ -508,6 +517,23 @@ pub struct TypedExprIfHir {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedExprWhileHir {
     pub condition: Box<TypedExprHir>,
+    pub body: TypedBlockHir,
+    pub ty: Type,
+    pub hir_id: HirId,
+    pub span: Span,
+}
+
+/// For expression in Typed HIR (0.0.3 V04).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedExprForHir {
+    /// Loop variable name (immutable, scoped to `body`).
+    pub var: String,
+    /// Resolver-assigned binding for the loop variable.
+    pub var_binding_id: BindingId,
+    /// Typed iterable expression (evaluated once, before the loop).
+    pub iterable: Box<TypedExprHir>,
+    /// Element type: the type of the loop variable per iteration.
+    pub elem_ty: Type,
     pub body: TypedBlockHir,
     pub ty: Type,
     pub hir_id: HirId,

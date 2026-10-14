@@ -123,6 +123,8 @@ pub enum FieldTypeTag {
     Box = 8,
     Ref = 9,
     Struct = 10,
+    /// `Range` (0.0.3 V04): a builtin Copy type.
+    Range = 11,
 }
 
 impl FieldTypeTag {
@@ -141,6 +143,7 @@ impl FieldTypeTag {
             Type::Box(_) => FieldTypeTag::Box,
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
+            Type::Range => FieldTypeTag::Range,
             // `Unsupported` never survives typeck, so it cannot reach codegen;
             // the Unit mapping keeps the match total for release builds.
             Type::Unsupported(_) => {
@@ -248,6 +251,17 @@ pub enum Opcode {
     ArrSetLocal = 0xB7,
     /// Same, for the array held by global `gid` (v i →), bounds-checked.
     ArrSetGlobal = 0xB8,
+    // 0xB9–0xBB range (0.0.3 V04, bytecode v3)
+    /// Pop the end bound, then the start bound; build a `Range` value
+    /// (start end → r). Not reachable from source until V06
+    /// (`std.collection.range`).
+    MakeRange = 0xB9,
+    /// Push a copy of a Range's start bound; the range stays on the stack
+    /// (r → r int). Used once, before the loop, by the `for` desugar.
+    RangeStart = 0xBA,
+    /// Push a copy of a Range's end bound; the range stays on the stack
+    /// (r → r int). Used once, before the loop, by the `for` desugar.
+    RangeEnd = 0xBB,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -364,6 +378,9 @@ impl Opcode {
             0xB6 => Opcode::ArrGet,
             0xB7 => Opcode::ArrSetLocal,
             0xB8 => Opcode::ArrSetGlobal,
+            0xB9 => Opcode::MakeRange,
+            0xBA => Opcode::RangeStart,
+            0xBB => Opcode::RangeEnd,
             _ => return None,
         })
     }

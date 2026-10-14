@@ -121,6 +121,9 @@ pub enum Type {
     Result(Box<Type>, Box<Type>),
     /// `(T, U) -> R`
     Func(Vec<Type>, Box<Type>),
+    /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
+    /// (`range`/`range_from`); iterates `start..end` (end-exclusive).
+    Range,
     /// A named user type (a struct, 0.0.3 V02). Whether the name actually
     /// refers to a declared struct is resolved by typeck.
     Named(String),
@@ -175,6 +178,7 @@ impl fmt::Display for Type {
                 let ps: Vec<String> = params.iter().map(|t| t.to_string()).collect();
                 write!(f, "({},) -> {}", ps.join(", "), ret)
             }
+            Type::Range => write!(f, "Range"),
         }
     }
 }
@@ -207,6 +211,8 @@ pub enum Expr {
     If(ExprIf),
     /// `while cond { ... }`
     While(ExprWhile),
+    /// `for x in expr { ... }` (0.0.3 V04)
+    For(ExprFor),
     /// `choose expr { when pat [if guard] { body } ... }`
     Choose(ExprChoose),
     /// `lhs or rhs` (short-circuit)
@@ -319,6 +325,7 @@ impl Expr {
             | Expr::Ident(_, s) => *s,
             Expr::If(e) => e.span,
             Expr::While(e) => e.span,
+            Expr::For(e) => e.span,
             Expr::Choose(e) => e.span,
             Expr::Block(b) => b.span,
         }
@@ -355,6 +362,17 @@ pub struct ExprIf {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprWhile {
     pub condition: Box<Expr>,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// `for` expression (0.0.3 V04): `for var in iterable { body }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprFor {
+    /// Loop variable name (bound immutable, scoped to `body`).
+    pub var: String,
+    /// The iterable expression (evaluated once, before the loop).
+    pub iterable: Box<Expr>,
     pub body: Block,
     pub span: Span,
 }
@@ -464,6 +482,9 @@ impl fmt::Display for Expr {
             Expr::If(ExprIf { condition, .. }) => write!(f, "if {} {{ ... }}", condition),
             Expr::While(ExprWhile { condition, .. }) => {
                 write!(f, "while {} {{ ... }}", condition)
+            }
+            Expr::For(ExprFor { var, iterable, .. }) => {
+                write!(f, "for {} in {} {{ ... }}", var, iterable)
             }
             Expr::Choose(ExprChoose { scrutinee, .. }) => {
                 write!(f, "choose {} {{ ... }}", scrutinee)

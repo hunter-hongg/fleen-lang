@@ -1,0 +1,2 @@
+// 0.0.3 V04 invalid: the iterable set is closed — an int is not iterable.
+for x in 42 { };

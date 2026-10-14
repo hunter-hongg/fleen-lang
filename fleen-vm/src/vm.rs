@@ -880,6 +880,41 @@ impl Vm {
                     _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
+            // ----------------------------------------------------------------
+            // 0.0.3 V04: range instructions (bytecode v3, 0xB9–0xBB).
+            // A Range is a plain pair of ints; `RangeStart`/`RangeEnd` read a
+            // bound once, before the `for` loop, and leave the Range on the
+            // stack for the `Pop` the desugar emits. Not reachable from
+            // source until V06 (`std.collection.range`), so a non-Range
+            // operand here is malformed bytecode.
+            // ----------------------------------------------------------------
+            Opcode::MakeRange => {
+                // `start end → r`.
+                let end = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Int(v) => v,
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                };
+                let start = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Int(v) => v,
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                };
+                self.stack.push(Value::Range { start, end });
+            }
+            Opcode::RangeStart => {
+                // `r → r int`: peek, the Range stays on the stack.
+                let r = match self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Range { start, .. } => *start,
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                self.stack.push(Value::Int(r));
+            }
+            Opcode::RangeEnd => {
+                let r = match self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)? {
+                    Value::Range { end, .. } => *end,
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                self.stack.push(Value::Int(r));
+            }
         }
         self.frames
             .last_mut()
