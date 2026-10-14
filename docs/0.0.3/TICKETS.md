@@ -3,13 +3,15 @@
 > **Goal**: Aggregation and organization — land `struct` / `[T]` / `for` + `Range` / the module
 > system end-to-end, ship the `std` library, and deliver the `flint` package manager
 > (`flint.toml` + git dependencies + `new/build/run/test/check`).
-> **Basis**: `docs/0.0.3/PLAN.md` (draft 2026-10-11, decision points D1–D10 pending review),
-> `docs/BYTECODE.md` v0.0.2 (opcode space, §10 versioning rules), `docs/DESIGN.md` §9/§10/§18,
-> `docs/0.0.2/TICKETS.md` (current implementation state: 0.0.2 complete).
-> **Status** (2026-10-11): V01 implemented (completion notes at the end of its section);
+> **Basis**: `docs/0.0.3/PLAN.md` (2026-10-11; D1–D5 finalized with implementation, D6–D10
+> ahead of their tickets), `docs/BYTECODE.md` v0.0.3, `docs/DESIGN.md` §9/§10/§18,
+> `docs/0.0.2/TICKETS.md` (prior state: 0.0.2 complete).
+> **Status** (2026-10-14): V01 implemented (completion notes at the end of its section);
 > V02 implemented (completion notes at the end of its section); V03 implemented
-> (completion notes at the end of its section); V04+ not started.
-> Implementation begins after the PLAN review freezes D1–D10.
+> (completion notes at the end of its section); V04 implemented (completion notes at the end of
+> its section); **V05+ not started**.
+> Implementation order: the V-ticket feature slices (per the overview table); D5–D10's remaining
+> decision points freeze when their ticket opens.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
 > 0.0.3 is cut **by feature** — every ticket is a vertical slice through Lex → Parse → … → VM
 > for one feature (the 0.0.2 U13 precedent, generalized). PLAN §9's stage-based table is
@@ -587,6 +589,29 @@ Range { start: i64, end: i64 },   // Copy
 cargo test -p fleen-compiler -p fleen-verify -p fleen-vm
 cargo fln tests/e2e/valid/for_range.fln
 ```
+
+> **Implemented** (2026-10-14). Full chain landed: `TokenKind::For`/`In` (both reserved words),
+> parser `ExprFor` and `parse_for` (iterable parsed with struct literals disabled, like a `while`
+> condition; body hugs `}`), ASI predicates (`For` → start set + block-like-header climb, `In` →
+> continuation set), resolver `ExprForHir` with a fresh immutable loop binding in its own loop
+> scope, typeck `Type::Range` (Copy) + the closed iterable set `{ [T], Range }` → `NotIterable`,
+> lower `lower_for` desugar (index-driven array loops; `RangeStart`/`RangeEnd` for ranges;
+> iterable evaluated once and parked in a synthetic `__it` slot), bytecode `MakeRange`/
+> `RangeStart`/`RangeEnd` (0xB9–0xBB, version 3), verify stack effects (`MakeRange` Δ−1 min 2;
+> `RangeStart`/`RangeEnd` Δ+1 min 1), and VM `Value::Range { start, end }` (Copy).
+> fmt/clippy/tests/doc green; all 0.0.1/0.0.2 e2e byte-for-byte. Deviations, recorded:
+> - **`for`'s iterable is lowered via a *dedicated head block***, exactly like `while`: the first
+>   entry (carrying the surrounding context's merge value) and a back-edge entry would otherwise
+>   disagree on stack depth, and verify would report `StackDepthMismatch`. The head block
+>   re-enters only the bound check.
+> - **Source-level `Range` construction is deferred to V06** (`std.collection.range`), per D5:
+>   the 0.0.3 compiler never emits `MakeRange`. The group is exercised by hand-built
+>   bytecode/verify/vm tests; `for_range.fln` (e2e) iterates arrays only (it is extended by V06).
+> - **`ArrLen`/`RangeStart`/`RangeEnd` are peek-shaped** (`a → a int` / `r → r int`): the iterable
+>   stays on the stack so the later `ArrGet` or the next bound read can use it; the desugar emits
+>   a `Pop` to drop the parked copy once the bounds are stored.
+> - **`for`'s element copy reuses `ArrGet`** (no new `LoopVarCopy` instruction): element reads are
+>   already bounds-checked copies (D3), and the Range path pushes `__i` directly.
 
 ---
 

@@ -3,6 +3,32 @@
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and version semantics follow [SPEC.md](SPEC.md) §13 (`0.0.x` = early development, unstable API).
 
+## 0.0.3 — (in progress) 🐚
+
+The release that gives values shape: aggregation types (`struct`, `[T]`), the `for` loop,
+and the module system. Planning and design decisions: [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md).
+
+### Language Features
+
+- **`[T]` arrays**: array literals, index read/write (`a[i]`), and `len` built-in; arrays are owned values
+  with `move`/`clone` semantics; indexing is bounds-checked at runtime (out of bounds to `IndexOutOfRange`)
+- **`for` loop + `Range`**: `for x in iterable { … }` over arrays `[T]` and ranges (`start..end`);
+  the loop variable is a fresh immutable binding per iteration; the iterable is evaluated once;
+  `for` and `in` are now reserved keywords (breaking change)
+- **`struct`** (from V02): struct declarations, literals, field access, and field assignment
+
+### Toolchain
+
+- Bytecode v3: Range instructions (`MakeRange`/`RangeStart`/`RangeEnd`, 0xB9–0xBB), array instructions
+  (0xB4–0xB8 renumbered), v3 modules are distinguished by bytecode version; v1/v2 fixtures continue to pass
+- `Value::Range` (Copy) joins the VM value model
+- `IndexOutOfRange` runtime error
+
+### Breaking
+
+- **`for` and `in` become reserved words**
+- Bytecode opcode renumbering: `MakeRange` moved from 0xB8 to 0xB9
+
 ## 0.0.2 — Hermit Crab (2026-10-11) 🐚
 
 The beginning of ownership: heap values get owners, errors start to flow, and semicolons start to retire.

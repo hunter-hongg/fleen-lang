@@ -5,7 +5,9 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.2 · Hermit Crab 🐚** — the "heap values get owners" milestone.
+> Current version **0.0.3 (in progress) · aggregation and organization** — built on
+> **0.0.2 · Hermit Crab 🐚** (the "heap values get owners" milestone).
+> Remaining 0.0.3 scope: modules / `pub`, `std`, and `flint` (planned).
 
 ## Language at a Glance
 
@@ -39,7 +41,13 @@ and function types; `if` / `elif` / `else` expressions; `while`; `choose` patter
 (deterministic deallocation, no GC); `ref T` provides read-only borrowing (parameter position only);
 `as string` converts scalars (a temporary feature); runtime errors carry source line/column.
 See [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) for planning and implementation decisions.
-0.0.3 will bring `struct` / `for`.
+
+**0.0.3 · Aggregation**: user `struct` declarations/literals/field access; `[T]` arrays with
+written elements (both bounds-checked at runtime); `for x in iterable { … }` over arrays and
+`Range` (the loop variable is a fresh immutable binding; the iterable is evaluated once).
+`struct` / `for` / `in` are now reserved words (a breaking change). Modules / `pub`, the `std`
+library, and the `flint` package manager come later in 0.0.3.
+See [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) and [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md).
 
 ## Quick Start
 
@@ -84,6 +92,7 @@ cargo doc --no-deps
 - [docs/SYNTAX.ebnf](docs/SYNTAX.ebnf) — EBNF grammar
 - [docs/BYTECODE.md](docs/BYTECODE.md) — bytecode format specification
 - [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) — 0.0.2 feature plan (the beginning of ownership)
+- [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) — 0.0.3 feature plan · [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md) — implementation tickets
 - [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License

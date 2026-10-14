@@ -255,7 +255,7 @@ pub fn codegen(mir: Mir) -> Bytecode { ... }
 | Parse | Token stream | AST | syntax |
 | Resolve | AST | HIR | name resolution, scopes |
 | Typeck | HIR | Typed HIR | type inference, checking (from 0.0.2 includes the ownership-check sub-pass `typeck/ownership.rs`; still the same phase, no new standalone phase) |
-| Lower | Typed HIR | MIR | control-flow flattening |
+| Lower | Typed HIR | MIR | control-flow flattening; the `for`-over-`[T]`/`Range` desugar is a sub-pass here (0.0.3, never in the parser — no phase is skipped) |
 | Codegen | MIR | Bytecode | bytecode generation |
 | Execute | Bytecode | result | VM execution |
 
@@ -479,6 +479,11 @@ Check before submitting a PR:
 
 **0.0.2 goal: foundations of ownership (plan in `docs/0.0.2/PLAN.md`).**
 
+**0.0.3 goal: aggregation and organization — `struct`, `[T]` arrays, `for` + `Range`,
+the module system, `std`, and the `flint` package manager (plan in `docs/0.0.3/PLAN.md`,
+tickets in `docs/0.0.3/TICKETS.md`). V01–V04 (F1 `struct`, F2 arrays, F3 `for` + `Range`,
+bytecode v3) are implemented; V05+ (modules, std, flint) remain planned.**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -491,6 +496,10 @@ float    // 64-bit float
 bool     // true / false
 string   // UTF-8 string
 unit     // empty-value type
+
+[T]      // array (0.0.3, owned even for [int]) | deeply covered in "Aggregation Types" below
+Range    // builtin Copy type, start..end end-exclusive (0.0.3 V04)
+MyStruct // a user-defined struct name is a type (0.0.3 V02)
 ```
 
 ### Declarations
@@ -546,6 +555,29 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
 result = apply(add, 1, 2);
 ```
 
+### Aggregation Types (0.0.3)
+
+```fleen
+// struct (0.0.3) — a user-defined aggregate; is_copy(S) = all fields Copy
+struct Point {
+    x: int,
+    y: int,
+}
+p = Point { x: 1, y: 2 };    // literal; all fields must be initialized
+n = p.x;                     // field read (a copy; deep for owned fields)
+p.y = 3;                     // field write (direct field of a local/global only)
+
+// arrays [T] (0.0.3) — an owned type for every T (even [int])
+a = [1, 2, 3];               // a: [int]; empty literals need a type annotation
+x = a[0];                    // read: bounds-checked copy
+a[1] = 10;                   // write: bounds-checked
+t = clone a;                 // deep copy
+u = move a;                  // transfer; a is unusable afterwards
+
+// Range (0.0.3, bytecode v3) — a builtin Copy type; source construction is
+// std.collection.range (V06), iterated by `for` (D4/D5)
+```
+
 ### Control Flow
 
 > **Note on semicolons**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 ASI (automatic semicolon insertion) is in place,
@@ -566,6 +598,15 @@ if x > 0 { "positive" } elif x < 0 { "negative" } else { "zero" };
 // while loop
 while x < 10 {
     x = x + 1;    // assignment to the outer x (§4.5), not shadowing
+};
+
+// for loop (0.0.3) — over an array [T] or a Range; loop var is a fresh
+// immutable binding per iteration; the iterable is evaluated once
+for x in [1, 2, 3] {
+    total = total + x;
+};
+for i in range(0, 10) {   // Range (std.collection.range, 0.0.3 V06)
+    print(i as string);
 };
 
 // choose expression
@@ -623,6 +664,7 @@ and
 as     (type cast, 0.0.2: binds tighter than binary operators, looser than unary prefixes, same as Rust)
 ?      (postfix, 0.0.2)
 box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2)
+() [i] .f ?   (postfix suffixes: call, index, field access (0.0.3), and `?` — bind tightest, chain left-to-right)
 ;       (explicit semicolon: required in 0.0.1, optional from 0.0.2)
 ```
 
@@ -630,29 +672,38 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 |
-|---------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ |
-| `const` immutability | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) |
-| `func` single-line / multi-line | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ |
-| `while` | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` pattern) |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) |
-| Function types | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) |
-| `?` | ❌ | ✅ |
-| `move` / `clone` | ❌ | ✅ |
-| `box<T>` | ❌ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) |
-| `struct` | ❌ | ❌ (0.0.3) |
-| `for` | ❌ | ❌ (0.0.3) |
-| `async` | ❌ | ❌ (0.0.4) |
-| FFI | ❌ | ❌ |
-| Generics | ❌ | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ (0.1.0) |
-| Pointers `ptr` / `addr` | ❌ | ❌ (0.0.5) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 |
+|---------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ |
+| `const` immutability | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ |
+| Function types | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ |
+| `?` | ❌ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) |
+| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, `start..end` end-exclusive; source construction via std `range`, V06) |
+| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`; `for`/`in` are reserved words) |
+| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) |
+| Modules (`import` / `pub`) | ❌ | ❌ | ⏳ planned (V05) |
+| `std` library | ❌ | ❌ | ⏳ planned (V06–V07) |
+| `flint` package manager | ❌ | ❌ | ⏳ planned (V08) |
+| `async` / `await` | ❌ | ❌ | ❌ (0.0.4) |
+| `unsafe` / `ptr` / `addr` | ❌ | ❌ | ❌ (0.0.5) |
+| FFI | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
+
+**Status of 0.0.3**: V01–V04 (`FileId`/`SourceMap`, `struct`, arrays, `for` + `Range`) are
+implemented and green. V05+ (modules, std, flint) remain planned.
 
 ---
 

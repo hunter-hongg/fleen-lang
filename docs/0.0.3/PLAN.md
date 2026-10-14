@@ -7,9 +7,11 @@
 > allocation, §10 versioning rules), the reserved grammar in `SYNTAX.ebnf` (`import_decl`,
 > `struct_literal`, `array_type`, field access), and the planning conversation of 2026-10-11
 > (four-item scope: struct/arrays, for+iterators, module system, flint + std).
-> **Status**: Draft (2026-10-11). All decision points in §2 are **recommendations pending review**;
-> spec documents are synced per §11 only after the plan is finalized; implementation starts once
-> the work is broken down into TICKETS. Until it lands, the current toolchain remains 0.0.2 behavior.
+> **Status**: **In progress — V01–V04 implemented** (`FileId`/`SourceMap`, `struct`, `[T]`
+> arrays, `for` + `Range`; bytecode v3). V05+ (modules / `pub`, `std`, `flint`) remain planned.
+> Decision points D1–D5 (aggregation) are finalized and reflected in `DESIGN.md`/`BYTECODE.md`;
+> D6–D10 (modules, std, flint) are still ahead of implementation. Spec documents are kept in sync
+> per ticket as each V-slice lands (see `TICKETS.md` for the authoritative status).
 
 ---
 
@@ -628,7 +630,7 @@ unchanged from 0.0.2.
 | Array checking | Uniform element type, literal inference, annotation for empty literals; `MoveOutOfArray`; index target place rules |
 | `for` checking | Iterable ∈ {[T], Range}; loop-variable binding type; body scope per §4.5 |
 | Schematic builtins | Type-variable signatures for std's `[T]` functions (§3.5.2 note) |
-| New error kinds | `RecursiveStruct`, `MissingField`, `UnknownField`, `MoveOutOfStruct`, `MoveOutOfArray`, `NotIterable`, `CannotInferArrayType`, `ArrayTypeMismatch`, `IndexNotInt`, `PrivateAccess` (with resolve), `ModuleNotFound`/`CircularImport` (from the module table) |
+| New error kinds | `RecursiveStruct`, `MissingField`, `UnknownField`, `MoveOutOfStruct`, `MoveOutOfArray`, `NotIterable`, `CannotInferArrayType`, `ArrayTypeMismatch`, `IndexNotInt`, `IndexOnBox` (indexing a `box<[T]>` directly — must `deref` first), `PrivateAccess` (with resolve), `ModuleNotFound`/`CircularImport` (from the module table) |
 
 ### 4.5 Lower (`lower/`)
 
@@ -665,13 +667,17 @@ unchanged from 0.0.2.
 | Execution | New instructions are mechanical: `StructNew` pops n field values; `ArrGet` bounds-checks → `RuntimeError::IndexOutOfRange` (span via §7's span_map); `RangeStart/End` destructure |
 | Copy semantics | `clone` of struct/array deep-copies (existing `DupDeep` generalizes over the new Value variants) |
 | Intrinsics | `println`, `read_line`, `sqrt`, `floor`, `args`, `exit`, `now_millis` join the builtins dispatch (the `print` mechanism, extended; §3.5.2) |
-| New RuntimeErrors | `IndexOutOfRange` (defensive; legal bytecode from the compiler never triggers it) |
+| New RuntimeErrors | `IndexOutOfRange { index: i64, len: usize }` — **runtime bounds error, reachable from compiler output** (the `a[i]` syntax is bounds-checked at runtime by design, D3); carries the faulting instruction's span via §7's span_map. The sign is checked before the `usize` cast so `a[-1]` is an out-of-range error, never a huge index. Reached by `ArrGet`/`ArrSet*` on malformed-or-OOB access (e.g. `array_oob.fln`) |
 
 ---
 
 ## 5. Bytecode v3 Spec Additions (to be merged into BYTECODE.md)
 
-### 5.1 New instructions (open group 0xB0–0xB7; 0xB8–0xBF stay reserved)
+### 5.1 New instructions (v3 opcode allocation — landed through V04)
+
+> `0xB0–0xB3` = struct (V02); `0xB4–0xB8` = array (V03); `0xB9–0xBB` = Range (V04).
+> `0xBC–0xBF` remain reserved for future struct/iterators. All of V02–V04's groups are allocated;
+> the full table is authoritative in `BYTECODE.md` §5.12–5.14.
 
 | opcode | Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|--------|------|--------|------|
@@ -681,14 +687,14 @@ unchanged from 0.0.2.
 | 0xB3 | `SetFieldGlobal` | `u16` gid, `u16` offset | 5 | `v →` | Same, for a global binding |
 | 0xB4 | `ArrNew` | `u16` n | 3 | `e₁ … eₙ → a` | Pop n elements into a fresh array |
 | 0xB5 | `ArrLen` | — | 1 | `a → a int` | Length (array stays on stack) |
-| 0xB6 | `ArrGet` | — | 1 | `a i → a v` | Bounds-checked element **copy**; out of bounds → `IndexOutOfRange` |
+| 0xB6 | `ArrGet` | — | 1 | `a i → v` | Bounds-checked element **copy** (**pop** form — the array leaves the stack, generalized from the V02 `GetField` erratum so `a[i][j]` chains); out of bounds → `IndexOutOfRange` |
 | 0xB7 | `ArrSetLocal` | `u16` slot | 3 | `v i →` | Bounds-checked store into local `slot`'s array (`a[i] = e`) |
-| — | `ArrSetGlobal` | `u16` gid | 3 | `v i →` | Same, for a global; **number TBD within 0xB8–0xBF or 0xA6–0xAF at spec time** (TICKETS finalizes; the group has room) |
-| 0xB8 | `MakeRange` | — | 1 | `start end → r` | Range value (Copy: two i64) |
-| 0xB9 | `RangeStart` | — | 1 | `r → r int` | Start bound (copy) |
-| 0xBA | `RangeEnd` | — | 1 | `r → r int` | End bound (copy) |
+| 0xB8 | `ArrSetGlobal` | `u16` gid | 3 | `v i →` | Same, for a global; writes an element in place, so the `StoreGlobal` `mutable` gate does not apply (same rule as `SetFieldGlobal`) |
+| 0xB9 | `MakeRange` | — | 1 | `start end → r` | Range value (Copy: two i64) — **renumbered from 0xB8** to free 0xB8 for `ArrSetGlobal` (0.0.3 V03 finalized the array opcode group 0xB4–0xB8) |
+| 0xBA | `RangeStart` | — | 1 | `r → r int` | Start bound (copy) |
+| 0xBB | `RangeEnd` | — | 1 | `r → r int` | End bound (copy) |
 
-Invariant: existing instructions (0x00–0xBA) keep their opcodes and encodings **unchanged, to the
+Invariant: existing instructions (0x00–0xBB) keep their opcodes and encodings **unchanged, to the
 letter** (BYTECODE.md §10 rule); v1/v2 modules remain executable on the 0.0.3 VM/verify.
 
 ### 5.2 Stack-depth analysis addendum (for verify)
@@ -696,7 +702,8 @@ letter** (BYTECODE.md §10 rule); v1/v2 modules remain executable on the 0.0.3 V
 | Instruction | Δdepth | Minimum depth before execution |
 |------|--------|----------------|
 | `StructNew(id)` | `1 − n` (n from the struct table) | n |
-| `ArrLen` / `ArrGet` / `RangeStart` / `RangeEnd` | +1 | 1 |
+| `ArrLen` / `RangeStart` / `RangeEnd` | +1 | 1 |
+| `ArrGet` | −1 (pops the array and index, pushes the element copy — pop form, `a i → v`) | 2 |
 | `GetField` | 0 (pops the struct, pushes the field copy) | 1 |
 | `ArrNew(n)` | `1 − n` | n |
 | `SetFieldLocal` / `SetFieldGlobal` | −1 (the value; the offset is an operand) | 1 |
@@ -858,38 +865,41 @@ tests/std/                   # std exercised directly (it is always compiled in 
 
 ## 9. Task Breakdown and Milestones (continuing T/U numbering; this release uses the V prefix)
 
-| Ticket | Area | crate/module | Deliverables | Depends on |
-|------|------|-----------|------|------|
-| V01 | Lex | `lexer/` | Struct/For/In/Pub tokens | — |
-| V02 | Parse | `parser/` | struct decl/literal, array literal, for, pub, field access, new assignment targets, EBNF v0.0.3, ASI predicate updates | V01 |
-| V03 | Span+Modules | all stages (mechanical) + `resolver/modules.rs` | FileId/SourceMap refactor; module table, cycle detection, prelude injection, pub enforcement | V02 |
-| V04 | Typeck | `typeck/` | Struct/Array/Range types, is_copy, field/index rules, for checks, schematic builtins, new error family | V02 |
-| V05 | Lower | `lower/` | New MIR instructions, for-desugar, place-form lowering | V03, V04 |
-| V06 | Codegen/Verify | `codegen/`, `fleen-verify/` | v3 opcodes, struct_defs table, stack effects, v1/v2 compat | V05 |
-| V07 | VM | `fleen-vm/` | New Value variants, instruction execution, intrinsics dispatch, IndexOutOfRange | V06 |
-| V08 | std | `std/`, `typeck/builtins.rs` | All std modules + signatures + prelude + `tests/std/` | V07 (V04 for schematic signatures) |
-| V09 | flint | `flint-cli/` | Manifest/lockfile, git resolution + cache, new/build/run/test/check | V08 (std must ship for flint projects to be usable) |
-| V10 | Test harness | `tests/` | Project-mode e2e harness + full §8 matrix + std suite | V07 |
-| V11 | Docs | `docs/`, `CHANGELOG.md` | BYTECODE v3, DESIGN/EBNF/SPEC bumps, CHANGELOG 0.0.3 (Breaking: reserved words) | V10 |
-| V12 | Release | repo | Version bump, release notes, README tour | V11 |
+> **Note**: 0.0.3 tickets are **feature-based vertical slices** (not stage-based as in 0.0.2's
+> U-series). Each V-ticket is a complete Lex → Parse → … → VM chain for one feature; the
+> `docs/0.0.3/TICKETS.md` breakdown is authoritative. The milestone mapping below is kept in
+> sync. PLAN §9's ticket table mirrors TICKETS.md's overview table.
+
+| Ticket | Feature | Phases touched | Types / Crates | Deliverable | Depends on |
+|------|------|------|-------|------|------|
+| V01 | Foundation: `FileId` / `SourceMap` | all (mechanical) | fleen-compiler, fleen-vm | Spans name their file; multi-file diagnostics render `--> file:line:col` | — |
+| V02 | F1 `struct` | Lex → VM | fleen-compiler, fleen-verify, fleen-vm | struct decl/literal/field access, `Value::Struct`, opcodes 0xB0–0xB3, `struct_defs` table, `struct_demo.fln` | V01 |
+| V03 | F2 `[T]` arrays | Lex-free → VM | fleen-compiler, fleen-verify, fleen-vm | array literal, index read/write, `Value::Arr`, opcodes 0xB4–0xB8, `array_demo.fln` | V02 (shares the aggregate-type pattern; V01) |
+| V04 | F3 `for` + `Range` | Lex → VM | fleen-compiler, fleen-verify, fleen-vm | `for x in expr {}`, `Range`, desugar lowering, opcodes 0xB9–0xBB, `for_range.fln` | V03 (arrays are the primary iterable) |
+| V05 | F5 module system | Lex → driver | fleen-compiler, fleen-vm | `import` resolves files, `pub` visibility, module table, cycle detection, prelude, project-mode e2e harness | V01 (**hard**), V02 (`pub struct`) |
+| V06 | F6 `std` library | builtins + VM | fleen-compiler, fleen-vm | `std/` Fleen sources, intrinsics table, schematic `[T]` signatures, prelude live, `tests/std/` | V05 (**hard**: std is modules), V02–V04 (std uses them) |
+| V07 | F4 iterator helpers | std only | fleen-compiler (compile-only) | `std.collection.iter`: `map`/`filter`/`fold`/`take`/`zip` (eager), `iter_helpers.fln` | V06 |
+| V08 | F7 `flint` | tooling | flint-cli (new) | `flint.toml`/`Flint.lock`, git resolution + cache, `new/build/run/test/check`, `depdemo` e2e | V06 (**hard**: projects need std) |
+| V09 | Testing & compatibility | integration | all | full §8 matrix, v1/v2 `.flnc` fixtures, byte-for-byte regression | V08 |
+| V10 | Docs & release | wrap-up | docs, Cargo.toml | BYTECODE/DESIGN/EBNF/SPEC v0.0.3, CHANGELOG, version bump | V09 |
+
+**Phase boundaries unchanged** (SPEC §6): the module table is a sub-pass within Resolve
+(`resolver/modules.rs`), the `for` desugar happens within Lower — no new independent phase.
 
 ```
-V01 → V02 → V03 ──────┐
-        ↘             ↓
-          V04 → V05 → V06 → V07 → V08 → V09 → V10 → V11 → V12
-                                       └─────┘ V08 ∥ V09 start
+V01 → V02 → V03 → V04 → V05 (modules) → V06 → V07 → V08 → V09 → V10
 ```
 
 ### Milestones
 
 | Milestone | Tickets | Marker |
 |--------|------|------|
-| M1 Frontend | V01–V02 | struct/for/array/pub parse; ASI traps green |
-| M2 Multi-file semantics | V03–V04 | FileId lands; module table + visibility checks green; all invalid cases green |
-| M3 Backend and runtime | V05–V07 | `struct_demo.fln`, `array_demo.fln`, `for_range.fln` run end to end; v1/v2 fixtures pass |
-| M4 std | V08 | `tests/std/` green; prelude compat; iter helpers e2e |
-| M5 flint | V09 | `depdemo` project builds and runs with a git fixture dependency |
-| M6 Tests, docs, release | V10–V12 | Full matrix green; docs synced; 0.0.3 released |
+| M0 Foundations | V01 | Multi-file diagnostics render; 0.0.1/0.0.2 regression byte-for-byte |
+| M1 Aggregation types | V02–V04 | `struct_demo.fln` / `array_demo.fln` / `for_range.fln` run end to end; v3 opcodes + struct_defs table land |
+| M2 Modules | V05 | `netdemo` project e2e green; privacy + cycle errors carry file:line:col |
+| M3 std | V06–V07 | `tests/std/` green in CI; prelude compat; `iter_helpers.fln` green |
+| M4 flint | V08 | `depdemo` project builds and runs with a git fixture dependency |
+| M5 Tests, docs, release | V09–V10 | Full §8 matrix green; docs synced; 0.0.3 released |
 
 ---
 

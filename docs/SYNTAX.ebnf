@@ -1,9 +1,15 @@
 (* ============================================ *)
-(* Fleen EBNF Grammar v0.0.2                    *)
+(* Fleen EBNF Grammar v0.0.3                    *)
 (* New in 0.0.2: box/deref/move/clone prefix    *)
 (* expressions, the ? suffix, Ok/Err patterns,  *)
 (* deref assignment targets, the as cast layer, *)
 (* and optional semicolons (ASI)                *)
+(* New in 0.0.3: struct declarations &          *)
+(* literals, array types & literals and         *)
+(* a[i] indexing, field access, the for loop    *)
+(* over arrays / Range, and the Range type      *)
+(* (V02–V04; modules/pub and std land in later  *)
+(* 0.0.3 tickets)                               *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -19,8 +25,15 @@ module_path     = ident , { "." , ident } ;
 
 declaration     = const_decl
                 | func_decl
+                | struct_decl
                 | var_binding
                 | expr_stmt ;
+
+(* 0.0.3 V02: user-defined aggregate declaration; a struct declaration takes
+   no trailing semicolon (same rule as func) and is not recursive (typeck) *)
+struct_decl     = "struct" , ident , "{" , [ field_decl , { "," , field_decl } ] , [ "," ] , "}" ;
+
+field_decl      = ident , ":" , type ;
 
 
 (* ---------- Variable Bindings ---------- *)
@@ -51,9 +64,14 @@ type            = base_type
                 | box_type
                 | ref_type
                 | result_type
-                | func_type ;
+                | func_type
+                | named_type ;
 
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
+
+(* 0.0.3: a bare name as a type — a user struct (V02) or the builtin Range (V04).
+   Which names are valid types is checked by typeck. *)
+named_type      = ident ;
 
 array_type      = "[" , type , "]" ;
 
@@ -84,13 +102,17 @@ block           = "{" , { declaration | expr_stmt } , "}" ;
 
 expr            = if_expr
                 | while_expr
+                | for_expr
                 | choose_expr
                 | assign_expr ;
 
 assign_expr     = logic_or , [ "=" , assign_expr ] ;
 (* 0.0.2: the assignment target is extended to deref b (writes the value inside
-   the box; no type annotation allowed);
-   validity is checked by the semantic phases — the grammar only recognizes shape *)
+   the box; no type annotation allowed)
+   0.0.3 V02–V03: the target also includes `p.f` (field write, one level) and
+   `a[i]` (index write) — the grammar only recognizes their shape; validity
+   (a bare local/global receiver, direct field, bounds at runtime) is checked
+   by the semantic phases *)
 
 if_expr         = "if" , expr , block
                   , { "elif" , expr , block }
@@ -99,6 +121,13 @@ if_expr         = "if" , expr , block
 
 while_expr      = "while" , expr , block ;
 (* Note: when while_expr is used as an expression statement, 0.0.1 requires a trailing semicolon *)
+
+for_expr        = "for" , ident , "in" , expr , block ;
+(* Note: `for` is new in 0.0.3 and is a statement like `while`; as an expression
+   statement the trailing semicolon is optional from 0.0.2 (ASI), per the same rules *)
+(* Note: `for` and `in` are reserved keywords from 0.0.3; the loop variable is a fresh
+   immutable binding per iteration; the iterable must be an array [T] or a Range,
+   and is evaluated once before the loop *)
 
 choose_expr     = "choose" , expr , "{"
                   , { when_clause }
@@ -181,9 +210,15 @@ primary         = literal
                 | ident
                 | "(" , expr , ")"
                 | block
+                | array_literal
                 | struct_literal ;
 
-struct_literal  = ident , "{" , [ field_init , { "," , field_init } ] , "}" ;
+(* 0.0.3 V03: array literal; an empty literal needs a type annotation
+   (CannotInferArrayType in typeck). Distinct from the index suffix `[ expr ]`
+   by parse position (a primary `[` is a literal). *)
+array_literal   = "[" , [ expr , { "," , expr } ] , [ "," ] , "]" ;
+
+struct_literal  = ident , "{" , [ field_init , { "," , field_init } ] , [ "," ] , "}" ;
 
 field_init      = ident , ":" , expr ;
 

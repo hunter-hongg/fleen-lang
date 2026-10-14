@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.2
+# Fleen Bytecode Specification v0.0.2–v0.0.3
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -6,9 +6,10 @@
 > The compiler and the VM must both adhere to this document.
 >
 > **v0.0.2 additions**: ownership instructions (0x80–0x93), Result instructions (0xA0–0xA4),
-> the `Value` ownership representation, and `span_map` generation. Design decisions are in
-> `docs/0.0.2/PLAN.md`; until the implementation lands, the current toolchain still
-> produces/executes v1, and readers must accept both `{1, 2}`.
+> the `Value` ownership representation, and `span_map` generation.
+> **v0.0.3 additions**: aggregation instructions — struct (0xB0–0xB3), array (0xB4–0xB8),
+> and Range/iteration (0xB9–0xBB). `Value::Struct` / `Value::Arr` / `Value::Range` join the
+> value model. Design decisions are in `docs/0.0.3/PLAN.md`.
 
 ---
 
@@ -19,7 +20,7 @@ Fleen compiles to a **custom stack-based bytecode**, executed by a purpose-built
 - **Execution model**: stack machine; operands are implicitly on top of the stack
 - **Encoding**: byte stream, little-endian
 - **Instruction format**: `opcode: u8` + fixed- or variable-length operands
-- **Structure**: one bytecode module (`Module`) = constant pool + function table + global variable table + entry point
+- **Structure**: one bytecode module (`Module`) = constant pool + function table + global variable table + `struct_defs` (v3) + entry point
 - **No GC, no exception table, no meta-circular instructions**: consistent with the language design
   (ownership is carried by v2 instructions such as `AllocBox` /
   `MoveLocal` / `CloneLocal`, §5.9–5.10; release is done via deterministic destruction of values)
@@ -43,13 +44,18 @@ Rules:
 
 ```rust
 pub struct Module {
-    pub version: u16,          // bytecode version: 0.0.2 writes 2, readers accept {1, 2}
+    pub version: u16,          // bytecode version: 0.0.3 writes 3, readers accept {1, 2, 3}
     pub constants: Vec<Const>, // constant pool
     pub functions: Vec<Func>,  // function table
     pub globals: Vec<Global>,  // global variable table
+    pub struct_defs: Vec<StructDef>, // struct field table (0.0.3, version 3 only, §2)
     pub entry: FuncId,         // entry function: usually main; synthesized __init__ when globals exist
 }
 ```
+
+> **`struct_defs` (0.0.3 V02)**: one entry per user struct, giving verify exactly
+> `StructNew`'s field count and each field's type tag (see §2 "Struct Definitions"). It is the
+> single appended table of bytecode version 3 (§9), so it is present only when `version >= 3`.
 
 Rules:
 - **Constant pool deduplication**: identical constants are stored once and referenced by index `ConstId(u32)`
@@ -148,6 +154,28 @@ Rules:
 - Global initialization order = table order; initialization code lives in the synthesized `__init__` function (see §2 "Entry and Global Initialization")
 - A `StoreGlobal` that initializes a `const` global inside `__init__` is allowed; everywhere else, the target of `StoreGlobal` must be `mutable: true`
 
+### Struct Definitions (`struct_defs`, 0.0.3)
+
+```rust
+/// Type tag for one struct field — compact enough for verify's count/shape checks.
+pub enum FieldTypeTag {
+    Int = 0,  Float = 1,  Bool = 2,  Str = 3,  Unit = 4,  Func = 5,
+    Result = 6, Array = 7, Box = 8,  Ref = 9,  Struct = 10, Range = 11,
+}
+
+pub struct StructDef {
+    pub field_types: Vec<FieldTypeTag>, // one tag per field, in declaration order
+}
+```
+
+Rules:
+- `StructDef.field_types.len()` is exactly the operand count `StructNew` must carry; verify
+  cross-checks `StructNew(id)` against `struct_defs[id]` (a forged/mismatched count is
+  `StructIndexOutOfRange` / a field-count mismatch).
+- Field tags exist only so `fleen-verify` can validate shape without executing; the VM does not
+  consult them. Struct values are stored as a plain `Box<[Value]>` (§3.2).
+- The table is **append-only in the module** and read only when `version >= 3` (§9).
+
 ---
 
 ## 3. Runtime Model (VM)
@@ -180,6 +208,9 @@ pub enum Value {
     Ref { base: u32, slot: u16 },  // 0.0.2: borrow handle, lives only within the callee frame's lifetime
     Ok(Box<Value>),                // 0.0.2: Result construction
     Err(Box<Value>),               // 0.0.2: Result construction
+    Struct(Box<[Value]>),          // 0.0.3: struct fields in declaration order (owned/ Copy per is_copy)
+    Arr(Box<[Value]>),             // 0.0.3: array elements (owned for every T)
+    Range { start: i64, end: i64 },// 0.0.3: builtin int interval (Copy)
     Unit,           // empty value, placeholder
     Func(FuncId),   // first-class function reference
 }
@@ -192,6 +223,11 @@ Rules:
   with `Drop` performed deterministically (frame-destruction truncation, slot overwrite, `Pop`), no GC
 - `Eq` semantics: `Str` compares by content; `Boxed` compares the value inside the box (consistent with Rust's `Box: PartialEq`);
   `Ref` is dereferenced before comparing
+- **0.0.3**: `Struct` / `Arr` / `Range` are **not comparable** (`==` on them is a *typeck* error);
+  `Eq`/`Ne`/ordering reaching one in the VM is a defensive `RuntimeError::TypeMismatch`
+  (unreachable via legal bytecode). `DupDeep` recurses into `Struct` / `Arr` / `Boxed` / `Ok` /
+  `Err`, so `clone` deep-copies aggregates. `Range` is **Copy** (two `i64`s, no heap); `Struct`
+  and `Arr` are owned.
 - `Ref` handles cannot escape: they are only produced by `MakeRefLocal` during argument preparation, are read-only, cannot be stored,
   and die when the call ends (out-of-range read → `RuntimeError::BorrowOutOfRange`, defensive)
 - `Value` is never serialized: the constant pool has no `Ref` / `Boxed` / `Ok` / `Err` variants
@@ -264,7 +300,10 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0x94–0x9F  Reserved
 0xA0–0xA4  Result / error handling (0.0.2, §5.11)
 0xA5       `as` conversion `ToStr` (0.0.2 U13, F8 §3.6)
-0xA6–0xFF  Reserved
+0xB0–0xB3  struct (0.0.3 V02, §5.12)
+0xB4–0xB8  array (0.0.3 V03, §5.13)
+0xB9–0xBB  Range / iteration (0.0.3 V04, §5.14)
+0xBC–0xFF  Reserved
 ```
 
 ---
@@ -342,7 +381,7 @@ The jump operand `u16` is the **absolute byte offset of the target instruction**
 Rules:
 - Jump targets must **land on instruction boundaries** (misaligned → VM error); `fleen-verify` performs the static check
 - `JumpIfTrue` is used for `or` short-circuiting; `JumpIfFalse` for `if` conditions and `and` short-circuiting
-- No `for` / `break` / `continue` instructions (0.0.1 has no such syntax)
+- `for` desugars to indexed iteration + control-flow jumps (see §5.13–5.14 v0.0.3); no `break` / `continue`
 
 ### 5.7 Function Calls
 
@@ -432,6 +471,69 @@ Rules:
 - `UnwrapOk` on an `Err` (or vice versa) → `RuntimeError::ResultMismatch` (defensive;
   legitimately compiled output never hits this — the branches are guaranteed by `IsErr` + jumps)
 - Payload extraction is a **move**: the `Result` value is consumed
+
+### 5.12 struct (v0.0.3 V02)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `StructNew` | `u16` (struct_id) | 3 | `f₁ … fₙ → s` | Pop n field values (declaration order) into a struct of id; n comes from `struct_defs[id]` |
+| `GetField` | `u16` (offset) | 3 | `s → v` | Pop the struct, push a **copy** of field `offset` (D2 read semantics) |
+| `SetFieldLocal` | `u16` (slot), `u16` (offset) | 5 | `v →` | Overwrite field `offset` of the struct in local `slot`; old field released |
+| `SetFieldGlobal` | `u16` (gid), `u16` (offset) | 5 | `v →` | Same, for the struct held by global `gid`; writes in place, so the `StoreGlobal` `mutable` gate does not apply |
+
+Rules:
+- `StructNew`'s field count is the **operand-derived** `struct_defs[id]` length — static, so verify
+  needs no abstract interpretation (`StructNew` requires depth n; a forged id is
+  `StructIndexOutOfRange`)
+- `GetField` is the **pop** form (`s → v`, Δ0, min 1): the struct leaves the stack so
+  `p.a.b` chains compose (the V02 erratum recorded in PLAN §5.2; the planned peek form `s → s v`
+  would strand the struct under the field value)
+- `SetFieldLocal` / `SetFieldGlobal` pop the **value only** — the field offset is an operand, not
+  a stack item (`v →`, Δ−1, min 1)
+
+### 5.13 array (v0.0.3 V03)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `ArrNew` | `u16` (n) | 3 | `e₁ … eₙ → a` | Pop n elements into a fresh array |
+| `ArrLen` | — | 1 | `a → a int` | Length (peek — the array stays on the stack) |
+| `ArrGet` | — | 1 | `a i → v` | Bounds-checked element **copy** (**pop** form); out of bounds → `IndexOutOfRange` |
+| `ArrSetLocal` | `u16` (slot) | 3 | `v i →` | Bounds-checked store into local `slot`'s array (`a[i] = e`) |
+| `ArrSetGlobal` | `u16` (gid) | 3 | `v i →` | Same, for the array held by global `gid`; writes in place, so the `StoreGlobal` `mutable` gate does not apply |
+
+Rules:
+- **All index operations are bounds-checked at runtime**: an out-of-range index (negative or
+  `>= len`) → `RuntimeError::IndexOutOfRange { index: i64, len: usize }` with the faulting
+  instruction's span (§2 `span_map`). The sign is checked **before** the `usize` cast, so `a[-1]`
+  is out of range, never a huge `usize` index. This is reachable from compiler output — it is the
+  intended runtime behavior of the `a[i]` syntax (D3), not just defensive.
+- `ArrGet` pops the array and index and pushes the element **copy** (`a i → v`, Δ−1, min 2) — the
+  same generalized pop form as `GetField` so `a[i][j]` chains and the `for` desugar work (the
+  planned peek form `a i → a v` would strand the array with no remove-below-top instruction)
+- `ArrLen` is peek-shaped (`a → a int`, Δ+1, min 1): the array must stay on the stack for a
+  subsequent `ArrGet`
+- `ArrSetLocal` / `ArrSetGlobal` pop the value **and** the index (`v i →`, Δ−2, min 2) and take the
+  array from the slot/global (not the stack); owned values first dup/deep-dup as assignment
+  requires
+- `ArrNew(n)` requires depth n and has net effect `1 − n` (static, n is an operand)
+
+### 5.14 Range / Iteration (v0.0.3 V04)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `MakeRange` | — | 1 | `start end → r` | Range value (Copy: two i64) — start inclusive, end exclusive |
+| `RangeStart` | — | 1 | `r → r int` | Start bound (peek — the Range stays on the stack) |
+| `RangeEnd` | — | 1 | `r → r int` | End bound (peek — the Range stays on the stack) |
+
+Rules:
+- A `Range` is represented as `Value::Range { start: i64, end: i64 }` (Copy)
+- `RangeStart` / `RangeEnd` are peek-shaped (`r → r int`, Δ+1, min 1): the Range stays on the stack so that
+  both bounds can be extracted in sequence (the parked copy is then dropped with a `Pop`)
+- `MakeRange` pops both bounds and pushes the Range (`start end → r`, Δ−1, min 2)
+- A `for x in r { … }` loop desugars to: `StoreLocal __it; __i = RangeStart(__it); __count = RangeEnd(__it);
+  while __i < __count { x = __i; …; __i = __i + 1 }` (see PLAN.md §5.4 for the exact MIR shape)
+- **Not reachable from `.fln` source until V06** (`std.collection.range`); the 0.0.3 compiler
+  never emits `MakeRange` today — the group is exercised by hand-built bytecode/verify tests.
 
 ---
 
@@ -658,6 +760,44 @@ Rules:
   `Ok` / `Err` arm or an `otherwise` fallback; otherwise typeck reports `ChooseNotExhaustive`.
 - Exhaustiveness is checked by `typeck`: **guard-free** `Ok` + `Err` arms alone are exhaustive
 
+### 6.9 array `for` (v0.0.3 V04)
+
+```fleen
+for x in [10, 20, 30] {
+    total = total + x;
+}
+```
+
+```text
+ArrLen …                      ; __count = len(__it)   (peek, then Pop the parked array copy)
+StoreLocal __count
+; …
+L_loop:
+LoadLocal __i
+LoadLocal __count
+Lt                            ; __i < __count
+JumpIfFalse L_end
+LoadLocal __it                ; __it is evaluated once, before the loop (D4)
+LoadLocal __i
+ArrGet                        ; element copy
+StoreLocal x                  ; loop variable: a fresh immutable binding
+<block body>
+LoadLocal __i
+Const    1
+IAdd
+StoreLocal __i
+Jump      L_loop
+L_end:
+Unit                          ; for's value is unit
+```
+
+- `for` over a `Range` uses the same shape with `__i = RangeStart(__it)` and
+  `__count = RangeEnd(__it)` (§5.14); the iterable is always evaluated once and parked in a
+  synthetic local before the loop
+- The desugar is done in **Lower** (`lower/`, `lower_for`), never the parser — Parse emits a real
+  `ExprFor` / `ExprForHir` node so Resolve/Typeck see the loop structure (no phase is skipped,
+  SPEC §6)
+
 ---
 
 ## 7. Complete Example
@@ -732,8 +872,12 @@ Constant pool:
 - [ ] Every function has `locals >= params`, and all `LoadLocal` / `StoreLocal` / `BindMatch` /
       `MakeRefLocal` / `MoveLocal` / `CloneLocal` slot operands are < `locals`;
       `CloneGlobal`'s gid is within the global table's range (0.0.2 U07)
-- [ ] **v2 instructions must not appear in a version=1 module**: all v1 opcodes are < 0x80 and all v2 opcodes are ≥ 0x80
-      (§4.2), so a single comparison suffices (verify's `V2OpcodeInV1Module`)
+- [ ] **v2/v3 instructions must not appear in a lower-version module**: all v1 opcodes are < 0x80,
+      all v2 opcodes are in 0x80–0xAF, and all v3 opcodes are ≥ 0xB0 (§4.2), so range comparisons
+      suffice (verify's `V2OpcodeInV1Module` and the v3 gate); a v3 opcode in a v2 module →
+      `BadOpcode`
+- [ ] **`StructNew(id)` indexes `struct_defs`** and carries exactly `field_types.len()` values;
+      `StructIndexOutOfRange` otherwise (0.0.3 V02)
 
 ### Per-Instruction Stack Depth Effect (Δdepth)
 
@@ -758,6 +902,14 @@ The stack-depth analysis is based on a static table (`n` is the operand count):
 | `StoreDerefBox` | -2 | 2 |
 | `PackOk` / `PackErr` / `IsErr` / `UnwrapOk` / `UnwrapErr` | 0 | 1 |
 | `ToStr` | 0 (`v → s`) | 1 |
+| `StructNew(id)` | `1 − n` (n = `struct_defs[id].field_types.len()`) | n |
+| `GetField` | 0 (`s → v`) | 1 |
+| `SetFieldLocal` / `SetFieldGlobal` | −1 (the value; the offset is an operand) | 1 |
+| `ArrNew(n)` | `1 − n` | n |
+| `ArrLen` / `RangeStart` / `RangeEnd` | +1 | 1 |
+| `ArrGet` | −1 (`a i → v`) | 2 |
+| `ArrSetLocal` / `ArrSetGlobal` | −2 (−1 value, −1 index) | 2 |
+| `MakeRange` | −1 | 2 |
 | `Return` | treated as a path terminator | 1 (the return value is on the stack top) |
 
 > **U07 erratum**: `AllocBox`'s net effect is **0** (`v → b`: the value is replaced by the box),
@@ -782,13 +934,15 @@ Rules:
 
 0.0.1 defines the on-disk binary format of the in-memory `Module`, with the extension `.flnc`. All integers are **little-endian**; multi-byte fields use the widths below.
 0.0.2 makes **zero layout changes**: `version` is bumped to `2`, readers accept `{1, 2}`; `span_map` is populated from 0.0.2 on (§2).
+0.0.3 (V02) writes `version = 3`, readers accept `{1, 2, 3}`; it appends **one** new table
+(`struct_defs`) at the end — the field order and widths of every existing table are unchanged.
 
 ### File Header
 
 | Field | Width | Value |
 |------|------|-----|
 | magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
-| version | u16 | bytecode version: the 0.0.2 compiler writes `2`, readers accept `{1, 2}` |
+| version | u16 | bytecode version: the 0.0.3 compiler writes `3`, readers accept `{1, 2, 3}` |
 
 ### Constant Pool
 
@@ -828,13 +982,26 @@ Rules:
 
 `entry: u32` (FuncId).
 
+### Struct Definitions (`struct_defs`, 0.0.3 V02, version ≥ 3 only)
+
+`struct_defs_len: u32`, then one entry at a time:
+
+| Field | Width |
+|------|------|
+| `field_count` | u32 |
+| `field_types` | `field_count` × u8 (a `FieldTypeTag`, §2) |
+
+The `FieldTypeTag` enum maps to the byte as `Int=0, Float=1, Bool=2, Str=3, Unit=4, Func=5,
+Result=6, Array=7, Box=8, Ref=9, Struct=10, Range=11`; any other byte is a format error.
+The table is present only when `version >= 3`.
+
 Rules:
 - Reading and writing must go through the same implementation (`codegen::flnc::{to_bytes, from_bytes}`); hand-written parsers are not allowed.
 - Version mismatch, bad magic, out-of-range indices, and truncated lengths are all deserialization errors.
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2}` (from 0.0.2 on); v2 does not change the field order or widths of any existing v1 tables.
+- `version` accepts `{1, 2, 3}` (from 0.0.3 on); v3 changes none of the existing tables — it only appends `struct_defs`.
 
 ---
 
@@ -844,7 +1011,7 @@ Rules:
 |-----------|-------------|------|
 | 1 | 0.0.1 | The instruction set defined in this document |
 | 2 | 0.0.2 | + ownership instructions `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal` (0x80–0x83), `DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal` (0x90–0x93), Result instructions (0xA0–0xA4), `ToStr` (0xA5, `as` conversion); `span_map` starts being populated (§5.9–5.11, §2) |
-| 3 | 0.0.3 | + `struct` / array instructions |
+| 3 | 0.0.3 | + aggregation instructions: `StructNew`/`GetField`/`SetFieldLocal`/`SetFieldGlobal` (0xB0–0xB3), `ArrNew`/`ArrLen`/`ArrGet`/`ArrSetLocal`/`ArrSetGlobal` (0xB4–0xB8), `MakeRange`/`RangeStart`/`RangeEnd` (0xB9–0xBB); `Struct`/`Arr`/`Range` values; the appended `struct_defs` table (§2, §9) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

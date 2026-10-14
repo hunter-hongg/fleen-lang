@@ -6,8 +6,14 @@
 > **0.0.2 additions**: ownership (`move` / `clone` / `box<T>` / `ref`), `?` and `Ok`/`Err`,
 > and ASI (optional semicolons) are finalized — see `docs/0.0.2/ASI.md` for decisions
 > and details (authoritative), `docs/0.0.2/PLAN.md` §3.5 for a summary.
+>
+> **0.0.3 additions**: aggregation — `struct` (§9.4), `[T]` arrays (§9.5), `for` + `Range`
+> (§6) — are implemented (V01–V04); the module system (`import` / `pub`), `std`, and `flint`
+> remain planned (V05+). Decisions are in `docs/0.0.3/PLAN.md` (D1–D5 finalized);
+> bytecode in `docs/BYTECODE.md` §5.12–5.14.
+>
 > The corresponding sections below have been annotated accordingly
-> (content marked "0.0.2" does not reflect current toolchain behavior until implemented).
+> (content marked "0.0.2"/"0.0.3" does not reflect current toolchain behavior until implemented).
 
 ---
 
@@ -55,7 +61,7 @@ true / false // bool
 ### Keywords
 
 ```
-func  const  if  elif  else  while  choose
+func  const  if  elif  else  while  for  in  choose
 when  otherwise  return  import  unsafe  trusted
 box  ref  deref  move  clone  as  true  false
 ```
@@ -386,7 +392,7 @@ A user binding with the same name as a builtin function (such as `print`) does n
 
 ### 4.5 Assignment Rules Inside Loop Bodies
 
-The body of a `while` (and of a future `for`) is a **loop scope**. When `x = expr` appears inside a loop body (including its nested blocks):
+The body of a `while` (and of a `for`, 0.0.3) is a **loop scope**. When `x = expr` appears inside a loop body (including its nested blocks):
 
 - If `x` already exists in the current scope (the loop body itself) → (2) assignment (as usual)
 - Otherwise, if an `x` that is **already visible within the current function scope before the current position** exists and is a **mutable user variable** → (2) **assignment**, not shadowing
@@ -501,7 +507,32 @@ while x < 10 {
 
 **Note: 0.0.1 requires a semicolon at the end of expression statements (from 0.0.2 on, ASI makes it optional, §3.9).**
 
-**0.0.1 only implements `while`; `for` depends on iterators and comes later.**
+**0.0.1 only implements `while`; `for` did not exist until 0.0.3 (V04, §6 below).**
+
+### for (0.0.3)
+
+```fleen
+// Sum an array
+total = 0;
+for x in [1, 2, 3, 4] {
+    total = total + x;
+};
+
+// Iterate a range (constructed via std.collection.range; there is no `..`
+// operator syntax in 0.0.3 — D5, PLAN §2)
+for i in range(0, 10) {
+    print(i as string);
+};
+```
+
+**Rules:**
+- The iterable must be an **array** `[T]` or a **`Range`**; a `Range` iterates `start, start+1, …, end-1` (end-exclusive, so the range is empty when `start == end`)
+- The loop variable is a **fresh immutable binding** per iteration — the body cannot assign to it
+- The iterable expression is **evaluated once**, before the loop begins
+- The loop variable is **out of scope** after the loop (it is a fresh binding, not an outer binding)
+- `for` yields `unit` (it is a statement, not an expression with a return value)
+- Assignment to an outer mutable variable inside the loop body works like a `while` body (§4.5)
+- `for` and `in` are now **reserved keywords** (breaking change from 0.0.2)
 
 ---
 
@@ -599,11 +630,60 @@ unit
 ### Composite Types
 
 ```fleen
-[T]              // array (0.0.3)
+[T]              // array (0.0.3): owned for every T; literals `[e1, e2, …]`, `a[i]` read/write, bounds-checked
+struct S { … }   // user-defined aggregate (0.0.3); a struct name is a type; is_copy = all fields Copy
+Range            // builtin Copy type (0.0.3 V04): `start..end`, end-exclusive; `for x in r` iterates it
 box<T>           // heap pointer, single ownership; box expr allocates, deref reads/writes (0.0.2, §10.3)
 ref T            // read-only borrow, function parameters only (0.0.2, §10.4)
 Result<T, E>     // error handling (Ok/Err/? officially adopted in 0.0.2, §8)
 ```
+
+> For struct / array syntax and rules see the §9.4 and §9.5 subsections below; the bytecode for
+> each is in `docs/BYTECODE.md` §5.12–5.13 and the design decisions are in `docs/0.0.3/PLAN.md` D1–D5.
+
+### 9.4 struct (0.0.3)
+
+```fleen
+struct Point {
+    x: int,
+    y: int,
+}
+
+p = Point { x: 1, y: 2 };    // literal — all fields must be initialized
+q = p.x;                     // field read (a copy; deep for owned fields)
+p.y = 3;                     // field write (one level, on a local/global struct only)
+```
+
+**Rules:**
+- `is_copy(S)` = **all fields are Copy**; a struct with any owned field (`string`, `box`, array,
+  owned struct) is an owned type: consuming positions need `move S` / `clone S`
+- **Field read `p.f` is a copy** of the field (deep for owned fields) — `move p.f` is forbidden
+  (`MoveOutOfStruct`); a read uses `clone`-free deep-copy semantics
+- **Field write `p.f = e`** is a legal assignment target when `p` is a local/global struct binding
+  and `f` is a direct field; owned `e` needs `move` / `clone` as usual
+- **Recursive structs are forbidden** (directly or via `box`) → `RecursiveStruct`
+- No `==` / no `choose` patterns on structs in 0.0.3 (§1.4, PLAN)
+
+### 9.5 arrays `[T]` (0.0.3)
+
+```fleen
+a = [1, 2, 3];            // a: [int]; empty literals need a type annotation (`empty: [int] = [];`)
+x = a[0];                 // read: bounds-checked copy (deep for owned elements)
+a[1] = 10;                // write: bounds-checked
+t = clone a;              // deep copy (new array + new elements)
+u = move a;               // transfer; a is unusable afterwards
+```
+
+**Rules:**
+- `[T]` is an **owned type for every `T`** (even `[int]`): the whole array moves / deep-copies
+  (PLAN D3) — there is no Copy array
+- Element type is **uniform**: `ArrayTypeMismatch` if later elements differ; empty literals need a
+  type annotation (`CannotInferArrayType`)
+- All index operations are **bounds-checked at runtime**: out of bounds → runtime
+  `IndexOutOfRange` (with source span); `a[-1]` is out of range, never a huge index
+- **`move a[i]` is forbidden** (`MoveOutOfArray`); element reads are copies, writes are in place
+- Arrays are legal as struct fields, `box<[T]>` pointees, `Result` components, parameters
+  (owned → `move`/`clone`; `ref [T]` allowed, parameters only), and globals
 
 ### Function Types
 
@@ -913,33 +993,40 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 |
-|---------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) |
-| `func` single-line / multi-line | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ |
-| `while` | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) |
-| Function types | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) |
-| `?` | ❌ | ✅ |
-| `move` / `clone` | ❌ | ✅ |
-| `box<T>` | ❌ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) |
-| `struct` | ❌ | ❌ (0.0.3) |
-| `for` | ❌ | ❌ (0.0.3) |
-| `async` | ❌ | ❌ (0.0.4) |
-| FFI | ❌ | ❌ |
-| Generics | ❌ | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ (0.1.0) |
-| Pointers `ptr` / `addr` | ❌ | ❌ (0.0.5) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 |
+|---------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ |
+| Function types | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ |
+| `?` | ❌ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) |
+| Modules (`import` / `pub`) | ❌ | ❌ | ⏳ (V05) |
+| `std` / `flint` | ❌ | ❌ | ⏳ (V06–V08) |
+| `async` | ❌ | ❌ | ❌ (0.0.4) |
+| FFI | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
+| Pointers `ptr` / `addr` / `unsafe` | ❌ | ❌ | ❌ (0.0.5) |
 
 **0.0.1 goal: Fibonacci runs.**
 
 **0.0.2 goal: ownership foundations — see `docs/0.0.2/PLAN.md` for the plan.**
+
+**0.0.3 goal: aggregation and organization — `struct`, `[T]`, `for` + `Range` (implemented, V01–V04),
+the module system, `std`, and `flint` (planned) — see `docs/0.0.3/PLAN.md` and
+`docs/0.0.3/TICKETS.md`.**
 
 ---
 
@@ -948,9 +1035,9 @@ This follows the **concise and clear** principle.
 | Version | Contents |
 |---------|----------|
 | 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
-| 0.0.3 | `struct` / `for` / iterators |
+| 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub`, `std`, `flint` — planned (V05+) |
 | 0.0.4 | `async` / `await` |
-| 0.0.5 | `unsafe` / `trusted` |
+| 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
 | 0.1.0 | Generics / operator overloading |
 
 ### Known Hacks
