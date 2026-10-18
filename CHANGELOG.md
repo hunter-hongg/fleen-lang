@@ -29,6 +29,12 @@ and the module system. Planning and design decisions: [docs/0.0.3/PLAN.md](docs/
 
 ### Toolchain
 
+- **`flint` package manager** (from V08): new `flint-cli` workspace crate. `flint.toml`
+  declares git-only dependencies pinned by a committed `Flint.lock`; `flint new / build /
+  run / check` scaffold, compile (whole-program, dependency crates + std) and execute a
+  project; `flint test` runs `tests/*.fln` against `.expected`. Git access shells out to the
+  `git` CLI; cache lives under `$FLINT_HOME` (default `~/.flint`); dependency sources are
+  read-only and their `pub` items are importable as `<crate>.<module>`.
 - Bytecode v3: Range instructions (`MakeRange`/`RangeStart`/`RangeEnd`, 0xB9–0xBB), array instructions
   (0xB4–0xB8 renumbered), v3 modules are distinguished by bytecode version; v1/v2 fixtures continue to pass
 - `Value::Range` (Copy) joins the VM value model

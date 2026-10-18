@@ -20,3 +20,12 @@ dependencies = [
  "fleen-compiler",
  "fleen-verify",
 ]
+
+[[package]]
+name = "flint-cli"
+version = "0.0.2"
+dependencies = [
+ "fleen-compiler",
+ "fleen-verify",
+ "fleen-vm",
+]

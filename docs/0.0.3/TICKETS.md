@@ -894,6 +894,29 @@ cargo fln tests/e2e/valid/iter_helpers.fln
 
 > A new workspace crate using `fleen-compiler` / `fleen-vm` as libraries (D9). Git-only
 > dependencies; the lockfile is the pin.
+>
+> **V08 implemented** — `flint-cli` added as a workspace member with `new/build/run/
+> test/check`. Notes on landed scope (deviation from the plan above is in brackets):
+> - Manifest + lockfile: hand-written minimal TOML-subset parser in `flint-cli/src/
+>   manifest.rs` — **no third-party TOML crate** (keeps the workspace zero external
+>   deps; the ticket allowed a crate, the zero-dep alternative was chosen).
+> - Resolution `resolve.rs`: git shells out to the `git` CLI, cache root is
+>   **`$FLINT_HOME`** (default `~/.flint`), `file://`-fixture tests drive it with no
+>   network. Cache layout `<home>/<name>-<commit>` (the plan's `~/.flint/cache/...`;
+>   the ticket's `<name>-<commit>` under `$FLINT_HOME`).
+> - Dep-graph **cycle detection** reports the cycle path (DFS back-edge);
+>   transitive deps are deduplicated by name so a shared lib is registered once
+>   [the file layout is `<dir>/<name>-<commit>`; project mode registers deps under
+>   those real paths — see below].
+> - Build `build.rs`: registers the project source tree plus every resolved dep's
+>   source tree into one `Session` under real paths, then `compile_project`; errors
+>   render through the real `SourceMap` (file:line:col + caret block).
+> - `flint test` compares each `tests/*.fln` against its `.expected` via an internal
+>   `--exec` of the compiled `.flnc` (dependency crates in `flint test` are a
+>   follow-up — cases compile standalone with the std prelude).
+> - e2e: `flint-cli/tests/e2e.rs` builds `file://` git fixtures on the spot
+>   (new-scaffold-run, dep resolve+lock+cache reuse, cross-crate private access,
+>   missing-module tried-paths, dep-graph cycle). All green; no network in CI.
 
 ### Prerequisite (landed): dependency-crate addressing
 
@@ -997,8 +1020,10 @@ resolve(manifest) →
 ### Acceptance
 ```
 cargo test -p flint-cli
-cargo run -p flint-cli -- new /tmp/flint-smoke && cd /tmp/flint-smoke && flint run
+cargo run -p flint-cli -- new /tmp/flint_smoke && cd /tmp/flint_smoke && cargo run -q -p flint-cli -- run
 ```
+> The smoke name uses `flint_smoke` (underscores): a project name is the module root of its
+> crate, so it must be a valid identifier (hyphens are rejected by manifest validation).
 
 ---
 

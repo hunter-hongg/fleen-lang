@@ -4,6 +4,7 @@ members = [
     "fleen-compiler",
     "fleen-vm",
     "fleen-verify",
+    "flint-cli",
 ]
 
 [workspace.package]

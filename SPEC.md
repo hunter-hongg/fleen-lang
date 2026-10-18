@@ -47,6 +47,14 @@ fleen/
 │   ├── Cargo.toml
 │   └── src/
 │       └── main.rs
+├── flint-cli/              # package manager (0.0.3 V08): manifest, git deps, new/build/run/test/check
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs
+│       ├── manifest.rs     # flint.toml parse + validation (minimal TOML subset)
+│       ├── lock.rs         # Flint.lock read/write
+│       ├── resolve.rs      # git fetch, cache ($FLINT_HOME), dep graph + cycles
+│       └── build.rs        # project-mode compile via Session
 └── tests/
     ├── lexer/
     │   ├── valid/
@@ -75,6 +83,7 @@ fleen/
 | `fleen-compiler` | lexing → parsing → semantics → bytecode |
 | `fleen-vm` | executes bytecode; its CLI doubles as the one-stop driver (`.fln`: compile → verify → execute) |
 | `fleen-verify` | static analysis / verification tooling |
+| `flint-cli` | package manager: `flint.toml`/`Flint.lock`, git dependencies, `new`/`build`/`run`/`test`/`check` |
 
 ---
 
@@ -696,16 +705,16 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 | Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) |
 | Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05: module paths → files, pub visibility, cycle detection, project mode) |
 | `std` library | ❌ | ❌ | ✅ (V06: `io` / `str` / `num` / `arr` / `collection` (range) / `os` / `time` modules; VM intrinsics; schematic `[T]` signatures) |
-| `flint` package manager | ❌ | ❌ | ⏳ planned (V08) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08: `flint-cli` crate, `flint.toml`/`Flint.lock`, git-only deps with `$FLINT_HOME` cache, `new`/`build`/`run`/`test`/`check`) |
 | `async` / `await` | ❌ | ❌ | ❌ (0.0.4) |
 | `unsafe` / `ptr` / `addr` | ❌ | ❌ | ❌ (0.0.5) |
 | FFI | ❌ | ❌ | ❌ |
 | Generics | ❌ | ❌ | ❌ (0.1.0) |
 | Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
 
-**Status of 0.0.3**: V01–V06 (`FileId`/`SourceMap`, `struct`, arrays, `for` + `Range`,
-module system with `import` / `pub`, the std library) are implemented and green. V07+
-(std iterator helpers) and V08 (flint) remain planned.
+**Status of 0.0.3**: V01–V08 are implemented and green (`FileId`/`SourceMap`,
+`struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,
+iterator helpers, and the `flint` package manager).
 
 ---
 
