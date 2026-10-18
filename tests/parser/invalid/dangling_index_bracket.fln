@@ -1,0 +1,4 @@
+// 0.0.3 V09 §8.1: a dangling index bracket `a[0` (missing `]`) is a parse
+// error, even though `a` itself would be resolved later (parse has no
+// resolution context).
+v = a[0

@@ -1,0 +1,23 @@
+// shapes module (0.0.3 V05) — a module is a directory of `.fln` files;
+// `flint`/the compiler resolve `import shapes;` to `src/shapes/mod.fln`.
+//
+// Visibility (V05): only `pub` items cross the module boundary. `secret`
+// below is private to this module — importing code cannot call it, and the
+// resolver rejects `shapes.secret()` with a `PrivateAccess` error.
+
+/// A 2-D point. A struct is `Copy` iff every field is `Copy` (both fields
+/// are `int`, so `Point` is a Copy type: it flows by value with no
+/// `move`/`clone`).
+pub struct Point { x: int, y: int }
+
+/// The origin point.
+pub func origin(): Point = Point { x: 0, y: 0 }
+
+/// Build a point from two coordinates.
+pub func make_point(x: int, y: int): Point = Point { x: x, y: y }
+
+/// Area of a rectangle. Takes Copy args, returns a Copy value.
+pub func area_of_rect(w: int, h: int): int = w * h
+
+/// Private helper — invisible outside this module.
+func secret(): int = 99

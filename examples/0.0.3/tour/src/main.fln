@@ -1,0 +1,87 @@
+// 0.0.3 "City Lights" feature tour — a small multi-file project.
+//
+// Run (module system + std, one command):
+//     cargo fln --project examples/0.0.3/tour
+//   or flint:   cd examples/0.0.3/tour && cargo run -p flint-cli -- run
+//
+// Features loaded by this program:
+//   struct  (V02)   user-defined aggregate, Copy iff all fields are Copy
+//   [T] arrays (V03) owned type, literal / index read+write / deep clone
+//   for + Range (V04) loops over an array and over an end-exclusive Range
+//   modules + pub (V05) cross-file imports, visibility, nested module paths
+//   std library (V06) io / str / arr / os intrinsics + schematic [T]
+//   collection.iter (V07) map / filter / fold / take, inlined by the compiler
+//
+// Run with a trailing argument to see std.os.args, e.g.:
+//     cargo fln --project examples/0.0.3/tour alpha beta
+
+import shapes;
+import shapes.tools;
+import std.arr;
+import std.collection.iter;
+import std.os;
+import std.str;
+
+// ── helpers: ordinary funcs consumed by the schematic iterator builtins ──
+func double(x: int): int = x * 2
+
+func is_even(x: int): bool = x % 2 == 0
+
+func add(a: int, b: int): int = a + b
+
+// Flatten a [int] into "[a,b,c]".
+func join_ints(xs: [int]): string {
+    s = "[";
+    for x in xs {
+        s = std.str.concat(s, x as string);
+        s = std.str.concat(s, ",");
+    }
+    std.str.concat(s, "]")
+}
+
+func main() {
+    // ── modules + pub + struct (V05 / V02) ──
+    p = shapes.make_point(6, 7);
+    print("area(p) = ", shapes.area_of_rect(p.x, p.y) as string);
+    print("gcd(48, 18) = ", shapes.tools.gcd(48, 18) as string);
+
+    // ── struct field write (V02): p is a local, so p.y = e is legal ──
+    p.y = 8;
+    print("p.y = ", p.y as string);
+
+    // ── arrays [T] (V03): literal, index write, deep clone independence ──
+    a = [1, 2, 3];
+    a[0] = 10;
+    b = clone a;
+    b[0] = 99;
+    print("a = ", join_ints(clone a), "  b = ", join_ints(clone b), " (deep clone)");
+    print("len(a) = ", std.arr.len(a) as string);
+
+    // ── for over an array (V04): accumulation, iteration order ──
+    total = 0;
+    for n in a {
+        total = total + n;
+    }
+    print("sum(a) = ", total as string);
+
+    // ── for over a Range (V04/V06): end-exclusive 1..=5 ──
+    squares: [int] = [];
+    for i in range_from(1, 6) {
+        squares = std.arr.push(squares, i * i);
+    }
+    print("squares (1..=5) = ", join_ints(clone squares));
+
+    // ── std.collection.iter (V07): map / filter / fold / take (eager) ──
+    doubled = std.collection.iter.map(a, double);
+    evens = std.collection.iter.filter(a, is_even);
+    head = std.collection.iter.take(clone squares, 3);
+    sum = std.collection.iter.fold(a, 0, add);
+    print("map(a,2x) = ", join_ints(clone doubled));
+    print("filter(a,even) = ", join_ints(clone evens));
+    print("take(squares,3) = ", join_ints(clone head));
+    print("fold(a,0,+) = ", sum as string);
+
+    // ── std.os.args (V06 runtime intrinsics) ──
+    args = std.os.args();
+    print("argc = ", std.arr.len(args) as string);
+}

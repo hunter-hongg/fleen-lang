@@ -1,3 +1,5 @@
 /target
 *.flnc
+# Committed compatibility fixtures (V09) are tracked, not build output.
+!tests/fixtures/**/*.flnc
 release/**/*.tar.gz

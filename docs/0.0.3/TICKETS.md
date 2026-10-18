@@ -6,12 +6,12 @@
 > **Basis**: `docs/0.0.3/PLAN.md` (2026-10-11; D1–D5 finalized with implementation, D6–D10
 > ahead of their tickets), `docs/BYTECODE.md` v0.0.3, `docs/DESIGN.md` §9/§10/§18,
 > `docs/0.0.2/TICKETS.md` (prior state: 0.0.2 complete).
-> **Status** (2026-10-14): V01 implemented (completion notes at the end of its section);
-> V02 implemented (completion notes at the end of its section); V03 implemented
-> (completion notes at the end of its section); V04 implemented (completion notes at the end of
-> its section); **V05 implemented (project-mode e2e + privacy/cycle rejection green)**;
+> **Status** (2026-10-18): V01–V04 implemented (completion notes at the end of each section);
+> **V05 implemented (project-mode e2e + privacy/cycle rejection green)**;
 > **V06 implemented (std library, intrinsics, schematic [T], VM tests + std e2e green — completion notes in the V06 section)**;
-> **V07 implemented (std.collection.iter map/filter/fold/take as schematic inline-expanded builtins, tests/std/iter + iter_helpers e2e green — completion notes in the V07 section)**; V08+ not started.
+> **V07 implemented (std.collection.iter map/filter/fold/take as schematic inline-expanded builtins, tests/std/iter + iter_helpers e2e green — completion notes in the V07 section)**;
+> **V08 implemented (`flint-cli`: manifest/lock/git resolve + new·build·run·test·check, e2e green — completion notes in the V08 section)**;
+> **V09 implemented (v1/v2/v3 `.flnc` fixtures + examples sweep + full §8 matrix, `cargo test` green — completion notes in the V09 section)**; V10 (docs & release) not started.
 > Implementation order: the V-ticket feature slices (per the overview table); D5–D10's remaining
 > decision points freeze when their ticket opens.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
@@ -1055,6 +1055,42 @@ cargo run -p flint-cli -- new /tmp/flint_smoke && cd /tmp/flint_smoke && cargo r
 cargo test && cargo doc --no-deps
 cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+> **Implemented** (2026-10-18). Every V09 deliverable landed:
+> - **Compatibility fixtures — all three versions now committed and executed on the 0.0.3
+>   verify/VM** (the ticket previously left v2 and v3 as gaps):
+>   - `tests/fixtures/v1/fib.flnc` (genuine 0.0.1 build, `v1_compat.rs`)
+>   - `tests/fixtures/v2/greet.flnc` (**v2**: hand-built 0.0.2-shaped module — no
+>     `struct_defs` section, v2 opcodes only — decoded, verified and executed by
+>     `fleen-vm/tests/compat.rs::v2_fixture_verifies_and_executes`)
+>   - `tests/fixtures/v3/aggregate.flnc` (**v3**: compiled from source through the real
+>     pipeline; its program exercises the struct (0xB0–0xB3), array (0xB4–0xB8) *and* range
+>     (0xB9–0xBB) instruction groups plus the `struct_defs` table end-to-end). The compat
+>     test asserts each group's bytes are present before executing.
+>   - Both fixtures carry a `*_is_committed_byte_identical` guard (codegen drift is caught),
+>     and an `#[ignore]`d `regenerate_fixtures` tool reproduces them deterministically.
+> - **`from_bytes` rejects a truncation inside a populated `struct_defs` table** (end to end:
+>   `from_bytes_rejects_truncated_populated_struct_defs_table` walks every strict prefix of the
+>   v3 fixture). The three named rejections — v3 opcode in a v1/v2 module (`V3OpcodeInV1V2Module`),
+>   `struct_defs` count mismatch (the `StructNew` operand-derived cross-check) and truncated
+>   input — are covered (verify-level gates live in `fleen-verify/tests`, decode-level here).
+> - **Reserved-word / compile sweep**: `fleen-vm/tests/examples.rs` compiles, verifies and runs
+>   every example under `examples/` on each `cargo test`. Because all examples must compile,
+>   any accidental `struct`/`for`/`in`/`pub` used as an *identifier* fails the sweep. The
+>   intentionally-failing `examples/0.0.2/err_exit.fln` opts into the e2e `.exit`/`.stderr`
+>   contract; all other examples must exit 0 with an empty stderr.
+> - **`cargo test` runs std (V06) + project-mode e2e (V05) + flint fixtures (V08)** — one
+>   command, everything (unchanged, confirmed green).
+> - **§8 matrix gap filled**: `tests/parser/invalid/dangling_index_bracket.fln` covers the
+>   `dangling [` parser-invalid row.
+>
+> **Recorded gaps / deviations (this ticket's cross-check against PLAN §12)**: the DoD's
+> "v1 **and v2** fixtures" and "D1–D10 settled" items are now met by this work and the
+> pre-existing DESIGN/PLAN decision records; the *populated-table* truncation case and the
+> examples sweep are the only additions beyond the ticket's literal list. The committed
+> `depdemo/` fixture of PLAN §8.2 is intentionally covered dynamically by
+> `flint-cli/tests/e2e.rs` (`file://` git fixtures built on the spot, no network) rather than
+> as a checked-in directory. Docs/`Cargo.toml` version sync stays in V10.
 
 ---
 

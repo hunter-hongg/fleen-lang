@@ -1,0 +1,15 @@
+// Nested module (0.0.3 V05): `import shapes.tools;` resolves to the flat
+// file `src/shapes/tools.fln` (a directory + `mod.fln` only for the root).
+// Members are addressed `shapes.tools.gcd`.
+
+/// Greatest common divisor (Euclid's algorithm) — `Copy` ints throughout.
+pub func gcd(a: int, b: int): int {
+    x = a;
+    y = b;
+    while y != 0 {
+        t = y;
+        y = x % y;
+        x = t
+    }
+    x
+}
