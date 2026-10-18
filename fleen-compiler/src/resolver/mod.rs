@@ -32,7 +32,7 @@ use hir::{
     ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir,
     ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
 };
-pub use modules::{ExportKind, ModuleDef, ModuleId, ModuleTable};
+pub use modules::{CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE};
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
 
@@ -91,10 +91,14 @@ pub fn resolve(ast: Ast) -> Result<Hir, Vec<ResolveError>> {
     let mut table = ModuleTable::default();
     // Single-file `resolve` is still a whole program: the crate root module
     // exists even though no import graph was discovered.
+    table
+        .crates
+        .push(CrateDef::root_crate(crate::source_map::FileId(0)));
     table.modules.push(ModuleDef {
         file: crate::source_map::FileId(0),
         path: Vec::new(),
-        is_root: true,
+        crate_id: ROOT_CRATE,
+        is_crate_root: true,
         imports: Vec::new(),
         items: std::collections::HashMap::new(),
     });

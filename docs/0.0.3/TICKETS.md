@@ -895,6 +895,35 @@ cargo fln tests/e2e/valid/iter_helpers.fln
 > A new workspace crate using `fleen-compiler` / `fleen-vm` as libraries (D9). Git-only
 > dependencies; the lockfile is the pin.
 
+### Prerequisite (landed): dependency-crate addressing
+
+The module table was single-crate: `module_path_from_name` derived module paths
+relative to the root file's directory, so a file cached at
+`~/.flint/cache/jsonlite-abc/src/util.fln` could not be named at all. This is
+now generalized (a V05 extension, landed ahead of V08):
+
+- **`ModuleTable` is a graph of crates.** `CrateDef { name, root }`; the crate
+  under compilation is `ROOT_CRATE` (empty `name`, unprefixed module paths, so
+  every existing project is unchanged). `Session::add_dependency(name, root)`
+  registers a dependency; its modules are addressed `<crate>.<module>` and its
+  files are recognized by the **longest matching source-directory prefix**, so a
+  vendored crate under `src/` still belongs to itself.
+- **Files keep their real paths.** `flint` registers cached files under the
+  paths they actually have; diagnostics point at real files. No synthetic names.
+- **`std` is a crate like any other**, registered when its sources are appended.
+- **Crate boundary**: a crate may not import a crate that already depends on it.
+  This covers both forbidden directions (dependency → project, and two
+  dependencies importing each other) while still allowing the project to import
+  its dependencies and a dependency to import *its own*. New error
+  `CrossCrateImport { path, crate_name, owner }`.
+  - Whether `a` may import `b` *at all* (declared-dependency) is manifest data —
+    `flint`'s job, not the compiler's.
+- **`DuplicateModule { path, file, first }`**: two files resolving to one path.
+  Previously this collapsed *silently* (the later file shadowed the earlier and
+  the build succeeded with the wrong code) — now a hard error.
+- **Cycle detection starts from every module**, not just the crate root, so an
+  unimported dependency still has to be acyclic on its own.
+
 ### Files involved
 ```
 flint-cli/                       # NEW crate (workspace member)
@@ -1022,7 +1051,8 @@ cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings
 - [ ] `docs/0.0.3/PLAN.md`: fold in as-built corrections (numbering finalization, any
       D-decision notes from review)
 - [ ] New error-message samples compared against actual output (`MoveOutOfStruct`,
-      `CircularImport`, `PrivateAccess`, `NotIterable`)
+      `CircularImport`, `PrivateAccess`, `NotIterable`, `CrossCrateImport`,
+      `DuplicateModule`)
 
 ### Version and release
 - [ ] Bump all four crates' `Cargo.toml` → `0.0.3`

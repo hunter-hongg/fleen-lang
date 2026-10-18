@@ -1941,3 +1941,565 @@ fn lower_for_iterable_is_evaluated_once() {
         .count();
     assert_eq!(arr_new, 1, "the array literal is built exactly once");
 }
+
+// =========================================================================
+// 0.0.3 V07: std.collection.iter inline lowering (instruction-level tests)
+// =========================================================================
+//
+// These tests construct hand-crafted TypedHir nodes for inline iter calls
+// (like `lower_for_range_desugar_uses_range_bounds_once` does for ranges),
+// so they exercise `lower_inline_iter` directly without needing the full
+// std module resolution pipeline. The end-to-end behavior (typeck + codegen
+// + verify + VM execution) is covered by the e2e `iter_helpers.fln` and
+// `tests/std/iter.fln` runners.
+
+use crate::lexer::Span;
+use crate::resolver::hir::{BindingId, HirId};
+use crate::typeck::typed_hir::{
+    Access, Type, TypedDeclHir, TypedExprHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir,
+    TypedHirItem, TypedStmtHir,
+};
+
+/// First binding id used by the hand-crafted V07 helpers. The call callee
+/// uses `BindingId(0)` and the function-valued arguments use `BindingId(1)`
+/// onwards, so helper *parameters* must live in their own range to keep
+/// per-function slot allocation unambiguous.
+const V07_HELPER_BINDING_BASE: u32 = 100;
+
+/// Build a user-function declaration `func <name>(a0: T0, ...): ret { 0 }`.
+///
+/// The helpers must be declared as real items so `LowerCtx::new` registers
+/// them in `func_ids`; a function-valued argument that resolves to no
+/// `FuncId` is a `LowerError`, not an implicit builtin.
+fn make_helper_decl(name: &str, param_tys: &[Type], ret: Type) -> TypedHirItem {
+    let span = Span::SYNTHETIC;
+    let params = param_tys
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| crate::typeck::typed_hir::TypedParamHir {
+            name: format!("a{i}"),
+            ty: ty.clone(),
+            binding_id: BindingId(V07_HELPER_BINDING_BASE + i as u32),
+            hir_id: HirId(0),
+            span,
+        })
+        .collect();
+    TypedHirItem::Decl(TypedDeclHir::Func(TypedFuncDeclHir {
+        name: name.to_string(),
+        params,
+        ret_type: Some(ret.clone()),
+        body: TypedFuncBodyHir::Block(crate::typeck::typed_hir::TypedBlockHir {
+            stmts: vec![],
+            tail_expr: Some(Box::new(TypedExprHir::Int(0, span))),
+            ty: ret,
+            hir_id: HirId(0),
+            span,
+        }),
+        hir_id: HirId(0),
+        span,
+    }))
+}
+
+/// Build a hand-crafted TypedHir containing a single inline-iter call.
+///
+/// `callee_name` is the fully-qualified builtin name, so `LowerCtx::new`
+/// (which mirrors every builtin into `func_ids`) resolves it. `helpers` are
+/// declared ahead of `main` so function-valued arguments lower to
+/// `LoadFunc`. `main`'s body is `{ <call>; 0 }`.
+fn make_inline_iter_hir(
+    callee_name: &str,
+    helpers: Vec<TypedHirItem>,
+    args: Vec<TypedExprHir>,
+    ret_ty: Type,
+) -> TypedHir {
+    let span = Span::SYNTHETIC;
+    let call = TypedExprHir::Call(
+        Box::new(TypedExprHir::Ident {
+            name: callee_name.to_string(),
+            binding_id: BindingId(0),
+            ty: Type::Func(vec![], Box::new(ret_ty.clone())),
+            access: Access::Copy,
+            hir_id: HirId(0),
+            span,
+        }),
+        args,
+        ret_ty,
+    );
+
+    let mut items = helpers;
+    items.push(TypedHirItem::Decl(TypedDeclHir::Func(TypedFuncDeclHir {
+        name: "main".to_string(),
+        params: vec![],
+        ret_type: Some(Type::Int),
+        body: TypedFuncBodyHir::Block(crate::typeck::typed_hir::TypedBlockHir {
+            stmts: vec![TypedStmtHir::Expr(Box::new(call), false)],
+            tail_expr: Some(Box::new(TypedExprHir::Int(0, span))),
+            ty: Type::Int,
+            hir_id: HirId(1),
+            span,
+        }),
+        hir_id: HirId(2),
+        span,
+    })));
+
+    TypedHir {
+        items,
+        structs: Vec::new(),
+        span,
+    }
+}
+
+/// Build the `xs` array argument for inline iter tests: a typed `[int]`
+/// array literal `[1, 2, 3]`.
+fn make_int_array_arg(span: Span) -> TypedExprHir {
+    TypedExprHir::ArrayLit {
+        elems: vec![
+            TypedExprHir::Int(1, span),
+            TypedExprHir::Int(2, span),
+            TypedExprHir::Int(3, span),
+        ],
+        ty: Type::Array(Box::new(Type::Int)),
+        span,
+    }
+}
+
+/// Build a function value argument for a declared helper function.
+fn make_func_arg(name: &str, param_tys: Vec<Type>, ret: Type, span: Span) -> TypedExprHir {
+    TypedExprHir::Ident {
+        name: name.to_string(),
+        binding_id: BindingId(1),
+        ty: Type::Func(param_tys, Box::new(ret)),
+        access: Access::Copy,
+        hir_id: HirId(3),
+        span,
+    }
+}
+
+#[test]
+fn lower_inline_iter_map_emits_call_and_push() {
+    // `std.collection.iter.map([1,2,3], double)` expands to a loop that
+    // calls `double` on each element and pushes the result via `std.arr.push`.
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.map",
+        vec![make_helper_decl("double", &[Type::Int], Type::Int)],
+        vec![
+            make_int_array_arg(span),
+            make_func_arg("double", vec![Type::Int], Type::Int, span),
+        ],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+
+    // The body block must contain ArrGet (element copy) and CallValue (indirect call).
+    let push_fid = find_func(&mir, "std.arr.push").func_id;
+    let body = main
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ArrGet))
+        })
+        .expect("body block with ArrGet");
+
+    // The loop body is exactly: element copy → indirect call → push →
+    // increment → back edge. Nothing else may sit between them.
+    let mut expected: Vec<String> = [
+        "LoadLocal(0)",  // __it
+        "LoadLocal(4)",  // __i
+        "ArrGet",        // bounds-checked element copy
+        "StoreLocal(5)", // __elem
+        "LoadLocal(1)",  // the function value
+        "LoadLocal(5)",  // the element argument
+        "CallValue(1)",
+        "StoreLocal(6)", // __mapped
+        "LoadLocal(3)",  // __out
+        "LoadLocal(6)",  // __mapped
+        "__PUSH__",
+        "StoreLocal(3)", // __out
+        "LoadLocal(4)",  // __i
+        "ConstInt(1)",
+        "IAdd",
+        "StoreLocal(4)",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let push_at = expected
+        .iter()
+        .position(|k| k == "__PUSH__")
+        .expect("push placeholder is present");
+    expected[push_at] = format!("Call({:?})", push_fid);
+    assert_eq!(
+        kinds_of(body),
+        expected,
+        "map's body block is element copy, indirect call, push, increment"
+    );
+
+    // Push to accumulator: the accumulator is grown through a direct
+    // `Call` to the `std.arr.push` builtin (not a `CallValue`).
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::Call(fid) if fid == push_fid)),
+        "map must push results via Call(std.arr.push)"
+    );
+
+    // The array literal is built exactly once in the loop prologue, not per
+    // iteration. (`map` also allocates the empty accumulator `ArrNew(0)`
+    // before the loop, so count only the non-empty literal.)
+    let literal_count = ins
+        .iter()
+        .filter(|i| matches!(i.kind, MirInstrKind::ArrNew(n) if n > 0))
+        .count();
+    assert_eq!(
+        literal_count, 1,
+        "the array literal must be built exactly once (not per iteration)"
+    );
+}
+
+#[test]
+fn lower_inline_iter_filter_emits_conditional_push() {
+    // `std.collection.iter.filter([1,2,3], pred)` expands to a loop that
+    // calls `pred` on each element and only pushes when the result is true.
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.filter",
+        vec![make_helper_decl("is_even", &[Type::Int], Type::Bool)],
+        vec![
+            make_int_array_arg(span),
+            make_func_arg("is_even", vec![Type::Int], Type::Bool, span),
+        ],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+
+    // The predicate block reads the element, calls the predicate, and
+    // branches on the result. Crucially it must be `JumpIfFalse`: the
+    // *fall-through* arm keeps the element, the *taken* arm drops it.
+    let push_fid = find_func(&mir, "std.arr.push").func_id;
+    let pred_pos = main
+        .blocks
+        .iter()
+        .position(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::CallValue(1)))
+        })
+        .expect("a block calling the predicate");
+    let pred_block = &main.blocks[pred_pos];
+    assert_eq!(
+        kinds_of(pred_block),
+        vec![
+            "LoadLocal(0)",  // __it
+            "LoadLocal(4)",  // __i
+            "ArrGet",        // bounds-checked element copy
+            "StoreLocal(5)", // __elem
+            "LoadLocal(1)",  // the predicate value
+            "LoadLocal(5)",  // the element argument
+            "CallValue(1)",
+        ],
+        "the predicate block copies the element and calls the predicate"
+    );
+    let dropped_id = match pred_block.terminator {
+        Terminator::JumpIfFalse(t) => t,
+        other => panic!("filter must branch with JumpIfFalse, got {other:?}"),
+    };
+
+    // The dropped arm is the taken branch and carries no push.
+    let dropped = main
+        .blocks
+        .iter()
+        .find(|b| b.id == dropped_id)
+        .expect("dropped arm exists");
+    assert!(
+        !dropped
+            .instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::Call(fid) if fid == push_fid)),
+        "the taken (dropped) arm must not push, got {:?}",
+        kinds_of(dropped)
+    );
+
+    // The kept arm is the fall-through and pushes `__elem` onto `__out`.
+    let kept = &main.blocks[pred_pos + 1];
+    let expected_kept: Vec<String> = [
+        "LoadLocal(3)", // __out
+        "LoadLocal(5)", // __elem (unmapped)
+        "__PUSH__",
+        "StoreLocal(3)", // __out
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let mut expected_kept = expected_kept;
+    let push_at = expected_kept
+        .iter()
+        .position(|k| k == "__PUSH__")
+        .expect("push placeholder is present");
+    expected_kept[push_at] = format!("Call({:?})", push_fid);
+    assert_eq!(
+        kinds_of(kept),
+        expected_kept,
+        "the fall-through (kept) arm pushes the element onto the accumulator"
+    );
+}
+
+#[test]
+fn lower_inline_iter_fold_uses_accumulator_slot() {
+    // `std.collection.iter.fold([1,2,3], 0, add)` expands to a loop that
+    // calls `add(acc, elem)` and stores the result back into the accumulator.
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.fold",
+        vec![make_helper_decl("add", &[Type::Int, Type::Int], Type::Int)],
+        vec![
+            make_int_array_arg(span),
+            TypedExprHir::Int(0, span),
+            make_func_arg("add", vec![Type::Int, Type::Int], Type::Int, span),
+        ],
+        Type::Int,
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+
+    // The body is exactly: element copy → `f(acc, elem)` → write back →
+    // increment. The argument order pins `f(acc, elem)` — swapping it would
+    // silently turn `fold` into a different combinator.
+    let body = main
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ArrGet))
+        })
+        .expect("body block with ArrGet");
+    assert_eq!(
+        kinds_of(body),
+        vec![
+            "LoadLocal(0)",  // __it
+            "LoadLocal(4)",  // __i
+            "ArrGet",        // bounds-checked element copy
+            "StoreLocal(5)", // __elem
+            "LoadLocal(2)",  // the function value
+            "LoadLocal(1)",  // __acc (the `init` slot) — first
+            "LoadLocal(5)",  // __elem — second
+            "CallValue(2)",
+            "StoreLocal(1)", // __acc = f(__acc, __elem)
+            "LoadLocal(4)",  // __i
+            "ConstInt(1)",
+            "IAdd",
+            "StoreLocal(4)",
+        ],
+        "fold calls f(acc, elem) and writes the result back into acc"
+    );
+
+    // Unlike the array builders, `fold` reuses the `init` slot as its
+    // accumulator — it never allocates an empty output array.
+    assert!(
+        !ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::ArrNew(0))),
+        "fold must not allocate an output array"
+    );
+}
+
+#[test]
+fn lower_inline_iter_take_caps_count_at_n() {
+    // `std.collection.iter.take([1,2,3,4,5], 3)` emits a cap check:
+    // `__count = min(__count, n)` via a conditional block before the loop.
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.take",
+        vec![],
+        vec![make_int_array_arg(span), TypedExprHir::Int(3, span)],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+
+    // The cap check is `n < count ? (__count = n) : ()`, so the first `Lt`
+    // in the stream is the cap comparison (the loop head's `__i < __count`
+    // comes later).
+    let cap_check = main
+        .blocks
+        .iter()
+        .find(|b| b.instrs.iter().any(|i| matches!(i.kind, MirInstrKind::Lt)))
+        .expect("a block with the cap comparison");
+    assert_eq!(
+        &kinds_of(cap_check)[..],
+        [
+            "ConstInt(1)",
+            "ConstInt(2)",
+            "ConstInt(3)",
+            "ArrNew(3)",
+            "StoreLocal(0)", // xs (slot 0)
+            "ConstInt(3)",
+            "StoreLocal(1)", // n (slot 1)
+            "LoadLocal(0)",
+            "ArrLen",
+            "StoreLocal(2)", // __count (slot 2)
+            "Pop",           // ArrLen is peek-shaped
+            "LoadLocal(1)",
+            "LoadLocal(2)",
+            "Lt",
+        ],
+        "prologue evaluates both args once, then caps __count against n"
+    );
+    assert!(
+        matches!(cap_check.terminator, Terminator::JumpIfTrue(_)),
+        "the cap comparison branches on true (n < count), got {:?}",
+        cap_check.terminator
+    );
+
+    // The cap block reassigns `__count = n` and nothing else.
+    let cap_id = match cap_check.terminator {
+        Terminator::JumpIfTrue(t) => t,
+        _ => unreachable!("just asserted JumpIfTrue"),
+    };
+    let cap = main
+        .blocks
+        .iter()
+        .find(|b| b.id == cap_id)
+        .expect("cap block exists");
+    assert_eq!(
+        kinds_of(cap),
+        vec!["LoadLocal(1)", "StoreLocal(2)"],
+        "the cap block writes n back into __count"
+    );
+
+    // Two `Lt`s total: the cap check and the loop head's bound check.
+    assert_eq!(
+        ins.iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::Lt))
+            .count(),
+        2,
+        "take emits exactly two comparisons: the cap and the loop bound"
+    );
+
+    // `take` passes elements through — no indirect call in the loop.
+    assert!(
+        !ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CallValue(_))),
+        "take must not call a user function"
+    );
+}
+
+#[test]
+fn lower_inline_iter_head_reenters_only_via_back_edge() {
+    // The head block must have exactly two predecessors: the entry jump
+    // and the body's back-edge jump (the V04 standing fix for stack depth
+    // consistency at the loop head).
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.map",
+        vec![make_helper_decl("id", &[Type::Int], Type::Int)],
+        vec![
+            make_int_array_arg(span),
+            make_func_arg("id", vec![Type::Int], Type::Int, span),
+        ],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+
+    // Find the head block (the one with the loop's bound check + JumpIfFalse).
+    let head = main
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Terminator::JumpIfFalse(_)))
+        .expect("head block with JumpIfFalse");
+
+    // Count predecessors: blocks whose terminator jumps back to head.
+    let preds = main
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == head.id))
+        .count();
+    assert_eq!(
+        preds, 2,
+        "head block must have exactly two predecessors: entry + back-edge"
+    );
+}
+
+#[test]
+fn lower_inline_iter_result_left_on_stack() {
+    // The end block must LoadLocal the accumulator/out slot as its
+    // final instruction (the loop's result value).
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.map",
+        vec![make_helper_decl("id", &[Type::Int], Type::Int)],
+        vec![
+            make_int_array_arg(span),
+            make_func_arg("id", vec![Type::Int], Type::Int, span),
+        ],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+
+    // Find the head block (with JumpIfFalse).
+    let head = main
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Terminator::JumpIfFalse(_)))
+        .expect("head block with JumpIfFalse");
+
+    // The JumpIfFalse target is the end block.
+    let end_id = match head.terminator {
+        Terminator::JumpIfFalse(t) => t,
+        _ => unreachable!(),
+    };
+    let end_block = main
+        .blocks
+        .iter()
+        .find(|b| b.id == end_id)
+        .expect("end block should exist");
+
+    // The end block loads the accumulator and pushes the result. Since the
+    // call here is a statement (not the tail expression) the value is
+    // immediately discarded, so `LoadLocal` must be followed by `Pop`.
+    let end_kinds = kinds_of(end_block);
+    let load_at = end_kinds
+        .iter()
+        .position(|k| k.starts_with("LoadLocal"))
+        .expect("end block loads the loop result");
+    assert_eq!(
+        end_kinds[load_at + 1],
+        "Pop",
+        "the statement-position loop result is loaded then popped, got {:?}",
+        end_kinds
+    );
+}
+
+#[test]
+fn lower_inline_iter_args_evaluated_once() {
+    // Each argument (the array and the function) must be evaluated exactly
+    // once, before the loop — not re-evaluated per iteration.
+    let span = Span::SYNTHETIC;
+    let typed = make_inline_iter_hir(
+        "std.collection.iter.map",
+        vec![make_helper_decl("id", &[Type::Int], Type::Int)],
+        vec![
+            make_int_array_arg(span),
+            make_func_arg("id", vec![Type::Int], Type::Int, span),
+        ],
+        Type::Array(Box::new(Type::Int)),
+    );
+    let mir = super::lower(typed).expect("lower should succeed");
+    let main = find_func(&mir, "main");
+    let literal_count = flat(main)
+        .iter()
+        .filter(|i| matches!(i.kind, MirInstrKind::ArrNew(n) if n > 0))
+        .count();
+    assert_eq!(
+        literal_count, 1,
+        "the array literal must be built exactly once (not per iteration)"
+    );
+}

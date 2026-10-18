@@ -13,7 +13,7 @@ pub mod typeck;
 
 pub use source_map::{FileId, SourceMap};
 
-use resolver::modules::build_module_table;
+use resolver::modules::{CrateDef, build_module_table};
 use resolver::resolve_module_with_table;
 use std::fmt;
 
@@ -103,6 +103,9 @@ pub fn compile(source: &str) -> Result<codegen::Bytecode, CompileError> {
 /// ```
 pub struct Session {
     sources: SourceMap,
+    /// Dependency crates registered for multi-crate compilation, in
+    /// registration order. The root crate is prepended at compile time.
+    dependencies: Vec<CrateDef>,
 }
 
 impl Default for Session {
@@ -116,6 +119,7 @@ impl Session {
     pub fn new() -> Self {
         Self {
             sources: SourceMap::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -127,6 +131,45 @@ impl Session {
     /// The registered files.
     pub fn sources(&self) -> &SourceMap {
         &self.sources
+    }
+
+    /// Register a dependency crate whose root file is `root`.
+    ///
+    /// The crate's modules become importable as `<name>.<module>`, and every
+    /// file below the root's directory is compiled as part of it. Files may
+    /// live anywhere — a build tool registers them under their real paths, so
+    /// diagnostics keep pointing at real files rather than synthesized names.
+    ///
+    /// Registering two crates under the same name is a
+    /// [`DuplicateModule`](resolver::error::ResolveErrorKind::DuplicateModule)
+    /// error at compile time.
+    ///
+    /// # Example
+    /// ```
+    /// let mut s = fleen_compiler::Session::new();
+    /// let root = s.add_file(
+    ///     "src/main.fln",
+    ///     "import jsonlite.util;\nfunc main(): int = jsonlite.util.answer()",
+    /// );
+    /// let dep_root = s.add_file(
+    ///     "/home/u/.flint/cache/jsonlite-abc/src/mod.fln",
+    ///     "pub func answer(): int = 42",
+    /// );
+    /// s.add_dependency("jsonlite", dep_root);
+    /// s.add_file(
+    ///     "/home/u/.flint/cache/jsonlite-abc/src/util.fln",
+    ///     "pub func answer(): int = 42",
+    /// );
+    /// s.compile_project(root).unwrap();
+    /// ```
+    pub fn add_dependency(&mut self, name: impl Into<String>, root: FileId) {
+        self.dependencies.push(CrateDef::dependency(name, root));
+    }
+
+    /// The registered dependency crates (empty until
+    /// [`Session::add_dependency`] is called).
+    pub fn dependencies(&self) -> &[CrateDef] {
+        &self.dependencies
     }
 
     /// Compile the file registered under `root`, running every stage in
@@ -156,12 +199,14 @@ impl Session {
 
         let sources = with_std_sources(&self.sources);
         let asts = parse_all(&sources)?;
-        compile_pre_parsed(&sources, root, asts)
+        let crates = self.crate_list(root, &sources);
+        compile_pre_parsed(&sources, root, &crates, asts)
     }
 
     /// Compile a whole program consisting of the files registered in this
     /// session (0.0.3 V05). The root file is the crate root (`main.fln`);
-    /// every other registered `.fln` file must be reachable from its imports.
+    /// every other registered `.fln` file must belong to this crate or to one
+    /// registered via [`Session::add_dependency`].
     ///
     /// The stage chain is identical to [`Session::compile`], but the module
     /// table sub-pass runs before per-module resolution and the resulting
@@ -179,9 +224,41 @@ impl Session {
         } else {
             self.sources.clone()
         };
-        compile_pre_parsed(&sources, root, asts)
+        let crates = self.crate_list(root, &sources);
+        compile_pre_parsed(&sources, root, &crates, asts)
+    }
+
+    /// The crate list for a compilation rooted at `root`: the root crate
+    /// first (its modules stay unprefixed), then every registered
+    /// dependency, then the shipped `std` crate when its sources were
+    /// appended.
+    fn crate_list(&self, root: FileId, sources: &SourceMap) -> Vec<CrateDef> {
+        let mut crates = Vec::with_capacity(self.dependencies.len() + 2);
+        crates.push(CrateDef::root_crate(root));
+        crates.extend(self.dependencies.iter().cloned());
+        // `std` is a crate like any other; it is just one the compiler ships.
+        // Registered only when its sources are actually present, so the
+        // no-std path keeps its exact byte-identical behavior.
+        if let Some(std_root) = std_crate_root(sources) {
+            crates.push(CrateDef::dependency(
+                resolver::modules::STD_CRATE_NAME,
+                std_root,
+            ));
+        }
+        crates
     }
 }
+
+/// The `FileId` of the shipped `std` crate root (`std/mod.fln`), if the std
+/// sources are in the map.
+fn std_crate_root(sources: &SourceMap) -> Option<FileId> {
+    (0..sources.len() as u32)
+        .map(FileId)
+        .find(|&id| sources.get(id).name == STD_ROOT_NAME)
+}
+
+/// File name of the shipped std crate root inside the embedded source map.
+const STD_ROOT_NAME: &str = "std/mod.fln";
 
 /// Whether any parsed file imports the `std.*` root (0.0.3 V06, D8). Only
 /// programs that do need the shipped std sources appended — everything else
@@ -221,13 +298,15 @@ fn parse_all(sources: &source_map::SourceMap) -> Result<Vec<parser::ast::Ast>, C
 /// Compile an already-parsed whole program (0.0.3 V05) — the shared tail of
 /// `Session::compile_project` and the V06 std path of `Session::compile`.
 /// `asts` are indexed by `FileId`, matching `sources` (std files appended
-/// last when the program imports `std.*`).
+/// last when the program imports `std.*`). `crates` lists the root crate
+/// first, then any dependency crates and the shipped `std`.
 fn compile_pre_parsed(
     sources: &source_map::SourceMap,
     root: source_map::FileId,
+    crates: &[CrateDef],
     asts: Vec<parser::ast::Ast>,
 ) -> Result<codegen::Bytecode, CompileError> {
-    let table = build_module_table(root, sources, &asts).map_err(CompileError::Resolve)?;
+    let table = build_module_table(crates, sources, &asts).map_err(CompileError::Resolve)?;
     let mut hirs = Vec::with_capacity(table.modules.len());
     let mut binding_offset = 0u32;
     let mut hir_offset = 0u32;

@@ -29,6 +29,25 @@ pub enum ResolveErrorKind {
     PrivateAccess { item: String, module: String },
     /// 0.0.3 V05: an `import` path named a module with no matching file.
     ModuleNotFound { path: String, tried: Vec<String> },
+    /// 0.0.3: two files resolved to the same absolute module path. With a
+    /// dependency graph this means two crates contributed a module of the
+    /// same name, or a crate was registered twice.
+    DuplicateModule {
+        path: String,
+        /// The file that lost the collision.
+        file: String,
+        /// The file that claimed the path first.
+        first: String,
+    },
+    /// 0.0.3: a module imported a path that resolves inside another crate —
+    /// a dependency reaching into the depending project, or the reverse.
+    CrossCrateImport {
+        path: String,
+        /// Name of the crate doing the importing (empty = the root crate).
+        crate_name: String,
+        /// Name of the crate that actually owns the module.
+        owner: String,
+    },
     /// 0.0.3 V05: the import graph contains a cycle.
     CircularImport { cycle: Vec<String> },
     /// Shadowing with mismatched mutability (DESIGN.md §4.3).
@@ -79,6 +98,33 @@ impl fmt::Display for ResolveErrorKind {
                     write!(f, " (tried {})", tried.join(", "))?;
                 }
                 Ok(())
+            }
+            ResolveErrorKind::DuplicateModule { path, file, first } => {
+                write!(
+                    f,
+                    "duplicate module `{path}`: `{file}` collides with `{first}`"
+                )
+            }
+            ResolveErrorKind::CrossCrateImport {
+                path,
+                crate_name,
+                owner,
+            } => {
+                let importer = if crate_name.is_empty() {
+                    "this crate".to_string()
+                } else {
+                    format!("crate `{crate_name}`")
+                };
+                let owning = if owner.is_empty() {
+                    "this crate".to_string()
+                } else {
+                    format!("crate `{owner}`")
+                };
+                write!(
+                    f,
+                    "{importer} cannot import `{path}`: {owning} already depends on \
+                     {importer}, so the dependency would be circular"
+                )
             }
             ResolveErrorKind::CircularImport { cycle } => {
                 write!(f, "circular import: {}", cycle.join(" → "))
