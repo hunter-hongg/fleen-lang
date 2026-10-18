@@ -1,0 +1,26 @@
+// 0.0.3 V06 std library: `num` module — numeric helpers.
+//
+// `abs`/`min`/`max` are ordinary Fleen functions. `sqrt`/`floor` are VM
+// intrinsics — no Fleen syntax calls the math library (D8).
+
+// Absolute value of `x`. Note: `std.num.abs` of the minimum int overflows
+// (there is no positive counterpart), which is a runtime arithmetic error.
+pub func abs(x: int): int {
+    if x >= 0 { x } else { 0 - x }
+}
+
+// The smaller of the two arguments.
+pub func min(a: int, b: int): int {
+    if a < b { a } else { b }
+}
+
+// The larger of the two arguments.
+pub func max(a: int, b: int): int {
+    if a > b { a } else { b }
+}
+
+// `sqrt` returns the non-negative square root of a float. VM intrinsic
+// `std.num.sqrt`.
+
+// `floor` rounds a float down to the nearest integer. VM intrinsic
+// `std.num.floor`.

@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod hir;
+pub mod modules;
 pub mod scope;
 
 use crate::lexer::Span;
@@ -31,6 +32,7 @@ use hir::{
     ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir,
     ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
 };
+pub use modules::{ExportKind, ModuleDef, ModuleId, ModuleTable};
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
 
@@ -39,7 +41,7 @@ use std::collections::HashMap;
 /// `print` is the only builtin *function*. `Ok`/`Err` are builtin Result
 /// constructors: they resolve like functions here (shadowable, §4.3), while
 /// typeck gives them their context-dependent semantics (0.0.2 U04, PLAN §3.4.1).
-const BUILTINS: &[&str] = &["print", "Ok", "Err"];
+const BUILTINS: &[&str] = &["print", "Ok", "Err", "range", "range_from"];
 
 /// Whether a type mentions `ref` anywhere in its structure (0.0.2 U05):
 /// `ref T` is legal only as the *outer* type of a function parameter
@@ -86,7 +88,32 @@ enum AssignTarget {
 /// - `Ok(Hir)`: Resolution successful, all names bound.
 /// - `Err(Vec<ResolveError>)`: Resolution errors (collected, not fail-fast).
 pub fn resolve(ast: Ast) -> Result<Hir, Vec<ResolveError>> {
-    Resolver::new().resolve_program(ast)
+    let mut table = ModuleTable::default();
+    // Single-file `resolve` is still a whole program: the crate root module
+    // exists even though no import graph was discovered.
+    table.modules.push(ModuleDef {
+        file: crate::source_map::FileId(0),
+        path: Vec::new(),
+        is_root: true,
+        imports: Vec::new(),
+        items: std::collections::HashMap::new(),
+    });
+    Resolver::new_for_module(&table, 0, 0, 0).resolve_program(ast)
+}
+
+/// Resolve one module of a whole-program compilation (0.0.3 V05).
+///
+/// `binding_offset`/`hir_offset` make IDs unique across modules so a later
+/// merged HIR (typeck/lower/codegen) never confuses two modules' bindings.
+pub fn resolve_module_with_table(
+    ast: Ast,
+    table: &ModuleTable,
+    module_id: ModuleId,
+    binding_offset: u32,
+    hir_offset: u32,
+) -> Result<(Hir, u32, u32), Vec<ResolveError>> {
+    Resolver::new_for_module(table, module_id, binding_offset, hir_offset)
+        .resolve_program_inner(ast)
 }
 
 /// Main resolver struct holding state during resolution.
@@ -102,16 +129,26 @@ struct Resolver {
     /// Top-level functions collected in the forward-reference pass, mapped to
     /// their `BindingId`. Used to avoid double-declaring them in the main pass.
     global_funcs: HashMap<String, BindingId>,
+    /// Module table and the module currently being resolved (0.0.3 V05).
+    table: ModuleTable,
+    cur_module: usize,
 }
 
 impl Resolver {
-    fn new() -> Self {
+    fn new_for_module(
+        table: &ModuleTable,
+        module_id: usize,
+        binding_offset: u32,
+        hir_offset: u32,
+    ) -> Self {
         Self {
             scopes: ScopeStack::new(),
             errors: Vec::new(),
-            hir_id_counter: 0,
-            binding_id_counter: 0,
+            hir_id_counter: hir_offset,
+            binding_id_counter: binding_offset,
             global_funcs: HashMap::new(),
+            table: table.clone(),
+            cur_module: module_id,
         }
     }
 
@@ -131,9 +168,83 @@ impl Resolver {
         self.errors.push(ResolveError { kind, span });
     }
 
+    /// Resolve type references for 0.0.3 V05: qualify bare struct names
+    /// declared in the current module and, for already-qualified names,
+    /// validate the target exists and check `pub` visibility. Composite
+    /// types recurse so nested `Named` references are rewritten too.
+    fn resolve_type(&mut self, ty: &Type, span: Span) -> Type {
+        match ty {
+            Type::Array(elem) => Type::Array(Box::new(self.resolve_type(elem, span))),
+            Type::Box(inner) => Type::Box(Box::new(self.resolve_type(inner, span))),
+            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_type(inner, span))),
+            Type::Result(ok, err) => Type::Result(
+                Box::new(self.resolve_type(ok, span)),
+                Box::new(self.resolve_type(err, span)),
+            ),
+            Type::Func(params, ret) => Type::Func(
+                params.iter().map(|p| self.resolve_type(p, span)).collect(),
+                Box::new(self.resolve_type(ret, span)),
+            ),
+            Type::Named(name) => self.resolve_type_name(name, span),
+            Type::Base(_) | Type::Range => ty.clone(),
+        }
+    }
+
+    fn resolve_type_name(&mut self, name: &str, span: Span) -> Type {
+        let module = self.table.modules[self.cur_module].clone();
+        if !name.contains('.') {
+            // A bare name is a struct declared in the current module; leave
+            // unknown names for typeck to report with its full error text.
+            if module.items.contains_key(name) {
+                return Type::Named(module.mangled_name(name));
+            }
+            return Type::Named(name.to_string());
+        }
+
+        // Qualified type path: `a.b.T` must name a module in the table and a
+        // `pub` item on that module.
+        let segments: Vec<String> = name.split('.').map(str::to_string).collect();
+        if let Some((mid, prefix_len)) = self.table.longest_module_prefix(&segments)
+            && prefix_len == segments.len() - 1
+        {
+            let target = &self.table.modules[mid];
+            let is_imported = mid == self.cur_module
+                || module
+                    .imports
+                    .iter()
+                    .any(|imp| imp.path.iter().eq(target.path.iter()));
+            if is_imported {
+                let item_name = &segments[prefix_len];
+                if let Some(item) = target.items.get(item_name) {
+                    if !item.is_pub && mid != self.cur_module {
+                        let private_item = item_name.clone();
+                        let private_module = target.path_string();
+                        self.add_error(
+                            ResolveErrorKind::PrivateAccess {
+                                item: private_item,
+                                module: private_module,
+                            },
+                            span,
+                        );
+                        return Type::Named(name.to_string());
+                    }
+                    return Type::Named(target.mangled_name(item_name));
+                }
+            }
+        }
+        Type::Named(name.to_string())
+    }
+
     /// Main entry point: resolve the entire program.
-    fn resolve_program(mut self, ast: Ast) -> Result<Hir, Vec<ResolveError>> {
+    fn resolve_program(self, ast: Ast) -> Result<Hir, Vec<ResolveError>> {
+        self.resolve_program_inner(ast).map(|(hir, _, _)| hir)
+    }
+
+    /// Main entry point, also returning the next free binding/hir ID so a
+    /// multi-module compiler can keep ID spaces disjoint (0.0.3 V05).
+    fn resolve_program_inner(mut self, ast: Ast) -> Result<(Hir, u32, u32), Vec<ResolveError>> {
         self.register_builtins();
+        self.register_imported_items();
         self.predeclare_global_functions(&ast);
         let global_funcs = std::mem::take(&mut self.global_funcs);
 
@@ -144,10 +255,12 @@ impl Resolver {
             // they are a type-table input for typeck, not executable code.
             // Only `ref`-in-type legality is checked here.
             if let Item::Decl(Decl::Struct(s)) = &item {
-                if let Some(first) = structs.iter().find(|e| e.name == s.name) {
+                let module = self.table.modules[self.cur_module].clone();
+                let mangled = module.mangled_name(&s.name);
+                if let Some(first) = structs.iter().find(|e| e.name == mangled) {
                     self.errors.push(ResolveError {
                         kind: ResolveErrorKind::DuplicateBinding {
-                            name: s.name.clone(),
+                            name: mangled.clone(),
                             first_span: first.span,
                         },
                         span: s.span,
@@ -165,13 +278,13 @@ impl Resolver {
                     }
                 }
                 structs.push(StructDeclHir {
-                    name: s.name.clone(),
+                    name: mangled,
                     fields: s
                         .fields
                         .iter()
                         .map(|f| StructFieldHir {
                             name: f.name.clone(),
-                            ty: f.ty.clone(),
+                            ty: self.resolve_type(&f.ty, f.span),
                             span: f.span,
                         })
                         .collect(),
@@ -190,11 +303,15 @@ impl Resolver {
             return Err(self.errors);
         }
 
-        Ok(Hir {
-            items: hir_items,
-            structs,
-            span: ast.span,
-        })
+        Ok((
+            Hir {
+                items: hir_items,
+                structs,
+                span: ast.span,
+            },
+            self.binding_id_counter,
+            self.hir_id_counter,
+        ))
     }
 
     /// Register builtin functions in the global scope.
@@ -211,8 +328,93 @@ impl Resolver {
                     ref_param: false,
                     span: Span::SYNTHETIC, // builtins have no source span
                     hir_id: HirId(0),
+                    global_name: None,
                 },
             );
+        }
+    }
+
+    /// Put every `pub` item from modules imported by the current module
+    /// into the global scope under its fully-qualified name. The module
+    /// table was built before resolution, so `import` declarations do not
+    /// need repeated header parsing.
+    fn register_imported_items(&mut self) {
+        let current = self.table.modules[self.cur_module].clone();
+        for import in &current.imports {
+            let Some(mid) = self.table.find(&import.path) else {
+                continue;
+            };
+            let target = self.table.modules[mid].clone();
+            let mut entries: Vec<(String, crate::resolver::modules::ExportDef)> = target
+                .items
+                .iter()
+                .filter(|(_, item)| item.is_pub)
+                .map(|(name, item)| (name.clone(), item.clone()))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (local_name, item) in entries {
+                let qualified = target.mangled_name(&local_name);
+                if self.scopes.current_get(&qualified).is_some() {
+                    continue;
+                }
+                // Structs have no runtime binding; their names are resolved
+                // through the typeck struct table.
+                if matches!(item.kind, ExportKind::Struct) {
+                    continue;
+                }
+                let binding_id = self.next_binding_id();
+                let kind = match item.kind {
+                    ExportKind::Func => BindingKind::Function,
+                    ExportKind::Const => BindingKind::Const,
+                    ExportKind::Global => BindingKind::Variable,
+                    ExportKind::Struct => continue,
+                };
+                let binding = Binding {
+                    id: binding_id,
+                    kind,
+                    mutable: matches!(kind, BindingKind::Variable),
+                    builtin: false,
+                    ref_param: false,
+                    span: item.span,
+                    hir_id: self.next_hir_id(),
+                    global_name: Some(qualified.clone()),
+                };
+                let _ = self.scopes.declare(qualified.clone(), binding);
+            }
+
+            // 0.0.3 V06: a std module's VM intrinsics are never declared in
+            // Fleen source (D8) — they only exist as builtin table entries —
+            // so materialize them as Builtin bindings here, exactly like the
+            // prelude `print`, keyed by their qualified names. The name
+            // prefix (`target.path_string() + "."`) is the module path, and
+            // the leaf carries the single-segment builtin (e.g.
+            // `std.io.println` for `import std.io;`). Qualified bare
+            // constructors (`std.collection.range.range`) match the same
+            // shape; bare `print`/`range`/`range_from` are seeded globally.
+            let prefix = format!("{}.", target.path_string());
+            for sig in crate::typeck::builtins::builtins() {
+                let Some(leaf) = sig.name.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if leaf.is_empty() || leaf.contains('.') {
+                    continue;
+                }
+                if self.scopes.current_get(sig.name).is_some() {
+                    continue;
+                }
+                let binding_id = self.next_binding_id();
+                let binding = Binding {
+                    id: binding_id,
+                    kind: BindingKind::Builtin,
+                    mutable: false,
+                    builtin: true,
+                    ref_param: false,
+                    span: Span::SYNTHETIC, // intrinsics have no source span
+                    hir_id: self.next_hir_id(),
+                    global_name: Some(sig.name.to_string()),
+                };
+                let _ = self.scopes.declare(sig.name.to_string(), binding);
+            }
         }
     }
 
@@ -223,6 +425,8 @@ impl Resolver {
         for item in &ast.items {
             if let Item::Decl(Decl::Func(func_decl)) = item {
                 let binding_id = self.next_binding_id();
+                let module = self.table.modules[self.cur_module].clone();
+                let global_name = module.mangled_name(&func_decl.name);
                 let binding = Binding {
                     id: binding_id,
                     kind: BindingKind::Function,
@@ -231,6 +435,7 @@ impl Resolver {
                     ref_param: false,
                     span: func_decl.span,
                     hir_id: HirId(0), // placeholder, filled when the body resolves
+                    global_name: Some(global_name),
                 };
                 match self.scopes.declare(func_decl.name.clone(), binding) {
                     Ok(()) => {
@@ -347,6 +552,7 @@ impl Resolver {
                     ref_param: false,
                     span: func.span,
                     hir_id: HirId(0),
+                    global_name: None,
                 };
                 match self.scopes.declare(func.name.clone(), binding) {
                     Ok(()) => id,
@@ -372,10 +578,18 @@ impl Resolver {
             binding.hir_id = hir_id;
         }
 
+        // 0.0.3 V05: use the mangled (fully-qualified) name so multi-module
+        // HIRs merge into one flat bytecode namespace without collisions.
+        let hir_name = self
+            .scopes
+            .get_by_id(binding_id)
+            .and_then(|b| b.global_name.clone())
+            .unwrap_or(func.name);
+
         Ok(FuncDeclHir {
-            name: func.name,
+            name: hir_name,
             params,
-            ret_type: func.ret_type,
+            ret_type: func.ret_type.map(|ty| self.resolve_type(&ty, func.span)),
             body,
             hir_id,
             span: func.span,
@@ -408,6 +622,7 @@ impl Resolver {
                 ref_param: matches!(param.ty, Type::Ref(_)),
                 span: param.span,
                 hir_id,
+                global_name: None,
             };
             match self.scopes.declare(param.name.clone(), binding) {
                 Ok(()) => {}
@@ -423,7 +638,7 @@ impl Resolver {
             }
             hir_params.push(ParamHir {
                 name: param.name,
-                ty: param.ty,
+                ty: self.resolve_type(&param.ty, param.span),
                 binding_id,
                 hir_id,
                 span: param.span,
@@ -570,6 +785,12 @@ impl Resolver {
         }
 
         let binding_id = self.next_binding_id();
+        let module = self.table.modules[self.cur_module].clone();
+        let global_name = if self.scopes.in_function() {
+            None
+        } else {
+            Some(module.mangled_name(&var.name))
+        };
         if let Err(first) = self.scopes.declare(
             var.name.clone(),
             Binding {
@@ -580,6 +801,7 @@ impl Resolver {
                 ref_param: false,
                 span: var.span,
                 hir_id,
+                global_name: global_name.clone(),
             },
         ) {
             self.add_error(
@@ -593,8 +815,8 @@ impl Resolver {
         }
 
         Ok(VarBindingHir {
-            name: var.name,
-            ty: var.ty,
+            name: global_name.unwrap_or(var.name),
+            ty: var.ty.map(|ty| self.resolve_type(&ty, var.span)),
             init: Box::new(init),
             binding_id,
             hir_id,
@@ -658,6 +880,12 @@ impl Resolver {
         }
 
         let binding_id = self.next_binding_id();
+        let module = self.table.modules[self.cur_module].clone();
+        let global_name = if self.scopes.in_function() {
+            None
+        } else {
+            Some(module.mangled_name(&c.name))
+        };
         if let Err(first) = self.scopes.declare(
             c.name.clone(),
             Binding {
@@ -668,6 +896,7 @@ impl Resolver {
                 ref_param: false,
                 span: c.span,
                 hir_id,
+                global_name: global_name.clone(),
             },
         ) {
             self.add_error(
@@ -681,8 +910,8 @@ impl Resolver {
         }
 
         Ok(ConstDeclHir {
-            name: c.name,
-            ty: c.ty,
+            name: global_name.unwrap_or(c.name),
+            ty: c.ty.map(|ty| self.resolve_type(&ty, c.span)),
             init: Box::new(init),
             binding_id,
             hir_id,
@@ -773,7 +1002,8 @@ impl Resolver {
             Expr::Deref(expr, span) => ExprHir::Deref(Box::new(self.resolve_expr(*expr)?), span),
             // 0.0.2 U13: type cast; operand resolved, target type passed through as-is.
             Expr::Cast(expr, ty, span) => {
-                ExprHir::Cast(Box::new(self.resolve_expr(*expr)?), ty, span)
+                let resolved_ty = self.resolve_type(&ty, span);
+                ExprHir::Cast(Box::new(self.resolve_expr(*expr)?), resolved_ty, span)
             }
             Expr::Question(expr, span) => {
                 ExprHir::Question(Box::new(self.resolve_expr(*expr)?), span)
@@ -798,8 +1028,13 @@ impl Resolver {
                 ExprHir::ArrayLit(elems, lit.span)
             }
             Expr::Field(obj, field) => {
-                let o = self.resolve_expr(*obj)?;
-                ExprHir::Field(Box::new(o), field)
+                let span = obj.span();
+                if let Some(hir) = self.try_resolve_module_path(&obj, &field, span)? {
+                    hir
+                } else {
+                    let o = self.resolve_expr(*obj)?;
+                    ExprHir::Field(Box::new(o), field)
+                }
             }
             Expr::StructLit(lit) => {
                 let inits = lit
@@ -807,8 +1042,19 @@ impl Resolver {
                     .into_iter()
                     .map(|(name, expr)| Ok((name, self.resolve_expr(expr)?)))
                     .collect::<Result<Vec<_>, ()>>()?;
+                // 0.0.3 V05: qualify a bare current-module struct so typeck's
+                // merged struct table recognizes it. Cross-module values are
+                // normally constructed by pub constructors in 0.0.3.
+                let module = self.table.modules[self.cur_module].clone();
+                let name = if lit.name.contains('.') {
+                    lit.name
+                } else if module.items.contains_key(&lit.name) {
+                    module.mangled_name(&lit.name)
+                } else {
+                    lit.name
+                };
                 ExprHir::StructLit {
-                    name: lit.name,
+                    name,
                     inits,
                     hir_id: self.next_hir_id(),
                     span: lit.span,
@@ -837,6 +1083,58 @@ impl Resolver {
     /// actually holds a box is typeck's business (U04/U05).
     fn resolve_assign(&mut self, lhs: Expr, rhs: Expr) -> Result<ExprHir, ()> {
         let rhs_span = rhs.span();
+
+        // 0.0.3 V05: m.items = [...] — a module-qualified global assignment.
+        // When the Field base name is a module path (not a local binding),
+        // resolve the full qualified path through the module table and
+        // treat the result as a plain variable assignment to the mangled
+        // global name.
+        let module_assign = match &lhs {
+            Expr::Field(obj, field) => {
+                if let Expr::Ident(name, _) = &**obj {
+                    if self.scopes.get(name).is_none()
+                        && self.table.find(std::slice::from_ref(name)).is_some()
+                    {
+                        let span = lhs.span();
+                        let resolved = self.try_resolve_module_path(obj, field, span)?;
+                        match resolved {
+                            Some(ExprHir::Ident {
+                                name: qualified,
+                                binding_id,
+                                ..
+                            }) => Some((qualified, binding_id, span)),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((name, binding_id, span)) = module_assign {
+            let rhs_hir = self.resolve_expr(rhs)?;
+            let binding = self.scopes.get_by_id(binding_id);
+            if let Some(b) = &binding
+                && !b.mutable
+            {
+                self.add_error(
+                    ResolveErrorKind::AssignToImmutable { name: name.clone() },
+                    span,
+                );
+                return Err(());
+            }
+            return Ok(ExprHir::Assign {
+                name,
+                binding_id,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span,
+            });
+        }
+
         let (target, span) = match lhs {
             Expr::Ident(name, span) => (AssignTarget::Ident(name), span),
             Expr::Deref(inner, span) => match *inner {
@@ -974,12 +1272,97 @@ impl Resolver {
             }
         };
 
+        // 0.0.3 V05: use the fully-qualified global name if available so
+        // codegen resolves to the correct global, not the local alias.
+        let hir_name = self
+            .scopes
+            .get_by_id(binding_id)
+            .and_then(|b| b.global_name.clone())
+            .unwrap_or(name);
+
         Ok(ExprHir::Ident {
-            name,
+            name: hir_name,
             binding_id,
             hir_id: self.next_hir_id(),
             span,
         })
+    }
+
+    /// Try to interpret a dotted expression as a module-qualified item
+    /// (m.items). Returns None when the expression is not a pure identifier
+    /// chain or when the first segment is shadowed by a local binding.
+    fn try_resolve_module_path(
+        &mut self,
+        obj: &Expr,
+        field: &str,
+        span: Span,
+    ) -> Result<Option<ExprHir>, ()> {
+        let mut segments = vec![field.to_string()];
+        let mut cur = obj;
+        loop {
+            match cur {
+                Expr::Ident(name, _) => {
+                    segments.push(name.clone());
+                    break;
+                }
+                Expr::Field(inner, f) => {
+                    segments.push(f.clone());
+                    cur = inner;
+                }
+                _ => return Ok(None),
+            }
+        }
+        segments.reverse();
+
+        // A local binding shadows a module path.
+        if self.scopes.get(&segments[0]).is_some() {
+            return Ok(None);
+        }
+
+        // std.io.print is the prelude spelling; route to the builtin.
+        if segments == ["std", "io", "print"] {
+            return self.resolve_ident("print".to_string(), span).map(Some);
+        }
+
+        let module = self.table.modules[self.cur_module].clone();
+        if let Some((mid, prefix_len)) = self.table.longest_module_prefix(&segments)
+            && prefix_len == segments.len() - 1
+        {
+            let target = &self.table.modules[mid];
+            let is_imported = mid == self.cur_module
+                || module
+                    .imports
+                    .iter()
+                    .any(|imp| imp.path.iter().eq(target.path.iter()));
+            if !is_imported {
+                return Ok(None);
+            }
+            let item_name = &segments[prefix_len];
+            if let Some(item) = target.items.get(item_name) {
+                if !item.is_pub && mid != self.cur_module {
+                    self.add_error(
+                        ResolveErrorKind::PrivateAccess {
+                            item: item_name.clone(),
+                            module: target.path_string(),
+                        },
+                        span,
+                    );
+                    return Err(());
+                }
+                let qualified = target.mangled_name(item_name);
+                return self.resolve_ident(qualified, span).map(Some);
+            }
+            // 0.0.3 V06: the item may be a VM intrinsic that lives only in
+            // the builtin table (`std.str.len`, `std.os.exit`, ...), in
+            // which case it was materialized as a Builtin binding during
+            // import registration; route to it under its qualified name.
+            let qualified = target.mangled_name(item_name);
+            if crate::typeck::builtins::find_builtin(&qualified).is_some() {
+                return self.resolve_ident(qualified, span).map(Some);
+            }
+        }
+
+        Ok(None)
     }
 
     fn resolve_if_expr(&mut self, if_expr: ExprIf) -> Result<ExprIfHir, ()> {
@@ -1051,6 +1434,7 @@ impl Resolver {
                 ref_param: false,
                 span: for_expr.span,
                 hir_id: var_hir_id,
+                global_name: None,
             },
         ) {
             self.add_error(
@@ -1230,6 +1614,7 @@ impl Resolver {
                 ref_param: false,
                 span,
                 hir_id,
+                global_name: None,
             },
         ) {
             self.add_error(

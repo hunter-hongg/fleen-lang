@@ -1,0 +1,6 @@
+pub struct Point { x: int, y: int }
+
+pub func make_point(): Point = Point { x: 3, y: 4 }
+pub func make_arr(): [int] = [10, 20, 30]
+
+func secret(): int = 0

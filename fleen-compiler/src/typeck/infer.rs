@@ -89,6 +89,10 @@ pub struct TypeChecker {
     fn_ret_stack: Vec<Option<Type>>,
     /// Binding ID to type mapping.
     binding_types: HashMap<BindingId, Type>,
+    /// Fully qualified name → type for top-level var/const declarations,
+    /// used by imported bindings whose local `BindingId` differs from the
+    /// declaration site (0.0.3 V05).
+    global_types: HashMap<String, Type>,
     /// Binding IDs of top-level (global) variables/consts. 0.0.2 U05: owned
     /// globals are read as deep copies and may never be moved — ownership
     /// checks key off this set.
@@ -109,6 +113,7 @@ impl TypeChecker {
             user_func_names: HashSet::new(),
             fn_ret_stack: Vec::new(),
             binding_types: HashMap::new(),
+            global_types: HashMap::new(),
             global_ids: HashSet::new(),
             structs: Vec::new(),
             struct_by_name: HashMap::new(),
@@ -350,14 +355,21 @@ impl TypeChecker {
     /// passed as a value) has a function type. `Ok`/`Err` are not registered
     /// here: their type depends on context, so calls are recognized by name in
     /// `typeck_call` (unless shadowed by a user function, §4.3).
+    /// 0.0.3 V06: `range`/`range_from` register with concrete signatures.
+    ///
+    /// Schematic builtins (`std.arr.*`) are deliberately **not** registered:
+    /// their signatures contain table-only type variables, and `Type::Var`
+    /// must never reach TypedHir (PLAN §10). They are call-only — a value
+    /// use (`f = std.arr.len`) reports `UndefinedVariable` instead.
     fn register_builtins(&mut self) {
-        for sig in crate::typeck::builtins::BUILTINS {
+        for sig in crate::typeck::builtins::builtins() {
             // Variadic builtins get their element type as the single
             // parameter for value-position lookup; call checking uses the
             // table's real (variadic) shape.
-            let params: Vec<Type> = match sig.param {
-                BuiltinParam::Fixed(params) => params.to_vec(),
-                BuiltinParam::Variadic(elem) => elem.to_vec(),
+            let params: Vec<Type> = match &sig.param {
+                BuiltinParam::Fixed(params) => params.clone(),
+                BuiltinParam::Variadic(elem) => elem.clone(),
+                BuiltinParam::Schematic { .. } => continue,
             };
             self.func_signatures
                 .insert(sig.name.to_string(), (params, sig.ret.clone()));
@@ -395,8 +407,13 @@ impl TypeChecker {
         self.collect_func_signatures(&hir);
         self.collect_global_ids(&hir);
 
+        let typed_globals = self.typeck_globals_first(&hir);
         let mut typed_items = Vec::new();
-        for item in hir.items {
+        for (idx, item) in hir.items.into_iter().enumerate() {
+            if let Some(typed_global) = typed_globals.get(&idx) {
+                typed_items.push(typed_global.clone());
+                continue;
+            }
             if let Ok(typed_item) = self.typeck_item(item) {
                 typed_items.push(typed_item);
             }
@@ -419,6 +436,45 @@ impl TypeChecker {
             structs,
             span: hir.span,
         })
+    }
+
+    /// Typecheck top-level var/const declarations first so imported globals
+    /// (`net.answer`, `net.g`) have a type by the time any module's items
+    /// reference them (0.0.3 V05). Returns a map from HIR index to the typed
+    /// item so the main loop preserves original declaration order.
+    fn typeck_globals_first(&mut self, hir: &Hir) -> HashMap<usize, TypedHirItem> {
+        let mut typed = HashMap::new();
+        for (idx, item) in hir.items.iter().enumerate() {
+            let typed_decl = match item {
+                HirItem::Decl(DeclHir::Var(v)) => {
+                    if let Ok(typed) = self.typeck_var_binding(v.clone()) {
+                        self.global_types.insert(
+                            v.name.clone(),
+                            typed.ty.clone().unwrap_or_else(|| typed.init.ty()),
+                        );
+                        Some(TypedHirItem::Decl(TypedDeclHir::Var(typed)))
+                    } else {
+                        None
+                    }
+                }
+                HirItem::Decl(DeclHir::Const(c)) => {
+                    if let Ok(typed) = self.typeck_const_decl(c.clone()) {
+                        self.global_types.insert(
+                            c.name.clone(),
+                            typed.ty.clone().unwrap_or_else(|| typed.init.ty()),
+                        );
+                        Some(TypedHirItem::Decl(TypedDeclHir::Const(typed)))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(typed_item) = typed_decl {
+                typed.insert(idx, typed_item);
+            }
+        }
+        typed
     }
 
     /// 0.0.2 U05: record the binding IDs of top-level variables and consts.
@@ -480,6 +536,7 @@ impl TypeChecker {
                     ref_param: matches!(param_type, Type::Ref(_)),
                     span: param.span,
                     hir_id,
+                    global_name: None,
                 },
             );
             // Store the parameter type
@@ -601,6 +658,7 @@ impl TypeChecker {
                 ref_param: false,
                 span: var.span,
                 hir_id,
+                global_name: None,
             },
         );
 
@@ -650,6 +708,7 @@ impl TypeChecker {
                 ref_param: false,
                 span: c.span,
                 hir_id,
+                global_name: None,
             },
         );
 
@@ -773,7 +832,13 @@ impl TypeChecker {
                 span,
             } => {
                 let typed_rhs = self.typeck_expr(*rhs, None)?;
-                let var_type = self.lookup_type(&name, span)?;
+                let var_type = match self.lookup_type(&name, span) {
+                    Ok(ty) => ty,
+                    Err(()) => match self.global_types.get(&name) {
+                        Some(ty) => ty.clone(),
+                        None => return Err(()),
+                    },
+                };
 
                 if let Err(e) = unify_assign(&var_type, &typed_rhs.ty(), typed_rhs.span()) {
                     self.add_error(e.kind, e.span);
@@ -1046,6 +1111,7 @@ impl TypeChecker {
                 ref_param: false,
                 span: for_expr.span,
                 hir_id: HirId(0),
+                global_name: None,
             },
         );
         self.binding_types
@@ -1179,6 +1245,7 @@ impl TypeChecker {
                         ref_param: false,
                         span: *span,
                         hir_id: new_hir_id,
+                        global_name: None,
                     },
                 );
                 // Record the pattern binding's type so `lookup_type` finds it.
@@ -1233,6 +1300,7 @@ impl TypeChecker {
                         ref_param: false,
                         span: *span,
                         hir_id: new_hir_id,
+                        global_name: None,
                     },
                 );
                 self.binding_types
@@ -1494,7 +1562,7 @@ impl TypeChecker {
             && self.scopes.get(name).is_none()
             && let Some(sig) = find_builtin(name)
         {
-            return self.typeck_builtin_call(sig, func, args);
+            return self.typeck_builtin_call(&sig, func, args);
         }
 
         let typed_func = self.typeck_expr(func, None)?;
@@ -1591,9 +1659,15 @@ impl TypeChecker {
         func: ExprHir,
         args: Vec<ExprHir>,
     ) -> Result<TypedExprHir, ()> {
+        // Schematic builtins bind their table type variable from the
+        // arguments; they take their own path (see below).
+        if matches!(sig.param, BuiltinParam::Schematic { .. }) {
+            return self.typeck_schematic_builtin_call(sig, func, args);
+        }
+
         let typed_func = self.typeck_expr(func, None)?;
 
-        let allowed: &[Type] = match sig.param {
+        let allowed: &[Type] = match &sig.param {
             BuiltinParam::Fixed(params) => {
                 if args.len() != params.len() {
                     self.add_error(
@@ -1608,6 +1682,8 @@ impl TypeChecker {
                 params
             }
             BuiltinParam::Variadic(elem) => elem,
+            // Handled above.
+            BuiltinParam::Schematic { .. } => return Err(()),
         };
 
         let mut typed_args = Vec::new();
@@ -1616,9 +1692,11 @@ impl TypeChecker {
             // Fixed: the expected type is the i-th parameter. Variadic: any
             // of the element types — report the mismatch against the first
             // (single-element sets cover the only builtin today).
-            let expected_ty = match sig.param {
+            let expected_ty = match &sig.param {
                 BuiltinParam::Fixed(params) => params[i].clone(),
                 BuiltinParam::Variadic(elem) => elem.first().cloned().unwrap_or(Type::Unit),
+                // Handled above.
+                BuiltinParam::Schematic { .. } => return Err(()),
             };
             // A `ref T` parameter value reads as `T` (PLAN §3.3).
             let found_ty = typed_arg.ty();
@@ -1641,6 +1719,115 @@ impl TypeChecker {
             Box::new(typed_func),
             typed_args,
             sig.ret.clone(),
+        ))
+    }
+
+    /// Check a schematic builtin call (`std.arr.*`, 0.0.3 V06).
+    ///
+    /// The table signature carries the type variable `T0`; it is bound from
+    /// the argument types at this call site (one-call unification — the
+    /// 0.0.2 `Ok`/`Err` context-inference mechanism extended to the table;
+    /// anything beyond it is 0.1.0 generics) and substituted into the
+    /// parameter and return types. `T0` never reaches TypedHir (PLAN §10).
+    fn typeck_schematic_builtin_call(
+        &mut self,
+        sig: &crate::typeck::builtins::BuiltinSig,
+        func: ExprHir,
+        args: Vec<ExprHir>,
+    ) -> Result<TypedExprHir, ()> {
+        // `typeck_call` only reaches here for the bare builtin identifier
+        // (a schematic builtin is recognized by name, unshadowed).
+        let (name, binding_id, hir_id, func_span) = match func {
+            ExprHir::Ident {
+                name,
+                binding_id,
+                hir_id,
+                span,
+            } => (name, binding_id, hir_id, span),
+            other => {
+                // Not reachable through `typeck_call`: the schematic path
+                // requires a name-recognized callee.
+                self.add_error(
+                    TypeckErrorKind::InternalError {
+                        message: "schematic builtin callee is not an identifier".to_string(),
+                    },
+                    other.span(),
+                );
+                return Err(());
+            }
+        };
+
+        let mut typed_args = Vec::with_capacity(args.len());
+        let mut arg_types = Vec::with_capacity(args.len());
+        for arg in args {
+            let typed_arg = self.typeck_expr(arg, None)?;
+            arg_types.push(typed_arg.ty().clone());
+            typed_args.push(typed_arg);
+        }
+
+        // Bind `T0` from the argument types and substitute it into the
+        // parameter and return types.
+        let expected_arity = match &sig.param {
+            BuiltinParam::Schematic { params, .. } => params.len(),
+            _ => 0,
+        };
+        let Some(resolved) = crate::typeck::builtins::resolve_schematic_call(sig, &arg_types)
+        else {
+            self.add_error(
+                TypeckErrorKind::ArityMismatch {
+                    expected: expected_arity,
+                    found: arg_types.len(),
+                },
+                func_span,
+            );
+            return Err(());
+        };
+
+        // A type variable bound to two different types by two arguments
+        // (`std.arr.push(["a"], 1)` binds `T0` to `string` and then to
+        // `int`) is an element-type mismatch.
+        if let Some(conflict) = resolved.conflict {
+            let span = typed_args[conflict.arg_index].span();
+            self.add_error(
+                TypeckErrorKind::ArrayTypeMismatch {
+                    expected: conflict.expected,
+                    found: conflict.found,
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        // Every argument must satisfy its *substituted* parameter type.
+        for (i, (typed_arg, expected_ty)) in typed_args
+            .iter()
+            .zip(resolved.param_types.iter())
+            .enumerate()
+        {
+            if let Err(e) =
+                Self::unify_arg_ref_aware(expected_ty, &typed_arg.ty(), i, typed_arg.span())
+            {
+                self.add_error(e.kind, e.span);
+                return Err(());
+            }
+        }
+
+        // The callee node carries the *substituted* function type: a
+        // `Type::Var` here would leak into TypedHir.
+        let ret_type = resolved.ret_type;
+        let typed_func = TypedExprHir::Ident {
+            name,
+            binding_id,
+            ty: Type::Func(resolved.param_types, Box::new(ret_type.clone())),
+            access: Access::Copy,
+            hir_id,
+            span: func_span,
+        };
+
+        Ok(TypedExprHir::Call(
+            Box::new(typed_func),
+            typed_args,
+            ret_type,
         ))
     }
 
@@ -1779,6 +1966,7 @@ impl TypeChecker {
             && *access == Access::Copy
             && (ty.is_owned() || matches!(ty, Type::Ref(_)))
             && !self.global_ids.contains(binding_id)
+            && !self.global_types.contains_key(name)
         {
             self.add_error(
                 TypeckErrorKind::OwnedArgRequiresMove {
@@ -1819,7 +2007,7 @@ impl TypeChecker {
                     );
                     return Err(());
                 }
-                if self.global_ids.contains(&binding_id) {
+                if self.global_ids.contains(&binding_id) || self.global_types.contains_key(&name) {
                     self.add_error(TypeckErrorKind::MoveOutOfGlobal { name }, ident_span);
                     return Err(());
                 }
@@ -1973,7 +2161,7 @@ impl TypeChecker {
             }
         };
 
-        if self.global_ids.contains(&binding_id) {
+        if self.global_ids.contains(&binding_id) || self.global_types.contains_key(&name) {
             self.add_error(TypeckErrorKind::DerefAssignOfGlobalBox, span);
             return Err(());
         }
@@ -2469,6 +2657,12 @@ impl TypeChecker {
                 }
             }
             None => {
+                // Fall back to globals collected in a first pass so that
+                // imported globals (e.g. `net.answer`) resolve by their
+                // mangled name. 0.0.3 V05.
+                if let Some(ty) = self.global_types.get(name) {
+                    return Ok(ty.clone());
+                }
                 self.add_error(
                     TypeckErrorKind::UndefinedVariable {
                         name: name.to_string(),

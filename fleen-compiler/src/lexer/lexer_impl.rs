@@ -297,6 +297,7 @@ impl<'a> Lexer<'a> {
             "otherwise" => TokenKind::Otherwise,
             "import" => TokenKind::Import,
             "struct" => TokenKind::Struct,
+            "pub" => TokenKind::Pub,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "int" => TokenKind::IntType,
@@ -457,7 +458,8 @@ mod tests {
     #[test]
     fn tokenize_keywords() {
         let tokens =
-            tokenize("func const if elif else while choose when otherwise import struct").unwrap();
+            tokenize("func const if elif else while choose when otherwise import struct pub")
+                .unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Func);
         assert_eq!(tokens[1].kind, TokenKind::Const);
         assert_eq!(tokens[2].kind, TokenKind::If);
@@ -469,6 +471,7 @@ mod tests {
         assert_eq!(tokens[8].kind, TokenKind::Otherwise);
         assert_eq!(tokens[9].kind, TokenKind::Import);
         assert_eq!(tokens[10].kind, TokenKind::Struct);
+        assert_eq!(tokens[11].kind, TokenKind::Pub);
     }
 
     #[test]

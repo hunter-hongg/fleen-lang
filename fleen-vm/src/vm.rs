@@ -21,6 +21,9 @@ pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     globals: Vec<Value>,
+    /// The host program's command-line arguments (0.0.3 V06), served to
+    /// Fleen by `std.os.args` — without argv[0].
+    program_args: Vec<String>,
 }
 
 impl Vm {
@@ -29,12 +32,19 @@ impl Vm {
     /// All globals are initialized to [`Value::Unit`]; the module's
     /// `__init__` function is expected to overwrite them.
     pub fn new(module: Module) -> Self {
+        Self::with_args(module, Vec::new())
+    }
+
+    /// Create a VM with the program's command-line arguments (0.0.3 V06),
+    /// exposed to Fleen through `std.os.args` (without argv[0]).
+    pub fn with_args(module: Module, program_args: Vec<String>) -> Self {
         let n_globals = module.globals.len();
         Vm {
             module,
             stack: Vec::new(),
             frames: Vec::new(),
             globals: vec![Value::Unit; n_globals],
+            program_args,
         }
     }
 
@@ -191,8 +201,138 @@ impl Vm {
                 println!("{line}");
                 Ok(Value::Unit)
             }
+            // 0.0.3 V06 intrinsics (D8): only what Fleen cannot express is
+            // host-side — standard input/output, the OS process interface,
+            // the clock, and the math/string primitives with no source
+            // syntax. Signatures come from `typeck/builtins.rs`.
+            "std.io.println" => {
+                let line: String = args
+                    .iter()
+                    .map(|a| {
+                        let v = self.read_ref(a)?;
+                        Ok(match v {
+                            Value::Str(s) => s.to_string(),
+                            other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RuntimeErrorKind>>()?
+                    .join("");
+                println!("{line}");
+                Ok(Value::Unit)
+            }
+            "std.io.read_line" => {
+                let mut buf = String::new();
+                match std::io::stdin().read_line(&mut buf) {
+                    Ok(_) => {
+                        // Strip the trailing newline (and a carriage return
+                        // from CRLF input); EOF yields the empty string.
+                        let line = buf.trim_end_matches('\n').trim_end_matches('\r');
+                        Ok(Value::Str(line.into()))
+                    }
+                    Err(_) => Ok(Value::Str("".into())),
+                }
+            }
+            "std.str.len" => match self.read_ref(&args[0])? {
+                Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.concat" => match (self.read_ref(&args[0])?, self.read_ref(&args[1])?) {
+                (Value::Str(a), Value::Str(b)) => {
+                    let mut joined = String::with_capacity(a.len() + b.len());
+                    joined.push_str(a);
+                    joined.push_str(b);
+                    Ok(Value::Str(joined.into()))
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.split" => match (self.read_ref(&args[0])?, self.read_ref(&args[1])?) {
+                (Value::Str(s), Value::Str(sep)) => {
+                    let parts: Vec<Value> = s
+                        .split(sep.as_ref())
+                        .map(|p| Value::Str(p.into()))
+                        .collect();
+                    Ok(Value::Arr(parts.into_boxed_slice()))
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.num.sqrt" => match self.read_ref(&args[0])? {
+                Value::Float(x) => Ok(Value::Float(x.sqrt())),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.num.floor" => match self.read_ref(&args[0])? {
+                Value::Float(x) => Ok(Value::Int(x.floor() as i64)),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.os.args" => {
+                let args: Vec<Value> = self
+                    .program_args
+                    .iter()
+                    .map(|a| Value::Str(a.as_str().into()))
+                    .collect();
+                Ok(Value::Arr(args.into_boxed_slice()))
+            }
+            "std.os.exit" => match &args[0] {
+                Value::Int(code) => Err(RuntimeErrorKind::Exit(*code)),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.time.now_millis" => {
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => Ok(Value::Int(d.as_millis() as i64)),
+                    Err(_) => Ok(Value::Int(0)),
+                }
+            }
+            "std.arr.len" => match self.read_ref(&args[0])? {
+                Value::Arr(elems) => Ok(Value::Int(elems.len() as i64)),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.arr.get" => match (self.read_ref(&args[0])?, &args[1]) {
+                (Value::Arr(elems), Value::Int(i)) => {
+                    // Out of bounds is a *value* (`Err`), not a crash (D3:
+                    // the raw `a[i]` syntax keeps the runtime-error path).
+                    match elems.get(*i as usize).filter(|_| *i >= 0) {
+                        Some(v) => Ok(Value::Ok(Box::new(v.clone()))),
+                        None => Ok(Value::Err(Box::new(Value::Str(
+                            format!("index {i} out of range (array length {})", elems.len()).into(),
+                        )))),
+                    }
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.arr.set" => {
+                let elems: Vec<Value> = match self.read_ref(&args[0])? {
+                    Value::Arr(elems) => elems.to_vec(),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                let (&Value::Int(i), v) = (&args[1], &args[2]) else {
+                    return Err(RuntimeErrorKind::StackShape);
+                };
+                // Arrays are owned (D3): `set` returns a fresh array; the
+                // negative/overflow case fails the index conversion the
+                // same way as a too-large index.
+                let idx = usize::try_from(i).map_err(|_| self.arr_index_error(i, elems.len()))?;
+                let mut elems = elems;
+                if idx >= elems.len() {
+                    return Err(self.arr_index_error(i, elems.len()));
+                }
+                elems[idx] = v.clone();
+                Ok(Value::Arr(elems.into_boxed_slice()))
+            }
+            "std.arr.push" => {
+                let mut elems: Vec<Value> = match self.read_ref(&args[0])? {
+                    Value::Arr(elems) => elems.to_vec(),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                elems.push(args[1].clone());
+                Ok(Value::Arr(elems.into_boxed_slice()))
+            }
             _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
         }
+    }
+
+    /// The out-of-bounds runtime error for `std.arr.set`, matching the raw
+    /// `a[i]` message of the `ArrSet*` instructions (0.0.3 V03).
+    fn arr_index_error(&self, index: i64, len: usize) -> RuntimeErrorKind {
+        RuntimeErrorKind::IndexOutOfRange { index, len }
     }
 
     fn step(&mut self) -> Result<(), RuntimeErrorKind> {

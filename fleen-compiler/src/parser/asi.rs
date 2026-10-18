@@ -30,6 +30,7 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::For
             | TokenKind::Choose
             | TokenKind::Import
+            | TokenKind::Pub
             | TokenKind::Struct
             | TokenKind::Ident(_)
             | TokenKind::IntLit(_)
@@ -325,6 +326,7 @@ mod tests {
             TokenKind::For,
             TokenKind::Choose,
             TokenKind::Import,
+            TokenKind::Pub,
             TokenKind::Ident(String::new()),
             TokenKind::IntLit(0),
             TokenKind::FloatLit(0.0),

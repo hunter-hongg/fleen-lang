@@ -31,6 +31,19 @@ fn run_vm(input: &Path) -> (i32, String, String) {
     )
 }
 
+/// Run the VM binary with arbitrary arguments (e.g. `--project <dir>`).
+fn run_vm_args(args: &[&Path]) -> (i32, String, String) {
+    let output = Command::new(VM)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", VM));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 /// `tests/e2e/<sub>` next to the repo root.
 fn e2e_dir(sub: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -160,4 +173,69 @@ fn no_arguments_exits_2() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Usage"), "stderr: {stderr}");
+}
+
+#[test]
+fn project_demo_prints_expected_output() {
+    let project = e2e_dir("projects/netdemo");
+    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
+    assert_eq!(code, 0, "exit code (stderr: {stderr})");
+    assert_eq!(stdout, expected, "stdout mismatch for project mode");
+}
+
+#[test]
+fn project_imported_globals_prints_expected_output() {
+    let project = e2e_dir("projects/globaldemo");
+    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
+    assert_eq!(code, 0, "exit code (stderr: {stderr})");
+    assert_eq!(stdout, expected, "stdout mismatch for imported globals");
+}
+
+#[test]
+fn project_cycle_reports_error() {
+    let project = e2e_dir("projects/circular");
+    let (code, _stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
+    assert_eq!(code, 1, "exit code (stderr: {stderr})");
+    assert!(stderr.contains("circular import"), "stderr: {stderr}");
+}
+
+/// Run the VM with a `.fln` file followed by trailing program arguments
+/// (0.0.3 V06: `std.os.args` receives these without argv[0]).
+fn run_vm_with_program_args(file: &Path, program_args: &[&str]) -> (i32, String, String) {
+    let mut cmd = Command::new(VM);
+    cmd.arg(file);
+    for a in program_args {
+        cmd.arg(a);
+    }
+    let output = cmd.output().unwrap_or_else(|e| panic!("spawn {}: {e}", VM));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// std.os.args receives trailing CLI args (no argv[0]).
+#[test]
+fn std_os_args_receives_program_arguments() {
+    // Write a temp .fln that prints args[0], then invoke with a trailing arg.
+    let dir = std::env::temp_dir();
+    let src = "import std.io;\nimport std.os;\nfunc main() {\n    args = std.os.args();\n    std.io.println(args[0]);\n}\n";
+    let input = dir.join("fleen-v06-std-os-args.fln");
+    fs::write(&input, src).expect("write temp fixture");
+    let (code, stdout, stderr) = run_vm_with_program_args(&input, &["alpha"]);
+    let _ = fs::remove_file(&input);
+    assert_eq!(code, 0, "exit code (stderr: {stderr})");
+    assert_eq!(stdout, "alpha\n", "stdout mismatch");
+}
+
+/// std.os.exit(3) passes the code through as the process exit code.
+#[test]
+fn std_os_exit_passes_through_exit_code() {
+    let input = e2e_dir("invalid").join("std_os_exit.fln");
+    let (code, _stdout, stderr) = run_vm(&input);
+    assert_eq!(code, 3, "exit code (stderr: {stderr})");
+    assert!(stderr.is_empty(), "stderr should be empty for clean exit");
 }

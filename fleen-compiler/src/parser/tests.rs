@@ -207,6 +207,56 @@ mod tests {
         }
     }
 
+    // ========== Pub visibility modifier (0.0.3 V05) ==========
+
+    #[test]
+    fn parse_pub_func() {
+        let ast = parse_str("pub func f(): int = 1\n");
+        assert!(matches!(
+            &ast.items[0],
+            Item::Decl(Decl::Func(f)) if f.is_pub
+        ));
+    }
+
+    #[test]
+    fn parse_pub_const_and_struct_and_var() {
+        let ast = parse_str("pub const c = 1;\npub struct S { x: int }\npub g = 2;\n");
+        assert!(matches!(
+            &ast.items[0],
+            Item::Decl(Decl::Const(c)) if c.is_pub
+        ));
+        assert!(matches!(
+            &ast.items[1],
+            Item::Decl(Decl::Struct(s)) if s.is_pub
+        ));
+        assert!(matches!(
+            &ast.items[2],
+            Item::Decl(Decl::Var(v)) if v.is_pub
+        ));
+    }
+
+    #[test]
+    fn parse_pub_import_is_error() {
+        match parse_err("pub import std.io;") {
+            ParseError {
+                kind: ParseErrorKind::PubNotAllowedHere,
+                ..
+            } => {}
+            other => panic!("expected PubNotAllowedHere, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pub_in_block_is_error() {
+        match parse_err("func main() { pub x = 1; }") {
+            ParseError {
+                kind: ParseErrorKind::PubNotAllowedHere,
+                ..
+            } => {}
+            other => panic!("expected PubNotAllowedHere, got {other:?}"),
+        }
+    }
+
     // ========== Binary Operators ==========
 
     #[test]

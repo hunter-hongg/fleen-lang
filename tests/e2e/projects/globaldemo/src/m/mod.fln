@@ -1,0 +1,4 @@
+pub const greeting: string = "hello";
+pub items: [int] = [10, 20, 30];
+
+pub func next(n: int): int = n + 1

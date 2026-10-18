@@ -51,6 +51,8 @@ pub struct StructDecl {
     pub name: String,
     pub fields: Vec<StructField>,
     pub span: Span,
+    /// Whether the declaration was prefixed with `pub` (0.0.3 V05).
+    pub is_pub: bool,
 }
 
 /// One `name: type` entry in a struct declaration.
@@ -69,6 +71,8 @@ pub struct FuncDecl {
     pub ret_type: Option<Type>,
     pub body: FuncBody,
     pub span: Span,
+    /// Whether the declaration was prefixed with `pub` (0.0.3 V05).
+    pub is_pub: bool,
 }
 
 /// Parameter in a function declaration.
@@ -95,6 +99,8 @@ pub struct VarBinding {
     pub ty: Option<Type>,
     pub init: Box<Expr>,
     pub span: Span,
+    /// Whether the declaration was prefixed with `pub` (0.0.3 V05).
+    pub is_pub: bool,
 }
 
 /// Const declaration.
@@ -104,6 +110,8 @@ pub struct ConstDecl {
     pub ty: Option<Type>,
     pub init: Box<Expr>,
     pub span: Span,
+    /// Whether the declaration was prefixed with `pub` (0.0.3 V05).
+    pub is_pub: bool,
 }
 
 /// Type system (0.0.1).

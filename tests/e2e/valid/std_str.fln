@@ -1,0 +1,49 @@
+// 0.0.3 V06 e2e: `std.str` (intrinsics + Fleen helpers), `std.num`, and the
+// schematic `std.arr` helpers over Copy and owned element types.
+//
+// Arrays are owned (D3), so a second read of an owned binding needs `clone`;
+// `std.arr.get` returns a `Result`, making the out-of-bounds case a value
+// (not a runtime crash) — extracted here with `choose`.
+import std.str;
+import std.num;
+import std.arr;
+
+func main() {
+    print(std.str.len("héllo") as string);
+    print(std.str.len("") as string);
+    print(std.str.concat("foo", "bar"));
+    parts = std.str.split("a,,b", ",");
+    print(std.arr.len(clone parts) as string);
+    print(parts[1]);
+    print(std.str.from_int(0 - 42));
+    print(std.str.from_float(1.5));
+    print(std.str.from_bool(true));
+    print(std.num.abs(0 - 5) as string);
+    print(std.num.min(3, 7) as string);
+    print(std.num.max(3, 7) as string);
+    print(std.num.sqrt(2.25) as string);
+    print(std.num.floor(3.7) as string);
+
+    print(std.arr.len([10, 20, 30]) as string);
+    got = choose std.arr.get([10, 20, 30], 1) {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    print(got as string);
+    missing = choose std.arr.get([10, 20, 30], 9) {
+        when Ok(v) { std.str.from_int(v) }
+        when Err(e) { e }
+    };
+    print(missing);
+    bigger = std.arr.push([1, 2], 3);
+    print(std.arr.len(clone bigger) as string);
+    print(bigger[2] as string);
+    replaced = std.arr.set(bigger, 0, 100);
+    print(replaced[0] as string);
+    print(std.arr.len(["a", "b"]) as string);
+    first = choose std.arr.get(["a", "b"], 0) {
+        when Ok(v) { v }
+        when Err(e) { e }
+    };
+    print(first);
+}

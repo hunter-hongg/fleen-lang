@@ -23,6 +23,8 @@ pub enum ParseErrorKind {
     ExpectedFieldColon { field: String },
     /// Reached end of file unexpectedly.
     UnexpectedEof,
+    /// `pub` used somewhere other than the top level (0.0.3 V05).
+    PubNotAllowedHere,
 }
 
 impl fmt::Display for ParseErrorKind {
@@ -48,6 +50,13 @@ impl fmt::Display for ParseErrorKind {
             }
             ParseErrorKind::UnexpectedEof => {
                 write!(f, "unexpected end of input")
+            }
+            ParseErrorKind::PubNotAllowedHere => {
+                write!(
+                    f,
+                    "`pub` may only mark a top-level declaration (func, const, \
+                     struct, or global binding)"
+                )
             }
         }
     }

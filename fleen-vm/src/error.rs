@@ -60,6 +60,12 @@ pub enum RuntimeErrorKind {
     /// design (D3); the error carries the faulting instruction's span via
     /// the span_map (V01).
     IndexOutOfRange { index: i64, len: usize },
+    /// `std.os.exit(code)` requested process termination (0.0.3 V06).
+    /// This is *not* a failure — the intrinsic must unwind the interpreter
+    /// loop from inside a call chain, and the runtime-error channel is the
+    /// only path out; the CLI maps it to a bare `process::exit(code)`
+    /// without rendering anything.
+    Exit(i64),
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -100,6 +106,7 @@ impl std::fmt::Display for RuntimeErrorKind {
             RuntimeErrorKind::IndexOutOfRange { index, len } => {
                 write!(f, "index {index} out of range (array length {len})")
             }
+            RuntimeErrorKind::Exit(code) => write!(f, "process exited with code {code}"),
         }
     }
 }

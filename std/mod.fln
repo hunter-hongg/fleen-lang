@@ -1,0 +1,6 @@
+// 0.0.3 V06 std library root module.
+//
+// `import std.<module>;` (e.g. `import std.io;`) makes a std module
+// available under its qualified path. There is no re-export mechanism in
+// 0.0.3 (no `pub use`), so the root carries only this documentation; import
+// the leaf modules directly.

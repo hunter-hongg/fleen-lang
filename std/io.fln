@@ -1,0 +1,18 @@
+// 0.0.3 V06 std library: `io` module — console and standard input.
+//
+// The functions in this module are implemented by the VM (`exec_builtin`,
+// fleen-vm/src/vm.rs), not in Fleen source (D8): they need capabilities the
+// language cannot express — standard input and formatted line output. Their
+// names live only in the compiler's builtin table and are bound by the
+// resolver from the module path, so this file carries only documentation.
+//
+//     import std.io;
+//     std.io.println("hi");     // print + trailing newline
+//     line = std.io.read_line(); // read one line of stdin (without the \n)
+
+// `println` prints each argument (unconditionally string-typed, like
+// `print`) followed by a newline. VM intrinsic `std.io.println`.
+
+// `read_line` reads one line from standard input, without its trailing
+// newline. Returns an empty string at end of input. VM intrinsic
+// `std.io.read_line`.

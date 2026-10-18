@@ -1,0 +1,20 @@
+import m;
+
+func take(x: string) { print(x); }
+
+func main() {
+    take(m.greeting);
+    print(m.greeting);
+    print(m.items[1] as string);
+    print(m.next(4) as string);
+    total = 0;
+    for x in m.items {
+        total = total + x;
+    };
+    print(total as string);
+    n = 0;
+    while n < 2 and m.items[0] < 100 {
+        n = n + 1;
+    };
+    print(n as string);
+}

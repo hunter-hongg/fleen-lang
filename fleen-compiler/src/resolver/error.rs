@@ -25,6 +25,12 @@ pub enum ResolveErrorKind {
     AssignToImmutable { name: String },
     /// Assignment target is not a simple identifier (e.g., `f() = 1`).
     InvalidAssignmentTarget,
+    /// 0.0.3 V05: a qualified path reached a private item in another module.
+    PrivateAccess { item: String, module: String },
+    /// 0.0.3 V05: an `import` path named a module with no matching file.
+    ModuleNotFound { path: String, tried: Vec<String> },
+    /// 0.0.3 V05: the import graph contains a cycle.
+    CircularImport { cycle: Vec<String> },
     /// Shadowing with mismatched mutability (DESIGN.md §4.3).
     ShadowingMutabilityMismatch {
         outer_mutable: bool,
@@ -60,6 +66,22 @@ impl fmt::Display for ResolveErrorKind {
             }
             ResolveErrorKind::InvalidAssignmentTarget => {
                 write!(f, "invalid assignment target")
+            }
+            ResolveErrorKind::PrivateAccess { item, module } => {
+                write!(
+                    f,
+                    "`{item}` is private to module `{module}` (mark it `pub` to expose it)"
+                )
+            }
+            ResolveErrorKind::ModuleNotFound { path, tried } => {
+                write!(f, "module not found: {path}")?;
+                if !tried.is_empty() {
+                    write!(f, " (tried {})", tried.join(", "))?;
+                }
+                Ok(())
+            }
+            ResolveErrorKind::CircularImport { cycle } => {
+                write!(f, "circular import: {}", cycle.join(" → "))
             }
             ResolveErrorKind::ShadowingMutabilityMismatch {
                 outer_mutable,

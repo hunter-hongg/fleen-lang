@@ -1,0 +1,7 @@
+// 0.0.3 V06 e2e: `std.os.exit(code)` passes the code through as the process
+// exit code (not a runtime failure).
+import std.os;
+
+func main() {
+    std.os.exit(3);
+}

@@ -96,3 +96,143 @@ fn compiling_unregistered_root_panics() {
     let session = Session::new();
     let _ = session.compile(FileId(7));
 }
+
+#[test]
+fn compile_project_merges_modules() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import net.tcp;\nfunc main() { net.tcp.say(); }",
+    );
+    session.add_file("src/net/tcp.fln", "pub func say() { print(\"hi\"); }");
+    let module = session.compile_project(root).unwrap();
+    assert_eq!(module.version, 3);
+}
+
+#[test]
+fn compile_project_reads_imported_owned_global() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\n\
+         func main() {\n\
+             print(m.greeting);\n\
+             n = 0;\n\
+             while n < 2 and m.items[0] < 100 {\n\
+                 n = n + 1;\n\
+             };\n\
+             print(n as string);\n\
+         }",
+    );
+    session.add_file(
+        "src/m/mod.fln",
+        "pub const greeting: string = \"hello\";\n\
+         pub items: [int] = [10, 20, 30];\n",
+    );
+    assert!(session.compile_project(root).is_ok());
+}
+
+#[test]
+fn compile_project_cross_module_global_assignment() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nfunc main() { m.items = [10, 20]; print(m.items[0] as string); }\n",
+    );
+    session.add_file("src/m/mod.fln", "pub items: [int] = [1, 2, 3];\n");
+    assert!(session.compile_project(root).is_ok());
+}
+
+#[test]
+fn compile_project_struct_return_type_is_qualified() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import net.tcp;\nfunc main() { p = net.tcp.make(); print(p.x as string); }\n",
+    );
+    session.add_file(
+        "src/net/tcp.fln",
+        "pub struct Point { x: int, y: int }\n\
+         pub func make(): Point = Point { x: 7, y: 8 }\n",
+    );
+    assert!(session.compile_project(root).is_ok());
+}
+
+#[test]
+fn compile_project_rejects_move_of_imported_global() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nfunc main() {\n    move m.s;\n}\n",
+    );
+    session.add_file("src/m/mod.fln", "pub const s: string = \"hello\";\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Typeck(_))
+    ));
+}
+
+#[test]
+fn compile_project_reports_cycle() {
+    let mut session = Session::new();
+    let root = session.add_file("src/main.fln", "import net.a;\nfunc main(): int = 0\n");
+    session.add_file("src/net/a.fln", "import net.b;\npub func af(): int = 0\n");
+    session.add_file("src/net/b.fln", "import net.a;\npub func bf(): int = 0\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}
+
+#[test]
+fn compile_project_rejects_private_func() {
+    let mut session = Session::new();
+    let root = session.add_file("src/main.fln", "import m;\nfunc main() { m.hidden(); }\n");
+    session.add_file("src/m/mod.fln", "func hidden() { print(\"x\"); }\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}
+
+#[test]
+fn compile_project_rejects_private_const() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nfunc main() { print(m.hidden); }\n",
+    );
+    session.add_file("src/m/mod.fln", "const hidden: string = \"x\";\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}
+
+#[test]
+fn compile_project_rejects_private_global() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nfunc main() { print(m.hidden); }\n",
+    );
+    session.add_file("src/m/mod.fln", "hidden: string = \"x\";\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}
+
+#[test]
+fn compile_project_rejects_private_struct_type() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nfunc main() { x: m.Hidden = 0; }\n",
+    );
+    session.add_file("src/m/mod.fln", "struct Hidden { a: int }\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}

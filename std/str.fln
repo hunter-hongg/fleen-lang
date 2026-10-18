@@ -1,0 +1,26 @@
+// 0.0.3 V06 std library: `str` module — text helpers.
+//
+// `from_int`/`from_float`/`from_bool` are ordinary Fleen functions (they are
+// the typed entry points for the `as string` cast, 0.0.2). `len`/`concat`/
+// `split` are VM intrinsics — no Fleen syntax reaches the underlying
+// operations (D8).
+
+// Convert an integer to its decimal string.
+pub func from_int(v: int): string = v as string
+
+// Convert a float to its decimal string.
+pub func from_float(v: float): string = v as string
+
+// Convert a boolean to "true"/"false".
+pub func from_bool(v: bool): string = v as string
+
+// `len` counts the characters of a string (Unicode scalar values, not
+// bytes). VM intrinsic `std.str.len`.
+
+// `concat` returns the two strings joined; `concat(a, b) == a + b is not
+// expressible` — Fleen has no string `+`, so the intrinsic supplies it.
+// VM intrinsic `std.str.concat`.
+
+// `split` returns the substrings of `s` between every occurrence of `sep`,
+// keeping empty parts (`split("a,,b", ",") == ["a", "", "b"]`). VM
+// intrinsic `std.str.split`.

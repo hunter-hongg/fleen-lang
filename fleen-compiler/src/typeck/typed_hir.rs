@@ -56,6 +56,11 @@ pub enum Type {
     /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
     /// (`range`/`range_from`); iterates `start..end` (end-exclusive). Copy.
     Range,
+    /// Type variable (0.0.3 V06): appears **only** in the schematic
+    /// signatures of std intrinsics — never in user-visible syntax. A
+    /// fresh `Var(n)` is created per call site, unified against the
+    /// argument types, then substituted in the return type.
+    Var(u32),
     /// Unsupported type (for features not yet implemented).
     Unsupported(String),
 }
@@ -79,6 +84,7 @@ impl Type {
             Type::Ref(inner) => format!("ref {}", inner.name()),
             Type::Struct(info) => info.name.to_string(),
             Type::Range => "Range".to_string(),
+            Type::Var(id) => format!("?T{}", id),
             Type::Unsupported(name) => name.clone(),
         }
     }
@@ -103,9 +109,12 @@ impl Type {
             // per declaration by the struct-table pass (dependency order).
             Type::Struct(info) => info.copy,
             Type::Range => true, // D5: Range is Copy (two ints)
-            Type::String | Type::Box(_) | Type::Array(_) | Type::Ref(_) | Type::Unsupported(_) => {
-                false
-            }
+            Type::Var(_)
+            | Type::String
+            | Type::Box(_)
+            | Type::Array(_)
+            | Type::Ref(_)
+            | Type::Unsupported(_) => false,
         }
     }
 

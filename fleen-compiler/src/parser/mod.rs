@@ -305,22 +305,36 @@ impl Parser {
 
     /// Parse a top-level item: import, declaration, or expression statement.
     fn parse_item(&mut self) -> Result<ast::Item, ParseError> {
+        // 0.0.3 V05: `pub` is a top-level visibility modifier. It is parsed
+        // here, never inside block statements (the block parser rejects it).
+        let is_pub = self.matches(&crate::lexer::TokenKind::Pub);
+
         if self.check(&crate::lexer::TokenKind::Import) {
+            if is_pub {
+                return Err(ParseError {
+                    kind: ParseErrorKind::PubNotAllowedHere,
+                    span: self.prev_span(),
+                });
+            }
             return self.parse_import();
         }
 
         if self.check(&crate::lexer::TokenKind::Func) {
-            return Ok(ast::Item::Decl(ast::Decl::Func(self.parse_func_decl()?)));
+            let mut decl = self.parse_func_decl()?;
+            decl.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
         }
 
         if self.check(&crate::lexer::TokenKind::Const) {
-            return Ok(ast::Item::Decl(ast::Decl::Const(self.parse_const_decl()?)));
+            let mut decl = self.parse_const_decl()?;
+            decl.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Const(decl)));
         }
 
         if self.check(&crate::lexer::TokenKind::Struct) {
-            return Ok(ast::Item::Decl(ast::Decl::Struct(
-                self.parse_struct_decl()?,
-            )));
+            let mut decl = self.parse_struct_decl()?;
+            decl.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Struct(decl)));
         }
 
         // Check for variable binding: ident followed by : or =
@@ -348,8 +362,24 @@ impl Parser {
                         span,
                     });
                 }
-                return Ok(ast::Item::Decl(ast::Decl::Var(self.parse_var_binding()?)));
+                let mut decl = self.parse_var_binding()?;
+                decl.is_pub = is_pub;
+                return Ok(ast::Item::Decl(ast::Decl::Var(decl)));
             }
+        }
+
+        // `pub` must be followed by a declaration. Reaching here with the
+        // modifier consumed means the next token is not a valid decl start.
+        if is_pub {
+            let found = self.current().kind.clone();
+            let span = self.current().span;
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "declaration after `pub`".to_string(),
+                    found,
+                },
+                span,
+            });
         }
 
         // Expression statement at top level.
@@ -459,6 +489,7 @@ impl Parser {
             name,
             fields,
             span: self.span(start, end),
+            is_pub: false,
         })
     }
 
@@ -493,6 +524,7 @@ impl Parser {
             ty,
             init: Box::new(init),
             span: self.span(start, end),
+            is_pub: false,
         })
     }
 
@@ -528,6 +560,7 @@ impl Parser {
             ty,
             init: Box::new(init),
             span: self.span(start, end),
+            is_pub: false,
         })
     }
 
@@ -585,6 +618,7 @@ impl Parser {
             ret_type,
             body,
             span: self.span(start, end),
+            is_pub: false,
         })
     }
 
@@ -660,10 +694,30 @@ impl Parser {
                 ast::Type::Base(ast::BaseType::Unit)
             }
             crate::lexer::TokenKind::Ident(name) => {
-                // Named user type (a struct, 0.0.3 V02). Whether the name
-                // refers to a declared struct is typeck's business.
-                let name = name.clone();
+                // Named user type (a struct, 0.0.3 V02). 0.0.3 V05 accepts a
+                // dotted module path (`net.Point`) in type position; whether
+                // the name resolves is typeck's business.
+                let mut name = name.clone();
                 self.advance();
+                while self.check(&crate::lexer::TokenKind::Dot) {
+                    self.advance();
+                    name.push('.');
+                    let seg = match self.current_kind().clone() {
+                        crate::lexer::TokenKind::Ident(seg) => seg,
+                        other => {
+                            let span = self.current().span;
+                            return Err(ParseError {
+                                kind: ParseErrorKind::Expected {
+                                    expected: "identifier after `.` in type path".to_string(),
+                                    found: other,
+                                },
+                                span,
+                            });
+                        }
+                    };
+                    name.push_str(&seg);
+                    self.advance();
+                }
                 ast::Type::Named(name)
             }
             crate::lexer::TokenKind::LParen => {
@@ -773,6 +827,14 @@ impl Parser {
             // instead of a generic "expected expression".
             if !asi::can_start_stmt(self.current_kind()) {
                 return Err(self.err_expected_stmt_end());
+            }
+
+            // `pub` is a top-level-only modifier (0.0.3 V05, PLAN D6).
+            if self.check(&crate::lexer::TokenKind::Pub) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::PubNotAllowedHere,
+                    span: self.current().span,
+                });
             }
 
             // Check for declaration

@@ -2,10 +2,9 @@
 // empty iterable, owned elements, nested loops, and a body that assigns an
 // outer mutable per the DESIGN.md §4.5 loop-scope rules.
 //
-// Range iteration is not source-constructible until V06
-// (`std.collection.range`), so this file covers arrays only; the range
-// opcodes (0xB9–0xBB) are covered by hand-built bytecode tests in
-// fleen-vm/fleen-verify.
+// 0.0.3 V06 extends this file with Range iteration: `range`/`range_from`
+// are recognized names lowering to `MakeRange` (D5), iterable without any
+// import.
 func main(): int {
     total = 0;
     for x in [10, 20, 30] {
@@ -38,5 +37,23 @@ func main(): int {
         last = v;
     }
     print(last as string);
+
+    // V06: Range iteration. `range(n)` is `0..n`, `range_from(a, b)` is
+    // `a..b` — both end-exclusive; an empty Range runs the body zero times.
+    rtotal = 0;
+    for i in range(5) {
+        rtotal = rtotal + i;
+    }
+    print(rtotal as string);
+
+    for i in range_from(2, 5) {
+        print(i as string);
+    }
+
+    empty_range_ran = 0;
+    for i in range_from(3, 3) {
+        empty_range_ran = 1;
+    }
+    print(empty_range_ran as string);
     0
 }

@@ -1,0 +1,3 @@
+import net.b;
+
+pub func af(): int = 0

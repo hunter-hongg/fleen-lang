@@ -1,0 +1,15 @@
+// 0.0.3 V06 std library: `arr` module — array helpers.
+//
+// All four helpers are schematic — the single type variable `[T]` is the
+// bounded polymorphism of 0.0.3 (resolved per call site by the compiler,
+// never spelled by the user). They are VM intrinsics:
+//
+//     std.arr.len(a)         // -> int
+//     std.arr.get(a, i)      // -> Result<T, string>  (Ok(T) in bounds, Err otherwise)
+//     std.arr.set(a, i, v)   // -> [T]  (a new array; a is not mutated)
+//     std.arr.push(a, v)     // -> [T]  (a new array; a is not mutated)
+//
+// Arrays are owned values (D3), so `set`/`push` return a fresh array rather
+// than mutating their argument; the argument array itself is always cloned
+// at the call site. `get` returns a `Result` so the out-of-bounds case is a
+// value, not a runtime crash.

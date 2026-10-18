@@ -8,10 +8,13 @@ pub mod lower;
 pub mod parser;
 pub mod resolver;
 pub mod source_map;
+pub mod std_src;
 pub mod typeck;
 
 pub use source_map::{FileId, SourceMap};
 
+use resolver::modules::build_module_table;
+use resolver::resolve_module_with_table;
 use std::fmt;
 
 /// Failure of any stage in the source → bytecode pipeline.
@@ -139,11 +142,120 @@ impl Session {
         let source = &self.sources.get(root).source;
         let tokens = lexer::tokenize_in_file(root, source).map_err(CompileError::Lex)?;
         let ast = parser::parse(tokens).map_err(CompileError::Parse)?;
-        let hir = resolver::resolve(ast).map_err(CompileError::Resolve)?;
-        let typed = typeck::typeck(hir).map_err(CompileError::Typeck)?;
-        let mir = lower::lower(typed).map_err(CompileError::Lower)?;
-        codegen::codegen(mir).map_err(CompileError::Codegen)
+
+        // Programs that import `std.*` compile against the shipped std
+        // sources, which are ordinary modules (0.0.3 V06, D8) — so they take
+        // the whole-program pipeline. Everything else keeps the exact
+        // single-file chain below (byte-identical to before V06).
+        if !uses_std(std::slice::from_ref(&ast)) {
+            let hir = resolver::resolve(ast).map_err(CompileError::Resolve)?;
+            let typed = typeck::typeck(hir).map_err(CompileError::Typeck)?;
+            let mir = lower::lower(typed).map_err(CompileError::Lower)?;
+            return codegen::codegen(mir).map_err(CompileError::Codegen);
+        }
+
+        let sources = with_std_sources(&self.sources);
+        let asts = parse_all(&sources)?;
+        compile_pre_parsed(&sources, root, asts)
     }
+
+    /// Compile a whole program consisting of the files registered in this
+    /// session (0.0.3 V05). The root file is the crate root (`main.fln`);
+    /// every other registered `.fln` file must be reachable from its imports.
+    ///
+    /// The stage chain is identical to [`Session::compile`], but the module
+    /// table sub-pass runs before per-module resolution and the resulting
+    /// HIRs are merged into one bytecode module (module structure never
+    /// reaches `.flnc`).
+    pub fn compile_project(&self, root: FileId) -> Result<codegen::Bytecode, CompileError> {
+        let mut asts = parse_all(&self.sources)?;
+        let sources = if uses_std(&asts) {
+            // A project importing `std.*` compiles against the shipped std
+            // sources too: append them, re-parse, and rebuild the table so
+            // they are ordinary modules (0.0.3 V06, D8).
+            let sources = with_std_sources(&self.sources);
+            asts = parse_all(&sources)?;
+            sources
+        } else {
+            self.sources.clone()
+        };
+        compile_pre_parsed(&sources, root, asts)
+    }
+}
+
+/// Whether any parsed file imports the `std.*` root (0.0.3 V06, D8). Only
+/// programs that do need the shipped std sources appended — everything else
+/// keeps the byte-identical single-file chain.
+fn uses_std(asts: &[parser::ast::Ast]) -> bool {
+    asts.iter().any(|ast| {
+        resolver::modules::imports_of_ast(ast)
+            .iter()
+            .any(|imp| imp.path.first().is_some_and(|p| p == "std"))
+    })
+}
+
+/// Clone `sources` and append the shipped std modules. The user files keep
+/// their existing `FileId`s and std files follow them, so the root `FileId`
+/// is unchanged and the source map stays contiguous.
+fn with_std_sources(sources: &source_map::SourceMap) -> source_map::SourceMap {
+    let mut out = sources.clone();
+    for (name, source) in std_src::files() {
+        out.add_file(name, source);
+    }
+    out
+}
+
+/// Lex + parse every file in the source map into `Ast`s indexed by `FileId`.
+fn parse_all(sources: &source_map::SourceMap) -> Result<Vec<parser::ast::Ast>, CompileError> {
+    let mut asts = Vec::with_capacity(sources.len());
+    for id in 0..sources.len() as u32 {
+        let file = source_map::FileId(id);
+        let source = &sources.get(file).source;
+        let tokens = lexer::tokenize_in_file(file, source).map_err(CompileError::Lex)?;
+        let ast = parser::parse(tokens).map_err(CompileError::Parse)?;
+        asts.push(ast);
+    }
+    Ok(asts)
+}
+
+/// Compile an already-parsed whole program (0.0.3 V05) — the shared tail of
+/// `Session::compile_project` and the V06 std path of `Session::compile`.
+/// `asts` are indexed by `FileId`, matching `sources` (std files appended
+/// last when the program imports `std.*`).
+fn compile_pre_parsed(
+    sources: &source_map::SourceMap,
+    root: source_map::FileId,
+    asts: Vec<parser::ast::Ast>,
+) -> Result<codegen::Bytecode, CompileError> {
+    let table = build_module_table(root, sources, &asts).map_err(CompileError::Resolve)?;
+    let mut hirs = Vec::with_capacity(table.modules.len());
+    let mut binding_offset = 0u32;
+    let mut hir_offset = 0u32;
+    for (mid, module) in table.modules.iter().enumerate() {
+        let ast = asts[module.file.0 as usize].clone();
+        let (hir, next_binding, next_hir) =
+            resolve_module_with_table(ast, &table, mid, binding_offset, hir_offset)
+                .map_err(CompileError::Resolve)?;
+        binding_offset = next_binding;
+        hir_offset = next_hir;
+        hirs.push(hir);
+    }
+
+    let mut items = Vec::new();
+    let mut structs = Vec::new();
+    let span = asts[root.0 as usize].span;
+    for hir in hirs {
+        items.extend(hir.items);
+        structs.extend(hir.structs);
+    }
+    let merged = resolver::hir::Hir {
+        items,
+        structs,
+        span,
+    };
+    let typed = typeck::typeck(merged).map_err(CompileError::Typeck)?;
+    let mir = lower::lower(typed).map_err(CompileError::Lower)?;
+    codegen::codegen(mir).map_err(CompileError::Codegen)
 }
 
 #[cfg(test)]

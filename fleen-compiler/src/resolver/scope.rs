@@ -86,6 +86,11 @@ pub struct Binding {
     pub ref_param: bool,
     pub span: Span,
     pub hir_id: HirId,
+    /// Fully qualified name for a top-level (global) binding. `None` for
+    /// locals/parameters/builtins. The resolver produces HIR identifier and
+    /// declaration names from this so modules can share a flat bytecode
+    /// namespace without collisions (0.0.3 V05).
+    pub global_name: Option<String>,
 }
 
 /// Kind of binding.
@@ -201,6 +206,14 @@ impl ScopeStack {
             .iter_mut()
             .rev()
             .find_map(|s| s.bindings.values_mut().find(|b| b.id == id))
+    }
+
+    /// Get an immutable reference to a binding by its ID (searches the chain).
+    pub fn get_by_id(&self, id: BindingId) -> Option<&Binding> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.bindings.values().find(|b| b.id == id))
     }
 
     /// The index of the nearest enclosing function scope, or 0 at global

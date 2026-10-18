@@ -1,0 +1,17 @@
+// 0.0.3 V06 e2e: `std.io` intrinsics.
+//
+// The e2e harness runs the VM with stdin closed (`Stdio::null`), so
+// `read_line` deterministically hits end-of-input and yields the empty
+// string — the documented EOF behavior. `now_millis` is not portable, so
+// only a broad sanity property is asserted (positive), mirroring the
+// ticket's "monotonic sanity" rule.
+import std.io;
+import std.time;
+
+func main() {
+    std.io.println("hello ", "std ", "io");
+    line = std.io.read_line();
+    std.io.println("got: [", line, "]");
+    mm = std.time.now_millis();
+    std.io.println((mm > 0) as string);
+}

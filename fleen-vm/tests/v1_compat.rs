@@ -1,10 +1,14 @@
 //! v1 compatibility (TICKETS U11, BYTECODE.md §10).
 //!
-//! `tests/fixtures/v1/fib.flnc` was produced by the **0.0.1 toolchain**
-//! (git tag `v0.0.1`) from the 0.0.1-era `fib.fln` (`print(fib(x))`, before
-//! `as`/strict-string print existed). v2 must keep decoding, verifying and
-//! executing it with unchanged output — the "v2 does not break v1" promise,
-//! locked as a committed binary fixture.
+//! `tests/fixtures/v1/fib.flnc` is a genuine **0.0.1 bytecode module**,
+//! regenerated from the archived 0.0.1 release
+//! (`release/0.0.1/fleen-0.0.1-x86_64-linux.tar.gz` → `fleen-compiler`) using
+//! the 0.0.1-era `fib.fln` from `release/0.0.1/RELEASE_NOTES.md` (the
+//! `print(fib(x))` form, before `as`/strict-string print existed). The 0.0.3
+//! verifier must decode, verify and execute it with unchanged output — the
+//! "a later version does not break v1" promise, locked as a committed binary
+//! fixture. Reproduce with:
+//!   `./fleen-compiler fib_v1.fln -o fib.flnc`
 
 use std::fs;
 use std::path::{Path, PathBuf};

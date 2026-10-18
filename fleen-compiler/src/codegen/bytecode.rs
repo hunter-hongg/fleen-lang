@@ -144,6 +144,15 @@ impl FieldTypeTag {
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
             Type::Range => FieldTypeTag::Range,
+            // `Var` is only in std builtin signatures (V06); it is always
+            // resolved to a concrete type before codegen ever runs.
+            Type::Var(_) => {
+                debug_assert!(
+                    false,
+                    "Type::Var reached codegen: schematic signatures must be resolved before codegen"
+                );
+                FieldTypeTag::Unit
+            }
             // `Unsupported` never survives typeck, so it cannot reach codegen;
             // the Unit mapping keeps the match total for release builds.
             Type::Unsupported(_) => {

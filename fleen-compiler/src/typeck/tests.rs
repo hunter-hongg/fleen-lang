@@ -1827,3 +1827,175 @@ fn for_over_string_is_not_iterable() {
         "expected NotIterable, got {errs:?}"
     );
 }
+
+// ========== 0.0.3 V06: builtin / schematic call tests ==========
+
+// --- Prelude builtins (range, range_from — no import needed) ---
+
+#[test]
+fn range_constructor_returns_range_type() {
+    // `range(5)` is a MakeRange call (D5), type-checks as `Range`.
+    let hir = compile_ok("func main(): int {\n    range(5);\n    0\n}\n");
+    // The top-level func body has the range expr as a statement; we verify
+    // by checking the module compiles (no errors).
+    let _ = hir;
+}
+
+#[test]
+fn range_from_constructor_returns_range_type() {
+    let hir = compile_ok("func main(): int {\n    range_from(2, 5);\n    0\n}\n");
+    let _ = hir;
+}
+
+#[test]
+fn range_wrong_arg_type_reports_arg_type_mismatch() {
+    // `range` expects `int`; passing a float is a type error.
+    let errs = compile_err("func main(): int {\n    range(5.0);\n    0\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn range_from_wrong_arity_reports_arity_mismatch() {
+    // `range_from(a, b)` takes 2 args; passing 1 is an arity error.
+    let errs = compile_err("func main(): int {\n    range_from(2);\n    0\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArityMismatch { .. })),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+// --- print prelude (variadic, string-only) ---
+
+#[test]
+fn print_with_string_literal_is_ok() {
+    let hir = compile_ok("func main(): int {\n    print(\"hi\");\n    0\n}\n");
+    let _ = hir;
+}
+
+#[test]
+fn print_with_int_arg_reports_arg_type_mismatch() {
+    // 0.0.2 U13: `print` requires string arguments.
+    let errs = compile_err("func main(): int {\n    print(42);\n    0\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch, got {errs:?}"
+    );
+}
+
+// --- Schematic std.arr builtins (tested via resolve_schematic_call) ---
+
+#[test]
+fn schematic_arr_len_resolves_element_type() {
+    // std.arr.len([int]) → int
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.arr.len").expect("std.arr.len must be a builtin");
+    let resolved =
+        resolve_schematic_call(&sig, &[Type::Array(Box::new(Type::Int))]).expect("arity match");
+    assert_eq!(resolved.ret_type, Type::Int);
+    assert!(resolved.is_schematic);
+    assert!(resolved.conflict.is_none());
+}
+
+#[test]
+fn schematic_arr_get_resolves_element_type() {
+    // std.arr.get([string], int) → Result<string, string>
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.arr.get").expect("std.arr.get must be a builtin");
+    let resolved = resolve_schematic_call(&sig, &[Type::Array(Box::new(Type::String)), Type::Int])
+        .expect("arity match");
+    assert_eq!(
+        resolved.ret_type,
+        Type::Result(Box::new(Type::String), Box::new(Type::String))
+    );
+    assert!(resolved.conflict.is_none());
+}
+
+#[test]
+fn schematic_arr_push_conflict_on_mismatched_element_type() {
+    // std.arr.push(["a"], 1) binds T0 to string (from array) and int (from
+    // value) → ArrayTypeMismatch conflict on arg index 1.
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.arr.push").expect("std.arr.push must be a builtin");
+    let resolved = resolve_schematic_call(&sig, &[Type::Array(Box::new(Type::String)), Type::Int])
+        .expect("arity match");
+    let conflict = resolved.conflict.expect("expected a type conflict");
+    assert_eq!(conflict.expected, Type::String);
+    assert_eq!(conflict.found, Type::Int);
+    assert_eq!(conflict.arg_index, 1);
+}
+
+#[test]
+fn schematic_arr_set_arity_mismatch_returns_none() {
+    // std.arr.set takes 3 args; passing 2 → None (handled as ArityMismatch
+    // by typeck).
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.arr.set").expect("std.arr.set must be a builtin");
+    let result = resolve_schematic_call(&sig, &[Type::Array(Box::new(Type::Int)), Type::Int]);
+    assert!(result.is_none(), "2-arg call to 3-arg builtin should fail");
+}
+
+// --- End-to-end: std.arr through the full compile pipeline (with imports) ---
+
+#[test]
+fn std_arr_len_compiles_through_full_pipeline() {
+    // The single-file `resolve` doesn't load std modules, so go through the
+    // public `fleen_compiler::compile` entry which wires up std sources.
+    let bc =
+        crate::compile("import std.arr;\nfunc main(): int {\n    std.arr.len([1, 2]);\n    0\n}\n")
+            .expect("std.arr.len should compile through the full pipeline");
+    let _ = bc;
+}
+
+#[test]
+fn std_arr_set_type_mismatch_does_not_compile() {
+    // set([string], int, int) — the value arg has wrong element type.
+    // Through the full pipeline, typeck should reject this.
+    let result = crate::compile(
+        "import std.arr;\nfunc main(): int {\n    std.arr.set([\"a\", \"b\"], 0, 1);\n    0\n}\n",
+    );
+    assert!(
+        result.is_err(),
+        "std.arr.set with mismatched element type should fail to compile"
+    );
+}
+
+#[test]
+fn std_arr_push_type_mismatch_does_not_compile() {
+    // push(["a"], 1) — element type mismatch.
+    let result = crate::compile(
+        "import std.arr;\nfunc main(): int {\n    std.arr.push([\"a\"], 1);\n    0\n}\n",
+    );
+    assert!(
+        result.is_err(),
+        "std.arr.push with mismatched element type should fail to compile"
+    );
+}
+
+#[test]
+fn range_wrong_arity_at_typeck_level() {
+    // range(5, 6) — range takes 1 arg, not 2.
+    let errs = compile_err("func main(): int {\n    range(5, 6);\n    0\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArityMismatch { .. })),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}

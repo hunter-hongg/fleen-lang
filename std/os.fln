@@ -1,0 +1,11 @@
+// 0.0.3 V06 std library: `os` module — process interface.
+//
+// Both functions are VM intrinsics: `args` needs the CLI to pass the
+// trailing program arguments through to the VM, and `exit` must stop
+// execution from inside a call chain (D8).
+//
+//     args = std.os.args();   // [string] of the program arguments, without argv[0]
+//     std.os.exit(3);         // terminate the process with exit code 3
+//
+// `exit` never returns: execution stops immediately, so it is valid
+// anywhere a `unit`-valued statement is.

@@ -1,0 +1,6 @@
+// 0.0.3 V06 std library: `time` module.
+//
+//     millis = std.time.now_millis();  // wall-clock time, milliseconds
+//
+// A VM intrinsic backed by SystemTime (D8). The exact value is not
+// portable, so tests assert it only in broad ranges.

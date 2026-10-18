@@ -1,0 +1,2 @@
+Compile error: resolve: 1 error(s)
+  error: circular import: net.a → net.b → net.a

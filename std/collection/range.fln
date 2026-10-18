@@ -1,0 +1,11 @@
+// 0.0.3 V06 std library: `collection.range` — `Range` constructors (D5).
+//
+// A `Range` value is created only through these two recognized names. Both
+// are table entries, not runtime calls: the call lowers directly to the
+// `MakeRange` instruction (0xB9), the same mechanism `Ok`/`Err` use.
+//
+//     for i in range(n)           // 0..n      (n exclusive)
+//     for i in range_from(a, b)   // a..b      (b exclusive)
+//
+// The same names are also reachable bare — `range(...)`/`range_from(...)`
+// — from any program (0.0.3 V06, see docs/DESIGN.md).

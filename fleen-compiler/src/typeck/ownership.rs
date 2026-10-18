@@ -74,6 +74,10 @@ struct Cx<'a> {
     /// Top-level variable/const bindings: owned values here are read as
     /// deep copies and may never be moved (D5).
     globals: &'a HashSet<BindingId>,
+    /// Fully-qualified names of top-level globals (0.0.3 V05). Imported
+    /// globals arrive under an alias `BindingId` that differs from the
+    /// original declaration's, so name-based lookup is needed too.
+    global_names: &'a HashSet<String>,
     /// Move state of owned locals: an absent key means `Alive`.
     state: HashMap<BindingId, MoveState>,
     /// Bindings declared in the current context, so a
@@ -85,9 +89,14 @@ struct Cx<'a> {
 }
 
 impl<'a> Cx<'a> {
-    fn new(globals: &'a HashSet<BindingId>, errors: &'a mut Vec<TypeckError>) -> Self {
+    fn new(
+        globals: &'a HashSet<BindingId>,
+        global_names: &'a HashSet<String>,
+        errors: &'a mut Vec<TypeckError>,
+    ) -> Self {
         Self {
             globals,
+            global_names,
             state: HashMap::new(),
             declared: HashSet::new(),
             errors,
@@ -325,7 +334,10 @@ impl<'a> Cx<'a> {
                 ..
             } => {
                 self.walk_expr(rhs, false);
-                if self.declared.contains(binding_id) && !self.globals.contains(binding_id) {
+                if self.declared.contains(binding_id)
+                    && !self.globals.contains(binding_id)
+                    && !self.global_names.contains(name)
+                {
                     if matches!(
                         self.current(binding_id),
                         MoveState::Moved { .. } | MoveState::MaybeMoved { .. }
@@ -415,7 +427,10 @@ impl<'a> Cx<'a> {
             } => {
                 self.walk_expr(rhs, false);
                 self.walk_expr(index, false);
-                if self.declared.contains(binding_id) && !self.globals.contains(binding_id) {
+                if self.declared.contains(binding_id)
+                    && !self.globals.contains(binding_id)
+                    && !self.global_names.contains(name)
+                {
                     if matches!(
                         self.current(binding_id),
                         MoveState::Moved { .. } | MoveState::MaybeMoved { .. }
@@ -436,7 +451,9 @@ impl<'a> Cx<'a> {
                 ..
             } => {
                 self.walk_expr(rhs, false);
-                if self.declared.contains(obj_binding_id) && !self.globals.contains(obj_binding_id)
+                if self.declared.contains(obj_binding_id)
+                    && !self.globals.contains(obj_binding_id)
+                    && !self.global_names.contains(obj_name)
                 {
                     if matches!(
                         self.current(obj_binding_id),
@@ -487,7 +504,7 @@ impl<'a> Cx<'a> {
             // `MoveOfBorrowed` first.)
             return;
         }
-        if self.globals.contains(id) {
+        if self.globals.contains(id) || self.global_names.contains(name) {
             *access = Access::Clone;
             return;
         }
@@ -566,7 +583,8 @@ impl<'a> Cx<'a> {
     ///   have run).
     fn walk_while(&mut self, e: &mut TypedExprWhileHir) {
         let entry = self.state.clone();
-        let guard_uses = collect_owned_local_uses(&e.condition, self.globals, &entry);
+        let guard_uses =
+            collect_owned_local_uses(&e.condition, self.globals, self.global_names, &entry);
 
         self.walk_expr(&mut e.condition, false);
         // A while body's tail is discarded (the loop is unit): it is not a
@@ -630,7 +648,7 @@ impl<'a> Cx<'a> {
 
         let mut arm_exits: Vec<HashMap<BindingId, MoveState>> = Vec::new();
         for arm in &mut e.arms {
-            let mut arm_cx = Cx::new(self.globals, self.errors);
+            let mut arm_cx = Cx::new(self.globals, self.global_names, self.errors);
             arm_cx.state = after_scrutinee.clone();
             arm_cx.declared = self.declared.clone();
             if let Some(binding) = pattern_binding(&arm.pattern) {
@@ -678,10 +696,11 @@ fn has_otherwise(arms: &[TypedChooseArmHir]) -> bool {
 fn collect_owned_local_uses(
     e: &TypedExprHir,
     globals: &HashSet<BindingId>,
+    global_names: &HashSet<String>,
     entry: &HashMap<BindingId, MoveState>,
 ) -> Vec<(BindingId, String, Span)> {
     let mut out: Vec<(BindingId, String, Span)> = Vec::new();
-    scan_owned_local_uses(e, &mut out, globals, entry);
+    scan_owned_local_uses(e, &mut out, globals, global_names, entry);
     out
 }
 
@@ -689,6 +708,7 @@ fn scan_owned_local_uses(
     e: &TypedExprHir,
     out: &mut Vec<(BindingId, String, Span)>,
     globals: &HashSet<BindingId>,
+    global_names: &HashSet<String>,
     entry: &HashMap<BindingId, MoveState>,
 ) {
     match e {
@@ -702,6 +722,7 @@ fn scan_owned_local_uses(
         } => {
             if ty.is_owned()
                 && !globals.contains(binding_id)
+                && !global_names.contains(name)
                 && *access == Access::Copy
                 && entry.get(binding_id).is_none_or(|s| !s.is_moved())
             {
@@ -721,8 +742,8 @@ fn scan_owned_local_uses(
         | TypedExprHir::Mul(l, r)
         | TypedExprHir::Div(l, r)
         | TypedExprHir::Mod(l, r) => {
-            scan_owned_local_uses(l, out, globals, entry);
-            scan_owned_local_uses(r, out, globals, entry);
+            scan_owned_local_uses(l, out, globals, global_names, entry);
+            scan_owned_local_uses(r, out, globals, global_names, entry);
         }
         TypedExprHir::Cast(inner, _)
         | TypedExprHir::Not(inner)
@@ -733,61 +754,65 @@ fn scan_owned_local_uses(
         | TypedExprHir::Deref(inner, _)
         | TypedExprHir::Assign { rhs: inner, .. }
         | TypedExprHir::AssignDeref { rhs: inner, .. } => {
-            scan_owned_local_uses(inner, out, globals, entry);
+            scan_owned_local_uses(inner, out, globals, global_names, entry);
         }
         TypedExprHir::Call(f, args, _) => {
-            scan_owned_local_uses(f, out, globals, entry);
+            scan_owned_local_uses(f, out, globals, global_names, entry);
             for arg in args {
-                scan_owned_local_uses(arg, out, globals, entry);
+                scan_owned_local_uses(arg, out, globals, global_names, entry);
             }
         }
         TypedExprHir::Index { arr, idx, .. } => {
-            scan_owned_local_uses(arr, out, globals, entry);
-            scan_owned_local_uses(idx, out, globals, entry);
+            scan_owned_local_uses(arr, out, globals, global_names, entry);
+            scan_owned_local_uses(idx, out, globals, global_names, entry);
         }
         TypedExprHir::ArrayLit { elems, .. } => {
             for elem in elems {
-                scan_owned_local_uses(elem, out, globals, entry);
+                scan_owned_local_uses(elem, out, globals, global_names, entry);
             }
         }
-        TypedExprHir::Field { obj, .. } => scan_owned_local_uses(obj, out, globals, entry),
+        TypedExprHir::Field { obj, .. } => {
+            scan_owned_local_uses(obj, out, globals, global_names, entry)
+        }
         TypedExprHir::StructLit { inits, .. } => {
             for (_, init) in inits {
-                scan_owned_local_uses(init, out, globals, entry);
+                scan_owned_local_uses(init, out, globals, global_names, entry);
             }
         }
         TypedExprHir::AssignIndex { index, rhs, .. } => {
-            scan_owned_local_uses(rhs, out, globals, entry);
-            scan_owned_local_uses(index, out, globals, entry);
+            scan_owned_local_uses(rhs, out, globals, global_names, entry);
+            scan_owned_local_uses(index, out, globals, global_names, entry);
         }
-        TypedExprHir::AssignField { rhs, .. } => scan_owned_local_uses(rhs, out, globals, entry),
-        TypedExprHir::Block(b) => scan_block_owned_local_uses(b, out, globals, entry),
+        TypedExprHir::AssignField { rhs, .. } => {
+            scan_owned_local_uses(rhs, out, globals, global_names, entry)
+        }
+        TypedExprHir::Block(b) => scan_block_owned_local_uses(b, out, globals, global_names, entry),
         TypedExprHir::If(i) => {
-            scan_owned_local_uses(&i.condition, out, globals, entry);
-            scan_block_owned_local_uses(&i.then_branch, out, globals, entry);
+            scan_owned_local_uses(&i.condition, out, globals, global_names, entry);
+            scan_block_owned_local_uses(&i.then_branch, out, globals, global_names, entry);
             for (cond, block) in &i.elif_branches {
-                scan_owned_local_uses(cond, out, globals, entry);
-                scan_block_owned_local_uses(block, out, globals, entry);
+                scan_owned_local_uses(cond, out, globals, global_names, entry);
+                scan_block_owned_local_uses(block, out, globals, global_names, entry);
             }
             if let Some(else_block) = &i.else_branch {
-                scan_block_owned_local_uses(else_block, out, globals, entry);
+                scan_block_owned_local_uses(else_block, out, globals, global_names, entry);
             }
         }
         TypedExprHir::While(w) => {
-            scan_owned_local_uses(&w.condition, out, globals, entry);
-            scan_block_owned_local_uses(&w.body, out, globals, entry);
+            scan_owned_local_uses(&w.condition, out, globals, global_names, entry);
+            scan_block_owned_local_uses(&w.body, out, globals, global_names, entry);
         }
         TypedExprHir::For(f) => {
-            scan_owned_local_uses(&f.iterable, out, globals, entry);
-            scan_block_owned_local_uses(&f.body, out, globals, entry);
+            scan_owned_local_uses(&f.iterable, out, globals, global_names, entry);
+            scan_block_owned_local_uses(&f.body, out, globals, global_names, entry);
         }
         TypedExprHir::Choose(c) => {
-            scan_owned_local_uses(&c.scrutinee, out, globals, entry);
+            scan_owned_local_uses(&c.scrutinee, out, globals, global_names, entry);
             for arm in &c.arms {
                 if let Some(guard) = &arm.guard {
-                    scan_owned_local_uses(guard, out, globals, entry);
+                    scan_owned_local_uses(guard, out, globals, global_names, entry);
                 }
-                scan_block_owned_local_uses(&arm.body, out, globals, entry);
+                scan_block_owned_local_uses(&arm.body, out, globals, global_names, entry);
             }
         }
         TypedExprHir::Int(..)
@@ -801,15 +826,16 @@ fn scan_block_owned_local_uses(
     b: &TypedBlockHir,
     out: &mut Vec<(BindingId, String, Span)>,
     globals: &HashSet<BindingId>,
+    global_names: &HashSet<String>,
     entry: &HashMap<BindingId, MoveState>,
 ) {
     for stmt in &b.stmts {
         if let TypedStmtHir::Expr(e, _) = stmt {
-            scan_owned_local_uses(e, out, globals, entry);
+            scan_owned_local_uses(e, out, globals, global_names, entry);
         }
     }
     if let Some(tail) = &b.tail_expr {
-        scan_owned_local_uses(tail, out, globals, entry);
+        scan_owned_local_uses(tail, out, globals, global_names, entry);
     }
 }
 
@@ -823,10 +849,10 @@ fn scan_block_owned_local_uses(
 /// Ownership errors (empty on success). Access annotations are filled in
 /// regardless.
 pub fn check_ownership(program: &mut TypedHir) -> Vec<TypeckError> {
-    let global_ids = collect_global_ids(program);
+    let (global_ids, global_names) = collect_global_ids(program);
     let mut errors: Vec<TypeckError> = Vec::new();
     for item in program.items.iter_mut() {
-        let mut cx = Cx::new(&global_ids, &mut errors);
+        let mut cx = Cx::new(&global_ids, &global_names, &mut errors);
         match item {
             TypedHirItem::Decl(TypedDeclHir::Func(f)) => cx.check_function(f, false),
             // Top-level decl: the global itself is not moveable; its
@@ -841,18 +867,23 @@ pub fn check_ownership(program: &mut TypedHir) -> Vec<TypeckError> {
 }
 
 /// 0.0.2 U05: collect the binding IDs of top-level variables and consts.
-fn collect_global_ids(program: &TypedHir) -> HashSet<BindingId> {
+/// Returns (binding IDs, fully-qualified names). The name set covers
+/// imported globals whose alias `BindingId` differs from the original.
+fn collect_global_ids(program: &TypedHir) -> (HashSet<BindingId>, HashSet<String>) {
     let mut ids = HashSet::new();
+    let mut names = HashSet::new();
     for item in &program.items {
         match item {
             TypedHirItem::Decl(TypedDeclHir::Var(v)) => {
                 ids.insert(v.binding_id);
+                names.insert(v.name.clone());
             }
             TypedHirItem::Decl(TypedDeclHir::Const(c)) => {
                 ids.insert(c.binding_id);
+                names.insert(c.name.clone());
             }
             _ => {}
         }
     }
-    ids
+    (ids, names)
 }

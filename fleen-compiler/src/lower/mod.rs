@@ -167,9 +167,7 @@ impl LowerCtx {
         if let Some(&fid) = self.builtin_arities.get(&(name.to_string(), argc)) {
             return fid;
         }
-        let ret = find_builtin(name)
-            .map(|sig| sig.ret.clone())
-            .unwrap_or(Type::Unit);
+        let ret = find_builtin(name).map(|sig| sig.ret).unwrap_or(Type::Unit);
         let id = FuncId(self.funcs.len() as u32);
         self.funcs.push(MirFunc {
             func_id: id,
@@ -203,15 +201,28 @@ impl LowerCtx {
             builtin_arities: HashMap::new(),
         };
         // Builtin functions occupy leading FuncIds.
-        for sig in crate::typeck::builtins::BUILTINS {
+        for sig in crate::typeck::builtins::builtins() {
             let id = FuncId(ctx.funcs.len() as u32);
+            // The base instance's `params` must equal the signature's
+            // parameter count: the `Call` instruction pops `callee.params`
+            // operands (U09). Variadic builtins grow extra instances lazily
+            // per observed arity (see `variadic_builtin_fid`).
+            let params: u16 = match &sig.param {
+                crate::typeck::builtins::BuiltinParam::Fixed(p) => p.len() as u16,
+                crate::typeck::builtins::BuiltinParam::Variadic(_) => 1,
+                crate::typeck::builtins::BuiltinParam::Schematic { params, .. } => {
+                    params.len() as u16
+                }
+            };
             ctx.func_ids.insert(sig.name.to_string(), id);
             ctx.param_types.insert(id, Vec::new()); // builtins have no Ref params
             ctx.funcs.push(MirFunc {
                 func_id: id,
                 name: sig.name.to_string(),
-                params: 1,
-                locals: 1,
+                params,
+                // The verifier requires `locals >= params`: each parameter
+                // occupies a local slot (U09 stack shape).
+                locals: params.max(1),
                 entry: BlockId(0),
                 blocks: vec![MirBlock {
                     id: BlockId(0),
@@ -225,9 +236,10 @@ impl LowerCtx {
                 is_builtin: true,
                 ret_type: sig.ret.clone(),
             });
-            // The base instance serves the 1-argument call sites; other
-            // arities instantiate lazily (see `variadic_builtin_fid`).
-            ctx.builtin_arities.insert((sig.name.to_string(), 1), id);
+            // The base instance serves call sites of its own arity; other
+            // arities (variadic only, in practice) instantiate lazily.
+            ctx.builtin_arities
+                .insert((sig.name.to_string(), params), id);
         }
         // Assign FuncIds to user functions in declaration order.
         for item in &hir.items {
@@ -582,6 +594,18 @@ impl<'a> FnBodyCx<'a> {
         } else if let Some(&gid) = self.lcx.global_of_binding.get(&binding_id) {
             Ok(Location::Global(gid))
         } else {
+            // 0.0.3 V05: imported globals arrive under their mangled name and
+            // have a global slot but no local BindingId from the merged
+            // type pass, so name-match against the globals table too.
+            if let Some((idx, _)) = self
+                .lcx
+                .globals
+                .iter()
+                .enumerate()
+                .find(|(_, g)| g.name == name)
+            {
+                return Ok(Location::Global(GlobalId(idx as u32)));
+            }
             Err(LowerError::new(
                 LowerErrorKind::UndeclaredBinding {
                     name: name.to_string(),
@@ -594,9 +618,14 @@ impl<'a> FnBodyCx<'a> {
     /// A binding is a *function* binding iff it owns neither a local slot
     /// nor a global entry (params/vars/consts/patterns have slots; only
     /// top-level functions live elsewhere).
-    fn is_function_binding(&self, binding_id: BindingId) -> bool {
-        self.slots.get(binding_id).is_none()
-            && !self.lcx.global_of_binding.contains_key(&binding_id)
+    fn is_function_binding(&self, binding_id: BindingId, name: &str) -> bool {
+        if self.slots.get(binding_id).is_some() {
+            return false;
+        }
+        if self.lcx.global_of_binding.contains_key(&binding_id) {
+            return false;
+        }
+        !self.lcx.globals.iter().any(|g| g.name == name)
     }
 
     /// Allocate a fresh temporary slot for global ref arguments.
@@ -673,7 +702,7 @@ impl<'a> FnBodyCx<'a> {
                 span,
                 ..
             } => {
-                if self.is_function_binding(*binding_id) {
+                if self.is_function_binding(*binding_id, name) {
                     match self.lcx.func_ids.get(name) {
                         Some(&fid) => fb.emit(MirInstr::new(MirInstrKind::LoadFunc(fid), *span)),
                         None => {
@@ -725,6 +754,7 @@ impl<'a> FnBodyCx<'a> {
                 }
             }
             TypedExprHir::Assign {
+                name,
                 binding_id,
                 rhs,
                 span,
@@ -738,7 +768,7 @@ impl<'a> FnBodyCx<'a> {
                     MirInstrKind::Dup
                 };
                 fb.emit(MirInstr::new(dup_kind, *span));
-                match self.loc(*binding_id, "?", *span)? {
+                match self.loc(*binding_id, name, *span)? {
                     Location::Local(slot) => {
                         fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span))
                     }
@@ -1138,8 +1168,33 @@ impl<'a> FnBodyCx<'a> {
         match callee {
             TypedExprHir::Ident {
                 name, binding_id, ..
-            } if self.is_function_binding(*binding_id) => {
+            } if self.is_function_binding(*binding_id, name) => {
                 let mut fid = self.lcx.func_ids[name];
+                // `range`/`range_from` (D5) are table-recognized Range
+                // constructors: the call collapses to `MakeRange` instead of
+                // a runtime call — the `Ok`/`Err` mechanism (a recognized
+                // name lowering to a dedicated instruction) extended to the
+                // builtin table (0.0.3 V06). The `is_builtin` guard keeps a
+                // user function that shadows the name a plain call.
+                if self.lcx.funcs[fid.0 as usize].is_builtin
+                    && let Some(sig) = find_builtin(name)
+                    && sig.lowering == crate::typeck::builtins::BuiltinLowering::MakeRange
+                {
+                    // Typeck guarantees exactly the signature's arity of
+                    // `int` arguments. `MakeRange` pops `start end`; a bare
+                    // `range(n)` is `0..n` (D5), so its start is pushed
+                    // first — `range_from(a, b)` supplies both bounds.
+                    if let crate::typeck::builtins::BuiltinParam::Fixed(p) = &sig.param
+                        && p.len() == 1
+                    {
+                        fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+                    }
+                    for arg in args {
+                        self.lower_expr_into(fb, arg)?;
+                    }
+                    fb.emit(MirInstr::new(MirInstrKind::MakeRange, span));
+                    return Ok(());
+                }
                 // Variadic builtins: resolve to (or instantiate) the
                 // instance whose `params` matches this call's argc.
                 if self.lcx.funcs[fid.0 as usize].is_builtin

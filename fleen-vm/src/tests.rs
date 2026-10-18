@@ -1642,3 +1642,400 @@ fn value_arr_display() {
     );
     assert_eq!(Value::Arr(Box::new([])).to_string(), "[]");
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.3 V06: VM intrinsics (std.io, std.str, std.num, std.os, std.time,
+// std.arr).  These exercise `exec_builtin` by name — each test builds a v3
+// module with one `is_builtin` function and a `Call` to it, following the
+// pattern of `print_builtin_dereferences_handle_argument`.
+// ---------------------------------------------------------------------------
+
+/// Build a v3 module whose `main` function (FuncId 0) calls a single builtin
+/// (FuncId 1).  `constants[0]` must be the builtin name string; user
+/// constants follow at indices 1..  `argc` sets the builtin's `params`
+/// field, which `Call` peeks to determine how many stack values to pop.
+///
+/// The `Call` opcode pops `params` values and reverses them (last-pushed =
+/// args[argc-1]), so push arg[0] first (bottom) and arg[argc-1] last (top).
+fn builtin_call_module(main_code: Box<[u8]>, argc: u16, constants: Vec<Const>) -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        version: 3,
+        constants,
+        functions: vec![
+            func(main_code, 0, 0),
+            Func {
+                name: ConstId(0),
+                params: argc,
+                locals: 0,
+                code: Box::new([]),
+                span_map: Box::new([]),
+                is_builtin: true,
+            },
+        ],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+/// Build a module whose `main` calls a zero-arity builtin.
+fn builtin_noarg_module(name: &str) -> Module {
+    builtin_call_module(
+        enc(&[(Opcode::Call, u16b(1)), (Opcode::Return, vec![])]),
+        0,
+        vec![Const::Str(name.into())],
+    )
+}
+
+#[test]
+fn std_os_exit_propagates_exit_code() {
+    // std.os.exit(3) → Exit(3), surfaced as RuntimeError by Vm::run.
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)), // 3
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.os.exit".into()), Const::Int(3)],
+    );
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::Exit(3));
+}
+
+#[test]
+fn std_os_exit_non_integer_arg_is_stack_error() {
+    // Malformed bytecode: exit given a non-int argument.
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Unit, vec![]),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.os.exit".into())],
+    );
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::StackShape);
+}
+
+#[test]
+fn std_io_println_returns_unit() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)), // "hello"
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![
+            Const::Str("std.io.println".into()),
+            Const::Str("hello".into()),
+        ],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Unit);
+}
+
+#[test]
+fn std_str_len_counts_unicode_chars() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.str.len".into()), Const::Str("héllo".into())],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(5));
+}
+
+#[test]
+fn std_str_len_empty_string_is_zero() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.str.len".into()), Const::Str("".into())],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(0));
+}
+
+#[test]
+fn std_str_concat_joins_strings() {
+    // Push arg[0] first (bottom), arg[1] second (top) → after pop+reverse
+    // args=[arg0, arg1] = ["foo", "bar"], VM does foo.push_str(bar).
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)), // "foo" (arg 0, bottom)
+            (Opcode::Const, u32b(2)), // "bar" (arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.str.concat".into()),
+            Const::Str("foo".into()),
+            Const::Str("bar".into()),
+        ],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("foobar".into()));
+}
+
+#[test]
+fn std_str_split_keeps_empty_segments() {
+    // split(subject, sep) = split("a,,b", ",") → ["a", "", "b"]
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)), // "a,,b" (subject, arg 0, bottom)
+            (Opcode::Const, u32b(2)), // "," (separator, arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.str.split".into()),
+            Const::Str("a,,b".into()),
+            Const::Str(",".into()),
+        ],
+    );
+    let result = Vm::new(m).run().unwrap();
+    assert_eq!(
+        result,
+        Value::Arr(Box::new([
+            Value::Str("a".into()),
+            Value::Str("".into()),
+            Value::Str("b".into()),
+        ]))
+    );
+}
+
+#[test]
+fn std_num_sqrt_of_225_is_1_5() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.num.sqrt".into()), Const::Float(2.25)],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Float(1.5));
+}
+
+#[test]
+fn std_num_floor_drops_fractional_part() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![Const::Str("std.num.floor".into()), Const::Float(3.7)],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(3));
+}
+
+#[test]
+fn std_os_args_returns_program_args_as_array() {
+    let m = builtin_noarg_module("std.os.args");
+    let mut vm = Vm::with_args(m, vec!["alpha".to_string(), "beta".to_string()]);
+    assert_eq!(
+        vm.run().unwrap(),
+        Value::Arr(Box::new([
+            Value::Str("alpha".into()),
+            Value::Str("beta".into()),
+        ]))
+    );
+}
+
+#[test]
+fn std_os_args_empty_when_no_program_args() {
+    let m = builtin_noarg_module("std.os.args");
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Arr(Box::new([])));
+}
+
+#[test]
+fn std_time_now_millis_is_positive() {
+    let m = builtin_noarg_module("std.time.now_millis");
+    let result = Vm::new(m).run().unwrap();
+    let Value::Int(t) = result else {
+        panic!("expected Int, got {result:?}");
+    };
+    assert!(t > 0, "now_millis should be positive, got {t}");
+}
+
+#[test]
+fn std_arr_len_returns_array_length() {
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)), // 10
+            (Opcode::Const, u32b(2)), // 20
+            (Opcode::Const, u32b(3)), // 30
+            (Opcode::ArrNew, u16b(3)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![
+            Const::Str("std.arr.len".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+        ],
+    );
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(3));
+}
+
+#[test]
+fn std_arr_get_in_bounds_returns_ok_value() {
+    // get([10, 20, 30], 1) → Ok(20)
+    // Push array (arg 0, bottom) then index (arg 1, top).
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 10
+            (Opcode::Const, u32b(2)),  // 20
+            (Opcode::Const, u32b(3)),  // 30
+            (Opcode::ArrNew, u16b(3)), // array (arg 0)
+            (Opcode::Const, u32b(4)),  // 1 (index, arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.arr.get".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+            Const::Int(1),
+        ],
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap(),
+        Value::Ok(Box::new(Value::Int(20)))
+    );
+}
+
+#[test]
+fn std_arr_get_out_of_bounds_returns_err_value() {
+    // get([10, 20, 30], 9) → Err("index 9 out of range (array length 3)")
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 10
+            (Opcode::Const, u32b(2)),  // 20
+            (Opcode::Const, u32b(3)),  // 30
+            (Opcode::ArrNew, u16b(3)), // array (arg 0)
+            (Opcode::Const, u32b(4)),  // 9 (index, arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.arr.get".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+            Const::Int(9),
+        ],
+    );
+    let result = Vm::new(m).run().unwrap();
+    let Value::Err(e) = result else {
+        panic!("expected Err, got {result:?}");
+    };
+    let Value::Str(s) = *e else {
+        panic!("expected Str payload, got {e:?}");
+    };
+    assert_eq!(&*s, "index 9 out of range (array length 3)");
+}
+
+#[test]
+fn std_arr_set_out_of_bounds_is_runtime_error() {
+    // set([10, 20], 5, 99) → IndexOutOfRange (NOT an Err value).
+    // Push array (arg 0), index (arg 1), value (arg 2, top).
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 10
+            (Opcode::Const, u32b(2)),  // 20
+            (Opcode::ArrNew, u16b(2)), // array (arg 0)
+            (Opcode::Const, u32b(4)),  // 5 (index, arg 1)
+            (Opcode::Const, u32b(3)),  // 99 (value, arg 2, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        3,
+        vec![
+            Const::Str("std.arr.set".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(99),
+            Const::Int(5),
+        ],
+    );
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(
+        err.kind,
+        RuntimeErrorKind::IndexOutOfRange { index: 5, len: 2 }
+    );
+}
+
+#[test]
+fn std_arr_set_in_bounds_returns_new_array() {
+    // set([10, 20, 30], 1, 99) → [10, 99, 30]
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 10
+            (Opcode::Const, u32b(2)),  // 20
+            (Opcode::Const, u32b(3)),  // 30
+            (Opcode::ArrNew, u16b(3)), // array (arg 0)
+            (Opcode::Const, u32b(5)),  // 1 (index, arg 1)
+            (Opcode::Const, u32b(4)),  // 99 (value, arg 2, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        3,
+        vec![
+            Const::Str("std.arr.set".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+            Const::Int(99),
+            Const::Int(1),
+        ],
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap(),
+        Value::Arr(Box::new([Value::Int(10), Value::Int(99), Value::Int(30),]))
+    );
+}
+
+#[test]
+fn std_arr_push_appends_element() {
+    // push([10, 20], 30) → [10, 20, 30]
+    // Push array (arg 0) then element (arg 1, top).
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 10
+            (Opcode::Const, u32b(2)),  // 20
+            (Opcode::ArrNew, u16b(2)), // array (arg 0)
+            (Opcode::Const, u32b(3)),  // 30 (element, arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.arr.push".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+        ],
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap(),
+        Value::Arr(Box::new([Value::Int(10), Value::Int(20), Value::Int(30),]))
+    );
+}

@@ -1,0 +1,10 @@
+import net;
+import net.tcp;
+
+func main() {
+    p = net.tcp.make_point();
+    print((p.x + p.y) as string);
+    arr = net.tcp.make_arr();
+    print(arr[1] as string);
+    print(net.name());
+}
