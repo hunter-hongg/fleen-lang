@@ -21,7 +21,12 @@ fleen/
 ├── CLAUDE.md               # symlink → SPEC.md
 ├── docs/
 │   ├── DESIGN.md           # Fleen language design draft
-│   └── SYNTAX.ebnf         # Fleen EBNF grammar
+│   ├── SYNTAX.ebnf         # Fleen EBNF grammar
+│   ├── BYTECODE.md         # bytecode format specification
+│   └── 0.0.1/ 0.0.2/ 0.0.3/  # per-milestone plans, tickets and decision records
+├── examples/               # runnable examples, grouped by release
+├── CHANGELOG.md            # version history
+├── README.md               # user-facing overview and quick start
 ├── fleen-compiler/         # compiler crate
 │   ├── Cargo.toml
 │   └── src/
@@ -55,7 +60,9 @@ fleen/
 │       ├── lock.rs         # Flint.lock read/write
 │       ├── resolve.rs      # git fetch, cache ($FLINT_HOME), dep graph + cycles
 │       └── build.rs        # project-mode compile via Session
+├── std/                    # the standard library, written in Fleen (embedded at compile time)
 └── tests/
+    ├── std/                # std library e2e tests (run by `cargo test`)
     ├── lexer/
     │   ├── valid/
     │   └── invalid/
@@ -70,7 +77,8 @@ fleen/
     │   └── invalid/
     └── e2e/
         ├── valid/          # <name>.fln + <name>.expected (line-by-line stdout comparison)
-        └── invalid/        # <name>.fln + <name>.exit + <name>.stderr
+        ├── invalid/        # <name>.fln + <name>.exit + <name>.stderr
+        └── projects/       # multi-file project-mode fixtures (netdemo, circular, globaldemo, …)
 ```
 
 > **Single-command run**: `cargo fln <file.fln>` performs compile → verify → execute in one step
@@ -490,9 +498,10 @@ Check before submitting a PR:
 
 **0.0.3 goal: aggregation and organization — `struct`, `[T]` arrays, `for` + `Range`,
 the module system, `std`, and the `flint` package manager (plan in `docs/0.0.3/PLAN.md`,
-tickets in `docs/0.0.3/TICKETS.md`). V01–V06 (`struct`, arrays, `for` + `Range`,
-bytecode v3, module system, the std library) are implemented; V07+ (std iterator
-helpers, flint) remain planned.**
+tickets in `docs/0.0.3/TICKETS.md`). V01–V08 (`struct`, arrays, `for` + `Range`,
+bytecode v3, module system, std, iterator helpers, flint) are implemented and green;
+V09 integrated and gated the full matrix; V10 synced the docs and bumped the version (release
+publication — tag/archives — is separate and pending).**
 
 ---
 
@@ -588,6 +597,22 @@ u = move a;                  // transfer; a is unusable afterwards
 // std.collection.range (V06), iterated by `for` (D4/D5)
 ```
 
+### Modules and the std Library (0.0.3)
+
+```fleen
+// Modules (V05): `import` resolves a dotted path to a `.fln` file; top-level
+// `pub` controls cross-module visibility. `--project <dir>` compiles a whole tree.
+import auth;             // src/auth.fln (or auth/mod.fln)
+import net.tcp;          // src/net/tcp.fln
+pub func router(): int = net.tcp.make()   // pub: importable by other modules
+
+// std (V06): the prelude is `print` only; everything else is imported by name
+// (leaf modules — there is no `pub use` re-export in 0.0.3).
+import std.io;                 // print / println / read_line
+import std.collection.range;   // the Range constructors: range(n) / range_from(a, b)
+for i in range_from(0, 10) { std.io.println(i as string); };   // 0..10, end-exclusive
+```
+
 ### Control Flow
 
 > **Note on semicolons**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 ASI (automatic semicolon insertion) is in place,
@@ -615,7 +640,7 @@ while x < 10 {
 for x in [1, 2, 3] {
     total = total + x;
 };
-for i in range(0, 10) {   // Range (std.collection.range, 0.0.3 V06)
+for i in range_from(0, 10) {   // Range (std.collection.range, 0.0.3 V06)
     print(i as string);
 };
 
@@ -712,9 +737,11 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 | Generics | ❌ | ❌ | ❌ (0.1.0) |
 | Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
 
-**Status of 0.0.3**: V01–V08 are implemented and green (`FileId`/`SourceMap`,
+**Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,
-iterator helpers, and the `flint` package manager).
+iterator helpers, and the `flint` package manager); V09 integrated the compatibility fixtures
+and the full §8 matrix; V10 synced the documentation and bumped the version to 0.0.3 (public
+release — tag and archives — is separate and not yet performed).
 
 ---
 

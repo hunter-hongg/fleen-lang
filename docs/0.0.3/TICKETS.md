@@ -11,7 +11,11 @@
 > **V06 implemented (std library, intrinsics, schematic [T], VM tests + std e2e green — completion notes in the V06 section)**;
 > **V07 implemented (std.collection.iter map/filter/fold/take as schematic inline-expanded builtins, tests/std/iter + iter_helpers e2e green — completion notes in the V07 section)**;
 > **V08 implemented (`flint-cli`: manifest/lock/git resolve + new·build·run·test·check, e2e green — completion notes in the V08 section)**;
-> **V09 implemented (v1/v2/v3 `.flnc` fixtures + examples sweep + full §8 matrix, `cargo test` green — completion notes in the V09 section)**; V10 (docs & release) not started.
+> **V09 implemented (v1/v2/v3 `.flnc` fixtures + examples sweep + full §8 matrix, `cargo test` green — completion notes in the V09 section)**;
+> **V10 doc-sync + version bump landed (docs/BYTECODE/DESIGN/EBNF/SPEC/PLAN/CHANGELOG/README synced to the as-built code, version → 0.0.3, four-crate quality gate green — completion notes in the V10 section)**.
+> Per project convention the 0.0.3 release *publication* (tag + release archives + CI release
+> job) is a separate step and was **deliberately not performed** here; it stays pending until
+> the maintainer asks for it.
 > Implementation order: the V-ticket feature slices (per the overview table); D5–D10's remaining
 > decision points freeze when their ticket opens.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
@@ -573,7 +577,7 @@ Range { start: i64, end: i64 },   // Copy
 - lexer: `for`/`in` tokens; parser valid: `for` over array/range literals, header spanning
   lines, body hugging `}`; invalid: `for x` (no `in`), `for = 1` / `in = 1` (reserved),
   `for x in` (no iterable)
-- ASI trap table additions: `for i` ⏎ `in range(0, 3)` ⏎ `{ … }`; `for x in a { }` ⏎ `print(1)`
+- ASI trap table additions: `for i` ⏎ `in range_from(0, 3)` ⏎ `{ … }`; `for x in a { }` ⏎ `print(1)`
   (statement boundary after the block)
 - typeck: `for x in 42` → `NotIterable`; loop-var immutability; §4.5 assignment semantics in
   the body; empty-iterable body never runs
@@ -857,7 +861,7 @@ pub func zip[T, U](xs: [T], ys: [U]): [[T]];   // ⚠ see design note
 - `tests/std/iter.fln`: each function over `[int]` and `[string]` (Copy and owned elements —
   owned-element moves through the closure position are the interesting case: `f` receives a
   copy, the source array is untouched — D3/D4 read semantics)
-- e2e `iter_helpers.fln`: a `range(0, 5)` → `map` → `filter` → `fold` chain, output anchored
+- e2e `iter_helpers.fln`: a `[0, 1, 2, 3, 4]` → `map` → `filter` → `fold` chain, output anchored
 
 ### Acceptance
 ```
@@ -1097,38 +1101,71 @@ cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings
 ## V10: Wrap-up — Docs, Version, Release
 
 ### Doc sync (PLAN §11 checklist, verified against the as-built code)
-- [ ] `docs/BYTECODE.md` → v0.0.3: §3.2 Value variants, §4.2 opcode space (0xB0–0xBB group),
-      §5 new instruction tables (with the **numbering finalized in V03** — `ArrSetGlobal` =
-      0xB8, range = 0xB9–0xBB; PLAN §5.1's TBD row resolved), §8 stack effects, §10 version
-      table, `struct_defs` table official
-- [ ] `docs/DESIGN.md`: §9 composite types (`[T]`, `Range`), new "Structs" / "Modules" /
-      "std and the prelude" chapters, §6 `for`, §17 feature table, §18 roadmap (0.0.3
-      complete), known-Hacks still empty, **D1–D10 recorded as settled**
-- [ ] `docs/SYNTAX.ebnf` v0.0.3: struct_decl, pub, for_stmt, array_literal, field access,
+- [x] `docs/BYTECODE.md` → v0.0.3: §3.2 Value variants, §4.2 opcode space (0xB0–0xB3 struct,
+      0xB4–0xB8 array, 0xB9–0xBB Range — the **numbering finalized in V03** — `ArrSetGlobal` =
+      0xB8, range = 0xB9–0xBB; PLAN §5.1's TBD row resolved), §5 new instruction tables, §8
+      stack effects, §10 version table, `struct_defs` table official
+- [x] `docs/DESIGN.md`: §9 composite types (`[T]`, `Range`), new "Structs" (§9.4) / "Modules
+      and Imports" (§11, incl. std & the prelude) chapters, §6 `for`, §17 feature table, §18
+      roadmap (0.0.3 complete), known-Hacks still empty, **D1–D10 recorded as settled** (§11)
+- [x] `docs/SYNTAX.ebnf` v0.0.3: struct_decl, pub, for_stmt, array_literal, field access,
       new assignment targets
-- [ ] `SPEC.md`: repo structure (+ `std/`, `flint-cli/`, `tests/std/`, `tests/e2e/projects/`),
-      crate table (+ flint-cli), §14 quick reference (struct/for/import examples), §15
+- [x] `SPEC.md`: repo structure (+ `std/`, `flint-cli/`, `tests/std/`, `tests/e2e/projects/`),
+      crate table (+ flint-cli), §14 quick reference (struct/for/import/std examples), §15
       feature table 0.0.3 column
-- [ ] `docs/0.0.3/PLAN.md`: fold in as-built corrections (numbering finalization, any
+- [x] `docs/0.0.3/PLAN.md`: fold in as-built corrections (numbering finalization, any
       D-decision notes from review)
-- [ ] New error-message samples compared against actual output (`MoveOutOfStruct`,
-      `CircularImport`, `PrivateAccess`, `NotIterable`, `CrossCrateImport`,
-      `DuplicateModule`)
+- [x] New error-message samples compared against actual output (`MoveOutOfStruct`,
+      `NotIterable`, `PrivateAccess`, `ModuleNotFound`, `CircularImport`,
+      `CrossCrateImport`, `DuplicateModule`) — the PLAN §3.1.3 / §3.4.4 samples now show the
+      real as-built messages and location blocks
 
 ### Version and release
-- [ ] Bump all four crates' `Cargo.toml` → `0.0.3`
-- [ ] `CHANGELOG.md`: 0.0.3 entry with a **Breaking section** (reserved words
+- [x] Bump all four crates' `Cargo.toml` → `0.0.3`
+- [x] `CHANGELOG.md`: 0.0.3 entry with a **Breaking section** (reserved words
       `struct` / `for` / `in` / `pub`)
-- [ ] `README.md`: version line, feature overview, **flint quick start** (`flint new` →
+- [x] `README.md`: version line, feature overview, **flint quick start** (`flint new` →
       `flint run`)
-- [ ] `cargo doc --no-deps` no warnings; public APIs of `flint-cli` documented
-- [ ] CI green → tag → release archives (0.0.1/0.0.2 process)
+- [x] `cargo doc --no-deps` no warnings; public APIs of `flint-cli` documented
+- [ ] **Release (deferred by request)**: CI green → tag → release archives (0.0.1/0.0.2
+      process). The docs and version bump are complete and the quality gate is green, but the
+      tag / release archives / CI release job were **deliberately not performed** — "don't
+      publish" until the maintainer asks.
 
 ### Acceptance
 ```
 cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo test && cargo doc --no-deps
 ```
+
+> **Implemented** (2026-10-18). Every V10 deliverable except the publication itself landed:
+> - **Doc sync**: `docs/BYTECODE.md` retitled to v0.0.3 (§5 heading now lists the v0.0.3
+>   additions; §2/§3.2/§4.2/§5.12–5.14/§8/§9/§10 already carried the as-built structs and were
+>   cross-checked row by row against the code); `docs/DESIGN.md` gained the as-built "Modules
+>   and Imports" chapter (§11 — qualified paths, privacy, cycles, cross-crate rules, std and
+>   the prelude) plus a **D1–D10 settled** table, the `struct` / `for` / `in` / `pub`
+>   reserved-word note, an ✅ `flint` / iterator-helper row in §17 and "0.0.3 complete" in §18;
+>   `docs/SYNTAX.ebnf`'s `declaration` rule now carries the top-level-only `pub` modifier
+>   (matching `parse_decl`'s as-built behavior: `pub` on func/const/struct/var only, a parse
+>   error anywhere else); `SPEC.md` gained `std/`, `tests/std/`, `tests/e2e/projects/`,
+>   `docs/BYTECODE.md` in the tree, the §13 status text, and a Modules/std quick-reference
+>   example; `docs/0.0.3/PLAN.md` §11 renumbered to V10 and its "later doc merge" pointers
+>   updated.
+> - **Error samples vs. reality**: all six named kinds (plus `ModuleNotFound`) were re-run
+>   through the real toolchain (`flint check` on throw-away projects, `fleen-vm` for
+>   single files) and the samples in PLAN §3.1.3 / §3.4.4 were replaced with the actual
+>   messages and `-->` location blocks — the planned rustc-style `help:`-line layout is not
+>   what the as-built renderer emits (help is appended to the message line with an em dash).
+> - **Version & docs**: workspace `version = "0.0.3"` (all four crates inherit it);
+>   `CHANGELOG.md` 0.0.3 entry finalized with the ⚠️ Breaking section (`struct` / `for` /
+>   `in` / `pub`) and the V07–V09 additions; `README.md` got the 0.0.3-complete version line,
+>   the aggregation/modules/std feature overview and a **flint quick start**
+>   (`flint new` → `flint run`).
+> - **Quality gate green**: `cargo fmt --check`, `cargo clippy --workspace --all-targets --
+>   -D warnings`, `cargo test`, `cargo doc --no-deps`.
+>
+> **Not done, on purpose**: the release itself (tag, release archives, CI release job) was
+> requested to be held back — V10's last checkbox stays open until publication is asked for.
 
 ---
 
@@ -1190,7 +1227,7 @@ cargo doc --no-deps
 | M2 Modules | V05 | `netdemo` project e2e green; privacy + cycle errors carry file:line:col |
 | M3 std | V06–V07 | `tests/std/` green in CI; prelude compat; `iter_helpers.fln` green |
 | M4 flint | V08 | `depdemo` builds and runs with a `file://` git fixture dependency |
-| M5 Integration & release | V09–V10 | Full matrix + fixtures green; docs synced; 0.0.3 released |
+| M5 Integration & release | V09–V10 | Full matrix + fixtures green; docs synced; 0.0.3 ready to release (tag/archives pending) |
 
 > Mapping to PLAN §9's milestones: M0–M1 ≈ PLAN M1, M2 ≈ PLAN M2, M3 ≈ PLAN M3+M4 (backend
 > work is distributed inside the feature tickets instead of gathered in one place), M4 ≈ PLAN

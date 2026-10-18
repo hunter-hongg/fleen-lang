@@ -82,7 +82,12 @@ real signature in the builtins table from day one.
 
 ---
 
-## 2. Design decision points (to be written into DESIGN.md after review)
+## 2. Design decision points (settled; written back into DESIGN.md at V10)
+
+> **Status**: all ten decisions below are **settled** and recorded in `docs/DESIGN.md` (§9.4
+> structs, §9.5 arrays, §6 `for`, §9 `Range`, §11 modules/imports + std and the prelude, and
+> the D1–D10 summary table in §11). D9/D10, the last two open at planning time, froze with
+> V08 (flint) and V04 (bytecode v3) respectively.
 
 Each decision point presents a **recommended option** with rationale; the review may overturn it,
 and if so the corresponding details in §3–§5 must be updated accordingly.
@@ -164,7 +169,7 @@ new instructions, not new rules.
 **Recommendation**:
 
 ```fleen
-for i in range(0, 10) {
+for i in range(10) {          // range(n) is 0..n, range_from(a, b) is a..b (V06)
     print(i as string);
 }
 
@@ -195,7 +200,7 @@ for-by-ref" distinction.
 
 **Recommendation**: `Range` is a builtin type (like `Result`: users cannot destructure it, only
 construct via the provided functions). It holds `start: int` and `end: int` and iterates
-`start, start+1, …, end-1` (end-exclusive, so `range(0, 0)` and `range(5, 5)` iterate zero
+`start, start+1, …, end-1` (end-exclusive, so `range_from(0, 0)` and `range_from(5, 5)` iterate zero
 times — no off-by-one surprises). Construction lives in `std.collection.range`:
 
 ```fleen
@@ -358,14 +363,15 @@ func main(): int {
 
 #### 3.1.3 Example error message
 
+Actual output (as built, V10-verified — `flint check` / `fleen-vm` render the message line
+with the inline help; the `-->` location block follows for project-mode builds):
+
 ```
-error: cannot move out of struct field `p.name`
-  --> demo.fln:6:9
+error: cannot move out of struct field `p.name` — structs own their fields exclusively — help: copy the field instead: `clone p.name`
+  --> src/main.fln:7:11
    |
- 6 | t = move p.name;
-   |     ^^^^^^^^^^^ structs own their fields exclusively
-   |
-help: copy the field instead: `t = clone p.name;`
+ 7 |     print(move p.name);
+   |           ^^^^^^^^^^^
 ```
 
 ### 3.2 arrays `[T]` (F2)
@@ -465,22 +471,42 @@ Per D6. Resolution algorithm (module-table sub-pass, runs before resolve per §4
 
 #### 3.4.4 Example error messages
 
-```
-error: module not found: net.tpc
-  --> src/main.fln:2:8
-   |
- 2 | import net.tpc;
-   |        ^^^^^^^^
-   |
-help: no file matched. tried: src/net/tpc.fln, src/net/tpc/mod.fln
+Actual outputs (as built, V10-verified):
 
-error: `secret` is private to module `auth`
-  --> src/main.fln:7:5
+```
+error: module not found: net.tpc (tried src/net/tpc.fln, src/net/tpc/mod.fln)
+  --> src/main.fln:1:1
    |
- 7 |     auth.secret();
-   |     ^^^^^^^^^^^ not marked `pub`
+ 1 | import net.tpc;
+   | ^^^^^^^^^^^^^^^
+
+error: `secret` is private to module `auth` (mark it `pub` to expose it)
+  --> src/main.fln:4:11
    |
-help: add `pub` to its declaration in src/auth.fln, or use a public function
+ 4 |     print(auth.secret());
+   |           ^^^^
+```
+
+The remaining resolve-time errors, as built (V10-verified):
+
+```
+error: circular import: net.a → net.b → net.a
+  --> src/net/a.fln:1:1
+   |
+ 1 | import net.b;
+   | ^^^^^^^^^^^^^
+
+error: duplicate module `net.tcp`: `src/net/tcp.fln` collides with `src/net/tcp/mod.fln`
+  --> src/net/tcp.fln:1:1
+   |
+ 1 | pub func n(): int = 1
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+error: crate `shylib` cannot import `net.tcp`: this crate already depends on crate `shylib`, so the dependency would be circular
+  --> ~/.flint/cache/shylib-<hash>/src/main.fln:1:1
+   |
+ 1 | import net.tcp;
+   | ^^^^^^^^^^^^^^^
 ```
 
 #### 3.4.5 Spans gain file identity (cross-cutting, do first)
@@ -675,7 +701,7 @@ unchanged from 0.0.2.
 
 ---
 
-## 5. Bytecode v3 Spec Additions (to be merged into BYTECODE.md)
+## 5. Bytecode v3 Spec Additions (merged into BYTECODE.md at V10)
 
 ### 5.1 New instructions (v3 opcode allocation — landed through V04)
 
@@ -723,7 +749,7 @@ verify needs no abstract interpretation — the existing per-instruction arithme
 > the struct under the field value with no remove-below-top instruction, and `p.f.g` chains
 > require the pop. `SetField*` is Δ−1, min 1 — the offset is an *operand*, not a stack item
 > (the −2 row conflated them with `ArrSet*`, which does take a stack index). The corrected
-> rows above are authoritative; BYTECODE.md picks them up at the V11 doc merge (see the
+> rows above are authoritative; BYTECODE.md picks them up at the V10 doc merge (see the
 > TICKETS V02 completion notes).
 
 ### 5.3 Value representation
@@ -903,7 +929,7 @@ V01 → V02 → V03 → V04 → V05 (modules) → V06 → V07 → V08 → V09 �
 | M2 Modules | V05 | `netdemo` project e2e green; privacy + cycle errors carry file:line:col |
 | M3 std | V06–V07 | `tests/std/` green in CI; prelude compat; `iter_helpers.fln` green |
 | M4 flint | V08 | `depdemo` project builds and runs with a git fixture dependency |
-| M5 Tests, docs, release | V09–V10 | Full §8 matrix green; docs synced; 0.0.3 released |
+| M5 Tests, docs, release | V09–V10 | Full §8 matrix green; docs synced; 0.0.3 ready to release (tag/archives pending) |
 
 ---
 
@@ -922,11 +948,11 @@ V01 → V02 → V03 → V04 → V05 (modules) → V06 → V07 → V08 → V09 �
 
 ---
 
-## 11. Documentation Sync Checklist (V11)
+## 11. Documentation Sync Checklist (V10)
 
 | Document | Changes |
 |------|------|
-| `docs/BYTECODE.md` | Bump to v0.0.3: §3.2 Value variants, §4.2 opcode space (new 0xB0–0xBA group), §5 new instructions, §8 stack effects, §10 version table (v3 row); the struct_defs table becomes official |
+| `docs/BYTECODE.md` | Bump to v0.0.3: §3.2 Value variants, §4.2 opcode space (new struct 0xB0–0xB3, array 0xB4–0xB8, Range 0xB9–0xBB groups), §5 new instructions, §8 stack effects, §10 version table (v3 row); the struct_defs table becomes official |
 | `docs/DESIGN.md` | §9 composite types (`[T]` official, `Range` added); a new "Structs" chapter (§3.1 made official); §6 gains `for` (§3.3); a new "Modules" chapter (§3.4); a new "std and the prelude" chapter (§3.5/§6); §17 feature table (struct/for rows → ✅); §18 roadmap marks 0.0.3 complete; known-Hacks stay empty |
 | `docs/SYNTAX.ebnf` | v0.0.3: struct_decl, pub, for_stmt, array_literal, field access activation, new assignment targets |
 | `SPEC.md` | §Repo structure (+ `std/`, `flint-cli/`, `tests/std/`, `tests/e2e/projects/`); crate table (+ flint-cli); §14 quick reference (struct/for/modules/std); §15 feature table 0.0.3 column |
@@ -938,15 +964,18 @@ V01 → V02 → V03 → V04 → V05 (modules) → V06 → V07 → V08 → V09 �
 
 ## 12. Acceptance Criteria (DoD)
 
-- [ ] `cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo doc --no-deps` all green
-- [ ] All 0.0.1/0.0.2 E2E regress **byte-for-byte** (subject only to the reserved-words breaking change)
-- [ ] All new E2E in §8.2 pass, including project-mode cases (`netdemo`, `depdemo` with a `file://` git fixture)
-- [ ] No std function is special-cased in `infer.rs`; every std signature lives in the builtins table
-- [ ] `flint new` → `flint run` works out of the box on a fresh project; `cargo fln file.fln` unchanged for single files
-- [ ] v1 and v2 `.flnc` fixtures remain executable on the 0.0.3 verify/VM
-- [ ] Multi-file compile errors and runtime errors carry correct `file:line:column`
-- [ ] All decision points in §2 (D1–D10) are settled in DESIGN.md
-- [ ] std is compiled and exercised on every `cargo test` run (cannot rot)
+> All items below were verified green by V09's integration gate and re-checked at V10
+> (docs & release); see the V09/V10 completion notes in `docs/0.0.3/TICKETS.md`.
+
+- [x] `cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo doc --no-deps` all green
+- [x] All 0.0.1/0.0.2 E2E regress **byte-for-byte** (subject only to the reserved-words breaking change)
+- [x] All new E2E in §8.2 pass, including project-mode cases (`netdemo`, `depdemo` with a `file://` git fixture)
+- [x] No std function is special-cased in `infer.rs`; every std signature lives in the builtins table
+- [x] `flint new` → `flint run` works out of the box on a fresh project; `cargo fln file.fln` unchanged for single files
+- [x] v1 and v2 `.flnc` fixtures remain executable on the 0.0.3 verify/VM
+- [x] Multi-file compile errors and runtime errors carry correct `file:line:column`
+- [x] All decision points in §2 (D1–D10) are settled in DESIGN.md
+- [x] std is compiled and exercised on every `cargo test` run (cannot rot)
 
 ---
 

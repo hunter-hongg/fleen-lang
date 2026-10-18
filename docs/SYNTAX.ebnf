@@ -9,8 +9,11 @@
 (* a[i] indexing, field access, the for loop    *)
 (* over arrays / Range, and the Range type      *)
 (* plus the module system (`import` / `pub`,    *)
-(* qualified module paths; V05). std land in    *)
-(* later 0.0.3 tickets.                         *)
+(* qualified module paths; V05), the std        *)
+(* library (V06) and its iterator helpers (V07),*)
+(* and the flint package manager (V08; the      *)
+(* manifest/lockfile are project-level, not     *)
+(* part of the .fln grammar).                   *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -24,10 +27,12 @@ module_path     = ident , { "." , ident } ;
 
 (* ---------- Declarations ---------- *)
 
-declaration     = const_decl
+(* 0.0.3 V05: `pub` is a top-level-only visibility modifier on func / const /
+   struct / global var; it is illegal elsewhere (on `import`, inside a block). *)
+declaration     = [ "pub" ] , ( const_decl
                 | func_decl
                 | struct_decl
-                | var_binding
+                | var_binding )
                 | expr_stmt ;
 
 (* 0.0.3 V02: user-defined aggregate declaration; a struct declaration takes

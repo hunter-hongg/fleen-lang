@@ -1,4 +1,4 @@
-# Fleen Language Draft v0.0.1 (Revised)
+# Fleen Language Draft v0.0.3
 
 > **Fast, Simple, Safe, Intuitive**
 > Fast to compile and run · Concise and clear · Memory safe · Intuitive and friendly
@@ -10,9 +10,9 @@
 > **0.0.3 additions**: aggregation — `struct` (§9.4), `[T]` arrays (§9.5), `for` + `Range`
 > (§6) — are implemented (V01–V04); the module system (`import` / `pub`), qualified
 > cross-module paths and private-access checks are implemented (V05); the `std` library
-> (intrinsics, schematic `[T]`, the prelude) is implemented (V06); `flint` remains planned
-> (V08). Decisions are in `docs/0.0.3/PLAN.md` (D1–D8 finalized; D9–D10 ahead of their
-> tickets); bytecode in `docs/BYTECODE.md` §5.12–5.14.
+> (intrinsics, schematic `[T]`, the prelude) is implemented (V06); `std.collection.iter`
+> iterator helpers (V07) and the `flint` package manager (V08) are implemented. Design
+> decisions D1–D10 are recorded as settled (§11 summary table). Bytecode in `docs/BYTECODE.md` §5.12–5.14.
 > The corresponding sections below have been annotated accordingly
 > (content marked "0.0.2"/"0.0.3" reflects current toolchain behavior from the ticket it landed in).
 
@@ -62,13 +62,16 @@ true / false // bool
 ### Keywords
 
 ```
-func  const  if  elif  else  while  for  in  choose
-when  otherwise  return  import  unsafe  trusted
+func  const  struct  if  elif  else  while  for  in  choose
+when  otherwise  return  import  pub  unsafe  trusted
 box  ref  deref  move  clone  as  true  false
 ```
 
 > `deref` is a new keyword in 0.0.2 (reads/writes the value inside a box, see §10.3);
 > `as` is a new reserved word in 0.0.2 (type conversion, see §9 "Type Conversion `as`").
+> `struct` (V02) / `for` / `in` (V04) / `pub` (V05) are new reserved words in 0.0.3 —
+> programs using them as identifiers are the **only** source breaking change of 0.0.3
+> (the CHANGELOG ⚠️ Breaking list; see `docs/0.0.3/PLAN.md` D4/D6).
 
 ---
 
@@ -520,8 +523,9 @@ for x in [1, 2, 3, 4] {
 };
 
 // Iterate a range (constructed via std.collection.range; there is no `..`
-// operator syntax in 0.0.3 — D5, PLAN §2)
-for i in range(0, 10) {
+// operator syntax in 0.0.3 — D5, PLAN §2): `range(n)` is 0..n,
+// `range_from(a, b)` is a..b (both end-exclusive)
+for i in range_from(0, 10) {
     print(i as string);
 };
 ```
@@ -633,7 +637,8 @@ unit
 ```fleen
 [T]              // array (0.0.3): owned for every T; literals `[e1, e2, …]`, `a[i]` read/write, bounds-checked
 struct S { … }   // user-defined aggregate (0.0.3); a struct name is a type; is_copy = all fields Copy
-Range            // builtin Copy type (0.0.3 V04): `start..end`, end-exclusive; `for x in r` iterates it
+Range            // builtin Copy type (0.0.3 V04): an int interval, end-exclusive; constructed
+                 // via std.collection.range (no `..` syntax in source); `for x in r` iterates it
 box<T>           // heap pointer, single ownership; box expr allocates, deref reads/writes (0.0.2, §10.3)
 ref T            // read-only borrow, function parameters only (0.0.2, §10.4)
 Result<T, E>     // error handling (Ok/Err/? officially adopted in 0.0.2, §8)
@@ -856,18 +861,72 @@ func main(): int {
 
 ---
 
-## 11. Modules and Imports
+## 11. Modules and Imports (0.0.3 V05)
 
 ```fleen
-import std.io;
+import net.tcp;          // resolves to src/net/tcp.fln (or src/net/tcp/mod.fln)
+import std.io;           // the std library ships in std/, embedded in the compiler
+import shylib;           // a `file://` / git dependency crate (flint, V08)
 
-std.io.print("hello");
+pub func make(): int = net.tcp.n()
+
+func main() {
+    std.io.print("hello");   // qualified access: <module>.<item>
+    print(net.tcp.n() as string);
+}
 ```
 
-**Rules:**
-- `import` performs no repeated header-file parsing
-- Module names are dot-separated lowercase
-- No C FFI imports
+**Rules (as built):**
+- `import` performs no repeated header-file parsing; module paths are dot-separated and
+  resolve **left to right** through the module table (an `import net.tcp;` also makes `net`
+  available so `net.tcp.f()` and, where declared, items on `net` itself are reachable).
+- Each non-final path segment must be a module; each final segment is a function / global /
+  const / struct. A path reaching a private item in another module → `PrivateAccess`
+  (mark the declaration `pub` to expose it).
+- A module path with no matching file → `ModuleNotFound` (the message lists the tried
+  candidates `<dir>/<path>.fln` and `<dir>/<path>/mod.fln`); two files resolving to one path
+  → `DuplicateModule`; a cycle in the import graph → `CircularImport` (the cycle path is
+  reported).
+- **Cross-crate rules** (V08): a crate may not import a crate that already depends on it —
+  either direction across the dependency graph → `CrossCrateImport`; a dependency's source
+  tree is read-only to a build and may not reach back into the depending project. Whether
+  `<crate>.<module>` is addressable at all is manifest data (`flint.toml`) — flint's job, not
+  the compiler's.
+- `pub` is a **top-level-only** visibility modifier (on `func` / `const` / `struct` / global
+  `var`); `pub` inside a block, or preceding `import`, is a parse error. Struct fields have no
+  per-field visibility — a struct is public or it is not.
+- Module names are dot-separated lowercase; there are no C FFI imports.
+- **std and the prelude (D7)**: the prelude is `print` only (an implicit import, the same
+  builtin as `std.io.print`). Everything else in the std library is pulled in by its **leaf**
+  module (`std/` has no re-export mechanism in 0.0.3 — there is no `pub use`):
+  `std.io` (`print` / `println` / `read_line`), `std.str`, `std.num`,
+  `std.arr` (schematic `[T]` signatures), `std.collection.range` (`range` / `range_from`,
+  the two `Range` constructors, also reachable bare), `std.collection.iter`
+  (`map` / `filter` / `fold` / `take`, V07), `std.os`, `std.time`. `std/` is written in Fleen
+  and embedded into the compiler binary; only VM-irreducible primitives are intrinsics.
+  std is always compiled and exercised by `cargo test`, so it cannot rot.
+
+### Design decisions settled in 0.0.3 (D1–D10)
+
+The decision points in `docs/0.0.3/PLAN.md` §2 are **settled** (each was finalized in the ticket
+that built it and folded back here / into `docs/BYTECODE.md`):
+
+| D | Decision settled | Where |
+|---|------------------|-------|
+| D1 | struct declaration syntax; `pub` on the whole struct, no per-field visibility | §9.4 (this doc) |
+| D2 | field read is a copy (no `move p.f`, `MoveOutOfStruct`); field write one level, local/global receiver | §9.4 + BYTECODE `GetField` (pop form) |
+| D3 | `[T]` is owned for every `T`; element reads copy; `a[-1]` out of range | §9.5 + BYTECODE §5.13 |
+| D4 | `for` iterates `{ [T], Range }` only; loop var fresh & immutable; iterable evaluated once | §6 + PLAN §5.4 |
+| D5 | `Range` is a builtin Copy type via `start..end`, constructed through std (`range`) | §9 (composite types) + BYTECODE §5.14 |
+| D6 | module paths → files, pub visibility, module table sub-pass, cycle detection | §11 + PLAN §4.3 |
+| D7 | prelude = `print` only; std modules imported by name | §11 |
+| D8 | std ships as Fleen sources embedded in the compiler; intrinsics only where the VM must do it | §11 + PLAN §6 |
+| D9 | flint: git-only dependencies, `$FLINT_HOME` cache, in-tree CLI | PLAN §3.6 |
+| D10 | bytecode v3 keeps a single appended `struct_defs` table; **no bytecode module table** (modules are compile-time) | BYTECODE §9 |
+
+Known Hacks stays empty (§18): no 0.0.3 feature required a special case in `infer.rs` (the
+schematic `[T]` std signatures live in the builtins table, and `grep` for std names in `infer.rs`
+is empty).
 
 ---
 
@@ -1015,7 +1074,8 @@ This follows the **concise and clear** principle.
 | `Range` / `for` | ❌ | ❌ | ✅ (V04) |
 | Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) |
 | `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) |
-| `flint` | ❌ | ❌ | ⏳ (V08) |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) |
 | `async` | ❌ | ❌ | ❌ (0.0.4) |
 | FFI | ❌ | ❌ | ❌ |
 | Generics | ❌ | ❌ | ❌ (0.1.0) |
@@ -1027,7 +1087,9 @@ This follows the **concise and clear** principle.
 **0.0.2 goal: ownership foundations — see `docs/0.0.2/PLAN.md` for the plan.**
 
 **0.0.3 goal: aggregation and organization — `struct`, `[T]`, `for` + `Range` (implemented, V01–V04),
-the module system (implemented, V05), the `std` library (implemented, V06), and `flint` (planned)
+the module system (implemented, V05), the `std` library (implemented, V06), its iterator helpers
+(implemented, V07), and the `flint` package manager (implemented, V08), integrated and gated by
+V09, with docs and version synced in V10
 — see `docs/0.0.3/PLAN.md` and `docs/0.0.3/TICKETS.md`.**
 
 ---
@@ -1037,7 +1099,7 @@ the module system (implemented, V05), the `std` library (implemented, V06), and 
 | Version | Contents |
 |---------|----------|
 | 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
-| 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; flint — planned (V08) |
+| 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; iterator helpers — **implemented (V07)**; flint — **implemented (V08)**; integrated & gated (V09); docs & version synced (V10). 0.0.3 is **complete** |
 | 0.0.4 | `async` / `await` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
 | 0.1.0 | Generics / operator overloading |

@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.2–v0.0.3
+# Fleen Bytecode Specification v0.0.3
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -308,7 +308,7 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 
 ---
 
-## 5. Instruction Set (v0.0.1 base + v0.0.2 additions)
+## 5. Instruction Set (v0.0.1 base + v0.0.2 additions + v0.0.3 additions)
 
 ### 5.1 Constants and Stack Operations
 

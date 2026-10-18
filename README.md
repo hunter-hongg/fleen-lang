@@ -5,9 +5,9 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.3 (in progress) · aggregation and organization** — built on
-> **0.0.2 · Hermit Crab 🐚** (the "heap values get owners" milestone).
-> Remaining 0.0.3 scope: `std` iterator helpers and `flint` (planned).
+> Current version **0.0.3 · aggregation and organization** — the `struct` / `[T]` / `for` +
+> `Range` / modules / `std` / `flint` release, complete (V01–V10; built on
+> **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
 
 ## Language at a Glance
 
@@ -42,11 +42,15 @@ and function types; `if` / `elif` / `else` expressions; `while`; `choose` patter
 `as string` converts scalars (a temporary feature); runtime errors carry source line/column.
 See [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) for planning and implementation decisions.
 
-**0.0.3 · Aggregation**: user `struct` declarations/literals/field access; `[T]` arrays with
-written elements (both bounds-checked at runtime); `for x in iterable { … }` over arrays and
-`Range` (the loop variable is a fresh immutable binding; the iterable is evaluated once).
-`struct` / `for` / `in` are now reserved words (a breaking change). Modules / `pub` (V05) and
-the `std` library (V06) are in; the `flint` package manager comes later in 0.0.3.
+**0.0.3 · Aggregation and organization**: user `struct` declarations/literals/field access;
+`[T]` arrays with written elements (both bounds-checked at runtime); `for x in iterable { … }`
+over arrays and `Range` (the loop variable is a fresh immutable binding; the iterable is
+evaluated once); a module system (`import` / `pub`, qualified paths, cycle detection,
+`--project` whole-tree compilation); the `std` library (`io` / `str` / `num` / `arr` /
+`collection` / `os` / `time`, the prelude stays `print` only) with eager iterator helpers in
+`std.collection.iter`; and the `flint` package manager (git dependencies, `Flint.lock`,
+`new` / `build` / `run` / `test` / `check`). `struct` / `for` / `in` / `pub` are now reserved
+words (the only source breaking change of 0.0.3).
 See [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) and [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md).
 
 ## Quick Start
@@ -67,20 +71,42 @@ cargo fln tests/e2e/valid/fib.fln
 ./target/release/fleen-vm tests/e2e/valid/fib.fln
 ```
 
-Three executables:
+Three toolchain executables plus the package manager:
 
 | Command | Usage |
 |------|------|
-| `fleen-vm` | `fleen-vm <file.fln \| file.flnc>`: one-stop compile→verify→execute, or run bytecode directly |
+| `fleen-vm` | `fleen-vm [--project <dir>] <file.fln \| file.flnc>`: one-stop compile→verify→execute (or a whole project tree), or run bytecode directly |
 | `fleen-compiler` | `fleen-compiler <file.fln> [-o <out.flnc>]`: compile to bytecode only |
 | `fleen-verify` | `fleen-verify <file.flnc>`: statically verify bytecode |
+| `flint-cli` (as `flint`) | `flint <new <name> \| build \| run \| test \| check>`: the 0.0.3 package manager |
 
 Exit code contract: `0` success / `1` compile·verify·runtime error / `2` usage·IO error.
+
+### flint quick start (0.0.3)
+
+`flint` builds whole projects: a `flint.toml` manifest, optional git-only dependencies pinned
+by a committed `Flint.lock` (cached under `$FLINT_HOME`, default `~/.flint`), and std modules
+imported by name.
+
+```bash
+# Scaffold a hello-world project (a git repo is initialized for the lockfile)
+cargo run -q -p flint-cli -- new hello
+
+cd hello
+cargo run -q -p flint-cli -- run     # → Hello, World!
+
+# Adding a dependency is one line in flint.toml:
+#   [dependencies]
+#   jsonlite = { git = "https://github.com/user/jsonlite" }
+# then: flint build / flint run / flint test / flint check
+```
 
 ## Testing
 
 ```bash
-cargo test          # unit + integration + end-to-end (including real-binary E2E)
+cargo test          # unit + integration + end-to-end (including real-binary E2E,
+                    # std e2e, project-mode e2e, flint fixtures and the v1/v2/v3
+                    # bytecode compatibility fixtures)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --no-deps
 ```
@@ -92,7 +118,7 @@ cargo doc --no-deps
 - [docs/SYNTAX.ebnf](docs/SYNTAX.ebnf) — EBNF grammar
 - [docs/BYTECODE.md](docs/BYTECODE.md) — bytecode format specification
 - [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) — 0.0.2 feature plan (the beginning of ownership)
-- [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) — 0.0.3 feature plan · [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md) — implementation tickets
+- [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) — 0.0.3 feature plan · [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md) — implementation tickets (V01–V10)
 - [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License
