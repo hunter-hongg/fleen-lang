@@ -9,7 +9,8 @@
 > **Status** (2026-10-14): V01 implemented (completion notes at the end of its section);
 > V02 implemented (completion notes at the end of its section); V03 implemented
 > (completion notes at the end of its section); V04 implemented (completion notes at the end of
-> its section); **V05+ not started**.
+> its section); **V05 implemented (project-mode e2e + privacy/cycle rejection green)**;
+> **V06 implemented (std library, intrinsics, schematic [T], VM tests + std e2e green — completion notes in the V06 section; V07+ not started)**.
 > Implementation order: the V-ticket feature slices (per the overview table); D5–D10's remaining
 > decision points freeze when their ticket opens.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),

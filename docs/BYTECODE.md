@@ -532,8 +532,9 @@ Rules:
 - `MakeRange` pops both bounds and pushes the Range (`start end → r`, Δ−1, min 2)
 - A `for x in r { … }` loop desugars to: `StoreLocal __it; __i = RangeStart(__it); __count = RangeEnd(__it);
   while __i < __count { x = __i; …; __i = __i + 1 }` (see PLAN.md §5.4 for the exact MIR shape)
-- **Not reachable from `.fln` source until V06** (`std.collection.range`); the 0.0.3 compiler
-  never emits `MakeRange` today — the group is exercised by hand-built bytecode/verify tests.
+- Source construction is via `std.collection.range` / `std.collection.range_from` (0.0.3 V06,
+  D5): the two recognized names lower directly to `MakeRange` (the `Ok`/`Err` constructor
+  mechanism), so the compiler emits `MakeRange` for them and the desugar above applies.
 
 ---
 

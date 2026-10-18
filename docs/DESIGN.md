@@ -8,12 +8,13 @@
 > and details (authoritative), `docs/0.0.2/PLAN.md` §3.5 for a summary.
 >
 > **0.0.3 additions**: aggregation — `struct` (§9.4), `[T]` arrays (§9.5), `for` + `Range`
-> (§6) — are implemented (V01–V04); the module system (`import` / `pub`), `std`, and `flint`
-> remain planned (V05+). Decisions are in `docs/0.0.3/PLAN.md` (D1–D5 finalized);
-> bytecode in `docs/BYTECODE.md` §5.12–5.14.
->
+> (§6) — are implemented (V01–V04); the module system (`import` / `pub`), qualified
+> cross-module paths and private-access checks are implemented (V05); the `std` library
+> (intrinsics, schematic `[T]`, the prelude) is implemented (V06); `flint` remains planned
+> (V08). Decisions are in `docs/0.0.3/PLAN.md` (D1–D8 finalized; D9–D10 ahead of their
+> tickets); bytecode in `docs/BYTECODE.md` §5.12–5.14.
 > The corresponding sections below have been annotated accordingly
-> (content marked "0.0.2"/"0.0.3" does not reflect current toolchain behavior until implemented).
+> (content marked "0.0.2"/"0.0.3" reflects current toolchain behavior from the ticket it landed in).
 
 ---
 
@@ -1012,8 +1013,9 @@ This follows the **concise and clear** principle.
 | `struct` | ❌ | ❌ | ✅ (V02) |
 | `[T]` arrays | ❌ | ❌ | ✅ (V03) |
 | `Range` / `for` | ❌ | ❌ | ✅ (V04) |
-| Modules (`import` / `pub`) | ❌ | ❌ | ⏳ (V05) |
-| `std` / `flint` | ❌ | ❌ | ⏳ (V06–V08) |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) |
+| `flint` | ❌ | ❌ | ⏳ (V08) |
 | `async` | ❌ | ❌ | ❌ (0.0.4) |
 | FFI | ❌ | ❌ | ❌ |
 | Generics | ❌ | ❌ | ❌ (0.1.0) |
@@ -1025,8 +1027,8 @@ This follows the **concise and clear** principle.
 **0.0.2 goal: ownership foundations — see `docs/0.0.2/PLAN.md` for the plan.**
 
 **0.0.3 goal: aggregation and organization — `struct`, `[T]`, `for` + `Range` (implemented, V01–V04),
-the module system, `std`, and `flint` (planned) — see `docs/0.0.3/PLAN.md` and
-`docs/0.0.3/TICKETS.md`.**
+the module system (implemented, V05), the `std` library (implemented, V06), and `flint` (planned)
+— see `docs/0.0.3/PLAN.md` and `docs/0.0.3/TICKETS.md`.**
 
 ---
 
@@ -1035,7 +1037,7 @@ the module system, `std`, and `flint` (planned) — see `docs/0.0.3/PLAN.md` and
 | Version | Contents |
 |---------|----------|
 | 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
-| 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub`, `std`, `flint` — planned (V05+) |
+| 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; flint — planned (V08) |
 | 0.0.4 | `async` / `await` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
 | 0.1.0 | Generics / operator overloading |

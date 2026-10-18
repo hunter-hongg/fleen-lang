@@ -7,7 +7,7 @@ stack-based virtual machine.
 
 > Current version **0.0.3 (in progress) · aggregation and organization** — built on
 > **0.0.2 · Hermit Crab 🐚** (the "heap values get owners" milestone).
-> Remaining 0.0.3 scope: modules / `pub`, `std`, and `flint` (planned).
+> Remaining 0.0.3 scope: `std` iterator helpers and `flint` (planned).
 
 ## Language at a Glance
 
@@ -45,8 +45,8 @@ See [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) for planning and implementation dec
 **0.0.3 · Aggregation**: user `struct` declarations/literals/field access; `[T]` arrays with
 written elements (both bounds-checked at runtime); `for x in iterable { … }` over arrays and
 `Range` (the loop variable is a fresh immutable binding; the iterable is evaluated once).
-`struct` / `for` / `in` are now reserved words (a breaking change). Modules / `pub`, the `std`
-library, and the `flint` package manager come later in 0.0.3.
+`struct` / `for` / `in` are now reserved words (a breaking change). Modules / `pub` (V05) and
+the `std` library (V06) are in; the `flint` package manager comes later in 0.0.3.
 See [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) and [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md).
 
 ## Quick Start

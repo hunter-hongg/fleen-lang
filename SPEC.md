@@ -481,8 +481,9 @@ Check before submitting a PR:
 
 **0.0.3 goal: aggregation and organization — `struct`, `[T]` arrays, `for` + `Range`,
 the module system, `std`, and the `flint` package manager (plan in `docs/0.0.3/PLAN.md`,
-tickets in `docs/0.0.3/TICKETS.md`). V01–V04 (F1 `struct`, F2 arrays, F3 `for` + `Range`,
-bytecode v3) are implemented; V05+ (modules, std, flint) remain planned.**
+tickets in `docs/0.0.3/TICKETS.md`). V01–V06 (`struct`, arrays, `for` + `Range`,
+bytecode v3, module system, the std library) are implemented; V07+ (std iterator
+helpers, flint) remain planned.**
 
 ---
 
@@ -693,8 +694,8 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 | `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, `start..end` end-exclusive; source construction via std `range`, V06) |
 | `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`; `for`/`in` are reserved words) |
 | Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) |
-| Modules (`import` / `pub`) | ❌ | ❌ | ⏳ planned (V05) |
-| `std` library | ❌ | ❌ | ⏳ planned (V06–V07) |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05: module paths → files, pub visibility, cycle detection, project mode) |
+| `std` library | ❌ | ❌ | ✅ (V06: `io` / `str` / `num` / `arr` / `collection` (range) / `os` / `time` modules; VM intrinsics; schematic `[T]` signatures) |
 | `flint` package manager | ❌ | ❌ | ⏳ planned (V08) |
 | `async` / `await` | ❌ | ❌ | ❌ (0.0.4) |
 | `unsafe` / `ptr` / `addr` | ❌ | ❌ | ❌ (0.0.5) |
@@ -702,8 +703,9 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 | Generics | ❌ | ❌ | ❌ (0.1.0) |
 | Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
 
-**Status of 0.0.3**: V01–V04 (`FileId`/`SourceMap`, `struct`, arrays, `for` + `Range`) are
-implemented and green. V05+ (modules, std, flint) remain planned.
+**Status of 0.0.3**: V01–V06 (`FileId`/`SourceMap`, `struct`, arrays, `for` + `Range`,
+module system with `import` / `pub`, the std library) are implemented and green. V07+
+(std iterator helpers) and V08 (flint) remain planned.
 
 ---
 

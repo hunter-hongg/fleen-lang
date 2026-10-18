@@ -10,12 +10,22 @@ and the module system. Planning and design decisions: [docs/0.0.3/PLAN.md](docs/
 
 ### Language Features
 
+- **Modules** (from V05): `import` resolves module paths to `.fln` files, top-level `pub`
+  controls cross-module visibility, qualified paths (`net.tcp.make`) reach functions, globals,
+  consts and structs, and `--project <dir>` compiles whole source trees while single-file
+  `cargo fln file.fln` remains unchanged
 - **`[T]` arrays**: array literals, index read/write (`a[i]`), and `len` built-in; arrays are owned values
   with `move`/`clone` semantics; indexing is bounds-checked at runtime (out of bounds to `IndexOutOfRange`)
 - **`for` loop + `Range`**: `for x in iterable { … }` over arrays `[T]` and ranges (`start..end`);
   the loop variable is a fresh immutable binding per iteration; the iterable is evaluated once;
   `for` and `in` are now reserved keywords (breaking change)
 - **`struct`** (from V02): struct declarations, literals, field access, and field assignment
+- **`std` library** (from V06): modules `io` / `str` / `num` / `arr` / `collection` (range) / `os` / `time`.
+  `print` / `println` / `read_line` (io), `len` / `concat` / `split` and the `from_*` cast helpers (str),
+  `abs` / `min` / `max` / `sqrt` / `floor` (num), `len` / `get` (→ `Result`) / `set` / `push` over
+  schematic `[T]` (arr), `range` / `range_from` (→ `Range`), `args` / `exit` (os), and `now_millis` (time).
+  The std root ships in `std/*.fln` and is embedded into the compiler; only VM-irreducible primitives
+  are intrinsics, everything else is ordinary Fleen.
 
 ### Toolchain
 
@@ -26,7 +36,7 @@ and the module system. Planning and design decisions: [docs/0.0.3/PLAN.md](docs/
 
 ### Breaking
 
-- **`for` and `in` become reserved words**
+- **`for`, `in`, and `pub` become reserved words**
 - Bytecode opcode renumbering: `MakeRange` moved from 0xB8 to 0xB9
 
 ## 0.0.2 — Hermit Crab (2026-10-11) 🐚

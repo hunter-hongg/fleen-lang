@@ -8,8 +8,9 @@
 (* literals, array types & literals and         *)
 (* a[i] indexing, field access, the for loop    *)
 (* over arrays / Range, and the Range type      *)
-(* (V02–V04; modules/pub and std land in later  *)
-(* 0.0.3 tickets)                               *)
+(* plus the module system (`import` / `pub`,    *)
+(* qualified module paths; V05). std land in    *)
+(* later 0.0.3 tickets.                         *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
