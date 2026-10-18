@@ -1,0 +1,18 @@
+// 0.0.3 V06 std test: std.os module (VM intrinsics).
+//
+// `args` returns program arguments (without argv[0]); `exit(code)`
+// terminates the process with the given code.
+//
+// `exit` terminates the process, so it cannot be tested via the standard
+// stdout-diff harness. The VM unit tests in `fleen-vm/src/tests.rs`
+// cover `std.os.exit` and `std.os.args` directly. Here we only test
+// that `args` compiles and returns an array (the e2e harness passes
+// no trailing args, so the length is 0).
+import std.os;
+import std.io;
+import std.arr;
+
+func main() {
+    args = std.os.args();
+    std.io.println(std.arr.len(args) as string);
+}

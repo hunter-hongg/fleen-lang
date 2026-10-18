@@ -1,0 +1,21 @@
+// 0.0.3 V06 std test: std.num module (Fleen helpers + VM intrinsics).
+import std.num;
+import std.io;
+
+func main() {
+    // abs, min, max (Fleen source).
+    std.io.println(std.num.abs(5) as string);
+    std.io.println(std.num.abs(0 - 5) as string);
+    std.io.println(std.num.abs(0) as string);
+    std.io.println(std.num.min(3, 7) as string);
+    std.io.println(std.num.max(3, 7) as string);
+
+    // sqrt, floor (VM intrinsics).
+    std.io.println(std.num.sqrt(2.25) as string);
+    std.io.println(std.num.sqrt(2.0) as string);
+    std.io.println(std.num.floor(3.7) as string);
+    std.io.println(std.num.floor(0.0 - 1.5) as string);
+
+    // Note: std.num.abs(min_int) overflows — runtime arithmetic error.
+    // Not tested here (would terminate the process with a runtime error).
+}

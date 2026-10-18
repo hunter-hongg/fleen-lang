@@ -1,0 +1,10 @@
+// 0.0.3 V06 std test: std.time module (VM intrinsic).
+import std.time;
+import std.io;
+
+func main() {
+    // now_millis: wall-clock time in milliseconds since UNIX_EPOCH.
+    // Not portable — assert only that it's positive.
+    mm = std.time.now_millis();
+    std.io.println((mm > 0) as string);
+}

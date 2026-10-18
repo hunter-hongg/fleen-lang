@@ -1,0 +1,10 @@
+// 0.0.3 V06 std test: prelude — `print` without any import.
+//
+// The prelude injects exactly one name: `print`. Everything else requires
+// an explicit import. This file verifies that `print` works without any
+// import statement. The VM's `print` builtin emits a trailing newline
+// (0.0.2 behavior).
+func main() {
+    // No import needed — print is in the prelude.
+    print("prelude print works");
+}

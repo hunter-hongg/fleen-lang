@@ -22,7 +22,7 @@ pub struct Vm {
     frames: Vec<CallFrame>,
     globals: Vec<Value>,
     /// The host program's command-line arguments (0.0.3 V06), served to
-    /// Fleen by `std.os.args` — without argv[0].
+    /// Fleen by `std.os.args` — without `argv[0]`.
     program_args: Vec<String>,
 }
 
@@ -36,7 +36,7 @@ impl Vm {
     }
 
     /// Create a VM with the program's command-line arguments (0.0.3 V06),
-    /// exposed to Fleen through `std.os.args` (without argv[0]).
+    /// exposed to Fleen through `std.os.args` (without `argv[0]`).
     pub fn with_args(module: Module, program_args: Vec<String>) -> Self {
         let n_globals = module.globals.len();
         Vm {

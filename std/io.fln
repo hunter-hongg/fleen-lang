@@ -9,6 +9,15 @@
 //     import std.io;
 //     std.io.println("hi");     // print + trailing newline
 //     line = std.io.read_line(); // read one line of stdin (without the \n)
+//
+// `std.io.print` is the prelude `print` (same builtin, same variadic
+// `(string...) -> unit` signature): the resolver routes the qualified
+// spelling to the bare-name builtin so `std.io.print(...)` works after
+// `import std.io;` just like the unqualified `print(...)`.
+
+// `print` prints each argument (unconditionally string-typed) with no
+// trailing newline. Prelude spelling: usable without any import. VM
+// intrinsic `print` (same as `std.io.print`).
 
 // `println` prints each argument (unconditionally string-typed, like
 // `print`) followed by a newline. VM intrinsic `std.io.println`.

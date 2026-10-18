@@ -239,3 +239,35 @@ fn std_os_exit_passes_through_exit_code() {
     assert_eq!(code, 3, "exit code (stderr: {stderr})");
     assert!(stderr.is_empty(), "stderr should be empty for clean exit");
 }
+
+/// `tests/std/` next to the repo root (0.0.3 V06: std exercised directly).
+fn std_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/std")
+}
+
+/// 0.0.3 V06: std library exercised directly as `.fln` + `.expected` fixtures.
+///
+/// Each `.fln` file in `tests/std/` is compiled, verified, and executed as a
+/// standalone program; its stdout must match the `.expected` file exactly.
+/// This ensures std cannot rot — it is compiled and run on every `cargo test`.
+#[test]
+fn std_library_tests_pass() {
+    let dir = std_dir();
+    let mut ran = 0;
+    for path in fln_files(&dir) {
+        let expected_path = path.with_extension("expected");
+        let expected = fs::read_to_string(&expected_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", expected_path.display()));
+
+        let (code, stdout, stderr) = run_vm(&path);
+        assert_eq!(code, 0, "{}: exit code (stderr: {stderr})", path.display());
+        assert!(
+            stderr.is_empty(),
+            "{}: unexpected stderr: {stderr}",
+            path.display()
+        );
+        assert_eq!(stdout, expected, "{}: stdout mismatch", path.display());
+        ran += 1;
+    }
+    assert!(ran > 0, "no .fln fixtures found in {}", dir.display());
+}

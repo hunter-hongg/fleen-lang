@@ -1,0 +1,42 @@
+// 0.0.3 V06 std test: std.arr module (schematic `[T]` VM intrinsics).
+import std.arr;
+import std.io;
+import std.str;
+
+func main() {
+    // len: schematic, works on [int] and [string].
+    std.io.println(std.arr.len([1, 2, 3]) as string);
+    std.io.println(std.arr.len(["a", "b", "c", "d"]) as string);
+    empty: [int] = [];
+    std.io.println(std.arr.len(clone empty) as string);
+
+    // get: returns Result<T, string>.
+    ok_val = choose std.arr.get([10, 20, 30], 1) {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    std.io.println(ok_val as string);
+
+    err_val = choose std.arr.get([10, 20, 30], 9) {
+        when Ok(v) { std.str.from_int(v) }
+        when Err(e) { e }
+    };
+    std.io.println(err_val);
+
+    // get on [string].
+    str_val = choose std.arr.get(["x", "y", "z"], 2) {
+        when Ok(v) { v }
+        when Err(e) { "none" }
+    };
+    std.io.println(str_val);
+
+    // set: returns a new array (arrays are owned, not mutated in place).
+    original = [1, 2, 3];
+    modified = std.arr.set(original, 1, 99);
+    std.io.println(modified[1] as string);
+
+    // push: returns a new array with the element appended.
+    pushed = std.arr.push([1, 2], 3);
+    std.io.println(std.arr.len(clone pushed) as string);
+    std.io.println(pushed[2] as string);
+}

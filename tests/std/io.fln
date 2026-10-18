@@ -1,0 +1,15 @@
+// 0.0.3 V06 std test: std.io module (VM intrinsics).
+import std.io;
+
+func main() {
+    // println: variadic strings with trailing newline.
+    std.io.println("a", "b", "c");
+
+    // read_line with stdin closed (e2e harness feeds null stdin) → empty string.
+    line = std.io.read_line();
+    std.io.println("read: [", line, "]");
+
+    // prelude print (no import needed — print is in the prelude).
+    // The VM's `print` builtin emits a trailing newline (0.0.2 behavior).
+    print("prelude ok");
+}

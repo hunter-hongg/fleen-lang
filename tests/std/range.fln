@@ -1,0 +1,31 @@
+// 0.0.3 V06 std test: std.collection.range module + for-over-Range.
+import std.collection.range;
+import std.io;
+
+func main() {
+    // range(n): 0..n, end-exclusive.
+    total = 0;
+    for i in range(5) {
+        total = total + i;
+    }
+    std.io.println(total as string);
+
+    // range_from(a, b): a..b, end-exclusive.
+    for i in range_from(2, 5) {
+        std.io.println(i as string);
+    }
+
+    // Empty range: body never runs.
+    count = 0;
+    for i in range(0) {
+        count = 1;
+    }
+    std.io.println(count as string);
+
+    // Empty range via range_from with a == b.
+    count2 = 0;
+    for i in range_from(3, 3) {
+        count2 = 1;
+    }
+    std.io.println(count2 as string);
+}

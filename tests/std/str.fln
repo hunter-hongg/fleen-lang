@@ -1,0 +1,30 @@
+// 0.0.3 V06 std test: std.str module (Fleen helpers + VM intrinsics).
+import std.str;
+import std.arr;
+import std.io;
+
+func main() {
+    // from_int / from_float / from_bool (Fleen source, backed by `as string`).
+    std.io.println(std.str.from_int(42));
+    std.io.println(std.str.from_int(0 - 7));
+    std.io.println(std.str.from_float(3.14));
+    std.io.println(std.str.from_bool(true));
+    std.io.println(std.str.from_bool(false));
+
+    // len: Unicode scalar value count, not byte count.
+    std.io.println(std.str.len("hello") as string);
+    std.io.println(std.str.len("héllo") as string);
+    std.io.println(std.str.len("") as string);
+
+    // concat.
+    std.io.println(std.str.concat("foo", "bar"));
+
+    // split: keeps empty segments.
+    parts = std.str.split("a,,b,,c", ",");
+    std.io.println(std.arr.len(parts) as string);
+    std.io.println(parts[0]);
+    std.io.println(parts[1]);
+    std.io.println(parts[2]);
+    std.io.println(parts[3]);
+    std.io.println(parts[4]);
+}
