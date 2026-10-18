@@ -110,12 +110,16 @@ fn flint_new_scaffolds_and_runs_hello() {
 fn flint_resolves_a_file_git_dependency_and_runs() {
     let tmp = Temp::new("dep");
     let dep = tmp.path().join("depdemo_lib");
+    // The dependency exposes a `util` submodule whose `helper` is called across
+    // the crate boundary as `depdemo_lib.util.helper` (the ticket's contract).
     git_project(
         &dep,
         &[
             ("flint.toml", &crate_toml("depdemo_lib")),
+            // A non-empty crate root; the `util` submodule sits alongside it.
+            ("src/main.fln", "pub func root(): int = 0\n"),
             (
-                "src/main.fln",
+                "src/util.fln",
                 "import std.io;\nimport std.str;\n\
                  pub func helper(n: string): string = \
                  std.str.concat(\"Hi \", std.str.concat(n, \"!\"))\n",
@@ -134,8 +138,8 @@ fn flint_resolves_a_file_git_dependency_and_runs() {
     );
     write(
         &proj.join("src/main.fln"),
-        "import std.io;\nimport depdemo_lib;\nfunc main() {\n    \
-         std.io.println(depdemo_lib.helper(\"flint\"));\n}\n",
+        "import std.io;\nimport depdemo_lib.util;\nfunc main() {\n    \
+         std.io.println(depdemo_lib.util.helper(\"flint\"));\n}\n",
     );
 
     let (code, out, err) = run_in(&proj, &["run"]);

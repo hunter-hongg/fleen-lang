@@ -4,9 +4,10 @@
 //! Design (ticket V08):
 //! - Git access shells out to the `git` CLI (no `git2` C dependency; the
 //!   decision is recorded in the ticket). `git` must be on PATH.
-//! - Cache layout `$FLINT_HOME/cache/<name>-<commit>/`, content-addressed by
-//!   commit. `FLINT_HOME` (default `~/.flint`) is injectable so tests never
-//!   touch a real home directory.
+//! - Cache layout `$FLINT_HOME/<name>-<commit>/` (the resolved crate sits
+//!   directly under the home directory, content-addressed by commit; there is
+//!   no extra `cache/` subdirectory — TICKETS V08 deviation note). `FLINT_HOME`
+//!   (default `~/.flint`) is injectable so tests never touch a real home
 //! - The lockfile is the pin: a dependency whose `(name, git)` matches an
 //!   existing `Flint.lock` entry reuses that commit without network traffic.
 //!   Version strings are advisory in 0.0.3.
@@ -318,12 +319,18 @@ pub fn render_lock(project_name: &str, crates: &[ResolvedCrate]) -> String {
     out
 }
 
-/// A lockfile is "dirty" when the manifest's direct dependency set no longer
-/// matches it (something added/removed/rewritten a git URL).
+/// A lockfile is "dirty" when a *direct* dependency's pin no longer matches
+/// the manifest — something added, removed, or its git URL rewritten.
+///
+/// The lock pins every resolved crate (direct *and* transitive) while the
+/// manifest declares only the direct set, so counting lengths would mark any
+/// project with a transitive dependency permanently dirty. Comparing direct
+/// deps by `(name, git)` is the meaningful signal: resolution reuses a pin
+/// whenever a dep's `(name, git)` still matches and the source is cached, and
+/// re-walks each dependency's own manifest for transitive changes, so a stale
+/// *extra* entry is harmless (it is dropped on the next lock rewrite). An
+/// added or rewritten direct dep must force a rewrite.
 pub fn lock_is_dirty(lock: &BTreeMap<String, manifest::LockEntry>, manifest: &Manifest) -> bool {
-    if lock.len() != manifest.dependencies.len() {
-        return true;
-    }
     manifest
         .dependencies
         .iter()
@@ -423,5 +430,40 @@ mod tests {
             !lock_is_dirty(&lock, &manifest),
             "empty lock matches empty deps"
         );
+    }
+
+    #[test]
+    fn lock_with_transitive_pins_is_not_dirty() {
+        // The lock pins direct *and* transitive crates, so it legitimately
+        // has more entries than the manifest's direct deps. That alone must
+        // not mark the lock dirty (a permanent false-dirty would rewrite the
+        // lock on every build).
+        let mut lock = BTreeMap::new();
+        lock.insert(
+            "a".into(),
+            manifest::LockEntry {
+                git: "u/a".into(),
+                commit: "aaa".into(),
+            },
+        );
+        // `b` is a transitive dep of `a`, pinned in the lock but not named in
+        // the manifest.
+        lock.insert(
+            "b".into(),
+            manifest::LockEntry {
+                git: "u/b".into(),
+                commit: "bbb".into(),
+            },
+        );
+        let manifest = Manifest {
+            name: "p".into(),
+            version: None,
+            dependencies: vec![manifest::Dependency {
+                name: "a".into(),
+                git: "u/a".into(),
+                version: None,
+            }],
+        };
+        assert!(!lock_is_dirty(&lock, &manifest), "transitive pin is clean");
     }
 }

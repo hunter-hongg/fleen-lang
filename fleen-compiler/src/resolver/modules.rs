@@ -669,6 +669,37 @@ mod tests {
     }
 
     #[test]
+    fn crate_of_file_uses_longest_source_prefix() {
+        let mut sm = SourceMap::new();
+        // Root project crate + a vendored dependency cached under the home dir.
+        let proj_root = sm.add_file("proj/src/main.fln", "");
+        let dep_root = sm.add_file("/home/u/.flint/jsonlite-abc/src/main.fln", "");
+        let crates = [
+            CrateDef::root_crate(proj_root),
+            CrateDef::dependency("jsonlite", dep_root),
+        ];
+
+        // A file under the dependency's source dir belongs to the dependency,
+        // even though its filename also ends in `.fln` under a `src/` dir.
+        let dep_util = sm.add_file("/home/u/.flint/jsonlite-abc/src/util.fln", "");
+        let (crate_id, local) = crate_of_file(&crates, &sm, dep_util).expect("dep-owned");
+        assert_eq!(crate_id, 1, "jsonlite owns its cached util.fln");
+        assert_eq!(local, vec!["util".to_string()]);
+
+        // The project's own root maps to the root crate with an empty path.
+        let (crate_id, local) = crate_of_file(&crates, &sm, proj_root).expect("root-owned");
+        assert_eq!(crate_id, 0);
+        assert!(local.is_empty());
+
+        // A file outside every crate's source directory is unclaimed.
+        let stray = sm.add_file("unrelated/x.fln", "");
+        assert!(
+            crate_of_file(&crates, &sm, stray).is_none(),
+            "file outside all crate source dirs is unclaimed"
+        );
+    }
+
+    #[test]
     fn build_module_table_detects_cycle() {
         let mut sm = SourceMap::new();
         let root = sm.add_file("src/main.fln", "import net.a;\nfunc main(): int = 0\n");

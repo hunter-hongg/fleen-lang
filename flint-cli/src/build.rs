@@ -206,3 +206,41 @@ fn push_entry(out: &mut String, message: &str, location: Option<&str>) {
         out.push_str(loc);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_project(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("flint-build-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `source_dir` prefers `src/` when it contains `main.fln`, else the root.
+    #[test]
+    fn source_dir_prefers_src_with_main() {
+        let proj = tmp_project("src");
+        fs::create_dir_all(proj.join("src")).unwrap();
+        fs::write(proj.join("src/main.fln"), "").unwrap();
+        assert_eq!(source_dir(&proj), proj.join("src"));
+
+        let _ = fs::remove_dir_all(&proj);
+    }
+
+    /// A single-file project (root `main.fln`, no `src/`) roots at the project.
+    #[test]
+    fn source_dir_falls_back_to_root_without_src() {
+        let proj = tmp_project("root");
+        fs::write(proj.join("main.fln"), "").unwrap();
+        assert_eq!(source_dir(&proj), proj);
+
+        // A `src/` that lacks `main.fln` also roots at the project.
+        fs::create_dir_all(proj.join("src")).unwrap();
+        assert_eq!(source_dir(&proj), proj);
+
+        let _ = fs::remove_dir_all(&proj);
+    }
+}

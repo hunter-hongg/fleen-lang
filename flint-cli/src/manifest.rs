@@ -150,10 +150,9 @@ fn validate(manifest: &Manifest) -> Result<(), ManifestError> {
 /// Package/import-root name validity: a single identifier matching the
 /// compiler's module-root rule, minus reserved words.
 pub fn is_valid_package_name(name: &str) -> bool {
-    if name.is_empty() {
+    let Some(first) = name.chars().next() else {
         return false;
-    }
-    let first = name.chars().next().unwrap();
+    };
     if !(first.is_ascii_lowercase() || first == '_') {
         return false;
     }
