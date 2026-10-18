@@ -2,7 +2,7 @@
 //!
 //! Each file is returned as `(path, source)`. The `path` keys the source map;
 //! users see it as `std/...`. The compiler treats these as normal Fleen files
-//! during project compilation.
+//! during project compilation. `std.collection.iter` was added in 0.0.3 V07.
 
 pub fn files() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -18,6 +18,10 @@ pub fn files() -> Vec<(&'static str, &'static str)> {
         (
             "std/collection/range.fln",
             include_str!("../../std/collection/range.fln"),
+        ),
+        (
+            "std/collection/iter.fln",
+            include_str!("../../std/collection/iter.fln"),
         ),
         ("std/os.fln", include_str!("../../std/os.fln")),
         ("std/time.fln", include_str!("../../std/time.fln")),

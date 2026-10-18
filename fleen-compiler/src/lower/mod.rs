@@ -574,6 +574,51 @@ impl IterKind {
     }
 }
 
+/// Which `std.collection.iter` helper an inline call lowers to (0.0.3 V07).
+///
+/// Each maps to a compiler-generated loop; the schema (which argument is
+/// the function, whether an array accumulator is produced) differs per
+/// helper, so the lowering is not one template but four small ones sharing
+/// the loop skeleton.
+///
+/// `zip` is deliberately absent: 0.0.3 has no tuples, so an eager pair has
+/// no representation (the V07 ticket's review note, PLAN D8/§6.5).
+enum InlineIterKind {
+    /// `map(xs, f)`: `[U]` built by pushing `f(elem)` for each elem.
+    Map,
+    /// `filter(xs, pred)`: `[T]` built by pushing elems where `pred` is true.
+    Filter,
+    /// `fold(xs, init, f)`: a single accumulator (`f(acc, elem)` each step).
+    Fold,
+    /// `take(xs, n)`: the first `min(n, len(xs))` elems, unchanged.
+    Take,
+}
+
+impl InlineIterKind {
+    /// Classify an inline-lowered helper by its qualified builtin name.
+    fn of(name: &str) -> Option<InlineIterKind> {
+        match name {
+            "std.collection.iter.map" => Some(Self::Map),
+            "std.collection.iter.filter" => Some(Self::Filter),
+            "std.collection.iter.fold" => Some(Self::Fold),
+            "std.collection.iter.take" => Some(Self::Take),
+            _ => None,
+        }
+    }
+
+    /// Is the function-valued argument the last (index `args.len() - 1`)?
+    ///
+    /// `map`/`filter` take it second, `fold` takes it third (`init` second);
+    /// `take` has no function argument.
+    fn fn_arg_index(&self) -> Option<usize> {
+        match self {
+            Self::Map | Self::Filter => Some(1),
+            Self::Fold => Some(2),
+            Self::Take => None,
+        }
+    }
+}
+
 /// Per-function lowering context.
 struct FnBodyCx<'a> {
     lcx: &'a mut LowerCtx,
@@ -1170,30 +1215,44 @@ impl<'a> FnBodyCx<'a> {
                 name, binding_id, ..
             } if self.is_function_binding(*binding_id, name) => {
                 let mut fid = self.lcx.func_ids[name];
-                // `range`/`range_from` (D5) are table-recognized Range
-                // constructors: the call collapses to `MakeRange` instead of
-                // a runtime call — the `Ok`/`Err` mechanism (a recognized
-                // name lowering to a dedicated instruction) extended to the
-                // builtin table (0.0.3 V06). The `is_builtin` guard keeps a
-                // user function that shadows the name a plain call.
+                // Builtins may collapse to something other than a runtime
+                // call. The `is_builtin` guard keeps a user function that
+                // shadows the name a plain call.
                 if self.lcx.funcs[fid.0 as usize].is_builtin
                     && let Some(sig) = find_builtin(name)
-                    && sig.lowering == crate::typeck::builtins::BuiltinLowering::MakeRange
                 {
-                    // Typeck guarantees exactly the signature's arity of
-                    // `int` arguments. `MakeRange` pops `start end`; a bare
-                    // `range(n)` is `0..n` (D5), so its start is pushed
-                    // first — `range_from(a, b)` supplies both bounds.
-                    if let crate::typeck::builtins::BuiltinParam::Fixed(p) = &sig.param
-                        && p.len() == 1
-                    {
-                        fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+                    match sig.lowering {
+                        crate::typeck::builtins::BuiltinLowering::InlineIter => {
+                            // 0.0.3 V07: `std.collection.iter.map/filter/
+                            // fold/take` expand inline into their loop (F4:
+                            // eager library functions, no runtime calls).
+                            return self.lower_inline_iter(fb, &sig, args, span);
+                        }
+                        crate::typeck::builtins::BuiltinLowering::MakeRange => {
+                            // `range`/`range_from` (D5) are table-recognized
+                            // Range constructors: the call collapses to
+                            // `MakeRange` instead of a runtime call — the
+                            // `Ok`/`Err` mechanism (a recognized name
+                            // lowering to a dedicated instruction) extended
+                            // to the builtin table (0.0.3 V06).
+                            // Typeck guarantees exactly the signature's
+                            // arity of `int` arguments. `MakeRange` pops
+                            // `start end`; a bare `range(n)` is `0..n` (D5),
+                            // so its start is pushed first —
+                            // `range_from(a, b)` supplies both bounds.
+                            if let crate::typeck::builtins::BuiltinParam::Fixed(p) = &sig.param
+                                && p.len() == 1
+                            {
+                                fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+                            }
+                            for arg in args {
+                                self.lower_expr_into(fb, arg)?;
+                            }
+                            fb.emit(MirInstr::new(MirInstrKind::MakeRange, span));
+                            return Ok(());
+                        }
+                        crate::typeck::builtins::BuiltinLowering::Intrinsic => {}
                     }
-                    for arg in args {
-                        self.lower_expr_into(fb, arg)?;
-                    }
-                    fb.emit(MirInstr::new(MirInstrKind::MakeRange, span));
-                    return Ok(());
                 }
                 // Variadic builtins: resolve to (or instantiate) the
                 // instance whose `params` matches this call's argc.
@@ -1428,6 +1487,245 @@ impl<'a> FnBodyCx<'a> {
         fb.emit(MirInstr::new(MirInstrKind::Unit, e.span));
         fb.resolve(cond, end);
         Ok(())
+    }
+
+    /// Expand a `std.collection.iter` inline call (0.0.3 V07, F4).
+    ///
+    /// The four schematic helpers lower (in the compiler, with no runtime
+    /// iterator objects — PLAN §3.5.2) to the loop their eager semantics
+    /// imply: accumulate into a fresh array via the always-registered
+    /// `std.arr.push` builtin (`map`/`filter`/`take`) or a single
+    /// accumulator (`fold`). Arguments are evaluated once, left to right,
+    /// into fresh temp slots (D4 discipline), so a `map(xs, f)` call does
+    /// not re-evaluate `xs` or `f` per iteration.
+    ///
+    /// Typechecking is schematic (two type variables for `map`/`fold`); the
+    /// MIR emitted here is untyped, exactly like `lower_for`.
+    ///
+    /// The loop shape mirrors `lower_for`: a head block re-entered only by
+    /// the increment back-edge so entry and back-edge agree on stack depth
+    /// (the V04 standing fix). The result (`[U]`/`[T]`/`A`) is left on the
+    /// stack at the `end` block.
+    fn lower_inline_iter(
+        &mut self,
+        fb: &mut FnBuilder,
+        sig: &crate::typeck::builtins::BuiltinSig,
+        args: &[TypedExprHir],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let kind = InlineIterKind::of(sig.name).ok_or_else(|| {
+            LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "unknown std.collection.iter inline helper",
+                },
+                span,
+            )
+        })?;
+
+        // `std.arr.push` is a builtin, always mirrored into `func_ids` by
+        // `LowerCtx::new` (the whole table), so the accumulator can call it
+        // without the user importing `std.arr`. A missing entry is a
+        // compiler-invariant break, reported rather than panicked.
+        let push_fid = *self.lcx.func_ids.get("std.arr.push").ok_or_else(|| {
+            LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "std.arr.push builtin not registered",
+                },
+                span,
+            )
+        })?;
+
+        // Evaluate every argument once, left to right, into fresh slots.
+        let mut slots = Vec::with_capacity(args.len());
+        for arg in args {
+            self.lower_expr_into(fb, arg)?;
+            let slot = self.fresh_temp();
+            fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), span));
+            slots.push(slot);
+        }
+        let xs = slots[0];
+        // The function value's slot: `map`/`filter` second arg, `fold`
+        // third; `take` has none (its second arg is the count `n`).
+        let f = kind.fn_arg_index().map(|i| slots[i]);
+        let n = matches!(kind, InlineIterKind::Take).then(|| slots[1]);
+
+        // `__count = len(xs)` — `ArrLen` is peek-shaped (`a → a int`), so
+        // the parked array copy is dropped with a `Pop` (the `lower_for`
+        // pattern).
+        let count = self.fresh_temp();
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(xs), span));
+        fb.emit(MirInstr::new(MirInstrKind::ArrLen, span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(count), span));
+        fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+
+        // `take`: cap the count at `n` (`__count = min(__count, __n)`).
+        // Shape: `n < count ? (__count = n) : ()`, with a shared merge.
+        if let Some(n) = n {
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(n), span));
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
+            fb.emit(MirInstr::new(MirInstrKind::Lt, span));
+            let cap_true = fb.jump_if_true_later();
+            // `n < count` is false: skip the cap, fall through.
+            let skip = fb.new_block();
+            fb.start(skip);
+            let skip_jump = fb.jump_later();
+            // `n < count` is true: cap, then merge.
+            let cap = fb.new_block();
+            fb.start(cap);
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(n), span));
+            fb.emit(MirInstr::new(MirInstrKind::StoreLocal(count), span));
+            let cap_jump = fb.jump_later();
+            let merge = fb.new_block();
+            fb.start(merge);
+            fb.resolve(cap_true, cap);
+            fb.resolve(skip_jump, merge);
+            fb.resolve(cap_jump, merge);
+            // Continue emitting into the merge block below.
+        }
+
+        // `__out = []` for the array-building helpers; `fold` uses the
+        // pre-stored `init` slot as its accumulator.
+        let out = if matches!(kind, InlineIterKind::Fold) {
+            slots[1]
+        } else {
+            let o = self.fresh_temp();
+            fb.emit(MirInstr::new(MirInstrKind::ArrNew(0), span));
+            fb.emit(MirInstr::new(MirInstrKind::StoreLocal(o), span));
+            o
+        };
+
+        // `__i = 0`.
+        let i = self.fresh_temp();
+        fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(i), span));
+
+        // Loop: head checks `__i < __count`.
+        let head = fb.new_block();
+        fb.jump(head);
+        fb.start(head);
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
+        fb.emit(MirInstr::new(MirInstrKind::Lt, span));
+        let cond_false = fb.jump_if_false_later();
+
+        let body = fb.new_block();
+        fb.start(body);
+
+        // Element read is a bounds-checked copy (`ArrGet`, D3/D4), so the
+        // source array is never consumed — and owned elements are deep-copied
+        // before crossing a call boundary.
+        let elem = self.fresh_temp();
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(xs), span));
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+        fb.emit(MirInstr::new(MirInstrKind::ArrGet, span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(elem), span));
+
+        match kind {
+            InlineIterKind::Map => {
+                // `mapped = f(elem)`; push it to `__out`.
+                let fs = f.ok_or_else(|| self.iter_missing_fn(span))?;
+                let mapped = self.fresh_temp();
+                self.emit_indirect_call(fb, fs, &[elem], span);
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(mapped), span));
+                self.emit_push_fold(fb, out, mapped, push_fid, span);
+                self.emit_loop_increment(fb, i, head, span);
+            }
+            InlineIterKind::Filter => {
+                // `keep = f(elem)`; push `elem` to `__out` only when true.
+                let fs = f.ok_or_else(|| self.iter_missing_fn(span))?;
+                self.emit_indirect_call(fb, fs, &[elem], span);
+                let keep_false = fb.jump_if_false_later();
+                // kept arm (fall-through of `keep`): `__out = push(__out, elem)`.
+                let kept = fb.new_block();
+                fb.start(kept);
+                self.emit_push_fold(fb, out, elem, push_fid, span);
+                let kept_jump = fb.jump_later();
+                // dropped arm (empty), then both arms converge on the increment.
+                let dropped = fb.new_block();
+                fb.start(dropped);
+                let dropped_jump = fb.jump_later();
+                let inc = fb.new_block();
+                fb.start(inc);
+                fb.resolve(keep_false, dropped);
+                fb.resolve(kept_jump, inc);
+                fb.resolve(dropped_jump, inc);
+                self.emit_loop_increment(fb, i, head, span);
+            }
+            InlineIterKind::Fold => {
+                // `acc = f(acc, elem)`.
+                let fs = f.ok_or_else(|| self.iter_missing_fn(span))?;
+                let acc = out;
+                self.emit_indirect_call(fb, fs, &[acc, elem], span);
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(acc), span));
+                self.emit_loop_increment(fb, i, head, span);
+            }
+            InlineIterKind::Take => {
+                // pass the element through unchanged.
+                self.emit_push_fold(fb, out, elem, push_fid, span);
+                self.emit_loop_increment(fb, i, head, span);
+            }
+        }
+
+        let end = fb.new_block();
+        fb.start(end);
+        fb.resolve(cond_false, end);
+        // The loop's result: `__out` for array builders, `__acc` for fold.
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(out), span));
+        Ok(())
+    }
+
+    /// Emit `<f(a1, …, an)>` leaving the result on the stack
+    /// (`LoadFunc`-independent: `f` is a pre-stored function value).
+    fn emit_indirect_call(
+        &mut self,
+        fb: &mut FnBuilder,
+        f_slot: u16,
+        arg_slots: &[u16],
+        span: Span,
+    ) {
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(f_slot), span));
+        for a in arg_slots {
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(*a), span));
+        }
+        fb.emit(MirInstr::new(
+            MirInstrKind::CallValue(arg_slots.len() as u8),
+            span,
+        ));
+    }
+
+    /// Emit `__acc = push(__acc, value_slot)`, rebinding the accumulator.
+    fn emit_push_fold(
+        &mut self,
+        fb: &mut FnBuilder,
+        acc: u16,
+        value_slot: u16,
+        push_fid: FuncId,
+        span: Span,
+    ) {
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(acc), span));
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(value_slot), span));
+        fb.emit(MirInstr::new(MirInstrKind::Call(push_fid), span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(acc), span));
+    }
+
+    /// Emit `__i = __i + 1` and jump back to the head.
+    fn emit_loop_increment(&mut self, fb: &mut FnBuilder, i: u16, head: BlockId, span: Span) {
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+        fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), span));
+        fb.emit(MirInstr::new(MirInstrKind::IAdd, span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(i), span));
+        fb.jump(head);
+    }
+
+    /// Defensive: an inline helper that needs a function argument was called
+    /// without one (a typeck-invariant break; typeck fixes the arity).
+    fn iter_missing_fn(&self, span: Span) -> LowerError {
+        LowerError::new(
+            LowerErrorKind::UnsupportedFeature {
+                feature: "std.collection.iter helper missing its function argument",
+            },
+            span,
+        )
     }
 
     fn lower_if(&mut self, fb: &mut FnBuilder, e: &TypedExprIfHir) -> Result<(), LowerError> {

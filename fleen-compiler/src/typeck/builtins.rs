@@ -6,11 +6,13 @@
 //! - **Fixed** (`std.os.exit`, ...): a fixed parameter sequence.
 //! - **Variadic** (`print`, `std.io.println`): any number of arguments,
 //!   each in a fixed set.
-//! - **Schematic** (`std.arr.len`, ...): a single type variable `T0` is
+//! - **Schematic** (`std.arr.len`, ...): type variables (`Var(n)`) are
 //!   created per call site, unified against the argument types, then
-//!   substituted into the return type. Type variables appear ONLY in this
-//!   table — never in user-visible syntax (PLAN §10 risk rule), and never
-//!   in TypedHir: every substitution happens at the call site.
+//!   substituted into the return type. Most helpers use one variable
+//!   (`T0`); the `std.collection.iter` functions (V07) need two (`T0`,
+//!   `T1`) for `map` / `fold`. Type variables appear ONLY in this table —
+//!   never in user-visible syntax (PLAN §10 risk rule), and never in
+//!   TypedHir: every substitution happens at the call site.
 //!
 //! Names of std-provided builtins are the fully-qualified module paths
 //! (`std.io.println`), so a user reaches them through `import std.io;` +
@@ -44,6 +46,12 @@ pub enum BuiltinLowering {
     /// `MakeRange` — no runtime call at all (the `Ok`/`Err` mechanism
     /// extended from constructors to a table entry).
     MakeRange,
+    /// A schematic `std.collection.iter` helper (0.0.3 V07): the call is
+    /// expanded inline in the compiler (no runtime call — `lower` emits the
+    /// loop every eager std function would compile to). This is F4's
+    /// "eager library functions, no iterator objects" shape (PLAN §3.5.2);
+    /// the polymorphism the Fleen source cannot express lives here.
+    InlineIter,
 }
 
 /// Signature of a builtin function.
@@ -68,7 +76,7 @@ pub struct BuiltinSig {
 /// - `std.str.split`: `(string, string) -> [string]` — split on a separator
 /// - `std.num.sqrt`: `(float) -> float` — square root
 /// - `std.num.floor`: `(float) -> int` — floor to integer
-/// - `std.os.args`: `() -> [string]` — command-line arguments (without argv[0])
+/// - `std.os.args`: `() -> [string]` — command-line arguments (without `argv[0]`)
 /// - `std.os.exit`: `(int) -> unit` — terminate with the given code
 /// - `std.time.now_millis`: `() -> int` — wall-clock milliseconds
 ///
@@ -77,6 +85,9 @@ pub struct BuiltinSig {
 /// - `std.arr.get`: `[T], int -> Result<T, string>`
 /// - `std.arr.set`: `[T], int, T -> [T]`  (returns a new array)
 /// - `std.arr.push`: `[T], T -> [T]`  (returns a new array)
+/// - `std.collection.iter.*` (0.0.3 V07): `map` / `filter` / `fold` /
+///   `take` — two type variables where needed; each call is expanded
+///   inline by `lower` (see `InlineIter`), so there is no runtime call.
 ///
 /// `print`: `(string...) -> unit` — 0.0.2 strict string check (PLAN §6).
 /// Non-string arguments report `ArgTypeMismatch` with help `x as string`
@@ -94,6 +105,9 @@ pub fn builtins() -> Vec<BuiltinSig> {
     let strings = || Type::Array(Box::new(string()));
     let t0 = || Type::Var(0);
     let arr_t0 = || Type::Array(Box::new(t0()));
+    let t1 = || Type::Var(1);
+    let arr_t1 = || Type::Array(Box::new(t1()));
+    let bool = || Type::Bool;
     vec![
         // The prelude (`print`): bare name, visible without any import.
         BuiltinSig {
@@ -203,6 +217,50 @@ pub fn builtins() -> Vec<BuiltinSig> {
             },
             ret: arr_t0(),
             lowering: BuiltinLowering::Intrinsic,
+        },
+        // std.collection.iter — schematic iterator helpers (0.0.3 V07,
+        // F4). Each call is expanded inline by `lower` (`InlineIter`) into
+        // the loop it compiles to; there are no iterator objects here. The
+        // signatures need two type variables (`map`/`fold` relate the
+        // element type to the mapped/folded type), which the one-call
+        // unification of `collect_bindings` already supports. `zip` is out
+        // of 0.0.3 (no tuples: an eager pair has no representation) and is
+        // documented as such in `std/collection/iter.fln`.
+        BuiltinSig {
+            name: "std.collection.iter.map",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), Type::Func(vec![t0()], Box::new(t1()))],
+                ret: arr_t1(),
+            },
+            ret: arr_t1(),
+            lowering: BuiltinLowering::InlineIter,
+        },
+        BuiltinSig {
+            name: "std.collection.iter.filter",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), Type::Func(vec![t0()], Box::new(bool()))],
+                ret: arr_t0(),
+            },
+            ret: arr_t0(),
+            lowering: BuiltinLowering::InlineIter,
+        },
+        BuiltinSig {
+            name: "std.collection.iter.fold",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), t1(), Type::Func(vec![t1(), t0()], Box::new(t1()))],
+                ret: t1(),
+            },
+            ret: t1(),
+            lowering: BuiltinLowering::InlineIter,
+        },
+        BuiltinSig {
+            name: "std.collection.iter.take",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), int()],
+                ret: arr_t0(),
+            },
+            ret: arr_t0(),
+            lowering: BuiltinLowering::InlineIter,
         },
         // Range constructors (D5) — bare global names, plus the qualified
         // module spellings; both lower to `MakeRange`.

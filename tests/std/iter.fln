@@ -1,0 +1,53 @@
+// 0.0.3 V07 std test: std.collection.iter (schematic iterator helpers).
+import std.io;
+import std.str;
+import std.arr;
+import std.collection.iter;
+
+func twice(x: int): int = x * 2
+
+func is_even(x: int): bool = x % 2 == 0
+
+func add(a: int, b: int): int = a + b
+
+func shout(s: string): string {
+    std.str.concat(s, "!")
+}
+
+func main() {
+    nums = [1, 2, 3, 4];
+
+    // map over [int] — output is a fresh array, source untouched.
+    doubled = std.collection.iter.map(nums, twice);
+    std.io.println(doubled[0] as string);
+    std.io.println(doubled[3] as string);
+    std.io.println(nums[0] as string); // source not consumed
+
+    // map over [string] — owned elements cross the call boundary as copies.
+    words = ["a", "b", "c"];
+    loud = std.collection.iter.map(words, shout);
+    std.io.println(loud[0]);
+    std.io.println(loud[2]);
+
+    // filter — keeps only elements where the predicate is true.
+    evens = std.collection.iter.filter(nums, is_even);
+    std.io.println(std.arr.len(clone evens) as string);
+    std.io.println(evens[0] as string);
+    std.io.println(evens[1] as string);
+
+    // fold — a single accumulator over the array.
+    total = std.collection.iter.fold(nums, 0, add);
+    std.io.println(total as string);
+
+    // take — the first min(n, len) elements.
+    two = std.collection.iter.take(nums, 2);
+    std.io.println(std.arr.len(clone two) as string);
+    std.io.println(two[0] as string);
+    std.io.println(two[1] as string);
+    over = std.collection.iter.take(nums, 99); // capped at len
+    std.io.println(std.arr.len(clone over) as string);
+
+    // take on a type-polymorphic source ([string]) — single type variable.
+    s2 = std.collection.iter.take(words, 1);
+    std.io.println(std.arr.len(clone s2) as string);
+}

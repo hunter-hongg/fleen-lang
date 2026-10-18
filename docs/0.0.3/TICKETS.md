@@ -10,7 +10,8 @@
 > V02 implemented (completion notes at the end of its section); V03 implemented
 > (completion notes at the end of its section); V04 implemented (completion notes at the end of
 > its section); **V05 implemented (project-mode e2e + privacy/cycle rejection green)**;
-> **V06 implemented (std library, intrinsics, schematic [T], VM tests + std e2e green — completion notes in the V06 section; V07+ not started)**.
+> **V06 implemented (std library, intrinsics, schematic [T], VM tests + std e2e green — completion notes in the V06 section)**;
+> **V07 implemented (std.collection.iter map/filter/fold/take as schematic inline-expanded builtins, tests/std/iter + iter_helpers e2e green — completion notes in the V07 section)**; V08+ not started.
 > Implementation order: the V-ticket feature slices (per the overview table); D5–D10's remaining
 > decision points freeze when their ticket opens.
 > **Split method**: unlike 0.0.2 (tickets cut **by compiler stage**, U01 Lex → U12 release),
@@ -767,9 +768,10 @@ push: ∀T. ([T], T) -> [T],
 ```
 - Hard rule (review gate): a push beyond one-call unification of table variables is rejected
   as 0.1.0 scope (generics)
-- `std.arr.get/set` are **pure Fleen** over `ArrLen`/`ArrGet` with an explicit bounds check
-  returning `Result` (errors are values, per DESIGN.md §8 — the VM `IndexOutOfRange` path
-  stays for the raw `a[i]` syntax only)
+- `std.arr.get/set/push` are **VM intrinsics** (not pure Fleen): they need deep-copy
+  element semantics and `Result` return types that would be complex to express in Fleen
+  source; the VM `IndexOutOfRange` path stays for the raw `a[i]` syntax only. `get`
+  returns `Result<T, string>` so the out-of-bounds case is a value, not a runtime crash
 
 ### std Fleen sources (highlights)
 - `std.collection.range.fln`:
@@ -862,6 +864,29 @@ pub func zip[T, U](xs: [T], ys: [U]): [[T]];   // ⚠ see design note
 cargo test
 cargo fln tests/e2e/valid/iter_helpers.fln
 ```
+
+> **Implemented** (2026-10-18). `std.collection.iter` `map` / `filter` / `fold` / `take`
+> landed as schematic builtins expanded **inline in the compiler** — no VM/verify/opcode
+> change (the compile-only nature the overview table promised). `zip` is dropped for 0.0.3
+> (no tuples, per the ticket's review note). fmt/clippy/tests/doc green; all 0.0.1–0.0.2 plus
+> V06 e2e byte-for-byte; `tests/std/iter.fln` green. Deviations, recorded:
+> - **"Pure Fleen, zero compiler changes" was not literally achievable**: 0.0.3 Fleen source
+>   cannot spell a polymorphic `map[T,U]` (no generics), and the ticket's own last bullet
+>   already routed these through the schematic table (PLAN §3.5.2 names `std.collection.iter`
+>   as a schematic consumer). They are therefore **schematic builtin table entries** with a new
+>   `BuiltinLowering::InlineIter`, whose calls `lower` expands into a loop. `infer.rs` stays
+>   free of std special cases (the DoD grep holds).
+> - **Two type variables**: `map`/`fold` are the schematic mechanism's first multi-variable
+>   users (`T0`, `T1`). `collect_bindings`/`substitute` already keyed by `Var(n)` and recursed
+>   into `Type::Func`, so only tests were missing — four added (`typeck/tests.rs`), including a
+>   cross-variable conflict case.
+> - **The inline expansion builds the output with `std.arr.push`** (a builtin always
+>   registered in `LowerCtx::new`, so the user need not `import std.arr`), each `map`/`take`
+>   element `ArrGet`-copied (so owned element types cross the call boundary as deep copies and
+>   the source array is never consumed, D3/D4). `fold` uses a single accumulator slot. The loop
+>   uses the `lower_for` head-block shape so entry/back-edge stack depths agree (the V04 fix);
+>   the compiler's output passes verify (full-chain smoke, standing practice).
+> - `take` caps the count at `min(len, n)` with a three-block cap before the loop.
 
 ---
 

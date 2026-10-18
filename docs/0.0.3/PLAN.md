@@ -7,9 +7,9 @@
 > allocation, §10 versioning rules), the reserved grammar in `SYNTAX.ebnf` (`import_decl`,
 > `struct_literal`, `array_type`, field access), and the planning conversation of 2026-10-11
 > (four-item scope: struct/arrays, for+iterators, module system, flint + std).
-> **Status**: **In progress — V01–V06 implemented** (`FileId`/`SourceMap`, `struct`, `[T]`
-> arrays, `for` + `Range`, bytecode v3, modules / `pub`, the `std` library). V07+ (std iterator
-> helpers, `flint`) remain planned.
+> **Status**: **In progress — V01–V07 implemented** (`FileId`/`SourceMap`, `struct`,
+> `[T]` arrays, `for` + `Range`, bytecode v3, modules / `pub`, the `std` library, and the
+> `std.collection.iter` iterator helpers). V08+ (`flint`) remain planned.
 > Decision points D1–D8 (aggregation, modules, prelude, std) are finalized and reflected in
 > `DESIGN.md`/`BYTECODE.md`; D9–D10 (flint, bytecode allocation) are still ahead of implementation.
 > Spec documents are kept in sync per ticket as each V-slice lands (see `TICKETS.md` for the

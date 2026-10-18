@@ -1,0 +1,31 @@
+// 0.0.3 V07 std library: `collection.iter` — eager iterator helpers (F4).
+//
+// `map` / `filter` / `fold` / `take` are schematic builtins: the compiler
+// resolves the single type variables per call site and expands each call
+// **inline** (there is no runtime call, and — without traits — no iterator
+// object). This module's header is the API contract; the real signatures
+// live in `typeck/builtins.rs` (the 0.0.3 V06 schematic mechanism, extended
+// to two type variables for `map`/`fold`).
+//
+// All helpers are **eager** — arrays in, arrays out (or, for `fold`, a
+// scalar out). Lazy iterators need user-facing generics and wait for 0.1.0.
+//
+//     import std.collection.iter;
+//
+//     xs = [1, 2, 3, 4];
+//     doubled = std.collection.iter.map(xs, twice);      // [2, 4, 6, 8]
+//     evens   = std.collection.iter.filter(xs, is_even); // [2, 4]
+//     total   = std.collection.iter.fold(xs, 0, add);    // 10
+//     head    = std.collection.iter.take(xs, 2);         // [1, 2]
+//
+//   where `twice`, `is_even` and `add` are ordinary `func`s.
+//
+// Ownership: iterating reads elements as **copies** (bounds-checked deep
+// copies for owned element types, D3/D4), so the source array is never
+// consumed and the function arguments never *receive* the originals — the
+// `move`/`clone` rules of a normal call do not apply to the element flowing
+// into `f`. The result array is a fresh value, built incrementally with
+// `std.arr.push`.
+//
+// `zip` is intentionally NOT in 0.0.3: it needs a two-element pair, and
+// 0.0.3 has no tuples (the V07 review decision; revisit with tuples, 0.1.0).

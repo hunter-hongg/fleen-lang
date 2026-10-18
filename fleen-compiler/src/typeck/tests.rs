@@ -443,6 +443,18 @@ fn check_builtin_print_function_value_rejected() {
     );
 }
 
+// 0.0.3 V06: `std.io.println` shares the `(string...) -> unit` signature
+// with `print` (D8): non-string args are rejected at compile time.
+#[test]
+fn check_builtin_println_wrong_arg() {
+    let result =
+        crate::compile("import std.io;\nfunc main(): int {\n    std.io.println(1);\n    0\n}\n");
+    assert!(
+        result.is_err(),
+        "std.io.println with non-string arg should fail to compile"
+    );
+}
+
 // ========== Cast: UnsupportedCast (0.0.2 U13, PLAN §8.1) ==========
 //
 // The 0.0.2 whitelist is scalar (int/float/bool) → string only; everything
@@ -1989,8 +2001,105 @@ fn std_arr_push_type_mismatch_does_not_compile() {
 }
 
 #[test]
+fn iter_helpers_two_type_variables_substitute_independently() {
+    // 0.0.3 V07: `map`/`fold` carry *two* type variables (T0, T1) — the
+    // schematic mechanism's first multi-variable users. Each substitutes
+    // independently at one call site.
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.collection.iter.map").expect("iter.map must be a builtin");
+    // map([int], (int) -> string) ->> [string]: T=Var(0)=int, U=Var(1)=string.
+    let resolved = resolve_schematic_call(
+        &sig,
+        &[
+            Type::Array(Box::new(Type::Int)),
+            Type::Func(vec![Type::Int], Box::new(Type::String)),
+        ],
+    )
+    .expect("map resolves arity-wise");
+    assert_eq!(
+        resolved.ret_type,
+        Type::Array(Box::new(Type::String)),
+        "map([int], (int)->string) must return [string]"
+    );
+    assert!(resolved.conflict.is_none(), "no conflict expected");
+
+    // fold([string], "", (string, string) -> string) ->> string.
+    let fold = find_builtin("std.collection.iter.fold").expect("iter.fold must be a builtin");
+    let resolved = resolve_schematic_call(
+        &fold,
+        &[
+            Type::Array(Box::new(Type::String)),
+            Type::String,
+            Type::Func(vec![Type::String, Type::String], Box::new(Type::String)),
+        ],
+    )
+    .expect("fold resolves arity-wise");
+    assert_eq!(
+        resolved.ret_type,
+        Type::String,
+        "fold returns its accumulator type"
+    );
+    assert!(resolved.conflict.is_none(), "no conflict expected");
+}
+
+#[test]
+fn iter_helpers_two_variable_conflict_is_detected() {
+    // Var(0) bound to `int` through the array, then to `string` through the
+    // function's parameter: the element type of `f` clashes with the array.
+    use crate::typeck::builtins::{find_builtin, resolve_schematic_call};
+    use crate::typeck::typed_hir::Type;
+
+    let sig = find_builtin("std.collection.iter.map").expect("iter.map must be a builtin");
+    let resolved = resolve_schematic_call(
+        &sig,
+        &[
+            Type::Array(Box::new(Type::Int)),
+            Type::Func(vec![Type::String], Box::new(Type::String)),
+        ],
+    )
+    .expect("map resolves arity-wise");
+    assert!(
+        resolved.conflict.is_some(),
+        "map([int], (string)->string) must report a Var(0) conflict"
+    );
+}
+
+#[test]
+fn iter_map_compiles_through_full_pipeline() {
+    // A two-variable schematic helper end-to-end: typeck, inline lowering,
+    // and codegen all accept it (verify/execution is covered by the e2e
+    // `iter_helpers.fln` runner).
+    let bc = crate::compile(
+        "import std.io;\nimport std.collection.iter;\n\
+         func f(x: int): string = \"n\";\n\
+         func main(): int {\n    \
+             std.io.println(std.collection.iter.map([1, 2], f)[1]);\n    \
+         0\n}\n",
+    )
+    .expect("map([int], (int)->string) should compile through the full pipeline");
+    let _ = bc;
+}
+
+#[test]
+fn iter_map_function_arg_type_mismatch_does_not_compile() {
+    // `f` takes a `string`, but the array is `[int]`: Var(0) clashes and
+    // typeck rejects the release — the same `ArrayTypeMismatch` a bad
+    // `std.arr.push` reports.
+    let result = crate::compile(
+        "import std.collection.iter;\n\
+         func f(s: string): string = \"x\";\n\
+         func main(): int {\n    std.collection.iter.map([1, 2], f);\n    0\n}\n",
+    );
+    assert!(
+        result.is_err(),
+        "map([int], (string)->string) should fail to compile"
+    );
+}
+
+#[test]
 fn range_wrong_arity_at_typeck_level() {
-    // range(5, 6) — range takes 1 arg, not 2.
     let errs = compile_err("func main(): int {\n    range(5, 6);\n    0\n}\n");
     assert!(
         err_kinds(&errs)

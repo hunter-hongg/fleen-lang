@@ -1,0 +1,24 @@
+// 0.0.3 V07 std test: std.collection.iter (schematic iterator helpers).
+import std.io;
+import std.arr;
+import std.collection.iter;
+
+func square(x: int): int = x * x
+
+func is_even(x: int): bool = x % 2 == 0
+
+func add(a: int, b: int): int = a + b
+
+func main() {
+    // map → filter → fold chain: [0..4] squared, kept if even, summed.
+    squares = std.collection.iter.map([0, 1, 2, 3, 4], square);
+    evens = std.collection.iter.filter(squares, is_even);
+    total = std.collection.iter.fold(evens, 0, add);
+    std.io.println(total as string);
+    std.io.println(std.arr.len(clone evens) as string);
+
+    // take can also cap a range-shaped prefix of an array literal.
+    head = std.collection.iter.take([7, 8, 9, 10], 3);
+    std.io.println(std.arr.len(clone head) as string);
+    std.io.println(head[2] as string);
+}

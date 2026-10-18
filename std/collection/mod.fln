@@ -1,4 +1,4 @@
 // 0.0.3 V06 std library: `collection` module root.
 //
-// Import the leaf modules directly, e.g. `import std.collection.range;`.
-// There is no re-export mechanism in 0.0.3.
+// Import the leaf modules directly, e.g. `import std.collection.iter;` or
+// `import std.collection.range;`. There is no re-export mechanism in 0.0.3.
