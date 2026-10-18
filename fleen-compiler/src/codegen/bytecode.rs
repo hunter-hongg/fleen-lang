@@ -18,11 +18,29 @@ impl fmt::Display for ConstId {
 /// live in a `HashMap` (`f64` is not `Eq`/`Hash` on its own). Consequence:
 /// `0.0` and `-0.0` are distinct constants, and NaNs with different bit
 /// patterns are distinct — this is intentional (bit-exact interning).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Const {
     Int(i64),
     Float(f64),
     Str(Box<str>),
+}
+
+impl PartialEq for Const {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Const::Int(a), Const::Int(b)) => a == b,
+            // Bit-exact, *not* `f64::eq`: `0.0 == -0.0` under `f64`, but the
+            // `Hash` impl below hashes floats by `to_bits()`. Equality and
+            // hashing must agree, otherwise `ConstPool::intern` returns the
+            // wrong existing id whenever the two keys land in the same bucket
+            // — which depends on the map's per-process random seed, i.e. a
+            // nondeterministic dedup (observed as a flaky
+            // `float_neg_zero_and_zero_are_distinct_constants` failure).
+            (Const::Float(a), Const::Float(b)) => a.to_bits() == b.to_bits(),
+            (Const::Str(a), Const::Str(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl Eq for Const {}

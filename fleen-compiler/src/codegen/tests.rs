@@ -334,6 +334,26 @@ fn float_neg_zero_and_zero_are_distinct_constants() {
     assert_eq!(a, c);
 }
 
+/// Regression for a nondeterministic `ConstPool::intern` dedup: the pool's
+/// `Eq` used `f64::eq` (`0.0 == -0.0`) while `Hash` used `to_bits()`, so
+/// `HashMap::get` returned the wrong entry whenever the two keys landed in
+/// the same bucket — and bucket placement depends on the map's per-process
+/// random seed, so a single `intern` pair only failed occasionally. Many
+/// pools in one run sample many seeds, turning the flake into a deterministic
+/// failure on the unfixed impl.
+#[test]
+fn intern_distinguishes_neg_zero_across_pool_seeds() {
+    for _ in 0..512 {
+        let mut pool = ConstPool::new();
+        let zero = pool.intern(Const::Float(0.0));
+        let neg_zero = pool.intern(Const::Float(-0.0));
+        assert_ne!(zero, neg_zero, "-0.0 must not dedup onto 0.0");
+        // …and the second interning must be idempotent for both signs.
+        assert_eq!(pool.intern(Const::Float(-0.0)), neg_zero);
+        assert_eq!(pool.intern(Const::Float(0.0)), zero);
+    }
+}
+
 #[test]
 fn jump_and_jump_if_true_targets_resolve() {
     // block0: Jump -> block2 (skips block1); block1: ConstInt; Return;
