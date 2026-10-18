@@ -3,7 +3,7 @@
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and version semantics follow [SPEC.md](SPEC.md) §13 (`0.0.x` = early development, unstable API).
 
-## 0.0.3 — (unreleased) 🐚
+## 0.0.3 — Busy Beaver (2026-10-18) 🦫
 
 The release that gives values shape: aggregation types (`struct`, `[T]`), the `for` loop,
 the module system, the `std` library, and the `flint` package manager. Planning and design
@@ -56,6 +56,10 @@ decisions: [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md); implementation tickets:
 - **Compatibility gate** (from V09): committed v1 / v2 / v3 `.flnc` fixtures are decoded,
   verified and executed on the 0.0.3 verify/VM on every `cargo test`, every example under
   `examples/` is compiled·verified·run, and the whole §8 test matrix is green
+- **Fixed**: constant-pool interning is now truly bit-exact — `Const`'s `PartialEq` compared
+  floats with `f64::eq` (`0.0 == -0.0`) while its `Hash` used `to_bits()`, a contract
+  violation that could collapse `0.0` and `-0.0` onto one pool entry depending on the map's
+  random seed (a seed-dependent test flake made it observable)
 - `IndexOutOfRange` runtime error (with source span)
 - Verify gains the `StructNew`/`ArrNew` operand-derived arity checks and the v3-opcode gate
   (a v3 opcode in a v1/v2 module is rejected)

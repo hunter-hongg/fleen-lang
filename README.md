@@ -5,8 +5,8 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.3 · aggregation and organization** — the `struct` / `[T]` / `for` +
-> `Range` / modules / `std` / `flint` release, complete (V01–V10; built on
+> Current version **0.0.3 · Busy Beaver 🦫 · aggregation and organization** — the `struct` /
+> `[T]` / `for` + `Range` / modules / `std` / `flint` release, complete (V01–V10; built on
 > **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
 
 ## Language at a Glance
