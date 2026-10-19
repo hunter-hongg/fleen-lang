@@ -111,9 +111,32 @@ claim was plausible but false.
 **Root cause**: pattern-matching ("early repo has Chinese commits" ⇒ "this one
 does too") instead of inspecting the specific object.
 
+**How exactly it misfired** (reconstructed after the user pushed back):
+
+1. It is **true** that this repo's history contains many Chinese-message
+   commits — the early 0.0.1/0.0.2 batch (`cabb264`, `86d1708`, `7fcabc36`,
+   `16e4908`, `ff8ca4858`, …), before the "translate all Chinese content to
+   English" cleanup (`2e41e9d`).
+2. The agent then **transferred that true fact about "the repo" onto one
+   specific commit** (`44fe842`, `chore: 0.0.3 release prep`) and asserted it
+   had a Chinese body — without ever running `git log -1 --format=%B 44fe842`.
+3. The immediate evidence contradicting the claim was already on screen: the
+   `git log --oneline` output showed that commit's **subject in English**, yet
+   the agent did not let that stop the claim — the memory of "repo has Chinese
+   commits" outranked the visible subject.  That is the failure shape to watch
+   for: a general, plausible memory overrides a directly-observable,
+   contradictory datum.
+
+Consequence: the user acted on the false premise ("改掉" / fix it), and the
+back-and-forth was only resolved by finally inspecting the object.  The lesson
+for the machine: **the visible contradiction is the signal to check, not the
+signal to plow on.**
+
 **Rule going forward**:
 - Before asserting anything about a specific commit/revision, run
   `git log -1 --format=%B <ref>` (full message, not just subject).
+- When an on-screen fact conflicts with a remembered one, trust the on-screen
+  fact and re-check — a plausible memory is weaker than a visible datum.
 - Distinguish "checked" claims from "assumed" claims out loud.
 
 **Closed when**: no repo/commit assertion is made without having run the command
