@@ -25,6 +25,7 @@ fleen/
 │   ├── BYTECODE.md         # bytecode format specification
 │   └── 0.0.1/ 0.0.2/ 0.0.3/  # per-milestone plans, tickets and decision records
 ├── examples/               # runnable examples, grouped by release
+├── LESSON.md               # behavior lessons — see §LESSON.md below
 ├── CHANGELOG.md            # version history
 ├── README.md               # user-facing overview and quick start
 ├── fleen-compiler/         # compiler crate
@@ -373,6 +374,29 @@ pub fn parse_expr(tokens: &mut TokenStream) -> Result<Expr, ParseError> { ... }
 // FIXME: this edge case is not handled
 // SAFETY: this unsafe is safe, because...
 ```
+
+### LESSON.md (Behavior Lessons)
+
+`LESSON.md` is the operating record of the coding agent's **process/behavior
+mistakes** on this repo — the "don't do that again" list.  It is separate from
+the docs (`docs/`) because it records *how work is done*, not *what the product
+is*.
+
+Rules:
+- **Read `LESSON.md` before planning or editing docs/commits.**  Each entry
+  is a specific past failure plus the rule that prevents it.
+- The lessons are the agent's contract with the maintainer: they exist so a
+  mistake is not repeated, not as a changelog of blame.
+- They **do not override** any SPEC rule — they exist to help keep SPEC rules
+  (e.g. "English commit messages", "verify before asserting").  Where a lesson
+  conflicts with SPEC, SPEC wins.
+- Entries are append-only once merged; a lesson is marked resolved only by a
+  structural fix (a guard, a checklist item), not by elapsed time.
+
+Typical triggers for a new lesson: writing files the user didn't ask for,
+choosing "the easy fork today" to defer a real decision, asserting a bytecode
+value / commit fact that wasn't checked against the authoritative source
+(BYTECODE.md, `git log -1 --format=%B`).
 
 ---
 
