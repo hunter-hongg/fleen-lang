@@ -325,6 +325,14 @@ impl Parser {
             return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
         }
 
+        // 0.0.4 F1: `async func` — the `async` modifier introduces a func
+        // declaration (so it is statement-startable, unlike `await`).
+        if self.check(&crate::lexer::TokenKind::Async) {
+            let mut decl = self.parse_func_decl()?;
+            decl.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
+        }
+
         if self.check(&crate::lexer::TokenKind::Const) {
             let mut decl = self.parse_const_decl()?;
             decl.is_pub = is_pub;
@@ -568,6 +576,11 @@ impl Parser {
     fn parse_func_decl(&mut self) -> Result<ast::FuncDecl, ParseError> {
         let start = self.current().span.start;
 
+        // 0.0.4 F1: optional `async` modifier. Only `func` may follow it (so
+        // a stray `async const`/`async x` errors here, at `expect`, rather
+        // than being silently accepted).
+        let is_async = self.matches(&crate::lexer::TokenKind::Async);
+
         self.expect(&crate::lexer::TokenKind::Func, "expected `func`")?;
 
         let name = self.parse_ident()?;
@@ -619,6 +632,7 @@ impl Parser {
             body,
             span: self.span(start, end),
             is_pub: false,
+            is_async,
         })
     }
 
@@ -672,6 +686,22 @@ impl Parser {
 
     /// Parse a type annotation.
     fn parse_type(&mut self) -> Result<ast::Type, ParseError> {
+        // 0.0.4 F3: `Future<T>` — the async coroutine type. `Future` is *not*
+        // a reserved word (0.0.4 reserves only `async`/`await`/`channel`), so
+        // it is recognizable only in constructor position `Future<T>`: a bare
+        // `Future` falls through to the ordinary `Named` path (a struct named
+        // `Future` stays legal).
+        if let crate::lexer::TokenKind::Ident(name) = self.current_kind()
+            && name == "Future"
+            && matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Lt))
+        {
+            self.advance();
+            self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in Future type")?;
+            let inner = self.parse_type()?;
+            self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in Future type")?;
+            return Ok(ast::Type::Future(Box::new(inner)));
+        }
+
         let ty = match self.current_kind() {
             crate::lexer::TokenKind::IntType => {
                 self.advance();
@@ -840,6 +870,8 @@ impl Parser {
             // Check for declaration
             let is_decl = self.check(&crate::lexer::TokenKind::Const)
                 || self.check(&crate::lexer::TokenKind::Func)
+                // 0.0.4 F1: `async` at statement start opens an `async func`.
+                || self.check(&crate::lexer::TokenKind::Async)
                 || (self.check(&crate::lexer::TokenKind::Ident(String::new())) && {
                     matches!(
                         self.peek_kind(1),
@@ -867,7 +899,9 @@ impl Parser {
                 if self.check(&crate::lexer::TokenKind::Const) {
                     let decl = self.parse_const_decl()?;
                     stmts.push(ast::Stmt::Decl(ast::Decl::Const(decl)));
-                } else if self.check(&crate::lexer::TokenKind::Func) {
+                } else if self.check(&crate::lexer::TokenKind::Func)
+                    || self.check(&crate::lexer::TokenKind::Async)
+                {
                     let decl = self.parse_func_decl()?;
                     stmts.push(ast::Stmt::Decl(ast::Decl::Func(decl)));
                 } else {

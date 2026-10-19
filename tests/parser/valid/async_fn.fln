@@ -1,0 +1,14 @@
+// 0.0.4 T02 (F1/F3): `async func` declarations, postfix `await`, and the
+// `Future<T>` type all parse. This only exercises the parser — typeck rules
+// (Future<T> ⇒ e await : T, AwaitNonFuture) are covered in tests/typeck.
+
+async func producer(ch: string) {
+    print(ch);
+}
+
+async func consumer(x: int, times: int): int {
+    total = x * times;
+    total
+}
+
+async func add(a: int, b: int): int = a + b

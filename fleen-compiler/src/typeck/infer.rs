@@ -56,6 +56,7 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
             }
             collect_named_type_refs(ret, f);
         }
+        ast::Type::Future(inner) => collect_named_type_refs(inner, f),
         ast::Type::Base(_) => {}
         ast::Type::Range => {}
     }
@@ -151,6 +152,7 @@ impl TypeChecker {
             ast::Type::Box(inner) => Type::Box(Box::new(self.convert_type(inner, span))),
             ast::Type::Ref(inner) => Type::Ref(Box::new(self.convert_type(inner, span))),
             ast::Type::Range => Type::Range,
+            ast::Type::Future(inner) => Type::Future(Box::new(self.convert_type(inner, span))),
             ast::Type::Named(name) => match self.struct_by_name.get(name) {
                 Some(&id) => {
                     let entry = &self.structs[id.0 as usize];
@@ -341,6 +343,9 @@ impl TypeChecker {
             },
             ast::Type::Array(_) | ast::Type::Box(_) | ast::Type::Ref(_) => false,
             ast::Type::Range => true, // Range is Copy: two ints (D5)
+            // F3: a Future owns its suspend state — never a Copy struct field
+            // (and cannot be a struct field at all; see codegen tags).
+            ast::Type::Future(_) => false,
             ast::Type::Result(ok, err) => {
                 self.ast_type_is_copy(ok, raw, in_progress)
                     && self.ast_type_is_copy(err, raw, in_progress)
@@ -393,6 +398,13 @@ impl TypeChecker {
                         self.convert_type(t, span)
                     })
                     .unwrap_or(Type::Unit);
+                // F1: an async fn's *caller* sees `Future<T>` (the body still
+                // returns `T`), so its call-site signature is wrapped here.
+                let ret_type = if func.is_async {
+                    Type::Future(Box::new(ret_type))
+                } else {
+                    ret_type
+                };
                 self.func_signatures
                     .insert(func.name.clone(), (param_types, ret_type));
                 self.user_func_names.insert(func.name.clone());
@@ -577,6 +589,7 @@ impl TypeChecker {
             body: typed_body,
             hir_id: func.hir_id,
             span: func.span,
+            is_async: func.is_async,
         })
     }
 
@@ -924,6 +937,8 @@ impl TypeChecker {
             ExprHir::Cast(inner, ty, span) => self.typeck_cast(*inner, ty, span),
             // 0.0.2 U04: `?` Result propagation.
             ExprHir::Question(operand, span) => self.typeck_question(*operand, span),
+            // 0.0.4 F2/F3: `e await` — drive a `Future<T>` to completion.
+            ExprHir::Await(operand, span) => self.typeck_await(*operand, span),
             ExprHir::AssignDeref {
                 name,
                 binding_id,
@@ -1942,6 +1957,26 @@ impl TypeChecker {
             ty: t.clone(),
             span,
         })
+    }
+
+    /// Check an `e await` expression (0.0.4 F2/F3): a `Future<T>` is driven
+    /// to completion and yields `T`. `await` on a non-Future is
+    /// `AwaitNonFuture`. Unlike `?`, `await` has no enclosing-return-type
+    /// legality condition — a synchronous caller may drive a future too
+    /// (PLAN §3.2).
+    fn typeck_await(&mut self, operand: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let typed_operand = self.typeck_expr(operand, None)?;
+        match typed_operand.ty() {
+            Type::Future(inner) => Ok(TypedExprHir::Await {
+                operand: Box::new(typed_operand),
+                ty: *inner,
+                span,
+            }),
+            other => {
+                self.add_error(TypeckErrorKind::AwaitNonFuture { found: other }, span);
+                Err(())
+            }
+        }
     }
 
     /// 0.0.2 U05 (PLAN §3.1.3 rule 2): a *bare* owned local value in a

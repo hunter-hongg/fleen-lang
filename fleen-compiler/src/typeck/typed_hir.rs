@@ -56,6 +56,9 @@ pub enum Type {
     /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
     /// (`range`/`range_from`); iterates `start..end` (end-exclusive). Copy.
     Range,
+    /// `Future<T>` (0.0.4 F3): a suspendable coroutine frame yielding `T`.
+    /// Non-Copy — it owns its suspended state and is driven once by `await`.
+    Future(Box<Type>),
     /// Type variable (0.0.3 V06): appears **only** in the schematic
     /// signatures of std intrinsics — never in user-visible syntax. A
     /// fresh `Var(n)` is created per call site, unified against the
@@ -84,6 +87,7 @@ impl Type {
             Type::Ref(inner) => format!("ref {}", inner.name()),
             Type::Struct(info) => info.name.to_string(),
             Type::Range => "Range".to_string(),
+            Type::Future(inner) => format!("Future<{}>", inner.name()),
             Type::Var(id) => format!("?T{}", id),
             Type::Unsupported(name) => name.clone(),
         }
@@ -109,7 +113,9 @@ impl Type {
             // per declaration by the struct-table pass (dependency order).
             Type::Struct(info) => info.copy,
             Type::Range => true, // D5: Range is Copy (two ints)
-            Type::Var(_)
+            // F3: a Future owns its suspended state — never Copy (driven once).
+            Type::Future(_)
+            | Type::Var(_)
             | Type::String
             | Type::Box(_)
             | Type::Array(_)
@@ -130,6 +136,9 @@ impl Type {
             Type::Result(t, e) => t.is_owned() || e.is_owned(),
             // A struct with any non-Copy field is an owned type (D2).
             Type::Struct(info) => !info.copy,
+            // F3: a Future owns its suspended coroutine frame; it is moved
+            // (e.g. into `std.async.run` or `await`), never shared.
+            Type::Future(_) => true,
             _ => false,
         }
     }
@@ -207,6 +216,9 @@ pub struct TypedFuncDeclHir {
     pub body: TypedFuncBodyHir,
     pub hir_id: HirId,
     pub span: Span,
+    /// `async func` (0.0.4 F1): **callers** see `Future<T>`; the body and
+    /// `ret_type` still describe the body's own `T`.
+    pub is_async: bool,
 }
 
 /// Function parameter in Typed HIR.
@@ -307,6 +319,13 @@ pub enum TypedExprHir {
     Cast(Box<TypedExprHir>, Span),
     /// `expr?` (0.0.2 U04: Result propagation; `ty` is the unwrapped payload `T`)
     Question {
+        operand: Box<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
+    /// `expr await` (0.0.4 F2/F3: drive a `Future<T>` to completion; `ty` is
+    /// the yielded `T`). The operand is consumed (a Future is driven once).
+    Await {
         operand: Box<TypedExprHir>,
         ty: Type,
         span: Span,
@@ -440,6 +459,7 @@ impl TypedExprHir {
             TypedExprHir::Neg(e) => e.ty(),
             TypedExprHir::Cast(_, _) => Type::String,
             TypedExprHir::Question { ty, .. } => ty.clone(),
+            TypedExprHir::Await { ty, .. } => ty.clone(),
             TypedExprHir::ResultCtor { ty, .. } => ty.clone(),
             TypedExprHir::Box(inner, _) => Type::Box(Box::new(inner.ty())),
             TypedExprHir::Deref(inner, _) => match inner.ty() {
@@ -490,6 +510,7 @@ impl TypedExprHir {
             TypedExprHir::Neg(e) => e.span(),
             TypedExprHir::Cast(_, s) => *s,
             TypedExprHir::Question { span, .. } => *span,
+            TypedExprHir::Await { span, .. } => *span,
             TypedExprHir::ResultCtor { span, .. } => *span,
             TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) => *s,
             TypedExprHir::AssignDeref { span, .. } => *span,

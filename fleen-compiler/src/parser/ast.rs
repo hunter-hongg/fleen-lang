@@ -73,6 +73,9 @@ pub struct FuncDecl {
     pub span: Span,
     /// Whether the declaration was prefixed with `pub` (0.0.3 V05).
     pub is_pub: bool,
+    /// Whether the declaration was prefixed with `async` (0.0.4 F1): the
+    /// function's *caller* sees `Future<T>` while the body still returns `T`.
+    pub is_async: bool,
 }
 
 /// Parameter in a function declaration.
@@ -132,6 +135,9 @@ pub enum Type {
     /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
     /// (`range`/`range_from`); iterates `start..end` (end-exclusive).
     Range,
+    /// `Future<T>` — the type of a suspended async coroutine (0.0.4 F3).
+    /// Non-Copy; owns the suspend state; driven once by `await`.
+    Future(Box<Type>),
     /// A named user type (a struct, 0.0.3 V02). Whether the name actually
     /// refers to a declared struct is resolved by typeck.
     Named(String),
@@ -187,6 +193,7 @@ impl fmt::Display for Type {
                 write!(f, "({},) -> {}", ps.join(", "), ret)
             }
             Type::Range => write!(f, "Range"),
+            Type::Future(inner) => write!(f, "Future<{}>", inner),
         }
     }
 }
@@ -265,6 +272,10 @@ pub enum Expr {
     Cast(Box<Expr>, Type, Span),
     /// `<expr>?` (0.0.2: Result propagation suffix)
     Question(Box<Expr>, Span),
+    /// `<expr> await` (0.0.4 F2: postfix future drive; `e: Future<T>` is
+    /// consumed and yields `T`). Binds with the tightest suffix group
+    /// (`() [i] .f await ?`), chaining left-to-right.
+    Await(Box<Expr>, Span),
     /// `func(args)`
     Call(Box<Expr>, Vec<Expr>),
     /// `arr[idx]` — span covers the whole `arr[idx]`, including the `]`.
@@ -320,7 +331,8 @@ impl Expr {
             | Expr::Box(_, s)
             | Expr::Deref(_, s)
             | Expr::Cast(_, _, s)
-            | Expr::Question(_, s) => *s,
+            | Expr::Question(_, s)
+            | Expr::Await(_, s) => *s,
             Expr::Call(f, _) => f.span(),
             Expr::Index(_, _, s) => *s,
             Expr::ArrayLit(l) => l.span,
@@ -459,6 +471,7 @@ impl fmt::Display for Expr {
             Expr::Deref(e, _) => write!(f, "(deref {})", e),
             Expr::Cast(e, ty, _) => write!(f, "({} as {})", e, ty),
             Expr::Question(e, _) => write!(f, "({}?)", e),
+            Expr::Await(e, _) => write!(f, "({} await)", e),
             Expr::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
             Expr::Ne(lhs, rhs) => write!(f, "({} != {})", lhs, rhs),
             Expr::Lt(lhs, rhs) => write!(f, "({} < {})", lhs, rhs),

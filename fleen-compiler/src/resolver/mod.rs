@@ -53,6 +53,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Array(el) | Type::Box(el) => type_contains_ref(el),
         Type::Result(ok, err) => type_contains_ref(ok) || type_contains_ref(err),
         Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
+        Type::Future(inner) => type_contains_ref(inner),
         Type::Range => false,
         Type::Base(_) => false,
         Type::Named(_) => false,
@@ -190,6 +191,8 @@ impl Resolver {
                 Box::new(self.resolve_type(ret, span)),
             ),
             Type::Named(name) => self.resolve_type_name(name, span),
+            // 0.0.4 F3: `Future<T>` recurses so a nested named type resolves.
+            Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, span))),
             Type::Base(_) | Type::Range => ty.clone(),
         }
     }
@@ -597,6 +600,7 @@ impl Resolver {
             body,
             hir_id,
             span: func.span,
+            is_async: func.is_async,
         })
     }
 
@@ -1012,6 +1016,7 @@ impl Resolver {
             Expr::Question(expr, span) => {
                 ExprHir::Question(Box::new(self.resolve_expr(*expr)?), span)
             }
+            Expr::Await(expr, span) => ExprHir::Await(Box::new(self.resolve_expr(*expr)?), span),
             Expr::Call(func, args) => {
                 let hir_func = self.resolve_expr(*func)?;
                 let hir_args: Result<Vec<_>, _> =

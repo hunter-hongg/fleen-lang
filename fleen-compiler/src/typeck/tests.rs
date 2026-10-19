@@ -2108,3 +2108,77 @@ fn range_wrong_arity_at_typeck_level() {
         "expected ArityMismatch, got {errs:?}"
     );
 }
+
+// ========== 0.0.4 async / await / Future<T> (T02) ==========
+
+#[test]
+fn async_func_decl_is_async() {
+    // An `async func` is recorded on the typed declaration.
+    let hir = compile_ok("async func gen(x: int): int = x + 1\n");
+    assert!(only_func(&hir).is_async);
+
+    let hir = compile_ok("func gen(x: int): int = x + 1\n");
+    assert!(!only_func(&hir).is_async);
+}
+
+#[test]
+fn async_fn_call_returns_future() {
+    // F1: the *caller* of an async fn sees `Future<T>`.
+    let hir = compile_ok("async func gen(x: int): int = x + 1\ngen(1);");
+    assert_eq!(hir.items.len(), 2);
+    let fut = match &hir.items[1] {
+        TypedHirItem::Expr(e) => e.ty(),
+        other => panic!("expected expr, got {other:?}"),
+    };
+    assert_eq!(fut, Type::Future(Box::new(Type::Int)));
+}
+
+#[test]
+fn async_func_body_still_returns_t() {
+    // F1: the async fn's local `ret_type` is `T`, not `Future<T>`.
+    let hir = compile_ok("async func gen(x: int): int = x + 1\n");
+    assert_eq!(only_func(&hir).ret_type.as_ref(), Some(&Type::Int));
+}
+
+#[test]
+fn await_unwraps_future() {
+    // F3 rule: `e: Future<T> ⇒ e await : T`.
+    let hir = compile_ok("async func gen(x: int): int = x + 1\nn = gen(2) await;");
+    let init = match &hir.items[1] {
+        TypedHirItem::Decl(TypedDeclHir::Var(v)) => &*v.init,
+        other => panic!("expected var decl, got {other:?}"),
+    };
+    assert_eq!(init.ty(), Type::Int);
+}
+
+#[test]
+fn await_in_async_fn_body() {
+    // An async fn may await internally; its body still returns `T`.
+    let hir = compile_ok(
+        "async func gen(x: int): int = x + 1\n\
+         async func outer(): int {\n    gen(1) await\n}\n",
+    );
+    assert_eq!(only_func(&hir).ret_type.as_ref(), Some(&Type::Int));
+    assert!(only_func(&hir).is_async);
+}
+
+#[test]
+fn await_non_future_is_error() {
+    // F3: awaiting a non-Future is `AwaitNonFuture`.
+    let errs = compile_err("n = 5 await;");
+    let want = TypeckErrorKind::AwaitNonFuture { found: Type::Int };
+    assert!(
+        errs.iter().any(|e| e.kind == want),
+        "expected AwaitNonFuture, got {errs:?}"
+    );
+}
+
+#[test]
+fn future_is_not_copy() {
+    // F3: a Future owns its suspend state — never Copy, always owned.
+    let fut = Type::Future(Box::new(Type::Int));
+    assert!(!fut.is_copy());
+    assert!(fut.is_owned());
+    // Copy classes are unchanged inside async fn: `int` stays Copy.
+    assert!(Type::Int.is_copy());
+}

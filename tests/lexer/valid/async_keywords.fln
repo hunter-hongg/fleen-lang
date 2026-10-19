@@ -1,0 +1,4 @@
+// 0.0.4 async keywords test (lexer only - not a valid program)
+// This file tests that `async` / `await` / `channel` are recognized by the
+// lexer as reserved words. It is NOT expected to parse successfully.
+async await channel

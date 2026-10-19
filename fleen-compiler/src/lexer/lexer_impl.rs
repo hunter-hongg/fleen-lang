@@ -312,6 +312,9 @@ impl<'a> Lexer<'a> {
             "clone" => TokenKind::Clone,
             "deref" => TokenKind::Deref,
             "as" => TokenKind::As,
+            "async" => TokenKind::Async,
+            "await" => TokenKind::Await,
+            "channel" => TokenKind::Channel,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -527,6 +530,37 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::Move);
         assert_eq!(tokens[1].kind, TokenKind::Clone);
         assert_eq!(tokens[2].kind, TokenKind::Deref);
+    }
+
+    #[test]
+    fn tokenize_async_keywords() {
+        // 0.0.4: `async` / `await` / `channel` are reserved words. They no
+        // longer lex as identifiers.
+        let tokens = tokenize("async await channel").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Async);
+        assert_eq!(tokens[1].kind, TokenKind::Await);
+        assert_eq!(tokens[2].kind, TokenKind::Channel);
+        assert_eq!(TokenKind::Async.keyword_str(), Some("async"));
+        assert_eq!(TokenKind::Await.keyword_str(), Some("await"));
+        assert_eq!(TokenKind::Channel.keyword_str(), Some("channel"));
+        // Metadata stays consistent with the reserved-word spelling.
+        assert!(TokenKind::Async.is_keyword());
+        assert!(TokenKind::Await.is_keyword());
+        assert!(TokenKind::Channel.is_keyword());
+        assert_eq!(TokenKind::Async.to_string(), "async");
+        assert_eq!(TokenKind::Await.to_string(), "await");
+        assert_eq!(TokenKind::Channel.to_string(), "channel");
+    }
+
+    #[test]
+    fn tokenize_async_keyword_prefix_identifiers() {
+        // 0.0.4 keywords must keep from swallowing longer identifiers that
+        // merely start with them (`channel_id` etc. stay identifiers).
+        let tokens = tokenize("asyncx awaiting channel_id awaitable").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "asyncx"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "awaiting"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "channel_id"));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "awaitable"));
     }
 
     #[test]

@@ -249,6 +249,14 @@ impl Parser {
                 let end = self.prev_span_end();
                 let start = expr.span().start;
                 expr = Expr::Question(Box::new(expr), self.span(start, end));
+            } else if self.matches(&TokenKind::Await) {
+                // 0.0.4 F2: postfix `await` — drives a `Future<T>` to
+                // completion, yielding `T`. Member of the tightest suffix
+                // group (`() [i] .f await ?`), so it chains and composes
+                // left-to-right with `?` (`e await?` = `(e await)?`).
+                let end = self.prev_span_end();
+                let start = expr.span().start;
+                expr = Expr::Await(Box::new(expr), self.span(start, end));
             } else {
                 break;
             }

@@ -167,6 +167,7 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
         TypedExprHir::Not(e) | TypedExprHir::Neg(e) => collect_expr(alloc, e),
         TypedExprHir::Cast(e, _) => collect_expr(alloc, e),
         TypedExprHir::Question { operand, .. } => collect_expr(alloc, operand),
+        TypedExprHir::Await { operand, .. } => collect_expr(alloc, operand),
         TypedExprHir::ResultCtor { value, .. } => collect_expr(alloc, value),
         TypedExprHir::Box(inner, _) => collect_expr(alloc, inner),
         TypedExprHir::Deref(inner, _) => collect_expr(alloc, inner),

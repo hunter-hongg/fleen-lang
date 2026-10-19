@@ -89,6 +89,8 @@ pub struct FuncDeclHir {
     pub body: FuncBodyHir,
     pub hir_id: HirId,
     pub span: Span,
+    /// `async func` (0.0.4 F1): caller sees `Future<T>`, body returns `T`.
+    pub is_async: bool,
 }
 
 /// Function parameter in HIR.
@@ -242,6 +244,8 @@ pub enum ExprHir {
     Cast(Box<ExprHir>, Type, Span),
     /// `<expr>?` (0.0.2 Result propagation; span covers operand and `?`)
     Question(Box<ExprHir>, Span),
+    /// `<expr> await` (0.0.4 F2: postfix future drive).
+    Await(Box<ExprHir>, Span),
     /// Function call
     Call(Box<ExprHir>, Vec<ExprHir>),
     /// Index access — span covers the whole `arr[idx]` (0.0.3 V03).
@@ -298,7 +302,8 @@ impl ExprHir {
             | ExprHir::Box(_, s)
             | ExprHir::Deref(_, s)
             | ExprHir::Cast(_, _, s)
-            | ExprHir::Question(_, s) => *s,
+            | ExprHir::Question(_, s)
+            | ExprHir::Await(_, s) => *s,
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(_, _, s) => *s,
             ExprHir::Field(o, _) => o.span(),

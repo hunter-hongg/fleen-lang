@@ -32,6 +32,8 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::Import
             | TokenKind::Pub
             | TokenKind::Struct
+            // 0.0.4 F1: `async` opens an `async func` declaration.
+            | TokenKind::Async
             | TokenKind::Ident(_)
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
@@ -327,6 +329,8 @@ mod tests {
             TokenKind::Choose,
             TokenKind::Import,
             TokenKind::Pub,
+            // 0.0.4 F1: `async` opens an `async func` declaration.
+            TokenKind::Async,
             TokenKind::Ident(String::new()),
             TokenKind::IntLit(0),
             TokenKind::FloatLit(0.0),
@@ -385,6 +389,12 @@ mod tests {
             TokenKind::Arrow,
             TokenKind::Eof,
             TokenKind::In,
+            // 0.0.4: `await` / `channel` are reserved words that cannot start
+            // a statement (non-expression-starting; rejected by the
+            // statement-entry guard, same as `as` / `ref`). `async` *can* —
+            // it opens an `async func` declaration (F1).
+            TokenKind::Await,
+            TokenKind::Channel,
         ];
         for k in no {
             assert!(!can_start_stmt(k), "{k} should not start a stmt");

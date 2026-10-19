@@ -62,6 +62,8 @@ pub enum TypeckErrorKind {
     /// `?` operand's error type differs from the function's error type (D6:
     /// exact equality; no error-type conversion in 0.0.2).
     QuestionTypeMismatch { expected: Type, found: Type },
+    /// `e await` where `e` is not a `Future<T>` (0.0.4 F3).
+    AwaitNonFuture { found: Type },
     /// `Ok(...)` / `Err(...)` with no context type to infer from (D6).
     CannotInferResultType { ctor: &'static str },
     /// A statement discards a `Result` value (Result may not be silently
@@ -273,6 +275,15 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`?` applies to a `Result<T, E>` value, found `{}`",
+                    found.name()
+                )
+            }
+            TypeckErrorKind::AwaitNonFuture { found } => {
+                write!(
+                    f,
+                    "`await` applies to a `Future<T>` value, found `{}`; \
+                     help: an async function call returns a `Future<T>` — \
+                     check the operand is a future you can drive",
                     found.name()
                 )
             }

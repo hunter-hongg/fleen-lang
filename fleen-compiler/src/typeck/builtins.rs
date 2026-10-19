@@ -438,6 +438,7 @@ fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
         Type::Array(elem) => Type::Array(Box::new(substitute(elem, subst))),
         Type::Box(inner) => Type::Box(Box::new(substitute(inner, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
+        Type::Future(inner) => Type::Future(Box::new(substitute(inner, subst))),
         Type::Struct(info) => Type::Struct(info.clone()),
         Type::Int
         | Type::Float

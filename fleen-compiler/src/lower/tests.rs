@@ -1868,6 +1868,7 @@ fn lower_for_range_desugar_uses_range_bounds_once() {
             }),
             hir_id: HirId(4),
             span,
+            is_async: false,
         }))],
         structs: Vec::new(),
         span,
@@ -1997,6 +1998,7 @@ fn make_helper_decl(name: &str, param_tys: &[Type], ret: Type) -> TypedHirItem {
         }),
         hir_id: HirId(0),
         span,
+        is_async: false,
     }))
 }
 
@@ -2040,6 +2042,7 @@ fn make_inline_iter_hir(
         }),
         hir_id: HirId(2),
         span,
+        is_async: false,
     })));
 
     TypedHir {

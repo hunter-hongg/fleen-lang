@@ -1,0 +1,29 @@
+// 0.0.4 T02 (F1/F3): type rules for async / await:
+// - an async fn's *caller* sees `Future<T>` (body still returns `T`);
+// - `e: Future<T> ⇒ e await : T`;
+// - `Future<T>` is used in type-annotation positions.
+
+async func gen(x: int): int {
+    x + 1
+}
+
+// A synchronous caller drives a future with `await` (runtime is T04–T06;
+// typeck only checks here).
+n = gen(2) await;
+
+// An async fn may await internally; the body still returns `T`.
+async func outer(): int {
+    gen(1) await
+}
+
+// Copy types stay Copy inside an async fn.
+async func accumulate(a: int, b: int): int {
+    s = a + b;
+    s
+}
+
+// `Future<T>` works in a user type annotation; a bare owned future must be
+// driven with `await` (moving it), which is what the ownership pass sees.
+async func two(): int = 2
+f: Future<int> = two();
+m = f await;

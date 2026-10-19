@@ -257,6 +257,102 @@ mod tests {
         }
     }
 
+    // ========== 0.0.4 async / await / Future<T> (T02) ==========
+
+    #[test]
+    fn parse_async_func_block_body() {
+        let ast = parse_str("async func producer(x: int) {\n    print(x);\n}\n");
+        assert!(matches!(
+            &ast.items[0],
+            Item::Decl(Decl::Func(f)) if f.is_async
+        ));
+    }
+
+    #[test]
+    fn parse_async_func_single_line() {
+        // Body still returns T; the async-ness is a modifier, not a type.
+        let ast = parse_str("async func add(a: int, b: int): int = a + b\n");
+        if let Item::Decl(Decl::Func(f)) = &ast.items[0] {
+            assert!(f.is_async);
+            assert!(matches!(f.body, FuncBody::SingleExpr(_)));
+        } else {
+            panic!("expected async func decl, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_pub_async_func() {
+        // `pub` and `async` both prefix a func; both are accepted together.
+        let ast = parse_str("pub async func f(): int = 1\n");
+        assert!(matches!(
+            &ast.items[0],
+            Item::Decl(Decl::Func(f)) if f.is_pub && f.is_async
+        ));
+    }
+
+    #[test]
+    fn parse_await_postfix_expr() {
+        let ast = parse_str("n = future await;\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(&*v.init, Expr::Await(_, _)));
+        } else {
+            panic!("expected var binding, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_await_composes_with_question() {
+        // `e await?` = `(e await)?` — await binds first, then `?` (0.0.4
+        // precedence: `() [i] .f await ?`, left-to-right).
+        let ast = parse_str("n = f() await?;\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(
+                &*v.init,
+                Expr::Question(inner, _) if matches!(**inner, Expr::Await(_, _))
+            ));
+        } else {
+            panic!("expected var binding, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_future_type_in_annotation() {
+        // `Future<T>` is parsed in type position; `Future` alone stays a
+        // `Named` type (it is not a reserved word, so a struct named `Future`
+        // remains legal).
+        let ast = parse_str("f: Future<int> = gen();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(
+                v.ty.as_ref(),
+                Some(Type::Future(inner)) if matches!(**inner, Type::Base(BaseType::Int))
+            ));
+        } else {
+            panic!("expected var binding, got {:?}", ast.items[0]);
+        }
+
+        // Bare `Future` (no `<...>`) stays a Named struct type.
+        let ast = parse_str("s: Future = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(v.ty.as_ref(), Some(Type::Named(n)) if n == "Future"));
+        } else {
+            panic!("expected var binding, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_future_return_type() {
+        // An async func's declared return type can itself be `Future<T>` in
+        // source (a user-specified annotation is passed through; typeck
+        // wraps the *body* type for the caller).
+        let ast = parse_str("async func f(a: int): Future<int> {\n    g(a)\n}\n");
+        if let Item::Decl(Decl::Func(f)) = &ast.items[0] {
+            assert!(f.is_async);
+            assert!(matches!(f.ret_type.as_ref(), Some(Type::Future(_))));
+        } else {
+            panic!("expected async func decl, got {:?}", ast.items[0]);
+        }
+    }
+
     // ========== Binary Operators ==========
 
     #[test]
@@ -1191,6 +1287,42 @@ func main() {
         } else {
             panic!("expected Expected error, got {:?}", err.kind);
         }
+    }
+
+    #[test]
+    fn async_keywords_are_not_identifiers() {
+        // 0.0.4: `await` / `channel` are reserved words that cannot start a
+        // statement. Unlike the prefix-statement keywords (`move`/`clone`/
+        // `box`, which can start an expression and thus reach
+        // `reject_keyword_binding_name`), these cannot start a statement, so
+        // they are caught by the statement/expr entry guards with their name
+        // in the diagnostic — the same path as `as` / `ref` (also
+        // non-expr-starting reserved words). `async` is excluded: since T02
+        // it *can* start a statement as the `async func` modifier (F1).
+        for src in ["await = 1;", "channel = 1;"] {
+            let err = parse_err(src);
+            assert!(
+                matches!(
+                    err.kind,
+                    ParseErrorKind::ExpectedSemiOrNewStmt { .. } | ParseErrorKind::Expected { .. }
+                ),
+                "src {src:?}: got unexpected error variant {:?}",
+                err.kind
+            );
+        }
+    }
+
+    #[test]
+    fn async_requires_func() {
+        // `async` must be followed by `func`; anything else is malformed.
+        // Reaching `parse_func_decl` means the guard accepted `async` as a
+        // statement start, and `parse_func_decl` then demands `func`.
+        let err = parse_err("async = 1;");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "`async` not followed by `func` must be an `Expected` error, got {:?}",
+            err.kind
+        );
     }
 
     #[test]

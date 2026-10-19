@@ -144,6 +144,14 @@ pub enum TokenKind {
     /// `as` keyword (0.0.2: type cast, F8 — scalar → string only in 0.0.2)
     As,
 
+    // Async keywords (0.0.4)
+    /// `async` keyword (0.0.4: marks a `func` as producing a `Future<T>`)
+    Async,
+    /// `await` keyword (0.0.4: postfix operator that drives a `Future<T>`)
+    Await,
+    /// `channel` keyword (0.0.4: first-class channel type constructor)
+    Channel,
+
     // Literals
     /// Integer literal (e.g., `42`)
     IntLit(i64),
@@ -255,6 +263,9 @@ impl TokenKind {
                 | TokenKind::Clone
                 | TokenKind::Deref
                 | TokenKind::As
+                | TokenKind::Async
+                | TokenKind::Await
+                | TokenKind::Channel
         )
     }
 
@@ -292,6 +303,9 @@ impl TokenKind {
             TokenKind::Clone => "clone",
             TokenKind::Deref => "deref",
             TokenKind::As => "as",
+            TokenKind::Async => "async",
+            TokenKind::Await => "await",
+            TokenKind::Channel => "channel",
             _ => return None,
         })
     }

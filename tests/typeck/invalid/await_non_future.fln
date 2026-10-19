@@ -1,0 +1,4 @@
+// 0.0.4 T02 (F3): `await` requires a `Future<T>` operand. Awaiting a plain
+// `int` is `AwaitNonFuture`.
+
+n = 5 await;

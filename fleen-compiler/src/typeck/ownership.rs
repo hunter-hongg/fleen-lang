@@ -369,6 +369,10 @@ impl<'a> Cx<'a> {
             | TypedExprHir::ResultCtor { value: inner, .. } => {
                 self.walk_expr(inner, false);
             }
+            // 0.0.4 F3: `e await` consumes the future (driven once), so the
+            // operand is a producing position — a bare owned future is an
+            // implicit move into `await`.
+            TypedExprHir::Await { operand, .. } => self.walk_expr(operand, true),
             TypedExprHir::Or(l, r)
             | TypedExprHir::And(l, r)
             | TypedExprHir::Eq(l, r)
@@ -752,6 +756,7 @@ fn scan_owned_local_uses(
         | TypedExprHir::ResultCtor { value: inner, .. }
         | TypedExprHir::Box(inner, _)
         | TypedExprHir::Deref(inner, _)
+        | TypedExprHir::Await { operand: inner, .. }
         | TypedExprHir::Assign { rhs: inner, .. }
         | TypedExprHir::AssignDeref { rhs: inner, .. } => {
             scan_owned_local_uses(inner, out, globals, global_names, entry);

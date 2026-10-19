@@ -8,20 +8,40 @@
 
 ## T01 — Keywords + lexer (F1/F7)
 
-- [ ] Reserve `async`, `await`, `channel` in the lexer keyword table
-- [ ] `ReservedWord` diagnostic for 0.0.3 identifiers named `async`/`await`/`channel`
-- [ ] Tests: `tests/lexer/{valid,invalid}/async_*`
+- [x] Reserve `async`, `await`, `channel` in the lexer keyword table
+- [x] `TokenKind::{Async,Await,Channel}` wired through `is_keyword` / `keyword_str` / `Display`
+- [x] Reserved-word enforcement: reserving the words makes misuse surface at the
+      existing statement/expr entry guards (`expected … found async`)
+      — same path as `as` / `ref`; no new `ReservedWord` kind needed (0.0.4)
+- [x] Tests: lexer unit tests (keyword tokens, metadata, prefix-safety) +
+      `tests/lexer/valid/async_keywords.fln`; a *valid* file only — reserving a
+      word never fails tokenization, so there is no `invalid/async_*` lexer case
 
 **D1**: postfix `await` (`e await`) — matches Rust; keeps `Future<T>` passable.
+**Note**: because these are non-expression-starting words, the parser rejects
+them via the generic statement guard (as `as`/`ref` do), *not* via
+`reject_keyword_binding_name` (which only fires for prefix keywords that start
+an expression, e.g. `move`/`box`). Any prettier `keyword`-named diagnostic for
+new async positions belongs to T02 (parser).
 
 ---
 
 ## T02 — `async fn` AST + `Future<T>` type (F1/F3)
 
-- [ ] AST: `Func` + `is_async`, `ExprAwait`; `Future<T>` in the type system
-- [ ] Type rule: `e: Future<T> ⇒ e await : T`; `await` on non-Future → `AwaitNonFuture`
-- [ ] `not_copy(Future<T>)`; Copy classes unchanged inside async fn
-- [ ] Tests: `tests/parser` + `tests/typeck` async suites
+- [x] AST: `Func` + `is_async`, `ExprAwait`; `Future<T>` in the type system
+- [x] Type rule: `e: Future<T> ⇒ e await : T`; `await` on non-Future → `AwaitNonFuture`
+- [x] `not_copy(Future<T>)`; Copy classes unchanged inside async fn
+- [x] Tests: `tests/parser` + `tests/typeck` async suites
+
+**Notes (implementation)**: `Future` is **not** a reserved word (0.0.4 reserves
+only `async`/`await`/`channel`); it is recognized only in constructor position
+`Future<T>` in `parse_type` — a bare `Future` stays a `Named` struct type.
+`async` (prefixing `func`) is added to `can_start_stmt`; `await` remains
+non-statement-starting and is a postfix suffix in the `() [i] .f await ?` group
+(so `e await?` = `(e await)?`). An async fn's *caller* signature is wrapped in
+`Future<T>` in `collect_func_signatures`; the fn's own `ret_type`/body stay `T`.
+Async **lowering** is deliberately not wired yet — `lower_expr_into` rejects
+`TypedExprHir::Await` with `UnsupportedFeature` until T05.
 
 ---
 

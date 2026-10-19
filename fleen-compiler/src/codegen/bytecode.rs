@@ -162,6 +162,17 @@ impl FieldTypeTag {
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
             Type::Range => FieldTypeTag::Range,
+            // `Future` can never be a *struct field* (0.0.4): the disk-format
+            // tags are untouched (PLAN §6), and a suspendable coroutine frame
+            // is not serializable as a field. The Unit mapping keeps the
+            // match total; reaching it is a typeck/lower bug.
+            Type::Future(_) => {
+                debug_assert!(
+                    false,
+                    "Future type reached struct-field codegen: a Future cannot be a struct field"
+                );
+                FieldTypeTag::Unit
+            }
             // `Var` is only in std builtin signatures (V06); it is always
             // resolved to a concrete type before codegen ever runs.
             Type::Var(_) => {

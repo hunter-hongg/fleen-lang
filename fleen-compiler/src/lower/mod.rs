@@ -988,6 +988,18 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Question { operand, span, .. } => {
                 self.lower_question(fb, operand, *span)?;
             }
+            // 0.0.4 F2/F3: `e await`. Async lowering (AsyncStart/Suspend/
+            // Poll/Await, version 4) is T05 in docs/0.0.4/TICKETS.md; until
+            // then `await` is rejected eagerly rather than mis-produced.
+            // (T02 lands parser + typeck support only.)
+            TypedExprHir::Await { span, .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "await (async lowering lands in 0.0.4 T05)",
+                    },
+                    *span,
+                ));
+            }
             // 0.0.2 U06: Result constructors.
             TypedExprHir::ResultCtor {
                 ctor, value, span, ..
