@@ -66,6 +66,11 @@ pub enum RuntimeErrorKind {
     /// only path out; the CLI maps it to a bare `process::exit(code)`
     /// without rendering anything.
     Exit(i64),
+    /// A coroutine frame was resumed after it had already run to completion or
+    /// failed (0.0.4 T04, D1 — a `Future` is driven once).  Defensive: typeck
+    /// gives every `Future<T>` value a single owner, so reaching this needs
+    /// hand-written bytecode.
+    FutureNotResumable,
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -107,6 +112,9 @@ impl std::fmt::Display for RuntimeErrorKind {
                 write!(f, "index {index} out of range (array length {len})")
             }
             RuntimeErrorKind::Exit(code) => write!(f, "process exited with code {code}"),
+            RuntimeErrorKind::FutureNotResumable => {
+                write!(f, "future has already been driven and cannot be resumed")
+            }
         }
     }
 }

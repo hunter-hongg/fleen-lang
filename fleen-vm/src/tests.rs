@@ -2039,3 +2039,272 @@ fn std_arr_push_appends_element() {
         Value::Arr(Box::new([Value::Int(10), Value::Int(20), Value::Int(30),]))
     );
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T04 (D1): coroutine frame save/restore.
+//
+// No opcode drives these yet — `Suspend` lands with T05 — so the tests call
+// `suspend_top_frame` / `resume_frame` directly, exactly as the T05 dispatch
+// and the T06 executor will.
+// ---------------------------------------------------------------------------
+
+/// Byte offset of the instruction after the suspension point in
+/// `async_worker_func` — the `Const 1` that follows the first `IAdd`.
+const WORKER_RESUME_PC: usize = 9;
+
+/// The suspendable body the coroutine tests snapshot: with `params = 1`,
+/// `locals = 2` it computes `arg + 5` (the suspension point), then `+ 1`, then
+/// returns.
+///
+/// ```text
+/// 0: LoadLocal 0
+/// 3: Const 5
+/// 8: IAdd        <- suspend here, resume_pc = 9
+/// 9: Const 1
+/// 14: IAdd
+/// 15: Return
+/// ```
+fn async_worker_func() -> Func {
+    func(
+        enc(&[
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::IAdd, vec![]),
+            (Opcode::Const, u32b(2)),
+            (Opcode::IAdd, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        2,
+    )
+}
+
+/// `locals = 1`, `params = 0`: loads slot 0 and returns it.  Used to prove a
+/// nested `Value::Future` travels through a snapshot untouched.
+fn async_host_func() -> Func {
+    func(
+        enc(&[(Opcode::LoadLocal, u16b(0)), (Opcode::Return, vec![])]),
+        0,
+        1,
+    )
+}
+
+/// `[0] = unused entry, [1] = worker, [2] = host`.
+fn async_fixture() -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        version: 1,
+        constants: vec![Const::Str("main".into()), Const::Int(5), Const::Int(1)],
+        functions: vec![
+            func(
+                enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]),
+                0,
+                0,
+            ),
+            async_worker_func(),
+            async_host_func(),
+        ],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+/// Run the live frames until the innermost one returns.
+fn drive_frames(vm: &mut Vm) -> Result<(), RuntimeErrorKind> {
+    while !vm.frames.is_empty() {
+        vm.step()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn suspend_snapshots_locals_and_operands_and_detaches_frame() {
+    let mut vm = Vm::new(async_fixture());
+    vm.stack.push(Value::Int(10));
+    vm.call(FuncId(1), 1).expect("worker frame");
+    vm.step().unwrap(); // LoadLocal 0
+    vm.step().unwrap(); // Const 5
+    vm.step().unwrap(); // IAdd -> operand 15
+
+    let frame = vm.suspend_top_frame(WORKER_RESUME_PC).unwrap();
+
+    assert_eq!(frame.func, FuncId(1));
+    assert_eq!(frame.resume_pc, WORKER_RESUME_PC);
+    // The local area (slot 0 = the argument) and the operand suffix are both
+    // captured, in their own slots.
+    assert_eq!(frame.locals, vec![Value::Int(10), Value::Unit]);
+    assert_eq!(frame.operands, vec![Value::Int(15)]);
+    assert_eq!(frame.state, super::frame::FutureState::Resumable);
+    // Moved, not copied: the VM stack no longer holds the frame's region.
+    assert!(vm.stack.is_empty(), "frame region must leave the stack");
+    assert!(vm.frames.is_empty());
+}
+
+#[test]
+fn resume_rebuilds_frame_at_a_different_stack_depth() {
+    let mut vm = Vm::new(async_fixture());
+    vm.stack.push(Value::Int(10));
+    vm.call(FuncId(1), 1).unwrap();
+    for _ in 0..3 {
+        vm.step().unwrap();
+    }
+    let frame = vm.suspend_top_frame(WORKER_RESUME_PC).unwrap();
+
+    // Pollute the stack so the resume cannot land at the old base: the frame
+    // stores no `stack_base`, so slot addressing must be recomputed.
+    vm.stack.push(Value::Str("poller depth".into()));
+    vm.resume_frame(frame).unwrap();
+    assert_eq!(vm.frames.len(), 1);
+    assert_eq!(vm.frames[0].stack_base, 1);
+    assert_eq!(vm.frames[0].ip, WORKER_RESUME_PC);
+
+    drive_frames(&mut vm).unwrap();
+    // (10 + 5) + 1 — the value computed before the suspend survived it.
+    assert_eq!(vm.stack.pop().unwrap(), Value::Int(16));
+}
+
+#[test]
+fn cold_frame_starts_at_pc_zero_with_padded_locals() {
+    let mut vm = Vm::new(async_fixture());
+    let frame = super::frame::FutureFrame::new(FuncId(1), vec![Value::Int(2)], 2);
+    assert_eq!(frame.resume_pc, 0);
+    assert_eq!(frame.locals, vec![Value::Int(2), Value::Unit]);
+    assert!(frame.operands.is_empty());
+
+    vm.resume_frame(frame).unwrap();
+    drive_frames(&mut vm).unwrap();
+    assert_eq!(vm.stack.pop().unwrap(), Value::Int(8));
+}
+
+#[test]
+fn nested_future_survives_an_outer_snapshot() {
+    let inner = super::frame::FutureFrame::new(FuncId(1), vec![Value::Int(3)], 2);
+    let mut vm = Vm::new(async_fixture());
+    vm.call(FuncId(2), 0).unwrap(); // host frame, locals = [Unit]
+    vm.stack[0] = Value::Future(Box::new(inner.clone()));
+
+    let outer = vm.suspend_top_frame(0).unwrap();
+    assert_eq!(outer.locals, vec![Value::Future(Box::new(inner.clone()))]);
+
+    // Resume into a fresh VM at a different depth and read the inner future
+    // back out through the host body.
+    let mut vm2 = Vm::new(async_fixture());
+    vm2.stack.push(Value::Int(-1)); // depth offset
+    vm2.resume_frame(outer).unwrap();
+    drive_frames(&mut vm2).unwrap();
+    assert_eq!(
+        vm2.stack.pop().unwrap(),
+        Value::Future(Box::new(inner)),
+        "the inner frame must be restored exactly, not reconstructed"
+    );
+}
+
+#[test]
+fn suspend_without_a_live_frame_is_an_error() {
+    let mut vm = Vm::new(async_fixture());
+    assert_eq!(
+        vm.suspend_top_frame(0).unwrap_err(),
+        RuntimeErrorKind::StackUnderflow
+    );
+}
+
+#[test]
+fn resume_rejects_an_already_driven_future() {
+    use super::frame::FutureState;
+    let mut vm = Vm::new(async_fixture());
+    let done = super::frame::FutureFrame {
+        func: FuncId(1),
+        resume_pc: WORKER_RESUME_PC,
+        locals: vec![Value::Unit, Value::Unit],
+        operands: vec![],
+        state: FutureState::Completed(Value::Int(16)),
+    };
+    assert_eq!(
+        vm.resume_frame(done).unwrap_err(),
+        RuntimeErrorKind::FutureNotResumable
+    );
+    assert!(
+        vm.stack.is_empty() && vm.frames.is_empty(),
+        "no partial restore"
+    );
+
+    let failed = super::frame::FutureFrame {
+        func: FuncId(1),
+        resume_pc: WORKER_RESUME_PC,
+        locals: vec![Value::Unit, Value::Unit],
+        operands: vec![],
+        state: FutureState::Failed(RuntimeError::new(RuntimeErrorKind::DivisionByZero)),
+    };
+    assert_eq!(
+        vm.resume_frame(failed).unwrap_err(),
+        RuntimeErrorKind::FutureNotResumable
+    );
+}
+
+#[test]
+fn resume_validates_the_snapshot_against_the_function() {
+    use super::frame::{FutureFrame, FutureState};
+    let mut vm = Vm::new(async_fixture());
+    let bad_locals = FutureFrame {
+        func: FuncId(1),
+        resume_pc: 0,
+        locals: vec![Value::Unit], // worker has 2 local slots
+        operands: vec![],
+        state: FutureState::Resumable,
+    };
+    assert_eq!(
+        vm.resume_frame(bad_locals).unwrap_err(),
+        RuntimeErrorKind::StackShape
+    );
+
+    let bad_func = FutureFrame {
+        func: FuncId(99),
+        resume_pc: 0,
+        locals: vec![],
+        operands: vec![],
+        state: FutureState::Resumable,
+    };
+    assert_eq!(
+        vm.resume_frame(bad_func).unwrap_err(),
+        RuntimeErrorKind::FuncOutOfRange(FuncId(99))
+    );
+}
+
+#[test]
+fn resume_counts_toward_the_call_depth_limit() {
+    let mut vm = Vm::new(async_fixture());
+    vm.frames = vec![
+        super::frame::CallFrame {
+            func: FuncId(0),
+            ip: 0,
+            stack_base: 0,
+        };
+        super::vm::MAX_CALL_DEPTH
+    ];
+    assert_eq!(
+        vm.resume_frame(super::frame::FutureFrame::new(
+            FuncId(1),
+            vec![Value::Int(1)],
+            2
+        ))
+        .unwrap_err(),
+        RuntimeErrorKind::CallDepthExceeded
+    );
+}
+
+#[test]
+fn future_value_is_opaque_and_does_not_grow_value() {
+    let v = Value::Future(Box::new(super::frame::FutureFrame::new(
+        FuncId(1),
+        vec![Value::Int(1)],
+        2,
+    )));
+    assert_eq!(v.to_string(), "<future>");
+    // The frame lives behind a Box: the snapshot must not inflate every operand
+    // slot, array element and struct field the VM touches.
+    assert!(
+        std::mem::size_of::<Value>() <= 24,
+        "Value grew to {} bytes — FutureFrame must stay boxed",
+        std::mem::size_of::<Value>()
+    );
+}

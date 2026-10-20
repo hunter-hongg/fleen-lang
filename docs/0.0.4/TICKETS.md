@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T03 implemented; T04–T10 planned.**
+> **Status: IN PROGRESS — T01–T04 implemented; T05–T10 planned.**
 
 ---
 
@@ -86,10 +86,52 @@ either accept and document that limit or tighten D5.
 
 ## T04 — VM coroutine frame (F4; D1)
 
-- [ ] `FutureFrame { func, operand_stack, resume_pc, live_locals }`
-- [ ] `Suspend` snapshot / resume from `resume_pc`
-- [ ] `Future` value tag (`0x0D`)
-- [ ] Tests: `tests/vm/async_valid` coroutine save/restore
+- [x] `FutureFrame { func, resume_pc, locals, operands, state }`
+- [x] `Suspend` snapshot / resume from `resume_pc`
+- [x] `Future` runtime `Value` variant (no disk tag — see notes)
+- [x] Tests: coroutine save/restore (`fleen-vm/src/tests.rs`)
+
+**Notes (implementation)**: the frame is **location-independent** — `resume_pc`
+is an offset into the function's own `code`, `locals` / `operands` are owned
+values, and unlike `CallFrame` a snapshot stores **no `stack_base`**. That is
+what lets `Vm::resume_frame` restore the frame at a different operand-stack
+depth (and, from T06, on a different worker thread). `suspend_top_frame` *moves*
+the frame region out of the shared stack (never copies), so Rust `Drop` is the
+release path if the future is dropped instead of resumed; the frame must be the
+innermost one, since `Suspend` is an instruction of the async function itself.
+
+Deviations from the card as written, all deliberate:
+
+- **No `0x0D` value tag.** Runtime `Value` variants are not serialized and carry
+  no numeric tag (PLAN §6, BYTECODE.md §3.2; see LESSON L3 — this exact draft
+  number was already caught once as an invention). T04 adds
+  `Value::Future(Box<FutureFrame>)` only: const-pool tags, `FieldTypeTag`, the
+  `.flnc` tables and the module version stay untouched. The `Box` is load-bearing:
+  inlining two `Vec`s plus the state would inflate every operand slot, array
+  element and struct field (`size_of::<Value>()` is pinned by a test).
+- **Tests are unit-level, not `tests/vm/async_valid` fixtures.** There is no
+  opcode that can reach a suspend point until T05, and no `.fln` can drive the
+  mechanics; the fixture directory lands with T05/T06.
+- `live_locals` became the full local area (`Func::locals` slots). Liveness
+  metadata does not exist anywhere in the pipeline, and D1 already accepts the
+  whole-frame snapshot; a liveness pass would be a separate optimization.
+
+The struct also carries a `FutureState` the original card omitted:
+`Resumable` (covers the not-yet-started frame `FutureFrame::new` produces —
+`resume_pc` 0, arguments padded to `Func::locals` — and a suspended one),
+`Completed(Value)` and `Failed(RuntimeError)`. A `Future` is driven once
+(PLAN §3.3), so resuming a completed/failed frame is the defensive
+`RuntimeErrorKind::FutureNotResumable`; `Failed` stores the error captured while
+the coroutine frame was live, so the T06 re-raise at the awaiting site keeps its
+location. `resume_pc` is `usize`, mirroring `CallFrame::ip`, rather than the
+`u32` in PLAN §4.1's sketch.
+
+Still open for T05/T08: `clone` of a `Future` is currently reachable (typeck
+treats it as an ordinary owned type, and `CloneGlobal` deep-copies on every
+global read), which would snapshot a suspended coroutine. `Value` derives
+`Clone`/`PartialEq` regardless, so the language rule and the defensive backstop
+are T08's to settle; D2 already guarantees no `ref` handle can appear in a
+snapshot, checked by a `debug_assert` here.
 
 ---
 

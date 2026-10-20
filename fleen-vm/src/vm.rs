@@ -4,10 +4,10 @@ use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
 
 use crate::error::{RuntimeError, RuntimeErrorKind};
 use crate::fmt::fmt_scalar;
-use crate::frame::CallFrame;
+use crate::frame::{CallFrame, FutureFrame, FutureState};
 use crate::value::Value;
 
-const MAX_CALL_DEPTH: usize = 1024;
+pub(crate) const MAX_CALL_DEPTH: usize = 1024;
 
 /// The virtual machine.
 ///
@@ -18,8 +18,11 @@ const MAX_CALL_DEPTH: usize = 1024;
 /// [`RuntimeErrorKind::ImmutableGlobal`].
 pub struct Vm {
     module: Module,
-    stack: Vec<Value>,
-    frames: Vec<CallFrame>,
+    /// Shared operand stack.  `pub(crate)` so the coroutine snapshot/restore
+    /// helpers (T04) and their tests can move frame regions in and out of it.
+    pub(crate) stack: Vec<Value>,
+    /// Live call frames, innermost last.
+    pub(crate) frames: Vec<CallFrame>,
     globals: Vec<Value>,
     /// The host program's command-line arguments (0.0.3 V06), served to
     /// Fleen by `std.os.args` — without `argv[0]`.
@@ -138,7 +141,7 @@ impl Vm {
 
     /// Invoke `fid` with `argc` arguments already on the operand stack.
     /// Builtins execute host-side; normal functions push a new frame.
-    fn call(&mut self, fid: FuncId, argc: u16) -> Result<(), RuntimeErrorKind> {
+    pub(crate) fn call(&mut self, fid: FuncId, argc: u16) -> Result<(), RuntimeErrorKind> {
         let func = self
             .module
             .functions
@@ -174,6 +177,91 @@ impl Vm {
             ip: 0,
             stack_base: base,
         });
+        Ok(())
+    }
+
+    /// `Func::locals` of `fid`, the width a frame's local area must have.
+    fn func_locals(&self, fid: FuncId) -> Result<usize, RuntimeErrorKind> {
+        let f = self
+            .module
+            .functions
+            .get(fid.0 as usize)
+            .ok_or(RuntimeErrorKind::FuncOutOfRange(fid))?;
+        Ok(f.locals as usize)
+    }
+
+    /// Snapshot the innermost frame into a [`FutureFrame`] and detach it
+    /// (0.0.4 T04, D1) — the mechanism behind `Suspend` (T05).
+    ///
+    /// `resume_pc` is where the frame continues: the instruction *after* the
+    /// suspension point, which the dispatch already knows because it decoded
+    /// the operands.  The frame's local slots and its operand suffix are
+    /// **moved** out of the shared stack, never copied, so each value keeps
+    /// exactly one owner; if the future is dropped instead of resumed, Rust
+    /// `Drop` releases them (BYTECODE.md §3.2: no GC).
+    ///
+    /// The frame must be the innermost one: `Suspend` is an instruction of the
+    /// async function itself, so no callee frame can be live above it.  A
+    /// borrow handle can never appear in the snapshot (D2 rejects `ref` inside
+    /// an async fn); the assertion is the guard for hand-written bytecode.
+    pub fn suspend_top_frame(&mut self, resume_pc: usize) -> Result<FutureFrame, RuntimeErrorKind> {
+        let frame = self.frames.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let n_locals = self.func_locals(frame.func)?;
+        if frame.stack_base + n_locals > self.stack.len() {
+            return Err(RuntimeErrorKind::StackShape);
+        }
+        let mut locals = self.stack.split_off(frame.stack_base);
+        let operands = locals.split_off(n_locals);
+        debug_assert!(
+            !locals
+                .iter()
+                .chain(operands.iter())
+                .any(|v| matches!(v, Value::Ref { .. })),
+            "a suspended frame must not capture a borrow handle: Ref stores an absolute \
+             operand-stack index that cannot survive a snapshot (D2 rejects ref in async fn)"
+        );
+        Ok(FutureFrame {
+            func: frame.func,
+            resume_pc,
+            locals,
+            operands,
+            state: FutureState::Resumable,
+        })
+    }
+
+    /// Restore a [`FutureFrame`] as the innermost call frame (0.0.4 T04).
+    ///
+    /// The snapshot's locals and operands move onto the top of the shared
+    /// stack at *whatever depth the stack currently has*, and the new
+    /// `CallFrame::stack_base` is computed from that.  Because the frame stores
+    /// no `stack_base`, resuming at a different depth — or later on another
+    /// worker thread (T06) — is sound.
+    ///
+    /// Only a [`FutureState::Resumable`] frame may be restored: a `Future` is
+    /// driven once (PLAN §3.3), so resuming a completed or failed frame is the
+    /// defensive [`RuntimeErrorKind::FutureNotResumable`].
+    pub fn resume_frame(&mut self, frame: FutureFrame) -> Result<(), RuntimeErrorKind> {
+        if !matches!(frame.state, FutureState::Resumable) {
+            return Err(RuntimeErrorKind::FutureNotResumable);
+        }
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            return Err(RuntimeErrorKind::CallDepthExceeded);
+        }
+        let n_locals = self.func_locals(frame.func)?;
+        // Defensive: snapshots are produced by `suspend_top_frame` or by the
+        // async call itself, both sized from `Func::locals`.
+        if frame.locals.len() != n_locals {
+            return Err(RuntimeErrorKind::StackShape);
+        }
+        let stack_base = self.stack.len();
+        self.frames.push(CallFrame {
+            func: frame.func,
+            ip: frame.resume_pc,
+            stack_base,
+        });
+        let mut locals = frame.locals;
+        self.stack.append(&mut locals);
+        self.stack.extend(frame.operands);
         Ok(())
     }
 
@@ -335,7 +423,7 @@ impl Vm {
         RuntimeErrorKind::IndexOutOfRange { index, len }
     }
 
-    fn step(&mut self) -> Result<(), RuntimeErrorKind> {
+    pub(crate) fn step(&mut self) -> Result<(), RuntimeErrorKind> {
         let frame = *self.frames.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
         let func = &self.module.functions[frame.func.0 as usize];
         let code = &func.code;

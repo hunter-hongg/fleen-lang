@@ -4,6 +4,8 @@ use std::fmt;
 
 use fleen_compiler::codegen::FuncId;
 
+use crate::frame::FutureFrame;
+
 /// A self-describing runtime value.
 ///
 /// Ownership discipline is static: typeck guarantees that `Str`, `Boxed`,
@@ -70,6 +72,14 @@ pub enum Value {
     Unit,
     /// First-class function reference.
     Func(FuncId),
+    /// Suspendable coroutine frame — the runtime value of a `Future<T>`
+    /// (0.0.4 D1/T04).  Boxed so that the frame's two `Vec`s and its state do
+    /// not inflate every `Value` the VM touches (D1 also calls a future a heap
+    /// object).  Like `Ref` it is **not serialized**: there is no `.flnc` tag,
+    /// no constant-pool or `FieldTypeTag` change.  Typeck makes it non-Copy
+    /// (`not_copy(Future<T>)`), so compiled code moves it rather than sharing
+    /// it.
+    Future(Box<FutureFrame>),
 }
 
 impl fmt::Display for Value {
@@ -111,6 +121,9 @@ impl fmt::Display for Value {
             Value::Range { start, end } => write!(f, "{start}..{end}"),
             Value::Unit => write!(f, "unit"),
             Value::Func(id) => write!(f, "<func #{}>", id.0),
+            // A future has no user-visible payload; the frame contents would be
+            // noise (and can be large).
+            Value::Future(_) => write!(f, "<future>"),
         }
     }
 }
