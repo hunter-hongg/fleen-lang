@@ -1,5 +1,5 @@
 (* ============================================ *)
-(* Fleen EBNF Grammar v0.0.3                    *)
+(* Fleen EBNF Grammar v0.0.4                    *)
 (* New in 0.0.2: box/deref/move/clone prefix    *)
 (* expressions, the ? suffix, Ok/Err patterns,  *)
 (* deref assignment targets, the as cast layer, *)
@@ -14,6 +14,11 @@
 (* and the flint package manager (V08; the      *)
 (* manifest/lockfile are project-level, not     *)
 (* part of the .fln grammar).                   *)
+(* New in 0.0.4: async / await (T02): the       *)
+(* `async` modifier on func_decl, the postfix   *)
+(* `await` operator, and the `Future<T>` type.  *)
+(* (VM coroutine frames, channels, and the      *)
+(* executor land in T04-T10.)                   *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -53,7 +58,9 @@ type_annot      = ":" , type ;
 
 (* ---------- Functions ---------- *)
 
-func_decl       = "func" , ident , "(" , [ param_list ] , ")"
+(* 0.0.4 T02: `async` is an optional prefix on func_decl; an async func's
+   caller sees `Future<T>` while the body still returns `T`. *)
+func_decl       = [ "async" ] , "func" , ident , "(" , [ param_list ] , ")"
                   , [ type_annot ]
                   , ( "=" , expr , [ ";" ]
                     | block ) ;
@@ -71,6 +78,7 @@ type            = base_type
                 | ref_type
                 | result_type
                 | func_type
+                | future_type
                 | named_type ;
 
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
@@ -86,6 +94,10 @@ box_type        = "box" , "<" , type , ">" ;
 ref_type        = "ref" , type ;
 
 result_type     = "Result" , "<" , type , "," , type , ">" ;
+(* 0.0.4 T02: `Future<T>` — the type of a suspended async coroutine.
+   `Future` is not a reserved word; a bare `Future` stays a named_type
+   (a struct named Future). Only `Future<T>` is recognized in type position. *)
+future_type     = "Future" , "<" , type , ">" ;
 
 func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 
@@ -196,10 +208,14 @@ unary           = "box" , cast
 
 unary_prefix    = "-" | "!" | "deref" | "move" | "clone" ;
 
-postfix         = primary , { call_suffix | index_suffix | field_suffix | question_suffix } ;
+postfix         = primary , { call_suffix | index_suffix | field_suffix | await_suffix | question_suffix } ;
 
 (* 0.0.2: the ? propagation operator; its operand must be Result<T, E> — see DESIGN.md §8 *)
 question_suffix = "?" ;
+
+(* 0.0.4 T02: postfix `await` — drives a `Future<T>` to completion, yielding `T`.
+   Composes with `?` left-to-right: `e await?` = `(e await)?` *)
+await_suffix    = "await" ;
 
 call_suffix     = "(" , [ arg_list ] , ")" ;
 
