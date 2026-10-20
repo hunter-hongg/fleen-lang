@@ -62,23 +62,6 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
     }
 }
 
-/// Whether an AST type mentions `ref` anywhere. The resolver already
-/// rejects nested refs, but the async parameter check (0.0.4 T03) uses the
-/// same recursive shape for robustness.
-fn ast_type_contains_ref(ty: &ast::Type) -> bool {
-    match ty {
-        ast::Type::Ref(_) => true,
-        ast::Type::Array(el) | ast::Type::Box(el) | ast::Type::Future(el) => {
-            ast_type_contains_ref(el)
-        }
-        ast::Type::Result(ok, err) => ast_type_contains_ref(ok) || ast_type_contains_ref(err),
-        ast::Type::Func(params, ret) => {
-            params.iter().any(ast_type_contains_ref) || ast_type_contains_ref(ret)
-        }
-        ast::Type::Base(_) | ast::Type::Named(_) | ast::Type::Range => false,
-    }
-}
-
 /// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
 /// the object binding, plus the field being written.
 struct FieldPlace {
@@ -598,8 +581,10 @@ impl TypeChecker {
             // Store the parameter type
             self.binding_types.insert(binding_id, param_type.clone());
             // 0.0.4 T03 (D2): no borrow may exist inside async code,
-            // including an async fn's own `ref` parameters.
-            if self.in_async_context() && ast_type_contains_ref(&param.ty) {
+            // including an async fn's own `ref` parameters. The resolver
+            // rejects nested/embedded refs before typeck, so a parameter
+            // can only carry a top-level `ref T`.
+            if self.in_async_context() && matches!(&param.ty, ast::Type::Ref(_)) {
                 self.reported_ref_ids.insert(binding_id);
                 self.add_error(TypeckErrorKind::RefInAsync, param.span);
             }

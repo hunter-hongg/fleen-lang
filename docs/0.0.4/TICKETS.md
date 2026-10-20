@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: PLANNING — nothing implemented.**
+> **Status: IN PROGRESS — T01–T03 implemented; T04–T10 planned.**
 
 ---
 
@@ -53,12 +53,22 @@ Async **lowering** is deliberately not wired yet — `lower_expr_into` rejects
 
 **Notes (implementation)**: the ref rule is lexical — any `ref` declared or
 used while an enclosing function is `async` reports `RefInAsync`. Since the
-resolver allows `ref` only as an outer function parameter, the two reachable
-shapes are an async fn's own parameter (reported at declaration) and a nested
-async fn capturing an enclosing sync fn's parameter (reported at the use,
-once per binding). An async fn calling a *synchronous* ref-taking helper stays
-legal: the borrow lives only for the call and cannot escape (refs are not
-storable).
+resolver allows `ref` only as an outer function parameter, the reachable
+shapes are:
+
+- an async fn's own parameter (reported at declaration);
+- a nested async fn capturing an enclosing sync fn's parameter (reported at
+  the use, once per binding);
+- a *sync* fn declared inside an async fn whose parameter is `ref` (reported
+  at declaration — the lexical rule deliberately covers nested sync
+  declarations too).
+
+`clone s` of a captured ref is rejected on its own typeck path. An operation
+with a stronger pre-existing rule keeps its own error: `move s` reports
+`MoveOfBorrowed` rather than `RefInAsync`.
+
+An async fn calling a *synchronous* ref-taking helper stays legal: the borrow
+lives only for the call and cannot escape (refs are not storable).
 
 Global writes are checked at the three HIR forms that can reach one:
 `AssignField` / `AssignIndex` match on the target binding id (a local shadow
@@ -68,7 +78,9 @@ its mangled dotted name. A bare `g = v` in a function body is a local binding
 keeps the older, stronger `DerefAssignOfGlobalBox` instead of double-reporting.
 Global reads are unchanged (deep copies via the ownership pass). Known gap,
 out of scope: an async fn calling a sync helper that writes its own module's
-global is not caught without a call graph (T06/T08).
+global is not caught without a call graph (T06/T08). Because functions are
+first-class values, call-graph analysis is necessarily incomplete; T08 must
+either accept and document that limit or tighten D5.
 
 ---
 
@@ -114,6 +126,8 @@ global is not caught without a call graph (T06/T08).
 
 - [ ] Wire D4 as the single cross-thread rule: borrow handles never cross
       async/task/channel (with T03); everything else unsafely-free (no sharing)
+- [ ] Decide the D5 enforcement boundary for sync helpers (call-graph analysis
+      is incomplete with first-class function values)
 - [ ] Defensive runtime `RuntimeError` backstop on misused `Future`/`Channel`
 - [ ] Tests: typeck boundary suite + defensive VM paths
 

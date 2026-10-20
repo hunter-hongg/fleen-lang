@@ -9,9 +9,10 @@
 > handles (`ref`) are confined to the synchronous call depth — the async world
 > and the borrowing world are cleanly separated.
 >
-> **Status**: PLANNED.  Decisions D1–D6 below are **settled** after review and
-> recorded here; `TICKETS.md` carries the per-ticket cards and encoding tables.
-> **No code yet.**
+> **Status**: IN PROGRESS.  Decisions D1–D6 below are **settled** after review
+> and recorded here; `TICKETS.md` carries the per-ticket cards and encoding
+> tables.  T01–T03 (keywords, async fn frontend, borrow/global boundaries) are
+> implemented; the lowering/VM/executor work (T04–T10) is planned.
 
 ---
 

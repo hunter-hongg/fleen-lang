@@ -57,14 +57,35 @@ fn typeck_invalid_files() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "fln") {
             let source = fs::read_to_string(&path).unwrap();
-            let result = typeck_str(&source);
-            assert!(
-                result.is_err(),
-                "Expected typeck error for invalid file {} but got TypedHir",
-                path.display()
-            );
+            let errs = match typeck_str(&source) {
+                Ok(_) => panic!(
+                    "Expected typeck error for invalid file {} but got TypedHir",
+                    path.display()
+                ),
+                Err(errs) => errs,
+            };
+            if let Some(expected) = expected_error_kind(&source) {
+                assert!(
+                    errs.iter()
+                        .any(|e| format!("{:?}", e.kind).starts_with(expected)),
+                    "Expected {expected} for {} but got {errs:?}",
+                    path.display()
+                );
+            }
             checked += 1;
         }
     }
     assert!(checked > 0, "no invalid test files found");
+}
+
+/// Optional `// expect-typeck: <Kind>` directive; when present, at least one
+/// reported error must be that `TypeckErrorKind` variant (matched by its
+/// `Debug` name). Fixtures without the directive only assert failure.
+fn expected_error_kind(source: &str) -> Option<&str> {
+    source.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("// expect-typeck:")
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+    })
 }

@@ -1,3 +1,4 @@
+// expect-typeck: RefInAsync
 // 0.0.4 T03 (D2): `ref` may not appear inside an async function.
 // The borrow would have to outlive an await point.
 async func show(s: ref string) {

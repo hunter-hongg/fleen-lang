@@ -167,6 +167,17 @@ fn compile_project_rejects_async_write_of_imported_global() {
 }
 
 #[test]
+fn compile_project_allows_async_read_of_imported_global() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nasync func read(): int = m.answer;\nfunc main() { print(\"ok\"); }\n",
+    );
+    session.add_file("src/m/mod.fln", "pub answer: int = 0;\n");
+    assert!(session.compile_project(root).is_ok());
+}
+
+#[test]
 fn compile_project_struct_return_type_is_qualified() {
     let mut session = Session::new();
     let root = session.add_file(

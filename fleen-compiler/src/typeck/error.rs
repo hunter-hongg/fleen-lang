@@ -298,8 +298,8 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`ref` is not allowed inside an `async` function — async \
-                     code must own its values; help: clone the value before \
-                     entering async (a borrow cannot cross an async boundary)"
+                     code must own its values; help: use an owned value \
+                     instead (or clone the borrowed value before entering async)"
                 )
             }
             TypeckErrorKind::AsyncGlobalWrite { name } => {

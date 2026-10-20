@@ -2267,3 +2267,89 @@ fn async_sync_ref_call_is_ok() {
          async func greet() {\n    name = \"fleen\";\n    show(name);\n}\n",
     );
 }
+
+#[test]
+fn ref_clone_in_async_is_error() {
+    // `clone` of a captured ref takes a separate typeck path; the borrow
+    // itself must still be rejected.
+    let errs = compile_err(
+        "func outer(s: ref string) {\n    async func inner() {\n        \
+         t = clone s;\n        print(t);\n    }\n}\n",
+    );
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::RefInAsync]);
+}
+
+#[test]
+fn ref_param_in_nested_sync_inside_async_is_error() {
+    // The ref rule is lexical: a sync helper declared inside an async fn is
+    // still inside the async world.
+    let errs = compile_err(
+        "async func outer() {\n    func helper(t: ref string) {\n        \
+         print(t);\n    }\n}\n",
+    );
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::RefInAsync]);
+}
+
+#[test]
+fn async_global_write_in_nested_sync_is_error() {
+    let errs = compile_err(
+        "struct Point { x: int, }\np = Point { x: 0 };\n\
+         async func outer() {\n    func helper() {\n        p.x = 1;\n    }\n}\n",
+    );
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::AsyncGlobalWrite {
+            name: "p".to_string()
+        }]
+    );
+}
+
+#[test]
+fn async_function_does_not_poison_later_sync_functions() {
+    // The async flag is scoped to one function: a later sync fn may take a
+    // ref and write a global again.
+    compile_ok(
+        "struct Point { x: int, }\np = Point { x: 0 };\n\
+         async func a() { print(\"a\"); }\n\
+         func b(s: ref string) { print(s); }\n\
+         func c() { p.x = 1; }\n",
+    );
+}
+
+#[test]
+fn async_error_does_not_poison_later_sync_functions() {
+    // Same as above on the error path: the stack is popped before `?`, so a
+    // failing async fn must not add spurious boundary errors to later items.
+    let errs = compile_err(
+        "struct Point { x: int, }\np = Point { x: 0 };\n\
+         async func a(s: ref string) { print(s); }\n\
+         func b(s: ref string) { print(s); }\n\
+         func c() { p.x = 1; }\n",
+    );
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::RefInAsync]);
+}
+
+#[test]
+fn async_deref_global_write_uses_existing_error() {
+    // `deref g = v` is rejected in every context; keep the older, stronger
+    // error instead of double-reporting an async global write.
+    let errs = compile_err("g = box 1;\nasync func f() {\n    deref g = 2;\n}\n");
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::DerefAssignOfGlobalBox]
+    );
+}
+
+#[test]
+fn async_boundary_error_messages_are_actionable() {
+    let errs = compile_err("async func f(s: ref string) { print(s); }\n");
+    let msg = format!("{}", errs[0].kind);
+    assert!(msg.contains("owned"), "unexpected message: {msg}");
+
+    let errs = compile_err(
+        "struct Point { x: int, }\np = Point { x: 0 };\n\
+         async func g() { p.x = 1; }\n",
+    );
+    let msg = format!("{}", errs[0].kind);
+    assert!(msg.contains("channel"), "unexpected message: {msg}");
+}
