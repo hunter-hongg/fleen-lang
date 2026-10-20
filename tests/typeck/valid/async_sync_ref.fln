@@ -1,0 +1,10 @@
+// 0.0.4 T03: an async fn may call a synchronous function that borrows.
+// The borrow lives only for the call and never crosses an async boundary.
+func show(s: ref string) {
+    print(s);
+}
+
+async func greet() {
+    name = "fleen";
+    show(name);
+}

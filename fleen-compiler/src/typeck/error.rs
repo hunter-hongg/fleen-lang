@@ -64,6 +64,13 @@ pub enum TypeckErrorKind {
     QuestionTypeMismatch { expected: Type, found: Type },
     /// `e await` where `e` is not a `Future<T>` (0.0.4 F3).
     AwaitNonFuture { found: Type },
+    /// `ref` inside an `async` fn (0.0.4 T03, D2): async code must own its
+    /// values; borrows may not be declared or captured across the boundary.
+    RefInAsync,
+    /// An `async` fn writes a global (0.0.4 T03, D5). Async code may read
+    /// globals (as deep copies) but must send values through channels
+    /// instead of mutating shared state.
+    AsyncGlobalWrite { name: String },
     /// `Ok(...)` / `Err(...)` with no context type to infer from (D6).
     CannotInferResultType { ctor: &'static str },
     /// A statement discards a `Result` value (Result may not be silently
@@ -285,6 +292,21 @@ impl fmt::Display for TypeckErrorKind {
                      help: an async function call returns a `Future<T>` — \
                      check the operand is a future you can drive",
                     found.name()
+                )
+            }
+            TypeckErrorKind::RefInAsync => {
+                write!(
+                    f,
+                    "`ref` is not allowed inside an `async` function — async \
+                     code must own its values; help: clone the value before \
+                     entering async (a borrow cannot cross an async boundary)"
+                )
+            }
+            TypeckErrorKind::AsyncGlobalWrite { name } => {
+                write!(
+                    f,
+                    "async function cannot write global `{name}` — help: send \
+                     the value through a channel instead of mutating shared state"
                 )
             }
             TypeckErrorKind::QuestionTypeMismatch { expected, found } => {

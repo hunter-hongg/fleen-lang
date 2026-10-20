@@ -3,6 +3,7 @@
 use super::{CompileError, FileId, Session, compile};
 use crate::codegen;
 use crate::resolver::error::ResolveErrorKind;
+use crate::typeck::error::TypeckErrorKind;
 
 #[test]
 fn compiles_valid_source() {
@@ -143,6 +144,26 @@ fn compile_project_cross_module_global_assignment() {
     );
     session.add_file("src/m/mod.fln", "pub items: [int] = [1, 2, 3];\n");
     assert!(session.compile_project(root).is_ok());
+}
+
+#[test]
+fn compile_project_rejects_async_write_of_imported_global() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import m;\nasync func bump() { m.answer = 42; }\nfunc main() { print(\"ok\"); }\n",
+    );
+    session.add_file("src/m/mod.fln", "pub answer: int = 0;\n");
+    match session.compile_project(root) {
+        Err(CompileError::Typeck(errs)) => assert!(
+            errs.iter().any(|e| matches!(
+                &e.kind,
+                TypeckErrorKind::AsyncGlobalWrite { name } if name == "m.answer"
+            )),
+            "expected AsyncGlobalWrite, got {errs:?}"
+        ),
+        other => panic!("expected typeck error, got {other:?}"),
+    }
 }
 
 #[test]

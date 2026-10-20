@@ -47,9 +47,28 @@ Async **lowering** is deliberately not wired yet — `lower_expr_into` rejects
 
 ## T03 — Borrow/global boundaries (F8; D2/D5)
 
-- [ ] typeck: reject `ref T` anywhere in an async fn / captured across a boundary → `RefInAsync`
-- [ ] typeck: reject **global writes** inside async fn → `AsyncGlobalWrite`
-- [ ] Tests: `tests/typeck/invalid/ref_in_async.fln`, `async_global_write.fln`
+- [x] typeck: reject `ref T` anywhere in an async fn / captured across a boundary → `RefInAsync`
+- [x] typeck: reject **global writes** inside async fn → `AsyncGlobalWrite`
+- [x] Tests: `tests/typeck/invalid/ref_in_async.fln`, `async_global_write.fln`
+
+**Notes (implementation)**: the ref rule is lexical — any `ref` declared or
+used while an enclosing function is `async` reports `RefInAsync`. Since the
+resolver allows `ref` only as an outer function parameter, the two reachable
+shapes are an async fn's own parameter (reported at declaration) and a nested
+async fn capturing an enclosing sync fn's parameter (reported at the use,
+once per binding). An async fn calling a *synchronous* ref-taking helper stays
+legal: the borrow lives only for the call and cannot escape (refs are not
+storable).
+
+Global writes are checked at the three HIR forms that can reach one:
+`AssignField` / `AssignIndex` match on the target binding id (a local shadow
+has a different id), and a module-qualified `Assign` (`m.g = v`) matches on
+its mangled dotted name. A bare `g = v` in a function body is a local binding
+(or loop assignment), not a global write, and stays legal. `deref g = v`
+keeps the older, stronger `DerefAssignOfGlobalBox` instead of double-reporting.
+Global reads are unchanged (deep copies via the ownership pass). Known gap,
+out of scope: an async fn calling a sync helper that writes its own module's
+global is not caught without a call graph (T06/T08).
 
 ---
 

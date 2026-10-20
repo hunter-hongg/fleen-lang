@@ -62,6 +62,23 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
     }
 }
 
+/// Whether an AST type mentions `ref` anywhere. The resolver already
+/// rejects nested refs, but the async parameter check (0.0.4 T03) uses the
+/// same recursive shape for robustness.
+fn ast_type_contains_ref(ty: &ast::Type) -> bool {
+    match ty {
+        ast::Type::Ref(_) => true,
+        ast::Type::Array(el) | ast::Type::Box(el) | ast::Type::Future(el) => {
+            ast_type_contains_ref(el)
+        }
+        ast::Type::Result(ok, err) => ast_type_contains_ref(ok) || ast_type_contains_ref(err),
+        ast::Type::Func(params, ret) => {
+            params.iter().any(ast_type_contains_ref) || ast_type_contains_ref(ret)
+        }
+        ast::Type::Base(_) | ast::Type::Named(_) | ast::Type::Range => false,
+    }
+}
+
 /// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
 /// the object binding, plus the field being written.
 struct FieldPlace {
@@ -88,6 +105,13 @@ pub struct TypeChecker {
     /// Needed by `?`, whose legality depends on the enclosing function's
     /// return type — information that the `expected` thread cannot carry.
     fn_ret_stack: Vec<Option<Type>>,
+    /// Whether each enclosing function is `async` (innermost last). 0.0.4
+    /// T03 (D2): a borrow may not appear anywhere lexically inside an
+    /// `async` fn, nested sync declarations included.
+    fn_async_stack: Vec<bool>,
+    /// Ref bindings already diagnosed by `RefInAsync`; a ref parameter is
+    /// reported once at its declaration, so later uses do not repeat it.
+    reported_ref_ids: HashSet<BindingId>,
     /// Binding ID to type mapping.
     binding_types: HashMap<BindingId, Type>,
     /// Fully qualified name → type for top-level var/const declarations,
@@ -113,6 +137,8 @@ impl TypeChecker {
             func_signatures: HashMap::new(),
             user_func_names: HashSet::new(),
             fn_ret_stack: Vec::new(),
+            fn_async_stack: Vec::new(),
+            reported_ref_ids: HashSet::new(),
             binding_types: HashMap::new(),
             global_types: HashMap::new(),
             global_ids: HashSet::new(),
@@ -124,6 +150,23 @@ impl TypeChecker {
     /// Add an error to the collection.
     fn add_error(&mut self, kind: TypeckErrorKind, span: Span) {
         self.errors.push(TypeckError::new(kind, span));
+    }
+
+    /// Whether any lexically enclosing function is `async` (0.0.4 T03/D2).
+    fn in_async_context(&self) -> bool {
+        self.fn_async_stack.iter().any(|&is_async| is_async)
+    }
+
+    /// Report a `ref` use inside async code (0.0.4 T03/D2). A binding is
+    /// reported at most once: an async fn's own ref parameter is already
+    /// diagnosed at its declaration.
+    fn check_ref_in_async(&mut self, ty: &Type, binding_id: BindingId, span: Span) {
+        if self.in_async_context()
+            && matches!(ty, Type::Ref(_))
+            && self.reported_ref_ids.insert(binding_id)
+        {
+            self.add_error(TypeckErrorKind::RefInAsync, span);
+        }
     }
 
     /// Convert `ast::Type` to `typed_hir::Type` (0.0.3 V02: struct-aware).
@@ -528,6 +571,7 @@ impl TypeChecker {
     fn typeck_func_decl(&mut self, func: FuncDeclHir) -> Result<TypedFuncDeclHir, ()> {
         // Enter function scope
         self.scopes.enter_function_scope();
+        self.fn_async_stack.push(func.is_async);
 
         // Add parameters to scope
         let mut typed_params = Vec::new();
@@ -553,6 +597,12 @@ impl TypeChecker {
             );
             // Store the parameter type
             self.binding_types.insert(binding_id, param_type.clone());
+            // 0.0.4 T03 (D2): no borrow may exist inside async code,
+            // including an async fn's own `ref` parameters.
+            if self.in_async_context() && ast_type_contains_ref(&param.ty) {
+                self.reported_ref_ids.insert(binding_id);
+                self.add_error(TypeckErrorKind::RefInAsync, param.span);
+            }
             typed_params.push(TypedParamHir {
                 name: param.name.clone(),
                 ty: param_type,
@@ -574,6 +624,9 @@ impl TypeChecker {
         self.fn_ret_stack.push(ret_ty.clone());
         let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
         self.fn_ret_stack.pop();
+        // Pop before `?`: errors are collected, so a leaked async flag would
+        // misclassify every later function.
+        self.fn_async_stack.pop();
         let typed_body = body_result?;
 
         // Exit function scope
@@ -824,6 +877,7 @@ impl TypeChecker {
                 span,
             } => {
                 let ty = self.lookup_type(&name, span)?;
+                self.check_ref_in_async(&ty, binding_id, span);
                 // `Access::Copy` is the default; the ownership pass (U05)
                 // upgrades bare owned reads to `Clone` and implicit
                 // tail-position transfers to `Move`.
@@ -844,6 +898,21 @@ impl TypeChecker {
                 hir_id,
                 span,
             } => {
+                // 0.0.4 T03 (D5): async code may read globals but not write
+                // them. Inside a function, a bare `g = v` is a local binding
+                // (never this node); the reachable global write here is the
+                // module-qualified form `m.g = v`, whose name is the mangled
+                // dotted path.
+                if self.in_async_context()
+                    && (self.global_ids.contains(&binding_id)
+                        || (name.contains('.') && self.global_types.contains_key(&name)))
+                {
+                    self.add_error(
+                        TypeckErrorKind::AsyncGlobalWrite { name: name.clone() },
+                        span,
+                    );
+                    return Err(());
+                }
                 let typed_rhs = self.typeck_expr(*rhs, None)?;
                 let var_type = match self.lookup_type(&name, span) {
                     Ok(ty) => ty,
@@ -2100,6 +2169,7 @@ impl TypeChecker {
                 span: ident_span,
             } => {
                 let ty = self.lookup_type(&name, ident_span)?;
+                self.check_ref_in_async(&ty, binding_id, ident_span);
                 // `ref T` clones to an owned `T` (the value leaves the
                 // borrow); every other type keeps its declared type.
                 let value_ty = match ty {
@@ -2197,6 +2267,8 @@ impl TypeChecker {
         };
 
         if self.global_ids.contains(&binding_id) || self.global_types.contains_key(&name) {
+            // 0.0.4 T03: this subsumes `AsyncGlobalWrite` — the write is
+            // illegal in every context, so one specific error is enough.
             self.add_error(TypeckErrorKind::DerefAssignOfGlobalBox, span);
             return Err(());
         }
@@ -2413,6 +2485,15 @@ impl TypeChecker {
             return Err(());
         }
 
+        // 0.0.4 T03 (D5): same rule for element writes on a global array.
+        if self.in_async_context() && self.global_ids.contains(&binding_id) {
+            self.add_error(
+                TypeckErrorKind::AsyncGlobalWrite { name: name.clone() },
+                span,
+            );
+            return Err(());
+        }
+
         let typed_rhs = self.typeck_expr(rhs, Some(&elem_ty))?;
         if let Err(e) = unify_assign(&elem_ty, &typed_rhs.ty(), typed_rhs.span()) {
             self.add_error(e.kind, e.span);
@@ -2615,6 +2696,18 @@ impl TypeChecker {
             return Err(());
         };
         let field_ty = entry.fields[idx].1.clone();
+
+        // 0.0.4 T03 (D5): a field write mutates the global's storage in
+        // place. `global_ids` is exact — a local shadow has its own id.
+        if self.in_async_context() && self.global_ids.contains(&obj_binding_id) {
+            self.add_error(
+                TypeckErrorKind::AsyncGlobalWrite {
+                    name: obj_name.clone(),
+                },
+                span,
+            );
+            return Err(());
+        }
 
         let typed_rhs = self.typeck_expr(rhs, Some(&field_ty))?;
         if let Err(e) = unify_assign(&field_ty, &typed_rhs.ty(), typed_rhs.span()) {

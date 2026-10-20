@@ -2182,3 +2182,88 @@ fn future_is_not_copy() {
     // Copy classes are unchanged inside async fn: `int` stays Copy.
     assert!(Type::Int.is_copy());
 }
+
+// ========== 0.0.4 async boundaries (T03) ==========
+
+#[test]
+fn ref_param_in_async_is_error() {
+    // One error per binding: the declaration is reported, later uses are not.
+    let errs = compile_err("async func show(s: ref string) {\n    print(s);\n    print(s);\n}\n");
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::RefInAsync]);
+}
+
+#[test]
+fn ref_captured_by_nested_async_is_error() {
+    let errs = compile_err(
+        "func outer(s: ref string) {\n    async func inner() {\n        print(s);\n    }\n}\n",
+    );
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::RefInAsync]);
+}
+
+#[test]
+fn async_global_field_write_is_error() {
+    let errs = compile_err(
+        "struct Point { x: int, }\np = Point { x: 0 };\n\
+         async func bump() {\n    p.x = 1;\n}\n",
+    );
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::AsyncGlobalWrite {
+            name: "p".to_string()
+        }]
+    );
+}
+
+#[test]
+fn async_global_index_write_is_error() {
+    let errs = compile_err("xs: [int] = [1];\nasync func bump() {\n    xs[0] = 2;\n}\n");
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::AsyncGlobalWrite {
+            name: "xs".to_string()
+        }]
+    );
+}
+
+#[test]
+fn async_const_global_field_write_is_error() {
+    // Mutability does not matter: async code may not write any global.
+    let errs = compile_err(
+        "struct Point { x: int, }\nconst p = Point { x: 0 };\n\
+         async func bump() {\n    p.x = 1;\n}\n",
+    );
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::AsyncGlobalWrite {
+            name: "p".to_string()
+        }]
+    );
+}
+
+#[test]
+fn async_global_read_is_ok() {
+    compile_ok(
+        "struct Point { x: int, }\np = Point { x: 7 };\n\
+         async func read() {\n    print(p.x as string);\n}\n",
+    );
+}
+
+#[test]
+fn async_local_shadow_writes_are_ok() {
+    // The local `p` shadows the global: `p = ...` binds locally and `p.x = 1`
+    // writes that local, so neither is an async global write.
+    compile_ok(
+        "struct Point { x: int, }\np = Point { x: 7 };\n\
+         async func local() {\n    p = Point { x: 0 };\n    p.x = 1;\n    print(p.x as string);\n}\n",
+    );
+}
+
+#[test]
+fn async_sync_ref_call_is_ok() {
+    // A borrow lives only for the synchronous call; no ref is declared or
+    // captured by the async fn itself.
+    compile_ok(
+        "func show(s: ref string) {\n    print(s);\n}\n\
+         async func greet() {\n    name = \"fleen\";\n    show(name);\n}\n",
+    );
+}

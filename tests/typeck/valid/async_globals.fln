@@ -1,0 +1,17 @@
+// 0.0.4 T03: global reads and local writes stay legal inside async code.
+struct Point {
+    x: int,
+}
+
+p = Point { x: 7 };
+xs: [int] = [1, 2, 3];
+
+async func read_global(): int = p.x + xs[0]
+
+async func local_shadow() {
+    // `p` here is a fresh local; neither the binding nor the field write
+    // touches the global.
+    p = Point { x: 0 };
+    p.x = 1;
+    print(p.x as string);
+}

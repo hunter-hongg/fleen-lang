@@ -1,0 +1,12 @@
+// 0.0.4 T03 (D5): async code may read globals but not write them.
+// A bare `p = ...` inside the body would be a local binding, so the
+// write must go through the field/element form to reach the global.
+struct Point {
+    x: int,
+}
+
+p = Point { x: 0 };
+
+async func bump() {
+    p.x = 1;
+}
