@@ -2293,6 +2293,39 @@ fn resume_counts_toward_the_call_depth_limit() {
 }
 
 #[test]
+fn suspend_rejects_a_frame_region_beyond_the_stack() {
+    let mut vm = Vm::new(async_fixture());
+    // A frame whose local area (2 slots) is not actually on the stack —
+    // hand-written or corrupted bytecode only.
+    vm.frames.push(super::frame::CallFrame {
+        func: FuncId(1),
+        ip: 0,
+        stack_base: 0,
+    });
+    assert_eq!(
+        vm.suspend_top_frame(0).unwrap_err(),
+        RuntimeErrorKind::StackShape
+    );
+}
+
+#[test]
+fn resume_pc_beyond_the_code_is_caught_by_the_dispatch() {
+    let mut vm = Vm::new(async_fixture());
+    let frame = super::frame::FutureFrame {
+        func: FuncId(1),
+        resume_pc: 999,
+        locals: vec![Value::Unit, Value::Unit],
+        operands: vec![],
+        state: super::frame::FutureState::Resumable,
+    };
+    // `resume_frame` does not re-validate the pc (the code length lives with
+    // the function, same trust model as a hand-written jump); the existing
+    // `ip >= code.len()` guard in `step` is the backstop.
+    vm.resume_frame(frame).unwrap();
+    assert_eq!(vm.step().unwrap_err(), RuntimeErrorKind::BadJumpTarget);
+}
+
+#[test]
 fn future_value_is_opaque_and_does_not_grow_value() {
     let v = Value::Future(Box::new(super::frame::FutureFrame::new(
         FuncId(1),
