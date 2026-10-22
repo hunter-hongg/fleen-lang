@@ -141,3 +141,41 @@ signal to plow on.**
 
 **Closed when**: no repo/commit assertion is made without having run the command
 that shows it.
+
+---
+
+## L5 — Do not over-read before delivering an analysis; match the scope of the ask
+
+**When**: analyzing 0.0.4 T05 (analysis-only request).
+
+**What happened**: The user asked to *analyze the implementation difficulty and
+gotchas* of T05 — a read-and-report task, not an implementation.  The agent
+spent ~30 minutes and many tool round-trips re-reading source files
+(vm.rs / lower / codegen / verify / flnc / tests) well beyond what the analysis
+needed, delaying the actual conclusion.  The user pushed back twice ("你这分析要
+分析多久，磨蹭这么久了" — how long will this take, you're dawdling), noting it
+seriously stalled their process, and said the *over-thinking itself* should be
+recorded as a lesson.
+
+**Root cause**: equating "be thorough" with "read as much as possible".  For an
+analysis-only task, extensive code re-reading is not diligence — it is
+procrastination.  A first pass over the TICKETS/PLAN cards plus the single most
+relevant source files would have been enough to write the analysis; every
+subsequent file read returned diminishing value and, worse, delayed delivery.
+
+**Rule going forward**:
+- Before starting, state the **scope and expected delivery time** for an
+  analysis, and deliver on it.  An analysis can be iterative; it does not need
+  exhaustion.
+- Read the docs/cards and the **one or two** decisive source files, then write
+  the answer.  Only read more if a specific claim needs verification — not
+  preemptively.
+- If a task is analysis-only ("analyze the difficulty / gotchas"), the deliverable
+  is a written analysis, not the reading process.  Stop reading, write it up.
+- When the user says "你是分析实现重难点" (just analyze the difficulty), treat
+  that as a hard scope limit: no implementation, no fix attempts, no extra
+  exploration.  Flag the intended next step ("want me to implement T05 next?")
+  as a question, not as work to begin.
+
+**Closed when**: the analysis-only scope is honored and delivered promptly
+without over-reading.
