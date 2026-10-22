@@ -4,14 +4,15 @@ use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
 
-/// Versions this reader accepts: 0.0.1 (v1), 0.0.2 (v2) and 0.0.3 (v3)
-/// modules.
+/// Versions this reader accepts: 0.0.1 (v1), 0.0.2 (v2), 0.0.3 (v3) and
+/// 0.0.4 (v4) modules.
 ///
 /// v2 adds instructions and fills `span_map`; v3 adds the struct
 /// instructions and the appended `struct_defs` table (read only for
-/// version >= 3). The field order and widths of every existing table are
+/// version >= 3); v4 (0.0.4 T05) adds the async instructions 0xC0–0xC3.
+/// The field order and widths of every existing table are
 /// unchanged (BYTECODE.md §9), so a v1 file reads unmodified.
-const READ_VERSIONS: [u16; 3] = [1, 2, 3];
+const READ_VERSIONS: [u16; 4] = [1, 2, 3, 4];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]

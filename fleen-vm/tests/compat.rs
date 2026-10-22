@@ -113,7 +113,16 @@ func main(): int {
     print("range sum: ", rsum as string);
     0
 }"#;
-    fleen_compiler::compile(SRC).expect("v3 fixture source compiles")
+    // The committed v3 fixture must stay a byte-v3 module so it keeps
+    // exercising legacy-v3 execution (BYTECODE.md §10 compat promise). The
+    // compiler now emits v4 (0.0.4 T05), but the *module structure* for this
+    // source is identical to what a v3-era compiler produced — only the
+    // version byte differs — so pin it to 3 here to make `v3_fixture_bytes()`
+    // the stable, byte-identical v3 reference that the committed file is
+    // checked against.
+    let mut module = fleen_compiler::compile(SRC).expect("v3 fixture source compiles");
+    module.version = 3;
+    module
 }
 
 /// Deterministic bytes each fixture must equal.

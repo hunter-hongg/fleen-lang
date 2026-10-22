@@ -9,7 +9,7 @@ mod tests;
 
 pub use bytecode::{
     Bytecode, Const, ConstId, FieldTypeTag, Func, FuncId, Global, GlobalId, Module, Opcode,
-    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE,
+    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -22,13 +22,15 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// Version 1 was 0.0.1; version 2 adds the ownership / Result instructions
 /// and a populated `span_map` (BYTECODE.md §10). Version 3 (0.0.3 V02) adds
 /// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table.
-/// Readers accept all three.
-pub const MODULE_VERSION: u16 = 3;
+/// Version 4 (0.0.4 T05) adds the async instructions 0xC0–0xC3. Readers
+/// accept all four.
+pub const MODULE_VERSION: u16 = 4;
 
 /// Lower MIR into a bytecode module.
 ///
 /// Since 0.0.3 (V02) the emitted module is bytecode version 3: it carries
-/// the struct instructions and the appended `struct_defs` table.
+/// the struct instructions and the appended `struct_defs` table. 0.0.4 (T05)
+/// bumps the emitter to version 4 and adds the async instructions.
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).

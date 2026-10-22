@@ -45,7 +45,7 @@ fn encode_single_block_function() {
         globals: vec![],
     };
     let module = codegen(mir).expect("codegen");
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
     assert_eq!(module.entry, FuncId(0));
     let code = &module.functions[0].code;
     // Const <id0> ; Return
@@ -1178,7 +1178,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
     // struct_defs: one entry, two Int fields.
     assert_eq!(module.struct_defs.len(), 1);
     assert_eq!(
@@ -1207,7 +1207,7 @@ func main(): int = 0
     assert_eq!(module.struct_defs.len(), 2);
     let bytes = to_bytes(&module);
     let parsed = from_bytes(&bytes).expect("round trip");
-    assert_eq!(parsed.version, 3);
+    assert_eq!(parsed.version, 4);
     assert_eq!(parsed.struct_defs, module.struct_defs);
 }
 
@@ -1393,7 +1393,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
     let main = module
         .functions
         .iter()

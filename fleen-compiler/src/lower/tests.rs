@@ -86,6 +86,45 @@ func f(): int {
 }
 
 #[test]
+fn lower_async_fn_begins_with_asyncstart() {
+    // 0.0.4 T05: an `async func`'s entry block must open with `AsyncStart` —
+    // the call boundary that packages the frame's params into a not-yet-started
+    // Future and returns it to the caller. Body entry is therefore the fixed
+    // instruction right after it (pc + 1), which the VM's `AsyncStart` relies
+    // on (`resume_pc = ip`), so this layout is load-bearing.
+    let src = "\
+async func producer(x: int): int = x + 1
+func main(): int = producer(1) await
+";
+    let mir = lower_src(src);
+    let producer = find_func(&mir, "producer");
+    let mut ins = flat(producer).into_iter();
+    assert!(
+        matches!(ins.next().map(|i| &i.kind), Some(MirInstrKind::AsyncStart)),
+        "async fn body must begin with AsyncStart"
+    );
+    // The entry block itself opens with AsyncStart, so the resume point is a
+    // fixed offset from the function start.
+    let entry = &producer.blocks[producer.entry.0 as usize];
+    assert!(
+        matches!(
+            entry.instrs.first().map(|i| &i.kind),
+            Some(MirInstrKind::AsyncStart)
+        ),
+        "async fn entry block must start with AsyncStart"
+    );
+    // A synchronous fn has no such head.
+    let main = find_func(&mir, "main");
+    assert!(
+        !matches!(
+            flat(main).first().map(|i| &i.kind),
+            Some(MirInstrKind::AsyncStart)
+        ),
+        "a sync fn must not open with AsyncStart"
+    );
+}
+
+#[test]
 fn lower_shadowing_new_slot() {
     let src = r#"
 func f(): int {
@@ -752,6 +791,13 @@ fn stack_delta(
         MirInstrKind::MakeRange => -1,
         MirInstrKind::RangeStart => 1,
         MirInstrKind::RangeEnd => 1,
+        // 0.0.4 T05: async / await. `AsyncStart` packages the frame into a
+        // Future (Δ0); `Await`/`Poll` drive a Future and leave its payload
+        // (F → T, Δ0); `Suspend` is unreachable in T05 (Δ0).
+        MirInstrKind::AsyncStart => 0,
+        MirInstrKind::Suspend => 0,
+        MirInstrKind::Poll => 0,
+        MirInstrKind::Await => 0,
     }
 }
 

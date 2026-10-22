@@ -1,7 +1,7 @@
 //! Static verification of bytecode modules (BYTECODE.md §8).
 
 use fleen_compiler::codegen::{
-    Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE,
+    Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
 };
 
 /// A verification failure.
@@ -93,6 +93,12 @@ pub enum VerifyError {
     /// A v3 instruction (opcode >= 0xB0) appears in a v1/v2 module
     /// (0.0.3 V02; the explicit gate — the 0.0.2 U07 lesson).
     V3OpcodeInV1V2Module {
+        pc: usize,
+        byte: u8,
+    },
+    /// A v4 instruction (opcode >= 0xC0) appears in a v1–v3 module
+    /// (0.0.4 T05; the explicit gate).
+    V4OpcodeInV1V2V3Module {
         pc: usize,
         byte: u8,
     },
@@ -214,6 +220,12 @@ impl std::fmt::Display for VerifyError {
                 write!(
                     f,
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v3, module is v1/v2"
+                )
+            }
+            Self::V4OpcodeInV1V2V3Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v4, module is v1/v2/v3"
                 )
             }
             Self::StructIndexOutOfRange { pc, index } => {
@@ -430,6 +442,19 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         // leave the Range on the stack for the `Pop` the desugar emits.
         Opcode::MakeRange => (-1, 2),
         Opcode::RangeStart | Opcode::RangeEnd => (1, 1), // r → r int (peek)
+        // 0.0.4 T05: async (BYTECODE v4, 0xC0–0xC3).
+        // `AsyncStart` (the head of an `async func` body) packages the frame's
+        // parameters into a not-yet-started coroutine frame and returns it,
+        // leaving the body to be driven later by `Await`; inside the body the
+        // net operand effect is 0, so the body is verified as a fresh call.
+        Opcode::AsyncStart => (0, 0),
+        // `Suspend` yields `Pending` to a driver. Unreachable from any verified
+        // 0.0.4 T05 program (no suspension source yet); its effect is fixed by
+        // the T06 executor / T07 channels.
+        Opcode::Suspend => (0, 0),
+        // `Await` (and `Poll`, which drives a future to completion in T05):
+        // pop the Future, push the unwrapped payload `F → T` (Δ0, min 1).
+        Opcode::Poll | Opcode::Await => (0, 1),
     })
 }
 
@@ -480,6 +505,14 @@ fn walk_function(
         }
         if module.version < 3 && (d.opcode as u8) >= V3_OPCODE_BASE {
             return Err(VerifyError::V3OpcodeInV1V2Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
+        // 0.0.4 T05: v4 (async, >= 0xC0) is kept out of v1–v3 modules — the
+        // same explicit comparison as the v2/v3 gates.
+        if module.version < 4 && (d.opcode as u8) >= V4_OPCODE_BASE {
+            return Err(VerifyError::V4OpcodeInV1V2V3Module {
                 pc: d.pc,
                 byte: d.opcode as u8,
             });

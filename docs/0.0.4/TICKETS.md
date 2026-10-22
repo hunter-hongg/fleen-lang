@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T04 implemented; T05–T10 planned.**
+> **Status: IN PROGRESS — T01–T05 implemented; T06–T10 planned.**
 
 ---
 
@@ -137,10 +137,44 @@ snapshot, checked by a `debug_assert` here.
 
 ## T05 — Opcodes + lower/codegen (F5)
 
-- [ ] `AsyncStart/Suspend/Poll/Await` (0xC0–0xC3)
-- [ ] Lower async fn → `AsyncStart`; `await` → `Poll`/`Await`; version → **4**
-- [ ] Verify: `Δdepth` for the 4 new instructions; version gate `{1,2,3,4}`
-- [ ] Tests: `tests/vm/async_valid`, `tests/verify`
+- [x] `AsyncStart/Suspend/Poll/Await` (0xC0–0xC3)
+- [x] Lower async fn → `AsyncStart`; `await` → `Await`; version → **4**
+- [x] Verify: `Δdepth` for the 4 new instructions; version gate `{1,2,3,4}`
+- [x] Tests: `tests/vm/async_valid`-style VM tests + verify v4-gate/depth tests
+
+**Notes (implementation)**: AsyncStart/Suspend/Poll/Await are all operand-less
+(`operand_len = 0`). The async fn's `code` is `[AsyncStart, <body>]`; a normal
+`Call` runs `AsyncStart` at pc 0, which packages the frame's parameter slots
+into a **not-yet-started** `FutureFrame` (T04 `D1`) with `resume_pc` set to the
+body entry (pc + 1) and delivers the `Future` to the caller. The body itself is
+only driven by `Await`/`Poll` via `resume_frame`.
+
+- `Await`/`Poll` pop a `Future`, then advance the awaiting frame's `ip` past the
+  instruction *before* calling `resume_frame` — mirroring `Call`'s ip-advance
+  (the U09 ip-rewind lesson). The resumed body's own `Return` delivers the
+  payload `T`, so in T05's synchronous subset (no suspension source) both
+  opcodes land `T` with no Ready/Pending tag or re-drive loop; the T06 executor
+  rewires `Poll` to honor a real `Pending`.
+- `Suspend` is defined, verify-tabled and dispatched, but no 0.0.4 T05 lowering
+  emits it (there is no channel/sleep/`yield_now` source yet), so a verified
+  program never reaches it — the VM arm is the defensive
+  `RuntimeErrorKind::UnsupportedAsyncSuspend`. The real yield lands with T06/T07.
+- Opcode stack effects (verify): `AsyncStart`/`Suspend` Δ0/min0 (AsyncStart is
+  a call boundary — net 0 in the body's linear analysis), `Poll`/`Await`
+  Δ0/min1 (`F → T`).
+- Version bump to **4**, applied where the version constant lives:
+  `codegen::MODULE_VERSION`, `flnc::READ_VERSIONS`, the VM version gate, and the
+  v3→v4 fixture/version-test assertions all updated. The committed
+  `tests/fixtures/v3/aggregate.flnc` stays **byte-v3** (BYTECODE.md §10 compat
+  promise); `v3_fixture_bytes()` pins `module.version = 3` so the v3 drift test
+  stays meaningful now that the compiler emits v4.
+- Tests: `fleen-vm/src/tests.rs` (source end-to-end async/await + raw-opcode
+  dispatch + defensive `FutureExpected`/`UnsupportedAsyncSuspend`),
+  `fleen-verify/src/tests.rs` (v4 async verifies, v4-in-v3 gate, Await underflow,
+  opcode numbering). `Poll`'s VM dispatch and both `Poll`/`Suspend` verify
+  stack-effect branches are covered by hand-written bytecode tests
+  (`raw_poll_*`, `v4_*_stack_effect_verifies`); a lower test asserts an async
+  fn's entry block opens with `AsyncStart` (body entry = fixed pc + 1).
 
 ---
 
@@ -208,13 +242,13 @@ snapshot, checked by a `debug_assert` here.
 
 | new opcode | mnemonic | Δdepth |
 |------------|----------|--------|
-| 0xC0 | `AsyncStart` | TBD at implementation |
-| 0xC1 | `Suspend` | TBD |
-| 0xC2 | `Poll` | TBD |
-| 0xC3 | `Await` | TBD |
-| 0xC4 | `ChannelNew` | TBD |
-| 0xC5 | `ChannelSend` | TBD |
-| 0xC6 | `ChannelRecv` | TBD |
+| 0xC0 | `AsyncStart` | (0, 0) — call boundary, net 0 in the body's linear analysis |
+| 0xC1 | `Suspend` | (0, 0) — yield boundary (unreachable from T05 lowering) |
+| 0xC2 | `Poll` | (0, 1) — `F → T` (T05: drives to completion) |
+| 0xC3 | `Await` | (0, 1) — `F → T` |
+| 0xC4 | `ChannelNew` | TBD (T07) |
+| 0xC5 | `ChannelSend` | TBD (T07) |
+| 0xC6 | `ChannelRecv` | TBD (T07) |
 
 ---
 

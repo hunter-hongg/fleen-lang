@@ -238,4 +238,18 @@ pub enum MirInstrKind {
     RangeStart,
     /// Push a copy of a Range's end bound. Stack effect: r → r int.
     RangeEnd,
+    // 0.0.4 T05: async / await instructions (bytecode v4, 0xC0–0xC3).
+    /// Async call boundary: at the head of an `async func` body it packages
+    /// the frame's parameter slots into a not-yet-started coroutine frame and
+    /// returns the `Future` value to the caller (stack effect Δ0).
+    AsyncStart,
+    /// Suspension point: snapshot the current coroutine frame and yield
+    /// `Pending` to the driver. Unreachable from T05 lowering (no suspension
+    /// source yet); wired by the T06 executor and T07 channels.
+    Suspend,
+    /// Drive a `Future` to its next state, pushing a Ready/Pending tag.
+    /// (0.0.4 T05: drives to completion and delivers `T`.)
+    Poll,
+    /// `Poll` + expect Ready + unwrap the payload: `F → T` (Δ0, min 1).
+    Await,
 }

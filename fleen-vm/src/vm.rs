@@ -53,7 +53,8 @@ impl Vm {
 
     /// Run the module's `entry` function to completion.
     ///
-    /// Accepts bytecode versions 1 (0.0.1), 2 (0.0.2) and 3 (0.0.3). On
+    /// Accepts bytecode versions 1 (0.0.1), 2 (0.0.2), 3 (0.0.3) and 4
+    /// (0.0.4). On
     /// failure the [`RuntimeError`] carries the source location of the
     /// failing instruction when one can be determined (0.0.2 U10).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
@@ -61,7 +62,7 @@ impl Vm {
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
-        if !(1..=3).contains(&self.module.version) {
+        if !(1..=4).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -1142,6 +1143,74 @@ impl Vm {
                     _ => return Err(RuntimeErrorKind::StackShape),
                 };
                 self.stack.push(Value::Int(r));
+            }
+            // 0.0.4 T05: async / await (bytecode v4, 0xC0–0xC3). These
+            // operate on the coroutine frame machinery in `frame.rs`
+            // (T04): `AsyncStart` produces a not-yet-started Future and
+            // returns it to the caller; `Poll`/`Await` drive a Future to
+            // completion (`resume_frame` + the body's own `Return` delivers
+            // the payload). `Suspend` is the yield boundary that the T06
+            // executor and T07 channels wire; it is unreachable from 0.0.4
+            // T05 lowering (there is no suspension source), so reaching it
+            // here is a malformed/unsupported program, reported defensively.
+            Opcode::AsyncStart => {
+                // `AsyncStart` is the head of an `async func` body. Called
+                // via a normal `Call`, it packages the frame's parameter
+                // slots into a not-yet-started coroutine frame (T04 `D1`:
+                // `resume_pc = ip`, i.e. the body entry right after this
+                // instruction) and returns that `Future` value to the
+                // caller. It must be a leaf (frame-last) instruction: the
+                // body that follows is driven later by `Poll`/`Await`.
+                let frame = *self.frames.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let params = self.module.functions[frame.func.0 as usize].params as usize;
+                let locals = self.func_locals(frame.func)?;
+                let args: Vec<Value> = (0..params)
+                    .map(|i| {
+                        self.stack
+                            .get(frame.stack_base + i)
+                            .cloned()
+                            .ok_or(RuntimeErrorKind::StackShape)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut slots = args;
+                slots.resize(locals, Value::Unit);
+                let future = FutureFrame {
+                    func: frame.func,
+                    resume_pc: ip, // body entry = the instruction after AsyncStart
+                    locals: slots,
+                    operands: Vec::new(),
+                    state: FutureState::Resumable,
+                };
+                // Unwind this call like `Return` (deliver the Future to the
+                // caller). No callee frame may be live above an `AsyncStart`.
+                let done = self.frames.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                self.stack.truncate(done.stack_base);
+                self.stack.push(Value::Future(Box::new(future)));
+                return Ok(());
+            }
+            Opcode::Suspend => {
+                // Yields `Pending` to a driver. T05 has no executor and no
+                // suspension source, so a verified program never executes
+                // this; hand-written bytecode that does is unsupported.
+                return Err(RuntimeErrorKind::UnsupportedAsyncSuspend);
+            }
+            Opcode::Poll | Opcode::Await => {
+                // Drive a `Future` to completion. Pop the Future, then advance
+                // *this* (the awaiting) frame's ip past the instruction so the
+                // resumed body — which `resume_frame` pushes above it — hands
+                // control back to the instruction after `Await` once its own
+                // `Return` unwinds. `Call` does the same advance before pushing
+                // a callee frame (the U09 ip-rewind lesson).
+                let fut = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let Value::Future(f) = fut else {
+                    return Err(RuntimeErrorKind::FutureExpected);
+                };
+                self.frames
+                    .last_mut()
+                    .ok_or(RuntimeErrorKind::StackUnderflow)?
+                    .ip = ip;
+                self.resume_frame(*f)?;
+                return Ok(());
             }
         }
         self.frames

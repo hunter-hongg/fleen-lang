@@ -78,7 +78,7 @@ impl std::error::Error for CompileError {}
 /// # Example
 /// ```
 /// let module = fleen_compiler::compile("func main(): int = 42").unwrap();
-/// assert_eq!(module.version, 3);
+/// assert_eq!(module.version, 4);
 /// ```
 pub fn compile(source: &str) -> Result<codegen::Bytecode, CompileError> {
     let mut session = Session::new();
@@ -99,7 +99,7 @@ pub fn compile(source: &str) -> Result<codegen::Bytecode, CompileError> {
 /// let mut session = fleen_compiler::Session::new();
 /// let root = session.add_file("main.fln", "func main(): int = 42");
 /// let module = session.compile(root).unwrap();
-/// assert_eq!(module.version, 3);
+/// assert_eq!(module.version, 4);
 /// ```
 pub struct Session {
     sources: SourceMap,

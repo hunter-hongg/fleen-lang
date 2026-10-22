@@ -657,7 +657,7 @@ func main(): int {
 }
 "#;
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
     assert!(
         crate::verify(&module).is_ok(),
         "{:?}",
@@ -1292,4 +1292,129 @@ fn v3_opcode_base_extends_to_arrays() {
     assert_eq!(Opcode::ArrGet as u8, 0xB6);
     assert_eq!(Opcode::ArrSetLocal as u8, 0xB7);
     assert_eq!(Opcode::ArrSetGlobal as u8, 0xB8);
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T05 async opcodes (bytecode v4, 0xC0–0xC3).
+// ---------------------------------------------------------------------------
+
+/// A hand-built v4 module exercising the async opcodes in a depth-balanced
+/// way: `main` pushes a Future (via `__await`-style `Await` at min depth 1).
+fn v4_async_module() -> Module {
+    // constants: [0]=main, [1]=Int(1).
+    // `main`: Const Int(1) (a stand-in Future operand) ; Await ; Return.
+    // Depth: Const(+1)→1, Await(Δ0,min1)→1, Return(needs 1) — balanced.
+    Module {
+        struct_defs: Vec::new(),
+        version: 4,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([
+                Opcode::Const as u8,
+                1,
+                0,
+                0,
+                0, // const idx 1 (Int(1))
+                Opcode::Await as u8,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn v4_async_program_verifies() {
+    // A v4 module reaching `Await` at a valid depth passes verify.
+    let m = v4_async_module();
+    assert_eq!(m.version, 4);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn v4_async_opcode_in_v3_module_rejected() {
+    // Explicit gate (the 0.0.2 U07 lesson): a 0xCx opcode in a v1–v3 module
+    // is rejected — the same explicit comparison as the v2/v3 gates, not a
+    // "naturally fine" side effect.
+    let mut m = v4_async_module();
+    m.version = 3;
+    assert_eq!(
+        verify::verify(&m),
+        Err(VerifyError::V4OpcodeInV1V2V3Module {
+            pc: 5,
+            byte: Opcode::Await as u8
+        })
+    );
+}
+
+#[test]
+fn v4_await_underflow_is_rejected() {
+    // `Await` has min depth 1 (it pops a Future). A module that hits it with
+    // an empty operand stack fails the depth analysis.
+    let mut m = v4_async_module();
+    m.functions[0].code = Box::new([Opcode::Await as u8, Opcode::Return as u8]);
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::StackUnderflow { .. })
+    ));
+}
+
+/// A v4 module whose `main` is `Const Int(1) ; <op> ; Return` — used to
+/// exercise the async opcodes that are reachable from hand-written bytecode
+/// but not from 0.0.4 T05 lowering (`Poll` / `Suspend`).
+fn v4_async_single_op(op: Opcode) -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        version: 4,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([
+                Opcode::Const as u8,
+                1,
+                0,
+                0,
+                0, // const idx 1 (Int(1))
+                op as u8,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn v4_poll_stack_effect_verifies() {
+    // `Poll` pops the Future and pushes the payload (Δ0, min1) like `Await`:
+    // Const→1, Poll(0,1)→1, Return→0 — balanced at min depth 1.
+    let m = v4_async_single_op(Opcode::Poll);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn v4_suspend_stack_effect_verifies() {
+    // `Suspend` is a yield boundary: net zero and touches no operand
+    // (Δ0, min0). Const→1, Suspend(0,0)→1, Return→0 — balanced.
+    let m = v4_async_single_op(Opcode::Suspend);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn v4_async_opcode_numbers_are_locked() {
+    // 0.0.4 uses the reserved 0xBC–0xFF region; async lands at 0xC0–0xC3.
+    assert_eq!(Opcode::AsyncStart as u8, 0xC0);
+    assert_eq!(Opcode::Suspend as u8, 0xC1);
+    assert_eq!(Opcode::Poll as u8, 0xC2);
+    assert_eq!(Opcode::Await as u8, 0xC3);
 }

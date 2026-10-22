@@ -300,6 +300,26 @@ pub enum Opcode {
     /// Push a copy of a Range's end bound; the range stays on the stack
     /// (r → r int). Used once, before the loop, by the `for` desugar.
     RangeEnd = 0xBB,
+    // 0xC0–0xC6 async / channel (0.0.4, bytecode v4; 0xC0–0xC3 land in T05,
+    // 0xC4–0xC6 in T07). All inside the reserved 0xBC–0xFF region, so v1–v3
+    // encodings are untouched (BYTECODE.md §10 compatibility promise).
+    /// Async call boundary (0.0.4 T05): at the head of an `async func`'s
+    /// body it packages the frame's parameter slots into a not-yet-started
+    /// coroutine frame and delivers the `Future` value back to the caller.
+    /// Operand-less; body entry is always the next instruction (pc + 1).
+    AsyncStart = 0xC0,
+    /// Suspension point (0.0.4 T05): snapshots the current coroutine frame
+    /// and yields `Pending` to the driver. Unreachable from 0.0.4 T05
+    /// lowering (no suspension source yet); the real yield lands with the
+    /// T06 executor and T07 channels.
+    Suspend = 0xC1,
+    /// Drive a `Future` to its next state, pushing a Ready/Pending tag
+    /// (0.0.4 T05; the T06 executor completes the Pending protocol).
+    Poll = 0xC2,
+    /// `Poll` + expect Ready + unwrap the payload: drive a `Future` to
+    /// completion and leave its `T` on the operand stack (0.0.4 T05).
+    /// Stack effect: `F → T` (Δ0, min 1).
+    Await = 0xC3,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -312,6 +332,10 @@ pub const V2_OPCODE_BASE: u8 = 0x80;
 /// Lowest opcode number reserved for the 0.0.3 (v3) instruction set
 /// (structs 0xB0–0xB3, arrays 0xB4–0xB8; range follows in V04, 0xB9–0xBB).
 pub const V3_OPCODE_BASE: u8 = 0xB0;
+
+/// Lowest opcode number reserved for the 0.0.4 (v4) instruction set
+/// (async / channel 0xC0–0xC6). v4 opcodes are at or above this.
+pub const V4_OPCODE_BASE: u8 = 0xC0;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -419,6 +443,11 @@ impl Opcode {
             0xB9 => Opcode::MakeRange,
             0xBA => Opcode::RangeStart,
             0xBB => Opcode::RangeEnd,
+            // 0.0.4 (v4): async opcodes (T05).
+            0xC0 => Opcode::AsyncStart,
+            0xC1 => Opcode::Suspend,
+            0xC2 => Opcode::Poll,
+            0xC3 => Opcode::Await,
             _ => return None,
         })
     }

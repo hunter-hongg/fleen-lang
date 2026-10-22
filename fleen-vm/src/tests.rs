@@ -270,12 +270,12 @@ fn v2_module_gate() {
     // Unknown module versions are rejected before execution.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 4,
+        version: 5,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(4)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(5)))
     );
 }
 
@@ -1174,13 +1174,13 @@ fn unsupported_version_has_no_location() {
     // No frame is ever pushed, so no location can be attached.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 4,
+        version: 5,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(4))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(5))
     );
 }
 
@@ -2339,5 +2339,171 @@ fn future_value_is_opaque_and_does_not_grow_value() {
         std::mem::size_of::<Value>() <= 24,
         "Value grew to {} bytes — FutureFrame must stay boxed",
         std::mem::size_of::<Value>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T05: AsyncStart / Suspend / Poll / Await opcode dispatch (bytecode v4).
+//
+// `run_src` compiles a `.fln` source through the full pipeline (now emitting
+// v4) and executes it as the module's entry — the same path `cargo fln` uses.
+// ---------------------------------------------------------------------------
+
+fn run_src(src: &str) -> Result<Value, RuntimeError> {
+    let module = fleen_compiler::compile(src).expect("compile async source");
+    assert_eq!(module.version, 4, "compiler must emit bytecode v4 now");
+    Vm::new(module).run()
+}
+
+#[test]
+fn async_fn_call_returns_a_future_and_await_unwraps_it() {
+    // `gen(1)` is an async call, so it yields `Future<int>`; `await` drives it
+    // to completion and leaves the payload `2` on the stack.
+    let src = "async func gen(x: int): int = x + 1\nfunc main(): int = gen(1) await\n";
+    let v = run_src(src).expect("runs");
+    assert_eq!(v, Value::Int(2));
+}
+
+#[test]
+fn await_chains_nested_async_calls() {
+    // `outer` awaits `gen` internally; the module drives `outer` to completion
+    // through two resume/Return cycles.
+    let src = "\
+async func gen(x: int): int = x + 1
+async func outer(): int { gen(2) await }
+func main(): int = outer() await
+";
+    let v = run_src(src).expect("runs");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn await_involving_locals_survives_the_drive() {
+    // A local bound to the awaited value must be a slot (part of the frame's
+    // local area), so it survives being resumed at a different stack depth.
+    let src = "\
+async func gen(x: int): int = x * 2
+func main(): int {
+    v = gen(21) await;
+    v + 1
+}
+";
+    let v = run_src(src).expect("runs");
+    assert_eq!(v, Value::Int(43));
+}
+
+#[test]
+fn await_on_an_async_fn_that_returns_unit() {
+    let src = "\
+async func tick(n: int) { print(n as string); }
+func main(): int {
+    tick(7) await;
+    0
+}
+";
+    let v = run_src(src).expect("runs");
+    assert_eq!(v, Value::Int(0));
+}
+
+#[test]
+fn await_emitted_by_lower_produces_v4_and_still_verifies() {
+    // The compiler emits version 4 with the Await opcode; the VM must run it,
+    // and the whole module must still pass fleen-verify's v4 gate.
+    let src = "async func f(): int = 5\nfunc main(): int = f() await\n";
+    let module = fleen_compiler::compile(src).expect("compile");
+    assert_eq!(module.version, 4);
+    fleen_verify::verify(&module).expect("v4 async module verifies");
+    assert_eq!(Vm::new(module).run().unwrap(), Value::Int(5));
+}
+
+// Hand-written v4 module exercising the raw opcodes directly.
+fn async_opcode_module() -> Module {
+    // constants: [0]=main, [1]=gen, [2]=Int(1), [3]=Int(40).
+    // function 0 = `main` (entry): pushes the arg `40`, calls the async fn
+    //   `gen` (func 1), which via its head `AsyncStart` returns a `Future`,
+    //   then `Await` drives it to `41`.
+    // function 1 = `gen(x)`: `AsyncStart` (packages the frame's param into a
+    //   not-yet-started coroutine frame and returns the Future), then the
+    //   body `LoadLocal 0, Const Int(1), IAdd → x+1`, Return — the same
+    //   single-function layout the real lowerer produces.
+    let main = enc(&[
+        (Opcode::Const, u32b(3)), // Int(40): the arg to gen
+        (Opcode::Call, u16b(1)),  // call async fn -> Future on stack
+        (Opcode::Await, vec![]),  // drive -> 41 on stack
+        (Opcode::Return, vec![]),
+    ]);
+    let gen_func = enc(&[
+        (Opcode::AsyncStart, vec![]),
+        (Opcode::LoadLocal, u16b(0)),
+        (Opcode::Const, u32b(2)), // Int(1)
+        (Opcode::IAdd, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    Module {
+        struct_defs: Vec::new(),
+        version: 4,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Str("gen".into()),
+            Const::Int(1),
+            Const::Int(40),
+        ],
+        functions: vec![func(main, 0, 0), func(gen_func, 1, 1)],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn raw_asyncstart_delivers_a_future_and_await_drives_it() {
+    // `AsyncStart` at the head of `gen` packages the frame's param into a
+    // not-yet-started coroutine frame and returns the Future; `Await` in
+    // `main` resumes it, `gen` runs `40 + 1` → Return delivers `41`.
+    let mut vm = Vm::new(async_opcode_module());
+    assert_eq!(vm.run().unwrap(), Value::Int(41));
+}
+
+#[test]
+fn raw_poll_delivers_a_future_and_drives_it() {
+    // 0.0.4 T05 `Poll` drives a Future to completion exactly like `Await`
+    // (the Ready/Pending protocol is wired by the T06 executor), so swapping
+    // the awaited opcode in `main` for `Poll` must yield the same 41. This
+    // exercises the `Opcode::Poll` → resume_frame dispatch that lowering does
+    // not yet emit.
+    let mut module = async_opcode_module();
+    module.functions[0].code = enc(&[
+        (Opcode::Const, u32b(3)), // Int(40): the arg to gen
+        (Opcode::Call, u16b(1)),  // call async fn -> Future on stack
+        (Opcode::Poll, vec![]),   // drive -> 41 on stack
+        (Opcode::Return, vec![]),
+    ]);
+    let mut vm = Vm::new(module);
+    assert_eq!(vm.run().unwrap(), Value::Int(41));
+}
+
+#[test]
+fn await_on_a_non_future_is_future_expected() {
+    // typeck rejects `5 await`, but hand-written bytecode can still reach the
+    // opcode with a non-Future operand; the VM reports it defensively.
+    let mut module = async_opcode_module();
+    module.functions[0].code = enc(&[
+        (Opcode::Const, u32b(2)), // Int(1): not a Future
+        (Opcode::Await, vec![]),
+        (Opcode::Return, vec![]),
+    ]);
+    let mut vm = Vm::new(module);
+    assert_eq!(vm.run().unwrap_err().kind, RuntimeErrorKind::FutureExpected);
+}
+
+#[test]
+fn suspend_reaches_a_defensive_error_without_an_executor() {
+    // No suspension source exists in 0.0.4 T05, so a verified program never
+    // executes `Suspend`; hand-written bytecode that does is unsupported.
+    let mut module = async_opcode_module();
+    module.functions[0].code = enc(&[(Opcode::Suspend, vec![]), (Opcode::Return, vec![])]);
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::UnsupportedAsyncSuspend
     );
 }

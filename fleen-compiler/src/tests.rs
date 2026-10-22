@@ -8,7 +8,7 @@ use crate::typeck::error::TypeckErrorKind;
 #[test]
 fn compiles_valid_source() {
     let module = compile("func main(): int = 42").unwrap();
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
     assert!(module.functions.iter().any(|f| f.params == 0));
 }
 
@@ -63,8 +63,8 @@ fn session_compiles_each_registered_file() {
     let mut session = Session::new();
     let a = session.add_file("a.fln", "func main(): int = 42");
     let b = session.add_file("b.fln", "func main(): int = 7");
-    assert_eq!(session.compile(a).unwrap().version, 3);
-    assert_eq!(session.compile(b).unwrap().version, 3);
+    assert_eq!(session.compile(a).unwrap().version, 4);
+    assert_eq!(session.compile(b).unwrap().version, 4);
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn compile_project_merges_modules() {
     );
     session.add_file("src/net/tcp.fln", "pub func say() { print(\"hi\"); }");
     let module = session.compile_project(root).unwrap();
-    assert_eq!(module.version, 3);
+    assert_eq!(module.version, 4);
 }
 
 #[test]

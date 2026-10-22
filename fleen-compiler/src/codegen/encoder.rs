@@ -253,6 +253,11 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::MakeRange => Opcode::MakeRange,
         MirInstrKind::RangeStart => Opcode::RangeStart,
         MirInstrKind::RangeEnd => Opcode::RangeEnd,
+        // 0.0.4 T05: async / await (bytecode v4, 0xC0–0xC3).
+        MirInstrKind::AsyncStart => Opcode::AsyncStart,
+        MirInstrKind::Suspend => Opcode::Suspend,
+        MirInstrKind::Poll => Opcode::Poll,
+        MirInstrKind::Await => Opcode::Await,
     })
 }
 

@@ -71,6 +71,13 @@ pub enum RuntimeErrorKind {
     /// gives every `Future<T>` value a single owner, so reaching this needs
     /// hand-written bytecode.
     FutureNotResumable,
+    /// `Poll`/`Await` found a non-`Future` value on the operand stack
+    /// (0.0.4 T05). Defensive: typeck restricts `await` to `Future<T>`.
+    FutureExpected,
+    /// `Suspend` executed with no executor and no suspension source
+    /// (0.0.4 T05). The real yield boundary is wired by the T06 executor and
+    /// T07 channels; any verified 0.0.4 T05 program never reaches this.
+    UnsupportedAsyncSuspend,
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -114,6 +121,15 @@ impl std::fmt::Display for RuntimeErrorKind {
             RuntimeErrorKind::Exit(code) => write!(f, "process exited with code {code}"),
             RuntimeErrorKind::FutureNotResumable => {
                 write!(f, "future has already been driven and cannot be resumed")
+            }
+            RuntimeErrorKind::FutureExpected => {
+                write!(f, "await expected a `Future<T>` value on the stack")
+            }
+            RuntimeErrorKind::UnsupportedAsyncSuspend => {
+                write!(
+                    f,
+                    "Suspend reached with no executor (0.0.4 T05 has no suspension source)"
+                )
             }
         }
     }
