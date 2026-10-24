@@ -1,0 +1,16 @@
+// Regression (0.0.3 V05/V06 resolver-typeck agreement): a root-crate
+// function sharing a name with a std-module parameter (`std.num.min(a, b)`
+// / `max(a, b)`) must not leak the function's type into the std module's
+// own body. Value lookup now checks the scope chain before the
+// program-wide function-signature map, so `a < b` inside std/num resolves
+// to the parameters — this program compiles and runs.
+import std.io;
+import std.async;
+
+async func b() {
+    std.io.println("b ran");
+}
+
+func main() {
+    std.async.run([b()]);
+}

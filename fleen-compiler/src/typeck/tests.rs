@@ -2410,3 +2410,38 @@ fn struct_field_named_send_resolves_as_field() {
         other => panic!("expected expression item, got {other:?}"),
     }
 }
+
+#[test]
+fn local_shadowing_a_function_name_resolves_to_the_local() {
+    // `lookup_type` must consult the scope chain before the program-wide
+    // function-signature map: a parameter or local that shares a name with a
+    // user function keeps the local's type. The resolver resolves the ident
+    // against its scopes (innermost wins), so typeck checking function names
+    // first disagreed with it — and across modules it broke every std-module
+    // body with `a`/`b`-style parameters (`std.num.min`'s `a < b` resolved
+    // the operand to a root-crate `async func b`'s type).
+    let hir = compile_ok("func b(): int = 1\nfunc f(b: bool): bool = b\n");
+    let last = hir.items.last().expect("items");
+    let TypedHirItem::Decl(TypedDeclHir::Func(f)) = last else {
+        panic!("expected function decl, got {last:?}");
+    };
+    let TypedFuncBodyHir::SingleExpr(tail) = &f.body else {
+        panic!("expected single-expression body");
+    };
+    assert_eq!(tail.ty(), Type::Bool);
+
+    // The same shadowing in `let` position.
+    let hir = compile_ok("func g(): int = 1\nfunc h(): int {\n    g = 2;\n    g\n}\n");
+    let last = hir.items.last().expect("items");
+    let TypedHirItem::Decl(TypedDeclHir::Func(f)) = last else {
+        panic!("expected function decl, got {last:?}");
+    };
+    let TypedFuncBodyHir::Block(body) = &f.body else {
+        panic!("expected block body");
+    };
+    let tail = body.tail_expr.as_ref().expect("tail expression");
+    assert_eq!(tail.ty(), Type::Int);
+
+    // A local may also shadow a *builtin* name in value position.
+    compile_ok("func f(print: int): int = print\n");
+}

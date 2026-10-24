@@ -3021,48 +3021,55 @@ impl TypeChecker {
     }
 
     /// Look up the type of a variable.
+    ///
+    /// Order matters: the **innermost scope wins**, then function signatures
+    /// (a bare function/builtin identifier used as a value), then imported
+    /// globals. The resolver resolved this ident against its own scopes — a
+    /// parameter or local shadowing a function name must keep the local's
+    /// type here too. Checking `func_signatures` first instead made any
+    /// local/param that shares a name with a *user function* resolve to the
+    /// function's type — including across modules, where the program-wide
+    /// signature map sees the root crate's bare names while the std module's
+    /// `min(a, b)`-style parameters are perfectly legal locals
+    /// (`std.num.min`'s `a < b` broke under a user `async func b`).
     fn lookup_type(&mut self, name: &str, span: Span) -> Result<Type, ()> {
-        // First check function signatures
+        // First check the scope chain (innermost binding shadows everything).
+        if let Some(binding) = self.scopes.get(name) {
+            // Look up the type from our binding_types map
+            if let Some(ty) = self.binding_types.get(&binding.id) {
+                return Ok(ty.clone());
+            }
+            // The resolver should have registered every binding with
+            // a type; reaching this means the resolver and typeck
+            // disagree — treat as a compiler bug, never silently
+            // invent a type.
+            self.add_error(
+                TypeckErrorKind::InternalError {
+                    message: format!("no recorded type for binding `{name}`"),
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        // Then check function signatures
         if let Some((params, ret)) = self.func_signatures.get(name) {
             return Ok(Type::Func(params.clone(), Box::new(ret.clone())));
         }
 
-        // Then check scope
-        match self.scopes.get(name) {
-            Some(binding) => {
-                // Look up the type from our binding_types map
-                if let Some(ty) = self.binding_types.get(&binding.id) {
-                    Ok(ty.clone())
-                } else {
-                    // The resolver should have registered every binding with
-                    // a type; reaching this means the resolver and typeck
-                    // disagree — treat as a compiler bug, never silently
-                    // invent a type.
-                    self.add_error(
-                        TypeckErrorKind::InternalError {
-                            message: format!("no recorded type for binding `{name}`"),
-                        },
-                        span,
-                    );
-                    Err(())
-                }
-            }
-            None => {
-                // Fall back to globals collected in a first pass so that
-                // imported globals (e.g. `net.answer`) resolve by their
-                // mangled name. 0.0.3 V05.
-                if let Some(ty) = self.global_types.get(name) {
-                    return Ok(ty.clone());
-                }
-                self.add_error(
-                    TypeckErrorKind::UndefinedVariable {
-                        name: name.to_string(),
-                    },
-                    span,
-                );
-                Err(())
-            }
+        // Fall back to globals collected in a first pass so that
+        // imported globals (e.g. `net.answer`) resolve by their
+        // mangled name. 0.0.3 V05.
+        if let Some(ty) = self.global_types.get(name) {
+            return Ok(ty.clone());
         }
+        self.add_error(
+            TypeckErrorKind::UndefinedVariable {
+                name: name.to_string(),
+            },
+            span,
+        );
+        Err(())
     }
 }
 
