@@ -22,7 +22,7 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// Version 1 was 0.0.1; version 2 adds the ownership / Result instructions
 /// and a populated `span_map` (BYTECODE.md §10). Version 3 (0.0.3 V02) adds
 /// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table.
-/// Version 4 (0.0.4 T05) adds the async instructions 0xC0–0xC3. Readers
+/// Version 4 (0.0.4) adds the async/channel instructions 0xC0–0xC7. Readers
 /// accept all four.
 pub const MODULE_VERSION: u16 = 4;
 

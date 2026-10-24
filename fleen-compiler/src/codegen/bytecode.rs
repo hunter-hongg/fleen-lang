@@ -310,8 +310,8 @@ pub enum Opcode {
     /// Push a copy of a Range's end bound; the range stays on the stack
     /// (r → r int). Used once, before the loop, by the `for` desugar.
     RangeEnd = 0xBB,
-    // 0xC0–0xC6 async / channel (0.0.4, bytecode v4; 0xC0–0xC3 land in T05,
-    // 0xC4–0xC6 in T07). All inside the reserved 0xBC–0xFF region, so v1–v3
+    // 0xC0–0xC7 async / channel (0.0.4, bytecode v4; 0xC0–0xC3 land in T05,
+    // 0xC4–0xC7 in T07). All inside the reserved 0xBC–0xFF region, so v1–v3
     // encodings are untouched (BYTECODE.md §10 compatibility promise).
     /// Async call boundary (0.0.4 T05): at the head of an `async func`'s
     /// body it packages the frame's parameter slots into a not-yet-started
@@ -359,7 +359,7 @@ pub const V2_OPCODE_BASE: u8 = 0x80;
 pub const V3_OPCODE_BASE: u8 = 0xB0;
 
 /// Lowest opcode number reserved for the 0.0.4 (v4) instruction set
-/// (async / channel 0xC0–0xC6). v4 opcodes are at or above this.
+/// (async / channel 0xC0–0xC7). v4 opcodes are at or above this.
 pub const V4_OPCODE_BASE: u8 = 0xC0;
 
 impl Opcode {

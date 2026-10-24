@@ -9,7 +9,8 @@ const MAGIC: &[u8; 4] = b"FLNC";
 ///
 /// v2 adds instructions and fills `span_map`; v3 adds the struct
 /// instructions and the appended `struct_defs` table (read only for
-/// version >= 3); v4 (0.0.4 T05) adds the async instructions 0xC0–0xC3.
+/// version >= 3); v4 (0.0.4) adds the async/channel instructions
+/// 0xC0–0xC7 (0xC0–0xC3 in T05, 0xC4–0xC7 in T07).
 /// The field order and widths of every existing table are
 /// unchanged (BYTECODE.md §9), so a v1 file reads unmodified.
 const READ_VERSIONS: [u16; 4] = [1, 2, 3, 4];

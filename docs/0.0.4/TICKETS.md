@@ -40,8 +40,9 @@ only `async`/`await`/`channel`); it is recognized only in constructor position
 non-statement-starting and is a postfix suffix in the `() [i] .f await ?` group
 (so `e await?` = `(e await)?`). An async fn's *caller* signature is wrapped in
 `Future<T>` in `collect_func_signatures`; the fn's own `ret_type`/body stay `T`.
-Async **lowering** is deliberately not wired yet — `lower_expr_into` rejects
-`TypedExprHir::Await` with `UnsupportedFeature` until T05.
+Async **lowering** is wired as of T05: `TypedExprHir::Await` lowers to the
+`Await` opcode and an async fn's entry block opens with `AsyncStart` (see the
+T05 card).
 
 ---
 
@@ -116,14 +117,15 @@ Deviations from the card as written, all deliberate:
   metadata does not exist anywhere in the pipeline, and D1 already accepts the
   whole-frame snapshot; a liveness pass would be a separate optimization.
 
-The struct also carries a `FutureState` the original card omitted:
-`Resumable` (covers the not-yet-started frame `FutureFrame::new` produces —
-`resume_pc` 0, arguments padded to `Func::locals` — and a suspended one),
-`Completed(Value)` and `Failed(RuntimeError)`. A `Future` is driven once
-(PLAN §3.3), so resuming a completed/failed frame is the defensive
-`RuntimeErrorKind::FutureNotResumable`; `Failed` stores the error captured while
-the coroutine frame was live, so the T06 re-raise at the awaiting site keeps its
-location. `resume_pc` is `usize`, mirroring `CallFrame::ip`, rather than the
+The struct also carries a `FutureState` the original card omitted. As drafted
+it had three variants — `Resumable`, `Completed(Value)` and `Failed(RuntimeError)`
+— but **T06 reduced it to `Resumable` only**: the cooperative scheduler drives a
+task to completion in one resume (the payload travels on the operand stack to
+the `Await` site, and an error propagates directly from `step()`), so
+completed/failed frames are never stored. The `FutureNotResumable` guard stays
+as the defensive backstop for malformed bytecode; the T06 re-raise at the
+awaiting site keeps its location because `step()` writes `frame.ip` only on
+success. `resume_pc` is `usize`, mirroring `CallFrame::ip`, rather than the
 `u32` in PLAN §4.1's sketch.
 
 Still open for T05/T08: `clone` of a `Future` is currently reachable (typeck
@@ -155,10 +157,12 @@ only driven by `Await`/`Poll` via `resume_frame`.
   payload `T`, so in T05's synchronous subset (no suspension source) both
   opcodes land `T` with no Ready/Pending tag or re-drive loop; the T06 executor
   rewires `Poll` to honor a real `Pending`.
-- `Suspend` is defined, verify-tabled and dispatched, but no 0.0.4 T05 lowering
+- `Suspend` is defined, verify-tabled and dispatched, but no T05 lowering
   emits it (there is no channel/sleep/`yield_now` source yet), so a verified
-  program never reaches it — the VM arm is the defensive
-  `RuntimeErrorKind::UnsupportedAsyncSuspend`. The real yield lands with T06/T07.
+  program never reaches it — in T05 the VM arm was the defensive
+  `RuntimeErrorKind::UnsupportedAsyncSuspend`, which **T06 replaced with the
+  real yield** (`suspend_chain` into the scheduler; outside a future context
+  the defensive error is now `StackShape`). The T06 card records the change.
 - Opcode stack effects (verify): `AsyncStart`/`Suspend` Δ0/min0 (AsyncStart is
   a call boundary — net 0 in the body's linear analysis), `Poll`/`Await`
   Δ0/min1 (`F → T`).
@@ -233,6 +237,29 @@ composition (0.1.0).
   on exit), so channels no longer pin one `Rc` root per channel ever parked on
   for the program's lifetime (regression:
   `channel_waiters_registry_is_pruned_after_tasks_unpark`).
+
+**Review fixes (post-T01–T07 full review)**:
+
+- **The nested join is matched by task id, not counted.** The single-slot
+  `waiting_join` counted *any* task completing at the boundary: a sibling
+  finishing while a nested run was outstanding released the waiter early, a
+  second nested `std.async.run` overwrote the waiter (dropping its parked
+  chain), and `run([])` parked the caller forever (a zero count no completion
+  can satisfy). Now `std.async.run` assigns each spawned task an id carried on
+  the chain's root frame (`FutureFrame::task_id`, preserved through every
+  snapshot/resume via `CallFrame::task_id`); `waiting_join` is a stack of
+  `JoinWait { task, pending: Vec<u64> }`, a completion is matched against each
+  waiter's pending set, and an empty pending set (`run([])`) re-enqueues the
+  caller immediately. `Task` no longer derives `Clone` — the released
+  waiter's chain is moved back into the scheduler. Regressions:
+  `nested_nested_run_releases_every_level_in_order`,
+  `run_with_an_empty_task_list_completes`,
+  `sibling_completion_does_not_release_a_nested_join_early`,
+  e2e `nested_run_sibling` / `nested_run_two_levels`.
+- **Timer wake order is deterministic**: `promote_timers` promotes due timers
+  in insertion order (`Vec::remove`, not `swap_remove`), so tasks whose
+  deadlines fall in the same promotion pass wake in the order they went to
+  sleep (regression: e2e `timer_wake_order`).
 
 ---
 
@@ -314,11 +341,13 @@ composition (0.1.0).
 
 **Consequences the card must carry:**
 
-- `Type::Channel` does not exist yet in either `ast::Type` or
-  `typed_hir::Type`, and `OwnedChannelArgRequiresMove` (PLAN §7) was never
-  implemented: 0.0.2's ownership pass only validates `move`/`clone` *nodes*,
-  so there is no existing "this argument must be a move" check. D6 adds a new
-  direction of check, at the call site, before `prepare_args`.
+- `Type::Channel` exists in both `ast::Type` and `typed_hir::Type`, and
+  `OwnedChannelArgRequiresMove` (PLAN §7) is implemented as a new direction of
+  check — at the call site, before `prepare_args` — because 0.0.2's ownership
+  pass only validates `move`/`clone` *nodes* (there was no existing "this
+  argument must be a move" check to reuse). A `ref channel<T>` parameter is
+  rejected outright (`ChannelNotBorrowable`): send/recv park and resume across
+  the scheduler, which would carry the borrowed handle across a suspension.
 - `ChannelSend`/`ChannelRecv` are **not idempotent**, unlike `std.io.sleep`.
   The T06 `Call intrinsic; Suspend` pattern re-executes the call on resume,
   which is harmless for a timer and a duplicate delivery for a send. The
