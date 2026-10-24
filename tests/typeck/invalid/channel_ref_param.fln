@@ -1,0 +1,6 @@
+// expect-typeck: ChannelNotBorrowable
+// 0.0.4 T07: a channel handle cannot sit behind a `ref` — its send/recv
+// park and resume across the scheduler, carrying the borrowed handle
+// across a suspension (D4). Pass the channel by ownership instead.
+func borrow(c: ref channel<int>) {
+}

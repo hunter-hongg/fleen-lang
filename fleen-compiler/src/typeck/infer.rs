@@ -599,6 +599,16 @@ impl TypeChecker {
                 self.reported_ref_ids.insert(binding_id);
                 self.add_error(TypeckErrorKind::RefInAsync, param.span);
             }
+            // 0.0.4 T07: a channel handle cannot sit behind a `ref` — its
+            // `send`/`recv` park the running task and resume it later, which
+            // would carry the borrowed handle across a suspension. Without
+            // this check the handle would flow into the T07a member rewrite
+            // only to fail there with a misleading `ChannelMemberNotFound`.
+            if let ast::Type::Ref(inner) = &param.ty
+                && matches!(inner.as_ref(), ast::Type::Channel(_))
+            {
+                self.add_error(TypeckErrorKind::ChannelNotBorrowable, param.span);
+            }
             typed_params.push(TypedParamHir {
                 name: param.name.clone(),
                 ty: param_type,

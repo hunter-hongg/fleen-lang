@@ -176,6 +176,11 @@ pub enum TypeckErrorKind {
     ChannelMemberNotFound { member: String, found: Type },
     /// `c.send` or `c.recv` used without call parentheses.
     ChannelMemberNotCalled { member: String },
+    /// A `ref channel<T>` parameter (0.0.4 T07): a channel handle may not sit
+    /// behind a borrow — its `send`/`recv` park and resume across the
+    /// scheduler, which would carry the borrowed handle across a suspension
+    /// (D4's boundary rule at its strongest).
+    ChannelNotBorrowable,
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -559,6 +564,14 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`{member}` on a channel must be called — use `{member}(...)`"
+                )
+            }
+            TypeckErrorKind::ChannelNotBorrowable => {
+                write!(
+                    f,
+                    "a `channel<T>` cannot be borrowed — a `ref` handle must not \
+                     cross a channel boundary (D4); help: take the channel by \
+                     ownership and `move` it into the task"
                 )
             }
         }

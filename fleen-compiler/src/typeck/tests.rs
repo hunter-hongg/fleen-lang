@@ -2353,3 +2353,60 @@ fn async_boundary_error_messages_are_actionable() {
     let msg = format!("{}", errs[0].kind);
     assert!(msg.contains("channel"), "unexpected message: {msg}");
 }
+
+#[test]
+fn ref_channel_param_is_error() {
+    // 0.0.4 T07: a channel handle cannot sit behind a `ref` — send/recv park
+    // and resume across the scheduler, carrying the borrowed handle with
+    // them (D4). Rejected at the declaration, before the T07a member rewrite
+    // could produce a misleading `ChannelMemberNotFound`.
+    let errs = compile_err("func borrow(c: ref channel<int>) { }\n");
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::ChannelNotBorrowable]
+    );
+
+    // In an async context both boundary rules fire: the borrow itself
+    // (`RefInAsync`) and the channel behind it.
+    let errs = compile_err("async func f(c: ref channel<string>) { }\n");
+    assert_eq!(
+        err_kinds(&errs),
+        vec![
+            &TypeckErrorKind::RefInAsync,
+            &TypeckErrorKind::ChannelNotBorrowable,
+        ]
+    );
+}
+
+#[test]
+fn move_of_captured_ref_in_async_is_move_of_borrowed() {
+    // `move s` of a captured ref keeps its stronger pre-existing error
+    // (`MoveOfBorrowed`) instead of `RefInAsync`, in an async context too.
+    let errs = compile_err(
+        "func outer(s: ref string) {\n    async func inner() {\n        \
+         t = move s;\n    }\n}\n",
+    );
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::MoveOfBorrowed {
+            name: "s".to_string()
+        }]
+    );
+}
+
+#[test]
+fn struct_field_named_send_resolves_as_field() {
+    // T07a: `send`/`recv` are only rewritten to channel ops on a
+    // `channel<T>` receiver; a struct with a field literally named `send`
+    // still resolves through the ordinary field path.
+    let hir = compile_ok(
+        "struct S { send: int, recv: int }\n\
+         s = S { send: 1, recv: 2 };\nn = s.send + s.recv;\n",
+    );
+    let last = hir.items.last().expect("items");
+    match last {
+        TypedHirItem::Expr(e) => assert_eq!(e.ty(), Type::Int),
+        TypedHirItem::Decl(TypedDeclHir::Var(v)) => assert_eq!(v.init.ty(), Type::Int),
+        other => panic!("expected expression item, got {other:?}"),
+    }
+}
