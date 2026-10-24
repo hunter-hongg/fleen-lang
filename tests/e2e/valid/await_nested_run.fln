@@ -1,0 +1,20 @@
+// 0.0.4 T06 regression: `await` an async body that itself calls
+// `std.async.run`. The join of the nested run must park the body via its
+// Suspend (never signal the join while the body is still a live frame), so
+// the awaited value flows back to main.
+import std.async;
+import std.io;
+
+async func task() {
+    std.io.println("task ran");
+}
+
+async func orch(): int {
+    std.async.run([task()]);
+    5
+}
+
+func main() {
+    v = orch() await;
+    std.io.println(v as string);
+}

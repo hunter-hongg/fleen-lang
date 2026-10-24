@@ -257,12 +257,16 @@ pub enum MirInstrKind {
     /// Stack effect: cap → ch (Δ0, min 1).
     ChannelNew(Type),
     /// Send a value through a channel; may suspend if full.
-    /// Stack effect: ch v → (Δ-2, min 2). Non-idempotent: on resume after
-    /// suspend, re-executes the send attempt.
+    /// Stack effect: ch v → unit (Δ-1, min 2) — the `Unit` result stays on
+    /// the stack so the statement wrapper's `Pop` stays balanced, including
+    /// across a park (pushed *before* the chain detaches). Non-idempotent:
+    /// the suspend parks *after* the op (ip already past the instruction,
+    /// operands popped), so the resumed frame never re-executes the send.
     ChannelSend(Type),
     /// Receive a value from a channel; may suspend if empty.
-    /// Stack effect: ch → v (Δ0, min 1). Non-idempotent: on resume after
-    /// suspend, re-executes the recv attempt.
+    /// Stack effect: ch → v (Δ0, min 1). Non-idempotent: the suspend parks
+    /// *after* the instruction (channel popped); the waking side injects
+    /// the payload into the resumed frame's operands.
     ChannelRecv(Type),
     /// Split a channel handle, producing a second handle to the same buffer.
     /// Stack effect: ch → ch2 (Δ0, min 1).

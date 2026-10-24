@@ -2580,6 +2580,60 @@ func main() {
     assert_eq!(v, Value::Unit);
 }
 
+#[test]
+fn await_of_async_body_that_calls_run_completes() {
+    // Regression (T06 executor): `std.async.run` from inside an async body
+    // must not signal the join itself — the compiler emits a `Suspend` right
+    // after the call, and only once that Suspend parks the caller may
+    // `drive_join` run the spawned tasks. With the join signaled early the
+    // tasks completed "into" the still-live caller frame (never counted by
+    // the JoinWait), the caller parked forever, and main lost its awaited
+    // value (a StackShape at the next store).
+    let v = run_src(
+        r#"
+import std.async;
+async func nop() { }
+async func orch(): int {
+    std.async.run([nop()]);
+    5
+}
+func main(): int {
+    v = orch() await;
+    v
+}
+"#,
+    )
+    .expect("awaiting an async body that runs tasks completes");
+    assert_eq!(v, Value::Int(5));
+}
+
+#[test]
+fn await_of_async_body_that_recvs_after_run_completes() {
+    // Same regression shape with a channel in the loop: the awaited body
+    // joins its spawned sender and then receives the buffered value.
+    let v = run_src(
+        r#"
+import std.async;
+import std.concurrent;
+async func sender(ch: channel<int>) {
+    ch.send(99);
+}
+async func orch(): int {
+    ch = channel<int>(1);
+    peer = std.concurrent.split(ch);
+    std.async.run([sender(move ch)]);
+    peer.recv()
+}
+func main(): int {
+    v = orch() await;
+    v
+}
+"#,
+    )
+    .expect("awaiting an async body that runs a channel task completes");
+    assert_eq!(v, Value::Int(99));
+}
+
 // ---------------------------------------------------------------------------
 // 0.0.4 T07: channels (F9). Source-level tests through the full pipeline —
 // the scheduler round-robin and the channel wake paths are deterministic:
@@ -2731,6 +2785,104 @@ func main(): int {
     )
     .expect("send returns unit, recv returns the payload");
     assert_eq!(v, Value::Int(42));
+}
+
+#[test]
+fn negative_channel_capacity_is_invalid_channel_capacity() {
+    // T07e: the capacity is an arbitrary int expression; a negative one is
+    // `InvalidChannelCapacity` at the ChannelNew instruction.
+    let err = run_src(
+        r#"
+import std.concurrent;
+func main() {
+    ch = channel<int>(0 - 1);
+}
+"#,
+    )
+    .expect_err("a negative capacity is rejected at ChannelNew");
+    assert_eq!(err.kind, RuntimeErrorKind::InvalidChannelCapacity);
+}
+
+#[test]
+fn channel_waiters_registry_is_pruned_after_tasks_unpark() {
+    // T07: the waiter registry roots channels that hold parked tasks. Once
+    // every parked chain has been woken the roots must go — otherwise one
+    // `Rc` per channel ever parked on pins its buffer for the program's
+    // lifetime (a leak by construction on long runs).
+    let src = r#"
+import std.async;
+import std.collection.range;
+import std.concurrent;
+async func producer(ch: channel<int>) {
+    for i in range(4) { ch.send(i); }
+}
+async func consumer(ch: channel<int>) {
+    for _ in range(4) { ch.recv(); }
+}
+func main() {
+    ch = channel<int>(2);
+    peer = std.concurrent.split(ch);
+    std.async.run([producer(move ch), consumer(move peer)]);
+}
+"#;
+    let module = fleen_compiler::compile(src).expect("compile channel source");
+    let mut vm = Vm::new(module);
+    let v = vm.run().expect("producer/consumer completes");
+    assert_eq!(v, Value::Unit);
+    assert_eq!(
+        vm.channel_waiter_count(),
+        0,
+        "no channel keeps a waiter root after its tasks were woken"
+    );
+}
+
+#[test]
+fn two_parked_senders_wake_in_fifo_arrival_order() {
+    // T07 (FIFO): two producers park on a rendezvous channel *before* the
+    // feeder runs (round-robin runs p1, then p2, then the feeder) — they must
+    // be woken in arrival order, p1's value before p2's in each round. The
+    // feeder folds the stream into one number: p1 sends 10, 11 and p2 sends
+    // 20, 21, so arrival order 10, 20, 11, 21 gives 10201121; a LIFO sender
+    // queue would wake p2 first (20102111). All three tasks live in one
+    // `run` (a join over parked senders with no receiver is a real T07b
+    // deadlock); the feeder hands the total back through a second channel.
+    let v = run_src(
+        r#"
+import std.async;
+import std.collection.range;
+import std.concurrent;
+async func p1(ch: channel<int>) {
+    ch.send(10);
+    ch.send(11);
+}
+async func p2(ch: channel<int>) {
+    ch.send(20);
+    ch.send(21);
+}
+async func feeder(ch: channel<int>, out: channel<int>) {
+    total = 0;
+    for _ in range(4) {
+        total = total * 100 + ch.recv();
+    }
+    out.send(total);
+}
+func main(): int {
+    ch = channel<int>(0);
+    a = std.concurrent.split(ch);
+    b = std.concurrent.split(ch);
+    // Buffered (cap 1): the feeder's result send must fit without the
+    // receiver being parked — `run` joins the feeder, so a rendezvous
+    // result-send would deadlock against the post-run recv (T07b correctly
+    // flags that shape).
+    out = channel<int>(1);
+    ra = std.concurrent.split(out);
+    std.async.run([p1(move ch), p2(move a), feeder(move b, move ra)]);
+    out.recv()
+}
+"#,
+    )
+    .expect("parked senders wake in FIFO arrival order");
+    assert_eq!(v, Value::Int(10201121));
 }
 
 // ---------------------------------------------------------------------------

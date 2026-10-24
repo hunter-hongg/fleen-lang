@@ -1,0 +1,9 @@
+// 0.0.4 T07: the payload type is checked statically — `send` on a
+// channel<int> rejects a value of any other type (uniform payload,
+// ticket Consequences; the run-time backstop is T08).
+import std.concurrent;
+
+func main() {
+    ch = channel<int>(2);
+    ch.send("not an int");
+}

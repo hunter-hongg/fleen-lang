@@ -25,12 +25,14 @@ pub struct ChannelInner {
     /// payload it was sending (the value moves into the queue with the
     /// parked chain — a parked sender owns its payload until a receiver
     /// takes it). Used for both cap=0 (rendezvous) and cap>0 (buffer full).
-    pub senders: Vec<(Value, Vec<FutureFrame>)>,
+    /// `VecDeque` because the queue is consumed from the *front* (`pop_front`):
+    /// a `Vec` + `.pop()` would wake the most recent sender first (LIFO).
+    pub senders: std::collections::VecDeque<(Value, Vec<FutureFrame>)>,
     /// Tasks blocked on `recv` waiting for a value, FIFO arrival order.
     /// A parked receiver's chain resumes *after* its `recv` instruction;
     /// the waking side injects the payload into the innermost frame's
     /// operands (`Vm::inject_value_into_chain`).
-    pub receivers: Vec<Vec<FutureFrame>>,
+    pub receivers: std::collections::VecDeque<Vec<FutureFrame>>,
 }
 
 /// A self-describing runtime value.

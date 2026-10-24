@@ -1,0 +1,7 @@
+// 0.0.4 T07e: the capacity is an arbitrary int expression; a negative one
+// is `InvalidChannelCapacity` at the ChannelNew instruction.
+import std.concurrent;
+
+func main() {
+    ch = channel<int>(0 - 1);
+}

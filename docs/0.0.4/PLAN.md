@@ -238,8 +238,10 @@ on a future that terminated abnormally re-raises it at the awaiting site.
 ## 5. Channels (F9, D3/D6)
 
 ```fleen
-ch = std.concurrent.channel<int>(16);        // bounded buffer of 16
-ch = std.concurrent.channel<string>(4);      // owned payload: ownership moves
+ch = channel<int>(16);                       // bounded buffer of 16
+ch = channel<string>(4);                     // owned payload: ownership moves
+peer = std.concurrent.split(ch);             // the one explicit fork point (T07d):
+                                             // a second handle, same buffer
 
 async func producer(c: channel<string>) {
     c.send("hi");                       // fresh value transfers naturally
@@ -248,13 +250,18 @@ async func consumer(c: channel<string>): int {
     s = c.recv();                       // transfers ownership to s
     s.len()
 }
+
+// T07d: a channel has exactly one owner — move it into each task, never
+// clone it (`clone ch` is a typeck error; `split` is the only sharing).
+std.async.run([producer(move ch), consumer(move peer)]);
 ```
 
 | Operation | Kind | Blocks when |
 |-----------|------|-------------|
-| `channel<T>(capacity)` | constructor | — |
+| `channel<T>(capacity)` | constructor (reserved word) | — |
 | `c.send(v)` | awaitable | buffer full |
 | `c.recv()` | awaitable | buffer empty |
+| `std.concurrent.split(ch)` | plain call | — (returns a second handle) |
 
 - Copy values move by copy; owned values move **ownership** (`move x` explicit,
   fresh values natural — D6).
@@ -276,7 +283,8 @@ async func consumer(c: channel<string>): int {
 | 0xC4 | `ChannelNew` | allocate a channel of given capacity |
 | 0xC5 | `ChannelSend` | push a value into the buffer (may suspend) |
 | 0xC6 | `ChannelRecv` | pop a value out of the buffer (may suspend) |
-| 0xC7–0xDF | — | reserved for 0.0.4 expansion |
+| 0xC7 | `ChannelSplit` | produce a second handle to the same buffer (T07d) |
+| 0xC8–0xDF | — | reserved for 0.0.4 expansion |
 
 All slots are inside the **reserved `0xBC–0xFF` region** (BYTECODE.md §4.2), and
 **none of the v1/v2/v3 encodings are touched** (BYTECODE.md §10 compatibility

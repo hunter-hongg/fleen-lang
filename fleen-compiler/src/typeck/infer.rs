@@ -1532,8 +1532,17 @@ impl TypeChecker {
 
         // 0.0.3 (§1.4): struct/array values have no `==` — element-wise
         // equality needs a recursion rule and traits; the VM's defensive
-        // TypeMismatch stays a backstop only.
-        if matches!(op, "==" | "!=") && matches!(typed_lhs.ty(), Type::Struct(_) | Type::Array(_)) {
+        // TypeMismatch stays a backstop only. 0.0.4 (T07d): channels have no
+        // `==` either — the derived `PartialEq` would compare *buffer
+        // contents*, so two distinct channels that happen to hold equal
+        // values would compare equal, which silently aliases what the
+        // handle discipline (split-only forking) keeps distinct.
+        if matches!(op, "==" | "!=")
+            && matches!(
+                typed_lhs.ty(),
+                Type::Struct(_) | Type::Array(_) | Type::Channel(_)
+            )
+        {
             self.add_error(
                 TypeckErrorKind::InvalidOperand {
                     op: op.to_string(),
@@ -1650,7 +1659,12 @@ impl TypeChecker {
                             );
                             return Err(());
                         }
-                        let typed_val = self.typeck_expr(args.into_iter().next().unwrap(), None)?;
+                        // The arity check above leaves exactly one argument;
+                        // the empty arm is impossible (SPEC §4 unreachable).
+                        let Some(val) = args.into_iter().next() else {
+                            unreachable!("send arity checked to be exactly 1 above")
+                        };
+                        let typed_val = self.typeck_expr(val, None)?;
                         // D6: the payload is consumed by the send — a bare
                         // owned local read would silently deep-copy the
                         // value; the transfer must be explicit (`move`/`clone`
@@ -1991,8 +2005,13 @@ impl TypeChecker {
                 );
                 return Err(());
             };
+            // The arity check above leaves exactly one argument; the empty
+            // arm is impossible (SPEC §4 unreachable).
+            let Some(channel) = typed_args.into_iter().next() else {
+                unreachable!("split arity checked to be exactly 1 above")
+            };
             return Ok(TypedExprHir::ChannelSplit {
-                channel: Box::new(typed_args.into_iter().next().unwrap()),
+                channel: Box::new(channel),
                 span: func_span,
             });
         }

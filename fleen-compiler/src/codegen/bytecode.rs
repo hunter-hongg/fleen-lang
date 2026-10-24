@@ -332,12 +332,13 @@ pub enum Opcode {
     Await = 0xC3,
     // 0xC4–0xC7 channel (0.0.4 T07). All inside the reserved 0xBC–0xFF
     // region.
-    /// Create a new channel with the given payload type (type encoded in
-    /// operand: 4 bytes = type tag, 4 bytes = type parameter for array/box/struct).
+    /// Create a new channel with the given payload type. The payload type is
+    /// carried in the MIR instruction only (for T08's defensive run-time
+    /// backstop) — the encoded instruction has **no operand**.
     /// Stack effect: cap → ch (Δ0, min 1).
     ChannelNew = 0xC4,
     /// Send a value through a channel; may suspend if full.
-    /// Stack effect: ch v → (Δ-2, min 2).
+    /// Stack effect: ch v → unit (Δ-1, min 2).
     ChannelSend = 0xC5,
     /// Receive a value from a channel; may suspend if empty.
     /// Stack effect: ch → v (Δ0, min 1).

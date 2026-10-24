@@ -1,0 +1,29 @@
+// 0.0.4 T07 (FIFO): two producers park on a rendezvous channel before the
+// receiver runs; the scheduler wakes them in arrival order — p1's value
+// before p2's in each round (a LIFO sender queue would print 20, 10, 21, 11).
+import std.async;
+import std.concurrent;
+import std.io;
+
+async func p1(ch: channel<int>) {
+    ch.send(10);
+    ch.send(11);
+}
+
+async func p2(ch: channel<int>) {
+    ch.send(20);
+    ch.send(21);
+}
+
+async func receiver(ch: channel<int>) {
+    for _ in range(4) {
+        std.io.println(ch.recv() as string);
+    }
+}
+
+func main() {
+    ch = channel<int>(0);
+    a = std.concurrent.split(ch);
+    b = std.concurrent.split(ch);
+    std.async.run([p1(move ch), p2(move a), receiver(move b)]);
+}

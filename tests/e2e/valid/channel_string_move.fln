@@ -1,0 +1,22 @@
+// 0.0.4 T07/D6: an owned payload crosses the task boundary through a channel
+// with an explicit `move` — the value transfers from the sender's frame into
+// the receiver's (a bare `ch.send(s)` would be `OwnedChannelArgRequiresMove`).
+import std.async;
+import std.concurrent;
+import std.io;
+
+async func sender(ch: channel<string>) {
+    s = "hello from sender";
+    ch.send(move s);
+}
+
+async func receiver(ch: channel<string>) {
+    msg = ch.recv();
+    std.io.println(msg);
+}
+
+func main() {
+    ch = channel<string>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([sender(move ch), receiver(move peer)]);
+}

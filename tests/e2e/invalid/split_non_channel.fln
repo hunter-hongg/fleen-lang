@@ -1,0 +1,8 @@
+// 0.0.4 T07d: `std.concurrent.split` forks a channel handle — any other
+// operand type is a type error (`InvalidOperand`).
+import std.concurrent;
+
+func main() {
+    s = "not a channel";
+    peer = std.concurrent.split(s);
+}

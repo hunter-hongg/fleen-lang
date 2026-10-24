@@ -215,18 +215,43 @@ the sync caller again. A task's suspended state is a `Vec<FutureFrame>` chain
 boundary. Out of scope here, as in the PLAN: language-level `select`/`join`
 composition (0.1.0).
 
+**Review fixes (post-T07 review)**:
+
+- **Nested `std.async.run` from an *awaited* async body** used to fail with a
+  `StackShape`: the builtin signaled `need_join` unconditionally, one
+  instruction *before* the compiler-emitted `Suspend` parks the caller, so
+  `drive_join` ran the spawned tasks while the caller was still a live frame —
+  the tasks completed "into" the future-marked caller (never counted by the
+  `JoinWait`), the caller's own `Suspend` then created a `JoinWait` that never
+  fills, and the awaiting frame below lost its value. The builtin now signals
+  the join only for *synchronous* callers; an async caller's `Suspend` parks it
+  and `run_inner`'s pending path builds the `JoinWait` (regressions:
+  `await_of_async_body_that_calls_run_completes`,
+  `await_of_async_body_that_recvs_after_run_completes`, e2e `await_nested_run`).
+- **The T07 waiter registry is pruned**: `drive_join` drops `channel_waiters`
+  roots whose channel has no parked task left (top of each iteration and once
+  on exit), so channels no longer pin one `Rc` root per channel ever parked on
+  for the program's lifetime (regression:
+  `channel_waiters_registry_is_pruned_after_tasks_unpark`).
+
 ---
 
 ## T07 — Channels (F9; D3/D6)
 
-- [x] `channel<T>` type + `ChannelNew/ChannelSend/ChannelRecv` (0xC4–0xC6); runtime variant `Channel`
+- [x] `channel<T>` type + `ChannelNew/ChannelSend/ChannelRecv/ChannelSplit`
+      (0xC4–0xC7); runtime variant `Channel`
 - [x] Bounded buffer; `send` suspends on full, `recv` suspends on empty
 - [x] Payload move: Copy by copy, owned by ownership; explicit `move x` required (D6)
 - [x] Constructor `channel<T>(cap)` (the settled T07e reserved-word syntax; the
       card's `std.concurrent.channel<T>(cap)` spelling is not implementable —
       see the notes)
 - [x] Tests: VM unit tests (`fleen-vm/src/tests.rs`, `fleen-verify/src/tests.rs`)
-      + e2e `channel_basic` / `channel_rendezvous` / 5 invalid typeck fixtures
+      + e2e valid `channel_basic` / `channel_rendezvous` / `channel_senders_fifo`
+      (two parked senders wake FIFO) / `channel_string_move` (owned payload via
+      `move`); e2e invalid `channel_member_not_called` / `channel_member_not_found` /
+      `channel_not_clonable` / `channel_not_storable` / `channel_send_requires_move` /
+      `channel_payload_mismatch` / `split_non_channel` / `channel_eq_rejected`
+      (typeck) and `channel_deadlock` / `channel_negative_cap` (runtime)
 
 **Decisions (settled before implementation — three forks the card left open):**
 
@@ -297,11 +322,14 @@ composition (0.1.0).
 - `ChannelSend`/`ChannelRecv` are **not idempotent**, unlike `std.io.sleep`.
   The T06 `Call intrinsic; Suspend` pattern re-executes the call on resume,
   which is harmless for a timer and a duplicate delivery for a send. The
-  suspend therefore re-enters the *same* instruction (ip not advanced) rather
-  than the next one.
-- A channel whose type is not statically uniform must be rejected: the payload
-  type is recorded on the buffer and checked at run time as the defensive
-  backstop (verify's stack analysis is type-blind).
+  suspend therefore completes the op *before* parking — the frame's ip is
+  already past the instruction and the channel operands are popped, so a
+  parked task resumes at the instruction *after* the send/recv (see Notes),
+  never re-executing it.
+- A channel whose type is not statically uniform is rejected by typeck
+  (`TypeMismatch` on the send payload); the payload type recorded on the MIR
+  instruction backs T08's defensive run-time check (its codegen use is
+  deferred — see the T08 card; verify's stack analysis is type-blind).
 - No `close`, so a channel is never drained to completion by construction: the
   run's exit condition is "no task is runnable", not "the channels are empty".
 
@@ -330,7 +358,16 @@ composition (0.1.0).
   balanced — on the park path the `Unit` is pushed *before* the chain
   detaches, so the resumed frame pops it exactly once.
 - **The buffer is FIFO** (`VecDeque`, `push_back`/`pop_front`) — a channel is
-  a queue, not a stack (the first draft used `Vec::pop`, LIFO).
+  a queue, not a stack (the first draft used `Vec::pop`, LIFO). The *sender and
+  receiver queues* are FIFO too (`VecDeque`; the first draft's `Vec` + `.pop()`
+  woke the most recently parked sender first — caught by review, fixed with the
+  `two_parked_senders_wake_in_fifo_arrival_order` unit test and the e2e
+  `channel_senders_fifo` fixture).
+- **Channels have no `==`/`!=`.** A handle's derived `PartialEq` would compare
+  *buffer contents*, so two distinct channels holding equal values would
+  compare equal — silently aliasing what the split-only fork discipline keeps
+  distinct. Typeck rejects the operands (`InvalidOperand`, same rule as
+  struct/array); the VM's `ArithTypeMismatch` stays the defensive backstop.
 - **A parked task is registered, not just parked.** A task that parks on a
   channel is invisible to the scheduler (its chain moved into
   `ChannelInner`), so: (a) `drive_join` keeps going while any channel has
@@ -396,7 +433,7 @@ composition (0.1.0).
 | Region | Owner |
 |--------|-------|
 | 0x00–0xBB | v1/v2/v3 — untouched (compat promise holds) |
-| 0xBC–0xFF | reserved (BYTECODE.md §4.2); 0.0.4 uses 0xC0–0xC6, 0xC7–0xDF reserved for expansion |
+| 0xBC–0xFF | reserved (BYTECODE.md §4.2); 0.0.4 uses 0xC0–0xC7, 0xC8–0xDF reserved for expansion |
 
 | tag | new runtime `Value` variant (not serialized) |
 |-----|-----------|
@@ -410,9 +447,10 @@ composition (0.1.0).
 | 0xC1 | `Suspend` | (0, 0) — yield boundary (unreachable from T05 lowering) |
 | 0xC2 | `Poll` | (0, 1) — `F → T` (T05: drives to completion) |
 | 0xC3 | `Await` | (0, 1) — `F → T` |
-| 0xC4 | `ChannelNew` | TBD (T07) |
-| 0xC5 | `ChannelSend` | TBD (T07) |
-| 0xC6 | `ChannelRecv` | TBD (T07) |
+| 0xC4 | `ChannelNew` | (0, 1) — `cap → ch` |
+| 0xC5 | `ChannelSend` | (-1, 2) — `ch v → unit` |
+| 0xC6 | `ChannelRecv` | (0, 1) — `ch → v` |
+| 0xC7 | `ChannelSplit` | (0, 1) — `ch → ch2` (T07d: the one explicit fork point; assigned during T07, extending the 0.0.4 region by one slot) |
 
 ---
 

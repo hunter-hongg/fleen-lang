@@ -211,6 +211,11 @@ impl Vm {
             || self.waiting_join.is_some()
             || self.has_blocked_channel_tasks()
         {
+            // Drop waiter roots whose channels no longer have parked tasks:
+            // without pruning the registry would grow for the program's
+            // lifetime (one stale `Rc` per channel ever parked on), pinning
+            // `ChannelInner` buffers that are otherwise unreachable.
+            self.prune_channel_waiters();
             // Ready tasks always win; only when nothing is runnable does the
             // scheduler block on the earliest pending timer (see
             // `Scheduler::next_task`), so a task that has not yet reached its
@@ -269,7 +274,31 @@ impl Vm {
                 }
             }
         }
+        // The exit evaluation of the loop condition does not run the body, so
+        // a final unpark inside the last iteration would leave one stale root
+        // behind — prune once more on the way out.
+        self.prune_channel_waiters();
         Ok(())
+    }
+
+    /// Drop `channel_waiters` roots whose channel has no parked task left
+    /// (T07). A root is only needed while a chain is parked inside the
+    /// `ChannelInner`; `remember_channel_waiter` re-adds one on the next park.
+    fn prune_channel_waiters(&mut self) {
+        self.channel_waiters.retain(|v| {
+            matches!(v, Value::Channel(inner)
+            if {
+                let ch = inner.borrow();
+                !ch.senders.is_empty() || !ch.receivers.is_empty()
+            })
+        });
+    }
+
+    /// Number of rooted waiter channels — test observation point for the
+    /// pruning above (T07).
+    #[cfg(test)]
+    pub(crate) fn channel_waiter_count(&self) -> usize {
+        self.channel_waiters.len()
     }
 
     /// Check if any task is blocked on a channel (waiting in senders/receivers
@@ -729,16 +758,24 @@ impl Vm {
                     });
                 }
                 // If called from inside an async body (future-marked frame),
-                // record the expected task count. The following `Suspend`
-                // (emitted by the compiler) will park the caller; `run_inner`
-                // will create a `JoinWait` and drive until all complete.
+                // record the expected task count — but do NOT signal the join
+                // here. The compiler emits a `Suspend` immediately after this
+                // call (T06 contract); that Suspend parks the caller and
+                // `run_inner` builds the `JoinWait` (setting `need_join`
+                // itself). Signaling here instead would start `drive_join`
+                // while the caller is still a live frame: the spawned tasks
+                // would complete "into" the future-marked caller (never
+                // counted by the JoinWait), and the caller's own Suspend
+                // would then create a JoinWait that never fills — the caller
+                // parks forever and the awaiting caller below loses its
+                // value (a StackShape at the next store).
                 if self.frames.last().is_some_and(|f| f.is_future) {
                     self.nested_run_expected = Some(task_count);
+                } else {
+                    // Synchronous caller (main): nothing will park it, so the
+                    // join must be signaled by the builtin itself.
+                    self.need_join = true;
                 }
-                // Always signal a join: for sync callers (main), this triggers
-                // `run_inner` to call `drive_join`. For async callers, the
-                // `nested_run_expected` mechanism handles the wait.
-                self.need_join = true;
                 Ok(Value::Unit)
             }
             "std.io.sleep" => {
@@ -1659,8 +1696,8 @@ impl Vm {
                 let inner = Rc::new(RefCell::new(ChannelInner {
                     cap: cap as usize,
                     buffer: std::collections::VecDeque::new(),
-                    senders: Vec::new(),
-                    receivers: Vec::new(),
+                    senders: std::collections::VecDeque::new(),
+                    receivers: std::collections::VecDeque::new(),
                 }));
                 self.stack.push(Value::Channel(inner));
             }
@@ -1681,10 +1718,7 @@ impl Vm {
             }
             Opcode::ChannelSplit => {
                 // Stack: ch -> ch2
-                let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                let Value::Channel(inner) = ch else {
-                    return Err(RuntimeErrorKind::StackShape);
-                };
+                let inner = self.pop_channel_handle()?;
                 // Split returns a second handle to the same inner buffer.
                 self.stack.push(Value::Channel(inner));
             }
@@ -1734,17 +1768,14 @@ impl Vm {
     /// continues in place.
     fn do_channel_send(&mut self, ip: usize) -> Result<bool, RuntimeErrorKind> {
         let value = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-        let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-        let Value::Channel(inner) = ch else {
-            return Err(RuntimeErrorKind::StackShape);
-        };
+        let inner = self.pop_channel_handle()?;
         let mut ch = inner.borrow_mut();
 
         // A parked receiver is waiting: hand the value over directly (the
         // buffer is necessarily empty — a receiver only parks then) and wake
         // it. The receiver's chain resumes *after* its `recv` instruction,
         // so the payload is injected into its innermost frame's operands.
-        if let Some(receiver_chain) = ch.receivers.pop() {
+        if let Some(receiver_chain) = ch.receivers.pop_front() {
             let chain = Self::inject_value_into_chain(receiver_chain, value);
             self.scheduler.push_ready(crate::executor::Task {
                 chain,
@@ -1768,8 +1799,21 @@ impl Vm {
         self.stack.push(Value::Unit);
         let chain = self.park_on_channel(ip)?;
         self.remember_channel_waiter(&inner);
-        ch.senders.push((value, chain));
+        ch.senders.push_back((value, chain));
         Ok(true)
+    }
+
+    /// Pop a channel handle off the operand stack (0.0.4 T07). `StackShape`
+    /// is the defensive backstop for malformed bytecode — typeck only
+    /// produces `ChannelSend`/`ChannelRecv`/`ChannelSplit` under a
+    /// `channel<T>` receiver, and the shared `ChannelInner` root is what
+    /// all three operate on.
+    fn pop_channel_handle(&mut self) -> Result<Rc<RefCell<ChannelInner>>, RuntimeErrorKind> {
+        let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        match v {
+            Value::Channel(inner) => Ok(inner),
+            _ => Err(RuntimeErrorKind::StackShape),
+        }
     }
 
     /// Root a channel that just gained a parked task (T07): one handle per
@@ -1822,10 +1866,7 @@ impl Vm {
     /// [`Self::inject_value_into_chain`]). `Ok(false)` means a value was
     /// produced and pushed; the receiver continues in place.
     fn do_channel_recv(&mut self, ip: usize) -> Result<bool, RuntimeErrorKind> {
-        let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-        let Value::Channel(inner) = ch else {
-            return Err(RuntimeErrorKind::StackShape);
-        };
+        let inner = self.pop_channel_handle()?;
         let mut ch = inner.borrow_mut();
 
         // Buffered value available: take it (FIFO). If a sender is parked the
@@ -1834,7 +1875,7 @@ impl Vm {
             && let Some(value) = ch.buffer.pop_front()
         {
             self.stack.push(value);
-            if let Some((parked_value, sender_chain)) = ch.senders.pop() {
+            if let Some((parked_value, sender_chain)) = ch.senders.pop_front() {
                 ch.buffer.push_back(parked_value);
                 self.scheduler.push_ready(crate::executor::Task {
                     chain: sender_chain,
@@ -1846,7 +1887,7 @@ impl Vm {
 
         // No buffered value (rendezvous, or an emptied buffer): take a parked
         // sender's payload and wake it — its send is already complete.
-        if let Some((value, sender_chain)) = ch.senders.pop() {
+        if let Some((value, sender_chain)) = ch.senders.pop_front() {
             self.stack.push(value);
             self.scheduler.push_ready(crate::executor::Task {
                 chain: sender_chain,
@@ -1860,7 +1901,7 @@ impl Vm {
         // this instruction, with the channel handle already popped).
         let chain = self.park_on_channel(ip)?;
         self.remember_channel_waiter(&inner);
-        ch.receivers.push(chain);
+        ch.receivers.push_back(chain);
         Ok(true)
     }
 
