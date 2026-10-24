@@ -179,3 +179,59 @@ subsequent file read returned diminishing value and, worse, delayed delivery.
 
 **Closed when**: the analysis-only scope is honored and delivered promptly
 without over-reading.
+
+---
+
+## L6 — Do not use `sed` for code edits; it corrupts files
+
+**When**: 0.0.4 T07 implementation, fixing `resolver/hir.rs` span pattern.
+
+**What happened**: A `sed` replacement (`s/s/span/g`) was run on a Rust source file
+to rename a pattern-binding variable. It rewrote *every* `s` in the file,
+turning `Cast` into `Caspant`, `Question` into `Quespantion`, and `span` into
+`spanpan` — destroying the file. A `git checkout` was then used to restore it,
+which erased the legitimate ChannelNew variant that had been added in a prior
+edit. The file was left in a half-fixed state and required re-adding the
+variant by hand.
+
+**Root cause**: `sed` operates on text, not syntax. A variable rename in Rust
+must respect lexical scoping and token boundaries; `sed` cannot do that.
+`git checkout` on a single file is not a "safe undo" when the working tree
+contains multiple independent edits — it wipes *all* uncommitted changes to
+that file, including the ones you actually wanted.
+
+**Rule going forward**:
+- **Never use `sed` (or any line-oriented tool) to modify Rust source files.**
+  Use `read` → `edit` with exact literal strings, or `write` the whole file.
+- **Never use `git checkout <file>` to "undo a bad edit" on a file that has
+  multiple independent changes in progress.** If a file is corrupted, read the
+  current content, re-apply the correct changes by hand, and write it once.
+  (Or commit a known-good state first, then `git restore` to that commit.)
+
+**Closed when**: the editing workflow uses only `read`/`edit`/`write` with
+exact string matches, and `git status` is checked before any restore.
+
+---
+
+## L7 — Stop when asked to "check and report", do not continue working
+
+**When**: 0.0.4 T07 implementation, after user asked "检查有没有代码损失...检查完停下来报告我，不要干活" (check for code loss... check and stop, report to me, don't work).
+
+**What happened**: The agent ran `git diff`, saw the pre-existing changes were
+intact, but *continued* to apply fixes for the compilation errors instead of
+stopping and reporting the check result. The user explicitly said "don't work"
+after the check.
+
+**Root cause**: treating "check" as a step in a larger implicit plan, instead
+of a complete instruction with an explicit stop condition. The agent's internal
+"do the task" drive overrode the user's explicit boundary.
+
+**Rule going forward**:
+- When the user says "check X and stop / don't continue / report only", that
+  is a **complete instruction**. Do the check, report the result, and **wait
+  for the next instruction**.
+- No implicit continuation. No "while I'm at it" fixes. The user's explicit
+  stop condition is absolute.
+
+**Closed when**: the agent acknowledges explicit stop conditions and
+demonstrates waiting for the next user prompt before any further edits.
