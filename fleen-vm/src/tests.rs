@@ -2218,6 +2218,7 @@ fn resume_validates_the_snapshot_against_the_function() {
         locals: vec![Value::Unit], // worker has 2 local slots
         operands: vec![],
         state: FutureState::Resumable,
+        task_id: 0,
     };
     assert_eq!(
         vm.resume_frame(bad_locals).unwrap_err(),
@@ -2230,6 +2231,7 @@ fn resume_validates_the_snapshot_against_the_function() {
         locals: vec![],
         operands: vec![],
         state: FutureState::Resumable,
+        task_id: 0,
     };
     assert_eq!(
         vm.resume_frame(bad_func).unwrap_err(),
@@ -2246,6 +2248,7 @@ fn resume_counts_toward_the_call_depth_limit() {
             ip: 0,
             stack_base: 0,
             is_future: false,
+            task_id: 0,
         };
         super::vm::MAX_CALL_DEPTH
     ];
@@ -2270,6 +2273,7 @@ fn suspend_rejects_a_frame_region_beyond_the_stack() {
         ip: 0,
         stack_base: 0,
         is_future: false,
+        task_id: 0,
     });
     assert_eq!(
         vm.suspend_top_frame(0).unwrap_err(),
@@ -2286,6 +2290,7 @@ fn resume_pc_beyond_the_code_is_caught_by_the_dispatch() {
         locals: vec![Value::Unit, Value::Unit],
         operands: vec![],
         state: super::frame::FutureState::Resumable,
+        task_id: 0,
     };
     // `resume_frame` does not re-validate the pc (the code length lives with
     // the function, same trust model as a hand-written jump); the existing
@@ -2608,6 +2613,69 @@ func main(): int {
 }
 
 #[test]
+fn nested_nested_run_releases_every_level_in_order() {
+    // Regression (T06 executor): a `std.async.run` inside a task that is
+    // itself the join target of an outer `std.async.run` must not overwrite
+    // the outer waiter. The old single-slot `waiting_join` dropped the outer
+    // waiter's parked chain when the inner run parked, so `top` never resumed
+    // and its awaiting site lost its value.
+    let v = run_src(
+        r#"
+import std.async;
+async func leaf() { std.async.yield_now(); }
+async func mid() { std.async.run([leaf()]); }
+async func top(): int {
+    std.async.run([mid()]);
+    42
+}
+func main(): int { top() await }
+"#,
+    )
+    .expect("two nested std.async.run levels both release");
+    assert_eq!(v, Value::Int(42));
+}
+
+#[test]
+fn run_with_an_empty_task_list_completes() {
+    // Regression (T06 executor): `run([])` in an async body parks the caller
+    // with zero tasks to wait for — no completion can ever satisfy a counter
+    // of 0, so the old counter-based JoinWait parked the caller forever. An
+    // empty pending set re-enqueues the caller immediately.
+    let v = run_src(
+        r#"
+import std.async;
+async func worker() { tasks: [Future<unit>] = []; std.async.run(tasks); }
+func main() { std.async.run([worker()]); }
+"#,
+    )
+    .expect("run([]) joins trivially");
+    assert_eq!(v, Value::Unit);
+}
+
+#[test]
+fn sibling_completion_does_not_release_a_nested_join_early() {
+    // Regression (T06 executor): the join completion is matched by spawned
+    // task id, not counted. Here `a` joins one spawned task `c`, while its
+    // sibling `b` completes first; `b`'s completion must not release `a`.
+    // `a` resumes only after `c` finished — observable through the e2e
+    // fixture `nested_run_sibling` (println ordering); this unit variant
+    // asserts the join still delivers.
+    let v = run_src(
+        r#"
+import std.async;
+async func yielder() { std.async.yield_now(); }
+async func idle() { }
+async func joiner() {
+    std.async.run([yielder()]);
+}
+func main(): int { std.async.run([joiner(), idle()]); 9 }
+"#,
+    )
+    .expect("the sibling does not release a's join");
+    assert_eq!(v, Value::Int(9));
+}
+
+#[test]
 fn await_of_async_body_that_recvs_after_run_completes() {
     // Same regression shape with a channel in the loop: the awaited body
     // joins its spawned sender and then receives the buffered value.
@@ -2903,6 +2971,7 @@ mod scheduler_tests {
             locals: vec![Value::Unit],
             operands: vec![],
             state: FutureState::Resumable,
+            task_id: 0,
         }
     }
 

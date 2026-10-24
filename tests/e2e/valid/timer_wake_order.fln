@@ -1,0 +1,24 @@
+// 0.0.4 T06 executor regression: timer wake order. Tasks whose deadlines are
+// due in the same promotion pass wake in the order they went to sleep
+// (insertion order), not in `swap_remove` order.
+import std.io;
+import std.async;
+
+async func sleeper_one() {
+    std.io.sleep(0);
+    std.io.println("one");
+}
+
+async func sleeper_two() {
+    std.io.sleep(0);
+    std.io.println("two");
+}
+
+async func sleeper_three() {
+    std.io.sleep(0);
+    std.io.println("three");
+}
+
+func main() {
+    std.async.run([sleeper_one(), sleeper_two(), sleeper_three()]);
+}

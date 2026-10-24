@@ -20,6 +20,13 @@ pub struct CallFrame {
     /// contiguous `is_future` frame up from the top, stopping at the first
     /// synchronous boundary (the host driver / `std.async.run` host loop).
     pub is_future: bool,
+    /// The id of the task this frame belongs to, when this frame is a task
+    /// root installed by a `std.async.run` spawn (0.0.4 T06); `0` otherwise.
+    /// Carried here so the id survives the live → snapshot → live round trip
+    /// (`suspend_top_frame` / `resume_frame`) between parks; ordinary calls
+    /// and inner await frames stay `0` — only the chain's outermost frame
+    /// (`chain[0]`) holds the task's identity.
+    pub task_id: u64,
 }
 
 /// Whether a [`FutureFrame`] can still make progress (0.0.4, D1).
@@ -65,6 +72,14 @@ pub struct FutureFrame {
     pub operands: Vec<Value>,
     /// Whether the frame can still run.
     pub state: FutureState,
+    /// Identity of the task this frame is the root of (0.0.4 T06 executor).
+    /// `std.async.run` assigns a fresh id to each frame it spawns; `0` means
+    /// "no spawned task" (a future awaited directly, never joined by id).
+    /// The *root* frame carries the task's id across every park/wake cycle —
+    /// a `Task` wrapper is rebuilt on each suspension, but `suspend_chain`
+    /// always keeps the root frame at `chain[0]`, so the id survives and a
+    /// nested join can recognize its spawned tasks' completions.
+    pub task_id: u64,
 }
 
 impl FutureFrame {
@@ -81,6 +96,7 @@ impl FutureFrame {
             locals: slots,
             operands: Vec::new(),
             state: FutureState::Resumable,
+            task_id: 0,
         }
     }
 }

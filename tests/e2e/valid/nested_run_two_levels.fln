@@ -1,0 +1,23 @@
+// 0.0.4 T06 executor regression: nested `std.async.run` calls — a task that
+// is itself a join target spawning (and joining) its own tasks. Every level
+// of the waiter stack must release in order: leaf, then mid, then top.
+import std.io;
+import std.async;
+
+async func leaf_task() {
+    std.io.println("leaf");
+}
+
+async func mid_task() {
+    std.async.run([leaf_task()]);
+    std.io.println("mid-after-join");
+}
+
+async func top_task() {
+    std.async.run([mid_task()]);
+    std.io.println("top-after-join");
+}
+
+func main() {
+    std.async.run([top_task()]);
+}

@@ -29,8 +29,10 @@ use crate::frame::FutureFrame;
 /// Resume order is outer-most-first — driving `Task::chain` means pushing
 /// `chain[0]`, running it (which may itself resume `chain[1]`, … via nested
 /// `await`), never jumping out of order. A root task pushed by
-/// `std.async.run` has a single element.
-#[derive(Debug, Clone)]
+/// `std.async.run` has a single element. A task's identity (for nested
+/// joins) is its root frame's `FutureFrame::task_id`; the wrapper is rebuilt
+/// on every park, but the root frame travels with the chain.
+#[derive(Debug)]
 pub struct Task {
     /// Suspended coroutine frames, outermost-first, innermost-last.
     pub chain: Vec<FutureFrame>,
@@ -92,12 +94,16 @@ impl Scheduler {
     }
 
     /// Promote every timer task whose deadline has passed onto the ready queue.
+    ///
+    /// `Vec::remove` (not `swap_remove`) keeps the remaining timers in place
+    /// and promotes due timers in insertion order, so tasks whose deadlines
+    /// land on the same millisecond wake in the order they went to sleep —
+    /// the scheduler stays deterministic for equal deadlines.
     fn promote_timers(&mut self, now_ms: i64) {
         let mut i = 0;
         while i < self.timers.len() {
-            let due = self.timers[i].ready_at_ms.is_some_and(|d| d <= now_ms);
-            if due {
-                let mut task = self.timers.swap_remove(i);
+            if self.timers[i].ready_at_ms.is_some_and(|d| d <= now_ms) {
+                let mut task = self.timers.remove(i);
                 task.ready_at_ms = None;
                 self.ready.push_back(task);
             } else {

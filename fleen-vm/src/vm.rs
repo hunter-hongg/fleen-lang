@@ -51,14 +51,19 @@ pub struct Vm {
     /// `(func_id, suspend_ip, deadline_ms)` and only consumed when the
     /// `Suspend` dispatch is at that identical location.
     sleep_deadline: Option<(usize, usize, i64)>,
-    /// When `std.async.run` is called from inside an async body, the number of
-    /// tasks it spawned.  The following `Suspend` will park the caller; instead
-    /// of re-enqueueing it immediately, `run_inner` creates a `JoinWait` and
-    /// drives the scheduler until all spawned tasks complete.
-    nested_run_expected: Option<usize>,
-    /// A suspended task waiting for a nested `std.async.run` to complete all its
-    /// spawned tasks before resuming.
-    waiting_join: Option<JoinWait>,
+    /// When `std.async.run` is called from inside an async body, the ids of
+    /// the tasks it spawned.  The following `Suspend` will park the caller;
+    /// instead of re-enqueueing it immediately, `run_inner`/`drive_join`
+    /// create a `JoinWait` and drive the scheduler until every spawned task
+    /// has completed.  (An empty vec — `run([])` — means nothing to wait
+    /// for: the parked caller is re-enqueued immediately.)
+    nested_run_expected: Option<Vec<u64>>,
+    /// Stack of suspended tasks each waiting for a nested `std.async.run` to
+    /// complete all its spawned tasks (outermost first).  A stack, because a
+    /// resumed waiter's own continuation may call `std.async.run` again
+    /// before the outer join has released it; overwriting a single slot
+    /// would drop the outer waiter's parked chain.
+    waiting_join: Vec<JoinWait>,
     /// Set when the running task parked on a channel (0.0.4 T07): its chain
     /// moved into the channel's sender/receiver queue, so unlike `Suspend`
     /// there is no `pending` task to re-enqueue — the waker owns it now.
@@ -73,6 +78,10 @@ pub struct Vm {
     /// task. It also roots the T07b deadlock scan. Deduplicated by inner
     /// pointer, so it is bounded by the number of distinct channels.
     channel_waiters: Vec<Value>,
+    /// Counter for `std.async.run`'s task ids (0.0.4 T06). Ids are unique per
+    /// VM instance and never reused, so a completed task's id can never be
+    /// mistaken for a later spawn.
+    next_task_id: u64,
 }
 
 /// A suspended task waiting for a nested `std.async.run` to complete all its
@@ -81,10 +90,11 @@ pub struct Vm {
 struct JoinWait {
     /// The suspended caller task.
     task: Task,
-    /// Total number of tasks spawned by the nested `std.async.run`.
-    expected: usize,
-    /// Number of those tasks that have completed so far.
-    completed: usize,
+    /// Ids of the spawned tasks that have **not** completed yet.  A completion
+    /// counts against the waiter whose `pending` set contains the finished
+    /// task's root-frame id — never against a sibling completing at the same
+    /// boundary.  Empty means the join is already satisfied.
+    pending: Vec<u64>,
 }
 
 impl Vm {
@@ -111,9 +121,10 @@ impl Vm {
             need_join: false,
             sleep_deadline: None,
             nested_run_expected: None,
-            waiting_join: None,
+            waiting_join: Vec::new(),
             suspended_on_channel: false,
             channel_waiters: Vec::new(),
+            next_task_id: 0,
         }
     }
 
@@ -150,16 +161,15 @@ impl Vm {
             // (its join) drains. The deadline (if any) was already attached to
             // the task by the `Suspend` dispatch, keyed to the exact suspend point.
             if let Some(task) = self.pending.take() {
-                if let Some(expected) = self.nested_run_expected.take() {
+                match self.nested_run_expected.take() {
                     // Nested `std.async.run` from an async body: the suspended
-                    // caller must wait for all spawned tasks to complete.
-                    self.waiting_join = Some(JoinWait {
-                        task,
-                        expected,
-                        completed: 0,
-                    });
-                } else {
-                    self.scheduler.enqueue(task);
+                    // caller must wait for every spawned task to complete.
+                    Some(ids) if !ids.is_empty() => {
+                        self.waiting_join.push(JoinWait { task, pending: ids });
+                    }
+                    // Synchronous caller path, or `run([])` — nothing to wait
+                    // for; the parked task re-enters the scheduler directly.
+                    _ => self.scheduler.enqueue(task),
                 }
                 self.need_join = true;
             }
@@ -208,7 +218,7 @@ impl Vm {
         // their chains live in the channel's sender/receiver queues — but
         // they are live work: keep the join going while any exist.
         while !self.scheduler.is_empty()
-            || self.waiting_join.is_some()
+            || !self.waiting_join.is_empty()
             || self.has_blocked_channel_tasks()
         {
             // Drop waiter roots whose channels no longer have parked tasks:
@@ -229,6 +239,11 @@ impl Vm {
                 }
                 break;
             };
+            // A completion counts against the waiter waiting for *this* task
+            // (by root-frame id) — a sibling finishing at the same boundary
+            // must not release a nested join early.  Captured before the
+            // chain is moved onto the stack.
+            let task_id = task.chain.first().map_or(0, |f| f.task_id);
             self.resume_chain(task.chain)?;
             loop {
                 // The task parked on a channel: its chain moved into the
@@ -243,14 +258,13 @@ impl Vm {
                     // A `Suspend` detached the whole task chain. If this was
                     // triggered by a nested `std.async.run` from an async body,
                     // hold the task in `waiting_join` instead of re-enqueueing.
-                    if let Some(expected) = self.nested_run_expected.take() {
-                        self.waiting_join = Some(JoinWait {
-                            task,
-                            expected,
-                            completed: 0,
-                        });
-                    } else {
-                        self.scheduler.enqueue(task);
+                    match self.nested_run_expected.take() {
+                        Some(ids) if !ids.is_empty() => {
+                            self.waiting_join.push(JoinWait { task, pending: ids });
+                        }
+                        // Not a nested join, or `run([])` (nothing to wait
+                        // for): the task re-enters the scheduler directly.
+                        _ => self.scheduler.enqueue(task),
                     }
                     break;
                 }
@@ -259,16 +273,7 @@ impl Vm {
                     Some(f) if f.is_future => self.step()?,
                     // Back at the synchronous join caller: the task completed.
                     _ => {
-                        // If we're waiting for a nested `std.async.run` to complete,
-                        // increment the completion counter.
-                        if let Some(wait) = self.waiting_join.as_mut() {
-                            wait.completed += 1;
-                            if wait.completed == wait.expected {
-                                // All spawned tasks done; re-enqueue the waiter.
-                                self.scheduler.enqueue(wait.task.clone());
-                                self.waiting_join = None;
-                            }
-                        }
+                        self.complete_task(task_id);
                         break;
                     }
                 }
@@ -299,6 +304,31 @@ impl Vm {
     #[cfg(test)]
     pub(crate) fn channel_waiter_count(&self) -> usize {
         self.channel_waiters.len()
+    }
+
+    /// Count a completed task against the nested-join waiter waiting for it
+    /// (0.0.4 T06).  A task's identity is its root frame's `task_id`, which
+    /// survives every park/wake cycle; the waiter whose `pending` set contains
+    /// that id loses one entry, and when its set empties the waiter's own
+    /// chain re-enters the scheduler.  A completion no waiter is waiting for
+    /// (a sibling task finishing at the same boundary, or a waiter itself
+    /// after its join released) is simply ignored — a completion must never
+    /// be counted twice, and never against the wrong join.
+    fn complete_task(&mut self, task_id: u64) {
+        let Some(pos) = self
+            .waiting_join
+            .iter()
+            .position(|w| w.pending.contains(&task_id))
+        else {
+            return;
+        };
+        self.waiting_join[pos].pending.retain(|&id| id != task_id);
+        if self.waiting_join[pos].pending.is_empty() {
+            // All spawned tasks done; re-enqueue the waiter (moved, never
+            // copied) and drop its join record.
+            let wait = self.waiting_join.remove(pos);
+            self.scheduler.enqueue(wait.task);
+        }
     }
 
     /// Check if any task is blocked on a channel (waiting in senders/receivers
@@ -343,8 +373,8 @@ impl Vm {
                 }
             }
         }
-        // Scan waiting_join task if present.
-        if let Some(wait) = &self.waiting_join {
+        // Scan any nested-join waiters' parked chains.
+        for wait in &self.waiting_join {
             for frame in &wait.task.chain {
                 if self.frame_has_blocked_channel(frame) {
                     return true;
@@ -532,6 +562,10 @@ impl Vm {
             ip: 0,
             stack_base: base,
             is_future,
+            // Task identity stays on the chain's root frame (installed by
+            // `resume_frame` from a spawned `Future`); an ordinary call is
+            // never the root.
+            task_id: 0,
         });
         Ok(())
     }
@@ -582,6 +616,10 @@ impl Vm {
             locals,
             operands,
             state: FutureState::Resumable,
+            // Preserve the task id: the chain's outermost frame is the task
+            // root, and its id must survive every snapshot/resume round trip
+            // for nested joins to recognize their spawned tasks.
+            task_id: frame.task_id,
         })
     }
 
@@ -620,6 +658,9 @@ impl Vm {
             // including a synchronous frame the chain swallowed because it was
             // called from an async body.
             is_future: true,
+            // `0` for a not-yet-spawned frame (`AsyncStart`); a snapshot of a
+            // task root carries its spawned id through.
+            task_id: frame.task_id,
         });
         let mut locals = frame.locals;
         self.stack.append(&mut locals);
@@ -747,13 +788,23 @@ impl Vm {
                     Some(Value::Arr(elems)) => elems.into_vec(),
                     _ => return Err(RuntimeErrorKind::StackShape),
                 };
-                let task_count = elems.len();
+                // Give each spawned root a task id (its chain's root frame
+                // carries it across every park/wake cycle) and remember the
+                // ids as the join's pending set — completions are matched by
+                // id, never by counting, so a sibling finishing at the same
+                // boundary cannot release the join early.
+                let mut spawned_ids = Vec::with_capacity(elems.len());
                 for elem in elems.drain(..) {
-                    let Value::Future(frame) = elem else {
+                    let Value::Future(boxed) = elem else {
                         return Err(RuntimeErrorKind::StackShape);
                     };
+                    let mut frame = *boxed;
+                    self.next_task_id += 1;
+                    let id = self.next_task_id;
+                    frame.task_id = id;
+                    spawned_ids.push(id);
                     self.scheduler.push_ready(Task {
-                        chain: vec![*frame],
+                        chain: vec![frame],
                         ready_at_ms: None,
                     });
                 }
@@ -770,7 +821,7 @@ impl Vm {
                 // parks forever and the awaiting caller below loses its
                 // value (a StackShape at the next store).
                 if self.frames.last().is_some_and(|f| f.is_future) {
-                    self.nested_run_expected = Some(task_count);
+                    self.nested_run_expected = Some(spawned_ids);
                 } else {
                     // Synchronous caller (main): nothing will park it, so the
                     // join must be signaled by the builtin itself.
@@ -1621,6 +1672,9 @@ impl Vm {
                     locals: slots,
                     operands: Vec::new(),
                     state: FutureState::Resumable,
+                    // Not a spawned task yet; `std.async.run` assigns the id
+                    // when (and if) it turns this frame into a root task.
+                    task_id: 0,
                 };
                 // Unwind this call like `Return` (deliver the Future to the
                 // caller). No callee frame may be live above an `AsyncStart`.

@@ -1,0 +1,26 @@
+// 0.0.4 T06 executor regression: a sibling task completing during a join must
+// not release a nested `std.async.run` early — completions are matched by
+// spawned task id, not counted. `joiner` joins one spawned task; `sibling`
+// finishes first and must not wake `joiner` before `inner` has completed, so
+// "joiner-after-join" prints strictly after "inner-done".
+import std.io;
+import std.async;
+
+async func inner_task() {
+    std.io.println("inner-run");
+    std.async.yield_now();
+    std.io.println("inner-done");
+}
+
+async func sibling_task() {
+    std.io.println("sibling-done");
+}
+
+async func joiner_task() {
+    std.async.run([inner_task()]);
+    std.io.println("joiner-after-join");
+}
+
+func main() {
+    std.async.run([joiner_task(), sibling_task()]);
+}
