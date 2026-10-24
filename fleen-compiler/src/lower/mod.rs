@@ -300,6 +300,7 @@ impl LowerCtx {
             let mut bcx = FnBodyCx {
                 lcx: &mut *self,
                 slots,
+                is_async: f.is_async,
             };
             // 0.0.4 T05: an `async func`'s code begins with `AsyncStart`, the
             // call boundary that packages the frame's parameters into a
@@ -632,6 +633,10 @@ impl InlineIterKind {
 struct FnBodyCx<'a> {
     lcx: &'a mut LowerCtx,
     slots: SlotAlloc,
+    /// Whether the enclosing function is `async` (0.0.4 T06): suspend-source
+    /// builtins (`std.io.sleep` / `std.async.yield_now`) lower to a trailing
+    /// `Suspend` only inside an async body; in a sync body they are no-ops.
+    is_async: bool,
 }
 
 impl<'a> FnBodyCx<'a> {
@@ -1006,6 +1011,46 @@ impl<'a> FnBodyCx<'a> {
                 self.lower_expr_into(fb, operand)?;
                 fb.emit(MirInstr::new(MirInstrKind::Await, *span));
             }
+            // 0.0.4 T07: channel operations.
+            TypedExprHir::ChannelNew {
+                capacity,
+                payload_ty,
+                span,
+            } => {
+                self.lower_expr_into(fb, capacity)?;
+                fb.emit(MirInstr::new(
+                    MirInstrKind::ChannelNew(payload_ty.clone()),
+                    *span,
+                ));
+            }
+            TypedExprHir::ChannelSend {
+                channel,
+                value,
+                payload_ty,
+                span,
+            } => {
+                self.lower_expr_into(fb, channel)?;
+                self.lower_expr_into(fb, value)?;
+                fb.emit(MirInstr::new(
+                    MirInstrKind::ChannelSend(payload_ty.clone()),
+                    *span,
+                ));
+            }
+            TypedExprHir::ChannelRecv {
+                channel,
+                payload_ty,
+                span,
+            } => {
+                self.lower_expr_into(fb, channel)?;
+                fb.emit(MirInstr::new(
+                    MirInstrKind::ChannelRecv(payload_ty.clone()),
+                    *span,
+                ));
+            }
+            TypedExprHir::ChannelSplit { channel, span } => {
+                self.lower_expr_into(fb, channel)?;
+                fb.emit(MirInstr::new(MirInstrKind::ChannelSplit, *span));
+            }
             // 0.0.2 U06: Result constructors.
             TypedExprHir::ResultCtor {
                 ctor, value, span, ..
@@ -1282,6 +1327,22 @@ impl<'a> FnBodyCx<'a> {
                 let param_tys = self.lcx.param_types.get(&fid).cloned().unwrap_or_default();
                 self.prepare_args(fb, args, &param_tys)?;
                 fb.emit(MirInstr::new(MirInstrKind::Call(fid), span));
+                // 0.0.4 T06: suspend-source builtins lower to a trailing
+                // `Suspend` so the task parks in the cooperative scheduler.
+                // `std.io.sleep` (deadline recorded by the VM's builtin) and
+                // `std.async.yield_now` (no deadline ⇒ immediately re-runnable)
+                // detect, in an async body, park here. `std.async.run` also
+                // suspends when called from inside an async body so it can wait
+                // for the spawned tasks to complete before continuing. A sync
+                // caller never emits the `Suspend`, so these are no-ops there.
+                if self.is_async
+                    && matches!(
+                        name.as_str(),
+                        "std.io.sleep" | "std.async.yield_now" | "std.async.run"
+                    )
+                {
+                    fb.emit(MirInstr::new(MirInstrKind::Suspend, span));
+                }
             }
             _ => {
                 // Indirect call: get param types from callee's function type.

@@ -1,0 +1,8 @@
+// 0.0.4 T07a: `c.send` / `c.recv` exist only in call position — as a bare
+// field read they are a typeck error.
+import std.concurrent;
+
+func main() {
+    ch = channel<int>(2);
+    f = ch.send;
+}

@@ -203,6 +203,13 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
             collect_expr(alloc, index);
         }
         TypedExprHir::AssignField { rhs, .. } => collect_expr(alloc, rhs),
+        TypedExprHir::ChannelNew { capacity, .. } => collect_expr(alloc, capacity),
+        TypedExprHir::ChannelSend { channel, value, .. } => {
+            collect_expr(alloc, channel);
+            collect_expr(alloc, value);
+        }
+        TypedExprHir::ChannelRecv { channel, .. } => collect_expr(alloc, channel),
+        TypedExprHir::ChannelSplit { channel, .. } => collect_expr(alloc, channel),
         TypedExprHir::Block(b) => collect_block(alloc, b),
         TypedExprHir::Int(..)
         | TypedExprHir::Float(..)

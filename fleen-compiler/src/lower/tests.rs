@@ -798,6 +798,15 @@ fn stack_delta(
         MirInstrKind::Suspend => 0,
         MirInstrKind::Poll => 0,
         MirInstrKind::Await => 0,
+        // 0.0.4 T07: channels. `ChannelNew` pops the capacity and pushes the
+        // handle (cap → ch); `ChannelSend` pops handle + payload and pushes
+        // the `unit` result (ch v → unit); `ChannelRecv` pops the handle and
+        // pushes the payload (ch → v); `ChannelSplit` replaces the handle
+        // with a second one (ch → ch).
+        MirInstrKind::ChannelNew(_) => 1,
+        MirInstrKind::ChannelSend(_) => -1,
+        MirInstrKind::ChannelRecv(_) => 0,
+        MirInstrKind::ChannelSplit => 0,
     }
 }
 

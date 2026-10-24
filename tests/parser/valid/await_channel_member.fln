@@ -1,0 +1,8 @@
+// 0.0.4 T06: `await`/`channel` as member names in dotted paths are legal
+import std.io;
+
+func main() {
+    x.await = 1;  // field named "await" on some struct
+    y.channel = 2; // field named "channel" on some struct
+    std.io.println("ok");
+}

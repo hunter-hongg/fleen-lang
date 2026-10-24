@@ -40,6 +40,8 @@ pub enum RuntimeErrorKind {
     BadJumpTarget,
     /// Module header version this VM cannot execute.
     UnsupportedVersion(u16),
+    /// `channel<T>(capacity)` called with a negative capacity (0.0.4 T07).
+    InvalidChannelCapacity,
     /// `UnwrapOk` hit an `Err` value or `UnwrapErr` hit an `Ok` value
     /// (defensive: typeck routes each payload through the matching
     /// arm / unwrap opcode before codegen).
@@ -74,10 +76,10 @@ pub enum RuntimeErrorKind {
     /// `Poll`/`Await` found a non-`Future` value on the operand stack
     /// (0.0.4 T05). Defensive: typeck restricts `await` to `Future<T>`.
     FutureExpected,
-    /// `Suspend` executed with no executor and no suspension source
-    /// (0.0.4 T05). The real yield boundary is wired by the T06 executor and
-    /// T07 channels; any verified 0.0.4 T05 program never reaches this.
-    UnsupportedAsyncSuspend,
+    /// Deadlock detected: all tasks blocked on channels, no timer pending,
+    /// and no ready task exists (0.0.4 T07b). Raised immediately in
+    /// `drive_join` rather than parking forever.
+    ChannelDeadlock,
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -125,10 +127,13 @@ impl std::fmt::Display for RuntimeErrorKind {
             RuntimeErrorKind::FutureExpected => {
                 write!(f, "await expected a `Future<T>` value on the stack")
             }
-            RuntimeErrorKind::UnsupportedAsyncSuspend => {
+            RuntimeErrorKind::InvalidChannelCapacity => {
+                write!(f, "channel capacity must be non-negative")
+            }
+            RuntimeErrorKind::ChannelDeadlock => {
                 write!(
                     f,
-                    "Suspend reached with no executor (0.0.4 T05 has no suspension source)"
+                    "channel deadlock: all tasks blocked with no ready task and no pending timer"
                 )
             }
         }

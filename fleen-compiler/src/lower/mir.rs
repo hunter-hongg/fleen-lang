@@ -252,4 +252,19 @@ pub enum MirInstrKind {
     Poll,
     /// `Poll` + expect Ready + unwrap the payload: `F → T` (Δ0, min 1).
     Await,
+    // 0.0.4 T07: channel instructions (bytecode v4, 0xC4–0xC7).
+    /// Create a new channel with the given payload type.
+    /// Stack effect: cap → ch (Δ0, min 1).
+    ChannelNew(Type),
+    /// Send a value through a channel; may suspend if full.
+    /// Stack effect: ch v → (Δ-2, min 2). Non-idempotent: on resume after
+    /// suspend, re-executes the send attempt.
+    ChannelSend(Type),
+    /// Receive a value from a channel; may suspend if empty.
+    /// Stack effect: ch → v (Δ0, min 1). Non-idempotent: on resume after
+    /// suspend, re-executes the recv attempt.
+    ChannelRecv(Type),
+    /// Split a channel handle, producing a second handle to the same buffer.
+    /// Stack effect: ch → ch2 (Δ0, min 1).
+    ChannelSplit,
 }

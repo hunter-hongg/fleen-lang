@@ -1,0 +1,7 @@
+// 0.0.4 T06: `async.run` as member access (async is module, run is function)
+import std.io;
+
+func main() {
+    f = std.async.run;
+    std.io.println("ok");
+}

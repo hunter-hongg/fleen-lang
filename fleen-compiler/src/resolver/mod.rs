@@ -54,6 +54,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Result(ok, err) => type_contains_ref(ok) || type_contains_ref(err),
         Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
         Type::Future(inner) => type_contains_ref(inner),
+        Type::Channel(inner) => type_contains_ref(inner),
         Type::Range => false,
         Type::Base(_) => false,
         Type::Named(_) => false,
@@ -193,6 +194,8 @@ impl Resolver {
             Type::Named(name) => self.resolve_type_name(name, span),
             // 0.0.4 F3: `Future<T>` recurses so a nested named type resolves.
             Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, span))),
+            // 0.0.4 F9: `channel<T>` recurses so the payload type resolves.
+            Type::Channel(inner) => Type::Channel(Box::new(self.resolve_type(inner, span))),
             Type::Base(_) | Type::Range => ty.clone(),
         }
     }
@@ -1074,6 +1077,16 @@ impl Resolver {
             Expr::Bool(b, span) => ExprHir::Bool(b, span),
             Expr::Str(s, span) => ExprHir::Str(s, span),
             Expr::Ident(name, span) => self.resolve_ident(name, span)?,
+            Expr::ChannelNew { ty, capacity, span } => {
+                let capacity_hir = self.resolve_expr(*capacity)?;
+                let ty_hir = self.resolve_type(&ty, span);
+                ExprHir::ChannelNew {
+                    ty: ty_hir,
+                    capacity: Box::new(capacity_hir),
+                    hir_id: self.next_hir_id(),
+                    span,
+                }
+            }
             Expr::Block(block) => ExprHir::Block(self.resolve_block(block)?),
         };
         Ok(hir)

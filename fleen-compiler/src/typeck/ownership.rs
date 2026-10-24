@@ -416,6 +416,21 @@ impl<'a> Cx<'a> {
             | TypedExprHir::Float(..)
             | TypedExprHir::Bool(..)
             | TypedExprHir::Str(..) => {}
+            // 0.0.4 T07: channel operations — read-only for the channel
+            // handle itself (the payload is produced/consumed separately).
+            TypedExprHir::ChannelNew { capacity, .. } => {
+                self.walk_expr(capacity, true);
+            }
+            TypedExprHir::ChannelSend { channel, value, .. } => {
+                self.walk_expr(channel, false);
+                self.walk_expr(value, true);
+            }
+            TypedExprHir::ChannelRecv { channel, .. } => {
+                self.walk_expr(channel, false);
+            }
+            TypedExprHir::ChannelSplit { channel, .. } => {
+                self.walk_expr(channel, false);
+            }
             TypedExprHir::Block(b) => self.walk_block(b, true),
             // Field/index assignment mirrors plain assignment: the RHS is
             // not a producing position; the binding's own move state resets
@@ -506,6 +521,19 @@ impl<'a> Cx<'a> {
             // transferred out of a borrow, so no move state applies.
             // (`Access::Move` is unreachable — typeck reports
             // `MoveOfBorrowed` first.)
+            return;
+        }
+        // 0.0.4 T07d: a bare *read* of a channel local is a plain handle
+        // load, never the read-only auto-clone deep copy — channels are
+        // non-clonable (`clone ch` is rejected in typeck) and
+        // `std.concurrent.split` is the only fork point, which needs exactly
+        // this plain load. A producing tail still transfers (`Move`), and the
+        // moved-state check applies to every use.
+        if matches!(ty, Type::Channel(_)) && *access == Access::Copy {
+            if self.check_use(name, id, span) && matches!(use_kind, IdentUse::Producer) {
+                *access = Access::Move;
+                self.register_moved(id, span);
+            }
             return;
         }
         if self.globals.contains(id) || self.global_names.contains(name) {
@@ -819,6 +847,18 @@ fn scan_owned_local_uses(
                 }
                 scan_block_owned_local_uses(&arm.body, out, globals, global_names, entry);
             }
+        }
+        // 0.0.4 T07: channel operations — walk sub-expressions so a moved
+        // handle used again is still caught by the back-edge check.
+        TypedExprHir::ChannelNew { capacity, .. } => {
+            scan_owned_local_uses(capacity, out, globals, global_names, entry);
+        }
+        TypedExprHir::ChannelSend { channel, value, .. } => {
+            scan_owned_local_uses(channel, out, globals, global_names, entry);
+            scan_owned_local_uses(value, out, globals, global_names, entry);
+        }
+        TypedExprHir::ChannelRecv { channel, .. } | TypedExprHir::ChannelSplit { channel, .. } => {
+            scan_owned_local_uses(channel, out, globals, global_names, entry);
         }
         TypedExprHir::Int(..)
         | TypedExprHir::Float(..)

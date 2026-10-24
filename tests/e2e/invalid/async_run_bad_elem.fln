@@ -1,0 +1,2 @@
+import std.async;
+func main() { std.async.run([42]); }

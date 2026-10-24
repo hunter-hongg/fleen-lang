@@ -455,6 +455,15 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         // `Await` (and `Poll`, which drives a future to completion in T05):
         // pop the Future, push the unwrapped payload `F → T` (Δ0, min 1).
         Opcode::Poll | Opcode::Await => (0, 1),
+        // 0.0.4 T07: channels (BYTECODE v4, 0xC4–0xC7).
+        // `ChannelNew`: cap → ch (Δ0, min 1).
+        Opcode::ChannelNew => (0, 1),
+        // `ChannelSend`: ch v → unit (Δ-1, min 2). May suspend.
+        Opcode::ChannelSend => (-1, 2),
+        // `ChannelRecv`: ch → v (Δ0, min 1). May suspend.
+        Opcode::ChannelRecv => (0, 1),
+        // `ChannelSplit`: ch → ch2 (Δ0, min 1).
+        Opcode::ChannelSplit => (0, 1),
     })
 }
 

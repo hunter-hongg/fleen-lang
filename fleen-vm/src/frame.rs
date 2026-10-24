@@ -2,7 +2,6 @@
 
 use fleen_compiler::codegen::FuncId;
 
-use crate::error::RuntimeError;
 use crate::value::Value;
 
 /// One activation of a function.
@@ -14,9 +13,21 @@ pub struct CallFrame {
     pub ip: usize,
     /// Start slot of this frame's locals inside the shared operand stack.
     pub stack_base: usize,
+    /// Whether this frame was installed by a coroutine resume (0.0.4 T06),
+    /// i.e. it is part of an async task's suspended-able chain. Frames pushed
+    /// by ordinary `Call` are `false`. The executor uses this to know how many
+    /// frames belong to the task being suspended: a `Suspend` detaches every
+    /// contiguous `is_future` frame up from the top, stopping at the first
+    /// synchronous boundary (the host driver / `std.async.run` host loop).
+    pub is_future: bool,
 }
 
 /// Whether a [`FutureFrame`] can still make progress (0.0.4, D1).
+///
+/// The current single-threaded cooperative executor (T06) does not persist
+/// completed/failed frames: a future runs until it returns (value passed via
+/// stack to the `Await` site) or fails (error propagates directly from
+/// `step()`).  A frame is either `Resumable` or it has been consumed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FutureState {
     /// Resumable: execution continues at `FutureFrame::resume_pc` with the
@@ -24,13 +35,6 @@ pub enum FutureState {
     /// async call creates (pc 0, arguments in slots `0..params`) and a frame
     /// suspended mid-body.
     Resumable,
-    /// The body ran to completion and produced its `T`.  A driven future never
-    /// runs again (PLAN §3.3 "driven once").
-    Completed(Value),
-    /// The body failed.  `await` on such a future re-raises the error at the
-    /// awaiting site (PLAN §4.3); the error is captured while the coroutine
-    /// frame was live, so it keeps its source location.
-    Failed(RuntimeError),
 }
 
 /// A suspendable coroutine frame — the runtime value of a `Future<T>`

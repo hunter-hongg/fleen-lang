@@ -1,0 +1,9 @@
+// 0.0.4 T07d: channels are move-only — `clone ch` is rejected because a deep
+// copy of a shared buffer is meaningless and a shallow one would alias
+// silently while typeck believed it copied. `std.concurrent.split` forks.
+import std.concurrent;
+
+func main() {
+    ch = channel<int>(2);
+    peer = clone ch;
+}

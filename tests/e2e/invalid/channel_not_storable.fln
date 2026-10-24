@@ -1,0 +1,11 @@
+// 0.0.4 T07d: a channel cannot be a struct field — a field read deep-copies
+// owned values, which would fork the shared buffer silently.
+import std.concurrent;
+
+struct Holder {
+    ch: channel<int>,
+}
+
+func main() {
+    h = Holder { ch: channel<int>(1) };
+}

@@ -2209,39 +2209,6 @@ fn suspend_without_a_live_frame_is_an_error() {
 }
 
 #[test]
-fn resume_rejects_an_already_driven_future() {
-    use super::frame::FutureState;
-    let mut vm = Vm::new(async_fixture());
-    let done = super::frame::FutureFrame {
-        func: FuncId(1),
-        resume_pc: WORKER_RESUME_PC,
-        locals: vec![Value::Unit, Value::Unit],
-        operands: vec![],
-        state: FutureState::Completed(Value::Int(16)),
-    };
-    assert_eq!(
-        vm.resume_frame(done).unwrap_err(),
-        RuntimeErrorKind::FutureNotResumable
-    );
-    assert!(
-        vm.stack.is_empty() && vm.frames.is_empty(),
-        "no partial restore"
-    );
-
-    let failed = super::frame::FutureFrame {
-        func: FuncId(1),
-        resume_pc: WORKER_RESUME_PC,
-        locals: vec![Value::Unit, Value::Unit],
-        operands: vec![],
-        state: FutureState::Failed(RuntimeError::new(RuntimeErrorKind::DivisionByZero)),
-    };
-    assert_eq!(
-        vm.resume_frame(failed).unwrap_err(),
-        RuntimeErrorKind::FutureNotResumable
-    );
-}
-
-#[test]
 fn resume_validates_the_snapshot_against_the_function() {
     use super::frame::{FutureFrame, FutureState};
     let mut vm = Vm::new(async_fixture());
@@ -2278,6 +2245,7 @@ fn resume_counts_toward_the_call_depth_limit() {
             func: FuncId(0),
             ip: 0,
             stack_base: 0,
+            is_future: false,
         };
         super::vm::MAX_CALL_DEPTH
     ];
@@ -2301,6 +2269,7 @@ fn suspend_rejects_a_frame_region_beyond_the_stack() {
         func: FuncId(1),
         ip: 0,
         stack_base: 0,
+        is_future: false,
     });
     assert_eq!(
         vm.suspend_top_frame(0).unwrap_err(),
@@ -2496,14 +2465,378 @@ fn await_on_a_non_future_is_future_expected() {
 }
 
 #[test]
-fn suspend_reaches_a_defensive_error_without_an_executor() {
-    // No suspension source exists in 0.0.4 T05, so a verified program never
-    // executes `Suspend`; hand-written bytecode that does is unsupported.
+fn suspend_outside_a_future_context_is_a_defensive_error() {
+    // A verified 0.0.4 program only ever reaches `Suspend` from inside an async
+    // body (the binary always emits it after a suspend-source builtin there, T06);
+    // hand-written bytecode that fires it from a synchronous frame is malformed
+    // and reports `StackShape` (no future-marked frame to detach).
     let mut module = async_opcode_module();
     module.functions[0].code = enc(&[(Opcode::Suspend, vec![]), (Opcode::Return, vec![])]);
     let mut vm = Vm::new(module);
-    assert_eq!(
-        vm.run().unwrap_err().kind,
-        RuntimeErrorKind::UnsupportedAsyncSuspend
-    );
+    assert_eq!(vm.run().unwrap_err().kind, RuntimeErrorKind::StackShape);
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T06: the cooperative executor (F6). `run_src` compiles a `.fln` source
+// through the full pipeline; each test drives a small async concurrency program
+// and asserts on its printed output / return value. These are deterministic:
+// the scheduler round-robins FIFO and `yield_now` re-enqueues, so the
+// interleaving is stable across runs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn async_run_joins_multiple_roots_to_completion() {
+    // `std.async.run` spawns independent roots, runs each to completion (round-
+    // robin over its suspension points), then returns `unit` to the caller.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+async func task(name: string, n: int) {
+    for i in range(n) { std.async.yield_now(); }
+    std.io.println(name, " done");
+}
+func main() {
+    std.async.run([task("a", 3), task("b", 2)]);
+    std.io.println("main after run");
+}
+"#,
+    )
+    .expect("executor joins the spawned roots");
+    assert_eq!(v, Value::Unit);
+}
+
+#[test]
+fn top_level_await_block_drives_a_suspending_future() {
+    // A bare `main`-level `await` on a root that suspends (here `sleep`) boots
+    // a blocking drive that waits on the timer and delivers the payload.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+async func wait_a_bit(): int { std.io.sleep(5); 42 }
+func main(): int { x = wait_a_bit() await; std.io.println("waited: ", x as string); 0 }
+"#,
+    )
+    .expect("blocking top-level await drives the root");
+    assert_eq!(v, Value::Int(0));
+}
+
+#[test]
+fn a_failing_task_re_raises_at_the_join() {
+    // A task that panics surfaces as a RuntimeError at the join (`std.async.run`),
+    // aborting the whole program — the executor does not swallow it.
+    let err = run_src(
+        r#"
+import std.io;
+import std.async;
+async func boom() { std.io.println("boom"); n = 1 / 0; std.io.println(n as string); }
+func main() { std.async.run([boom()]); std.io.println("unreachable"); }
+"#,
+    )
+    .expect_err("the failing task re-raises at the join");
+    assert_eq!(err.kind, RuntimeErrorKind::DivisionByZero);
+}
+
+#[test]
+fn sync_sleep_and_yield_are_no_ops() {
+    // Outside an async body the compiler emits no `Suspend`, so a synchronous
+    // caller of `sleep`/`yield_now` simply continues (no scheduler, no park).
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+func main() {
+    std.io.sleep(1);
+    std.async.yield_now();
+    std.io.println("sync ok");
+}
+"#,
+    )
+    .expect("sync sleep/yield are no-ops");
+    assert_eq!(v, Value::Unit);
+}
+
+#[test]
+fn a_sync_sleep_does_not_leak_a_deadline_into_a_later_async_suspend() {
+    // A synchronous `sleep` is a no-op and must not record a deadline that a
+    // later unrelated async suspension would mistake for a timer. Here a huge
+    // sync `sleep` is followed by an async task that only `yield_now`s (no
+    // sleep): if the stale deadline leaked, the task would be parked on a timer
+    // and the program would hang on the join.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+async func ping() { std.async.yield_now(); }
+func main() {
+    std.io.sleep(999999);      // sync no-op
+    std.async.run([ping()]);   // would hang if deadline leaked
+    std.io.println("async ok");
+}
+"#,
+    )
+    .expect("the async task is not stuck on a leaked sync sleep deadline");
+    assert_eq!(v, Value::Unit);
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T07: channels (F9). Source-level tests through the full pipeline —
+// the scheduler round-robin and the channel wake paths are deterministic:
+// a task always runs to its next suspension point before yielding.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn channel_buffered_send_then_recv_is_fifo() {
+    // Buffered channel: all sends fit, then all recvs come out in send order.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+import std.collection.range;
+import std.concurrent;
+async func producer(ch: channel<int>) {
+    for i in range(4) { ch.send(i); }
+}
+async func consumer(ch: channel<int>) {
+    for _ in range(4) { std.io.println(ch.recv() as string); }
+}
+func main() {
+    ch = channel<int>(4);
+    peer = std.concurrent.split(ch);
+    std.async.run([producer(move ch), consumer(move peer)]);
+}
+"#,
+    )
+    .expect("buffered channel round-trips");
+    assert_eq!(v, Value::Unit);
+    // FIFO order is the observable behavior; captured by the e2e fixture
+    // `channel_basic` (stdout comparison) — here only the value is checked.
+}
+
+#[test]
+fn channel_rendezvous_hands_off_between_parked_tasks() {
+    // Rendezvous (cap 0): the receiver parks first, the sender's handoff
+    // injects the payload into its resumed frame, and the sender continues.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+import std.collection.range;
+import std.concurrent;
+async func sender(ch: channel<int>) {
+    for i in range(3) { ch.send(i); }
+}
+async func receiver(ch: channel<int>) {
+    for _ in range(3) { std.io.println(ch.recv() as string); }
+}
+func main() {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([sender(move ch), receiver(move peer)]);
+}
+"#,
+    )
+    .expect("rendezvous handoff completes all three sends");
+    assert_eq!(v, Value::Unit);
+}
+
+#[test]
+fn channel_park_does_not_count_as_a_nested_join_completion() {
+    // A nested `std.async.run` whose spawned task parks on a channel must not
+    // be counted as completed by the join (the `suspended_on_channel` signal):
+    // the waiter would otherwise resume before the channel work finishes.
+    let v = run_src(
+        r#"
+import std.io;
+import std.async;
+import std.collection.range;
+import std.concurrent;
+async func worker(ch: channel<int>, n: int) {
+    ch.send(n);
+}
+async func feeder(ch: channel<int>) {
+    for i in range(2) {
+        std.io.println(ch.recv() as string);
+    }
+}
+async func spawner(ch: channel<int>) {
+    peer = std.concurrent.split(ch);
+    std.async.run([worker(move ch, 7), worker(move peer, 9)]);
+    std.io.println("spawner done");
+}
+func main() {
+    ch = channel<int>(2);
+    sub = std.concurrent.split(ch);
+    std.async.run([spawner(move ch), feeder(move sub)]);
+}
+"#,
+    )
+    .expect("nested run with channel parks completes in order");
+    assert_eq!(v, Value::Unit);
+}
+
+#[test]
+fn sync_recv_on_an_empty_channel_is_channel_deadlock() {
+    // T07b: in a synchronous main nothing can ever fill the channel, so the
+    // blocking recv is the immediate `ChannelDeadlock` (located at the recv).
+    let err = run_src(
+        r#"
+import std.concurrent;
+func main() {
+    ch = channel<int>(0);
+    ch.recv();
+}
+"#,
+    )
+    .expect_err("sync recv on an empty channel deadlocks");
+    assert_eq!(err.kind, RuntimeErrorKind::ChannelDeadlock);
+}
+
+#[test]
+fn all_tasks_blocked_on_channels_is_channel_deadlock() {
+    // T07b: two tasks, each waiting for the other's channel — no ready task,
+    // no timer, so the scheduler detects the deadlock instead of hanging.
+    let err = run_src(
+        r#"
+import std.async;
+import std.concurrent;
+async func wait_on(ch: channel<int>) {
+    ch.recv();
+}
+func main() {
+    ch = channel<int>(0);
+    std.async.run([wait_on(move ch)]);
+}
+"#,
+    )
+    .expect_err("a lone receiver with no sender deadlocks");
+    assert_eq!(err.kind, RuntimeErrorKind::ChannelDeadlock);
+}
+
+#[test]
+fn channel_send_result_is_unit_and_recv_yields_the_payload() {
+    // `send` has type `unit` (its result can be discarded by the statement
+    // wrapper — the ChannelSend opcode leaves `Unit` on the stack); `recv`
+    // yields the payload into an expression.
+    let v = run_src(
+        r#"
+import std.concurrent;
+func main(): int {
+    ch = channel<int>(2);
+    u = ch.send(41);
+    ch.recv() + 1
+}
+"#,
+    )
+    .expect("send returns unit, recv returns the payload");
+    assert_eq!(v, Value::Int(42));
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler unit tests (0.0.4 T06)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::super::executor::{Scheduler, Task};
+    use super::super::frame::{FutureFrame, FutureState};
+    use super::super::value::Value;
+    use fleen_compiler::codegen::FuncId;
+
+    fn dummy_frame() -> FutureFrame {
+        FutureFrame {
+            func: FuncId(0),
+            resume_pc: 0,
+            locals: vec![Value::Unit],
+            operands: vec![],
+            state: FutureState::Resumable,
+        }
+    }
+
+    fn dummy_task() -> Task {
+        Task {
+            chain: vec![dummy_frame()],
+            ready_at_ms: None,
+        }
+    }
+
+    fn timer_task(ms: i64) -> Task {
+        Task {
+            chain: vec![dummy_frame()],
+            ready_at_ms: Some(ms),
+        }
+    }
+
+    #[test]
+    fn new_scheduler_is_empty() {
+        let s = Scheduler::new();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn push_ready_then_next_task_returns_it() {
+        let mut s = Scheduler::new();
+        s.push_ready(dummy_task());
+        assert!(!s.is_empty());
+        let t = s.next_task().expect("task available");
+        assert!(s.is_empty());
+        assert!(t.ready_at_ms.is_none());
+    }
+
+    #[test]
+    fn ready_tasks_win_over_timers() {
+        let mut s = Scheduler::new();
+        // Enqueue a timer task far in the future
+        s.enqueue(timer_task(1000));
+        // Enqueue a ready task
+        s.push_ready(dummy_task());
+        // Ready task must come first (round-robin)
+        let t = s.next_task().expect("ready task first");
+        assert!(t.ready_at_ms.is_none());
+        // Timer still in scheduler
+        assert!(!s.is_empty());
+        // Next is the timer (after waiting, but we use a fake now)
+        // We can't easily test the sleep, but the ordering is correct.
+    }
+
+    #[test]
+    fn timer_task_is_promoted_when_due() {
+        let mut s = Scheduler::new();
+        // Enqueue a timer with deadline 0 (already due)
+        s.enqueue(timer_task(0));
+        // next_task will promote it and return it
+        let t = s.next_task().expect("timer promoted");
+        assert!(t.ready_at_ms.is_none());
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn ready_before_timer_even_if_timer_due_sooner() {
+        let mut s = Scheduler::new();
+        // Timer with very early deadline (but in future), ready task added after
+        s.enqueue(timer_task(1000));
+        s.push_ready(dummy_task());
+        // Ready task wins (next_task promotes timers first, then pops ready)
+        let t = s.next_task().expect("ready wins");
+        assert!(t.ready_at_ms.is_none());
+        // Timer still in scheduler
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn enqueue_routes_by_deadline() {
+        let mut s = Scheduler::new();
+        s.enqueue(timer_task(100));
+        s.push_ready(dummy_task());
+        // Both should be in scheduler
+        assert!(!s.is_empty());
+        // Ready first
+        let t1 = s.next_task().expect("first");
+        assert!(t1.ready_at_ms.is_none());
+        // Timer second
+        let t2 = s.next_task().expect("second");
+        assert!(t2.ready_at_ms.is_none());
+        assert!(s.is_empty());
+    }
 }

@@ -1,0 +1,17 @@
+// 0.0.4 T06: sleep timer — shorter sleep (10ms) wakes first.
+import std.io;
+import std.async;
+
+async func slow(label: string, ms: int) {
+    std.io.println(label, " start");
+    std.io.sleep(ms);
+    std.io.println(label, " end");
+}
+
+func main() {
+    std.async.run([
+        slow("s1", 30),
+        slow("s2", 10),
+    ]);
+    std.io.println("sleep order done");
+}

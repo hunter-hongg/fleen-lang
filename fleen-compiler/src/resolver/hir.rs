@@ -246,6 +246,13 @@ pub enum ExprHir {
     Question(Box<ExprHir>, Span),
     /// `<expr> await` (0.0.4 F2: postfix future drive).
     Await(Box<ExprHir>, Span),
+    /// `channel<T>(capacity)` (0.0.4 T07: channel constructor).
+    ChannelNew {
+        ty: Type,
+        capacity: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
     /// Function call
     Call(Box<ExprHir>, Vec<ExprHir>),
     /// Index access — span covers the whole `arr[idx]` (0.0.3 V03).
@@ -297,13 +304,14 @@ impl ExprHir {
             ExprHir::Mod(l, _) => l.span(),
             ExprHir::Not(e) => e.span(),
             ExprHir::Neg(e) => e.span(),
-            ExprHir::Move(_, s)
-            | ExprHir::Clone(_, s)
-            | ExprHir::Box(_, s)
-            | ExprHir::Deref(_, s)
-            | ExprHir::Cast(_, _, s)
-            | ExprHir::Question(_, s)
-            | ExprHir::Await(_, s) => *s,
+            ExprHir::Move(_, span)
+            | ExprHir::Clone(_, span)
+            | ExprHir::Box(_, span)
+            | ExprHir::Deref(_, span)
+            | ExprHir::Cast(_, _, span)
+            | ExprHir::Question(_, span)
+            | ExprHir::Await(_, span)
+            | ExprHir::ChannelNew { span, .. } => *span,
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(_, _, s) => *s,
             ExprHir::Field(o, _) => o.span(),

@@ -8,6 +8,7 @@
 
 pub mod diag;
 pub mod error;
+pub mod executor;
 pub mod fmt;
 pub mod frame;
 pub mod value;

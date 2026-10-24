@@ -1,0 +1,24 @@
+// 0.0.4 T07 std library: `concurrent` module — channels.
+//
+// The functions in this module are compiler/VM primitives, not Fleen source
+// (D8), so this file carries only documentation. `channel` is a reserved
+// word (T07e constructor syntax) and `split` lives in the compiler's builtin
+// table (typeck/builtins.rs), bound by the resolver from the module path.
+//
+//     import std.concurrent;
+//
+//     ch = channel<int>(2);            // buffered channel, capacity 2
+//     ch = channel<int>(0);            // rendezvous (direct handoff)
+//     peer = std.concurrent.split(ch); // second handle to the same buffer
+//     std.async.run(producer(move ch), consumer(move peer));
+//
+// `channel<T>(cap)` is a reserved-word constructor expression: cap = 0 is a
+// rendezvous channel (a `send` parks until a receiver takes the value
+// directly), cap > 0 is buffered (a `send` parks only when full). Channels
+// are non-Copy and move-only (T07d): `clone ch` is rejected, and `split` is
+// the one explicit fork point — it returns a second independent handle to
+// the same buffer. Values travel with `c.send(v)` / `c.recv()`, recognized
+// in typeck (T07a): `send` suspends on a full buffer, `recv` on an empty
+// one. There is no `close` in 0.0.4: a run ends when no task is runnable,
+// and a program whose tasks are all blocked on channels is a
+// `ChannelDeadlock` runtime error (T07b).

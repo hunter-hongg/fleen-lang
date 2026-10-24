@@ -25,3 +25,8 @@
 // `read_line` reads one line from standard input, without its trailing
 // newline. Returns an empty string at end of input. VM intrinsic
 // `std.io.read_line`.
+// 0.0.4 T06: `std.io.sleep(n)` — awaitable timer. Inside an async body the
+// compiler lowers the call to `Call std.io.sleep; Suspend`, so the task parks
+// until `n` milliseconds elapse (the VM records the deadline and the executor
+// wakes it). A synchronous caller of `sleep` gets a no-op (no `Suspend` is
+// emitted). Returns `unit` after the delay.

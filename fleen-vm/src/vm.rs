@@ -3,9 +3,12 @@
 use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
 
 use crate::error::{RuntimeError, RuntimeErrorKind};
+use crate::executor::{Scheduler, Task};
 use crate::fmt::fmt_scalar;
 use crate::frame::{CallFrame, FutureFrame, FutureState};
-use crate::value::Value;
+use crate::value::{ChannelInner, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub(crate) const MAX_CALL_DEPTH: usize = 1024;
 
@@ -27,6 +30,61 @@ pub struct Vm {
     /// The host program's command-line arguments (0.0.3 V06), served to
     /// Fleen by `std.os.args` — without `argv[0]`.
     program_args: Vec<String>,
+    /// Cooperative task scheduler (0.0.4 T06). Non-empty while `std.async.run`
+    /// has spawned tasks that have not all completed; `run_inner` drives it
+    /// to empty before returning.
+    scheduler: Scheduler,
+    /// The task chain most recently detached by a `Suspend` (0.0.4 T06). Set by
+    /// the `Suspend` dispatch, consumed by `run_inner`, which parks it in the
+    /// scheduler. One slot — only the innermost instruction can suspend, so a
+    /// step yields exactly one task.
+    pending: Option<Task>,
+    /// Set when a drive must join the scheduler before the (synchronous) caller
+    /// frame may continue: `std.async.run` spawning tasks, or a top-level bare
+    /// `await` whose root suspended. `run_inner` drains the scheduler to empty
+    /// (the join) and only then steps the caller frame.
+    need_join: bool,
+    /// Deadline (monotonic ms) set by `std.io.sleep` for the *exact* suspension
+    /// point (function + instruction pointer after `Suspend`).  A `sleep` call
+    /// inside a synchronous helper must not leak its deadline into a later
+    /// unrelated `Suspend` (e.g. from `yield_now`).  Stored as
+    /// `(func_id, suspend_ip, deadline_ms)` and only consumed when the
+    /// `Suspend` dispatch is at that identical location.
+    sleep_deadline: Option<(usize, usize, i64)>,
+    /// When `std.async.run` is called from inside an async body, the number of
+    /// tasks it spawned.  The following `Suspend` will park the caller; instead
+    /// of re-enqueueing it immediately, `run_inner` creates a `JoinWait` and
+    /// drives the scheduler until all spawned tasks complete.
+    nested_run_expected: Option<usize>,
+    /// A suspended task waiting for a nested `std.async.run` to complete all its
+    /// spawned tasks before resuming.
+    waiting_join: Option<JoinWait>,
+    /// Set when the running task parked on a channel (0.0.4 T07): its chain
+    /// moved into the channel's sender/receiver queue, so unlike `Suspend`
+    /// there is no `pending` task to re-enqueue — the waker owns it now.
+    /// Consumed by `run_inner`/`drive_join` to keep driving the remaining
+    /// tasks instead of treating the park as a completion.
+    suspended_on_channel: bool,
+    /// One handle per channel that currently has parked tasks (T07). The
+    /// parked chain lives *inside* `ChannelInner`, and a parked task's frame
+    /// no longer holds the channel handle (`send`/`recv` popped it before
+    /// suspending) — without this registry the last live handle dropping
+    /// would deallocate the `ChannelInner` and silently lose the parked
+    /// task. It also roots the T07b deadlock scan. Deduplicated by inner
+    /// pointer, so it is bounded by the number of distinct channels.
+    channel_waiters: Vec<Value>,
+}
+
+/// A suspended task waiting for a nested `std.async.run` to complete all its
+/// spawned tasks before resuming.
+#[derive(Debug)]
+struct JoinWait {
+    /// The suspended caller task.
+    task: Task,
+    /// Total number of tasks spawned by the nested `std.async.run`.
+    expected: usize,
+    /// Number of those tasks that have completed so far.
+    completed: usize,
 }
 
 impl Vm {
@@ -48,7 +106,26 @@ impl Vm {
             frames: Vec::new(),
             globals: vec![Value::Unit; n_globals],
             program_args,
+            scheduler: Scheduler::new(),
+            pending: None,
+            need_join: false,
+            sleep_deadline: None,
+            nested_run_expected: None,
+            waiting_join: None,
+            suspended_on_channel: false,
+            channel_waiters: Vec::new(),
         }
+    }
+
+    /// Monotonic clock in milliseconds for deadline calculations.
+    /// Uses a process-wide start instant so all VM instances share the same
+    /// timebase (avoids clock skew between multiple VMs in the same test).
+    fn now_mono_ms(&self) -> i64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as i64
     }
 
     /// Run the module's `entry` function to completion.
@@ -67,16 +144,45 @@ impl Vm {
         }
         let entry = self.module.entry;
         self.call(entry, 0)?;
-        // No globals/`__init__` path pushes extra frames; run until empty.
-        // A top-level `Return` leaves its value on the stack (the `Return`
-        // dispatch pushes it back), so the pop below yields the module
-        // result.
         loop {
+            // A `Suspend` parks the current task in `self.pending`; park it and
+            // remember the caller frame must not continue until the scheduler
+            // (its join) drains. The deadline (if any) was already attached to
+            // the task by the `Suspend` dispatch, keyed to the exact suspend point.
+            if let Some(task) = self.pending.take() {
+                if let Some(expected) = self.nested_run_expected.take() {
+                    // Nested `std.async.run` from an async body: the suspended
+                    // caller must wait for all spawned tasks to complete.
+                    self.waiting_join = Some(JoinWait {
+                        task,
+                        expected,
+                        completed: 0,
+                    });
+                } else {
+                    self.scheduler.enqueue(task);
+                }
+                self.need_join = true;
+            }
+            // A channel park (0.0.4 T07) detached the task's chain into the
+            // channel's sender/receiver queue — the waker owns it now — so
+            // there is no `pending` task; only the join signal remains.
+            if self.suspended_on_channel {
+                self.suspended_on_channel = false;
+                self.need_join = true;
+            }
+            // A re-drive boundary (a top-level `await` whose root suspended, or
+            // a `std.async.run` build that spawned tasks): the synchronous
+            // caller frame is parked at its join, so run every task in the
+            // scheduler to completion before stepping it again.
+            if self.need_join {
+                self.need_join = false;
+                self.drive_join()?;
+                continue;
+            }
             if self.frames.is_empty() {
-                // The entry frame starts at stack base 0 and `Return`
-                // truncates to the frame's base before pushing its value
-                // back, so after unwinding nothing but the module result
-                // (if any) can remain.
+                // The entry frame starts at base 0 and `Return` truncates to the
+                // base and pushes its value back, so after full unwinding only
+                // the module result (if any) can remain.
                 debug_assert!(
                     self.stack.len() <= 1,
                     "stray operands left on the stack after unwinding"
@@ -85,6 +191,221 @@ impl Vm {
             }
             self.step()?;
         }
+    }
+
+    /// Run every task in the scheduler to completion — the *join* at a
+    /// synchronous boundary (`main` awaiting a root, or `std.async.run`).
+    ///
+    /// The synchronous caller frame (below all tasks on the shared stack) stays
+    /// exactly where it is; each task is resumed onto the stack one at a time,
+    /// driven until it completes (`Return` to the sync caller) or yields again
+    /// (`Suspend` re-parks it, with the round-robin continuing). When the
+    /// scheduler empties the awaited future's payload is already sitting on the
+    /// caller's stack where its `Await`/`Call` expects it, so `run_inner` can
+    /// safely resume stepping the caller.
+    fn drive_join(&mut self) -> Result<(), RuntimeErrorKind> {
+        // Tasks parked on channels (0.0.4 T07) are not in the scheduler —
+        // their chains live in the channel's sender/receiver queues — but
+        // they are live work: keep the join going while any exist.
+        while !self.scheduler.is_empty()
+            || self.waiting_join.is_some()
+            || self.has_blocked_channel_tasks()
+        {
+            // Ready tasks always win; only when nothing is runnable does the
+            // scheduler block on the earliest pending timer (see
+            // `Scheduler::next_task`), so a task that has not yet reached its
+            // own sleep is never starved behind an earlier timeout.
+            let Some(task) = self.scheduler.next_task() else {
+                // No ready tasks and no timers at all: nothing can ever run
+                // again, so any task still parked on a channel is deadlocked
+                // (T07b — no `close` in 0.0.4, so "everyone blocked" is final).
+                if self.has_blocked_channel_tasks() {
+                    return Err(RuntimeErrorKind::ChannelDeadlock);
+                }
+                break;
+            };
+            self.resume_chain(task.chain)?;
+            loop {
+                // The task parked on a channel: its chain moved into the
+                // channel's queue (the waker owns it), so unlike a `Suspend`
+                // there is no task to re-enqueue — and this is *not* a
+                // completion: a nested join must not count it.
+                if self.suspended_on_channel {
+                    self.suspended_on_channel = false;
+                    break;
+                }
+                if let Some(task) = self.pending.take() {
+                    // A `Suspend` detached the whole task chain. If this was
+                    // triggered by a nested `std.async.run` from an async body,
+                    // hold the task in `waiting_join` instead of re-enqueueing.
+                    if let Some(expected) = self.nested_run_expected.take() {
+                        self.waiting_join = Some(JoinWait {
+                            task,
+                            expected,
+                            completed: 0,
+                        });
+                    } else {
+                        self.scheduler.enqueue(task);
+                    }
+                    break;
+                }
+                match self.frames.last() {
+                    // A future-marked frame is live — keep driving the task.
+                    Some(f) if f.is_future => self.step()?,
+                    // Back at the synchronous join caller: the task completed.
+                    _ => {
+                        // If we're waiting for a nested `std.async.run` to complete,
+                        // increment the completion counter.
+                        if let Some(wait) = self.waiting_join.as_mut() {
+                            wait.completed += 1;
+                            if wait.completed == wait.expected {
+                                // All spawned tasks done; re-enqueue the waiter.
+                                self.scheduler.enqueue(wait.task.clone());
+                                self.waiting_join = None;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if any task is blocked on a channel (waiting in senders/receivers
+    /// queues). Scans the operand stack, all live frames' locals/operands,
+    /// and all suspended frames in the scheduler's ready/timer queues.
+    /// Returns true if at least one channel has waiters.
+    fn has_blocked_channel_tasks(&self) -> bool {
+        // The waiter registry roots every channel with parked tasks — a
+        // parked task's own frame no longer holds the handle, so without it
+        // such a channel could be unreachable from any live value.
+        if self
+            .channel_waiters
+            .iter()
+            .any(|v| self.value_has_blocked_channel(v))
+        {
+            return true;
+        }
+        // Scan the operand stack.
+        if self.stack_has_blocked_channel() {
+            return true;
+        }
+        // Scan live call frames' locals and operands.
+        for frame in &self.frames {
+            let n_locals = self.func_locals(frame.func).unwrap_or(0);
+            let base = frame.stack_base;
+            if base + n_locals <= self.stack.len() {
+                let locals = &self.stack[base..base + n_locals];
+                if self.slice_has_blocked_channel(locals) {
+                    return true;
+                }
+            }
+            let operands = &self.stack[base + n_locals..];
+            if self.slice_has_blocked_channel(operands) {
+                return true;
+            }
+        }
+        // Scan suspended frames in the scheduler's ready and timer queues.
+        for task in self.scheduler.iter_tasks() {
+            for frame in &task.chain {
+                if self.frame_has_blocked_channel(frame) {
+                    return true;
+                }
+            }
+        }
+        // Scan waiting_join task if present.
+        if let Some(wait) = &self.waiting_join {
+            for frame in &wait.task.chain {
+                if self.frame_has_blocked_channel(frame) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn stack_has_blocked_channel(&self) -> bool {
+        self.slice_has_blocked_channel(&self.stack)
+    }
+
+    fn slice_has_blocked_channel(&self, slice: &[Value]) -> bool {
+        slice.iter().any(|v| self.value_has_blocked_channel(v))
+    }
+
+    fn frame_has_blocked_channel(&self, frame: &FutureFrame) -> bool {
+        self.slice_has_blocked_channel(&frame.locals)
+            || self.slice_has_blocked_channel(&frame.operands)
+    }
+
+    fn value_has_blocked_channel(&self, value: &Value) -> bool {
+        match value {
+            Value::Channel(inner) => {
+                let ch = inner.borrow();
+                !ch.senders.is_empty() || !ch.receivers.is_empty()
+            }
+            Value::Boxed(v) => self.value_has_blocked_channel(v),
+            Value::Ok(v) => self.value_has_blocked_channel(v),
+            Value::Err(v) => self.value_has_blocked_channel(v),
+            Value::Struct(fields) => fields.iter().any(|f| self.value_has_blocked_channel(f)),
+            Value::Arr(elems) => elems.iter().any(|e| self.value_has_blocked_channel(e)),
+            Value::Range { .. } => false,
+            Value::Future(f) => self.frame_has_blocked_channel(f),
+            _ => false,
+        }
+    }
+
+    /// Restore a suspended task chain (outermost first) as the live frames.
+    ///
+    /// Each frame is installed like `resume_frame` — locals/operands moved onto
+    /// the top of the shared stack at whatever depth currently exists, marked
+    /// `is_future`. Nested `await`s resume naturally: the outermost frame runs,
+    /// and its body's own `Await`/`Poll` resumes the next frame when it reaches
+    /// them. `frames` only ever holds the synchronous join caller below a
+    /// single task (run_inner/drive_join framing), so a resumed chain never
+    /// overlaps another task.
+    fn resume_chain(&mut self, chain: Vec<FutureFrame>) -> Result<(), RuntimeErrorKind> {
+        for frame in chain {
+            self.resume_frame(frame)?;
+        }
+        Ok(())
+    }
+
+    /// Detach the running task's suspended frames from the shared stack, from
+    /// the innermost frame outward, stopping at the first *synchronous* frame
+    /// (a `CallFrame` with `is_future == false` — the `std.async.run` join
+    /// caller or the top-level `main`). Returns the detached chain in resume
+    /// order (outermost first, innermost last).
+    ///
+    /// This is the chain analogue of T04's single-frame `suspend_top_frame`: it
+    /// keeps T04's guarantees (each value is **moved**, never copied, so a value
+    /// has exactly one owner; `Drop` releases a parked task that is never
+    /// resumed) but records every future frame above a synchronous boundary so a
+    /// task that `await`s a nested future which suspends resumes correctly.
+    fn suspend_chain(&mut self, resume_pc: usize) -> Result<Vec<FutureFrame>, RuntimeErrorKind> {
+        let mut frames = Vec::new();
+        let mut first = true;
+        while let Some(frame) = self.frames.last() {
+            if !frame.is_future {
+                break;
+            }
+            // For the innermost frame (where Suspend fired), resume at the
+            // instruction after Suspend (the passed `resume_pc`). For outer
+            // frames, their `frame.ip` was already advanced by their `Await`
+            // instruction, so resume at that ip.
+            let this_resume_pc = if first { resume_pc } else { frame.ip };
+            let resumed = self.suspend_top_frame(this_resume_pc)?;
+            frames.push(resumed);
+            first = false;
+        }
+        // Reverse the innermost-last walk into resume order (outermost first).
+        // Empty means the suspend fired with no future frame live — `Suspend`
+        // is only reachable from an async body (always future-marked), so this
+        // is the defensive backstop for hand-written bytecode / sync misuse.
+        if frames.is_empty() {
+            return Err(RuntimeErrorKind::StackShape);
+        }
+        Ok(frames.into_iter().rev().collect())
     }
 
     /// Attach source location to a runtime error (0.0.2 U10).
@@ -160,7 +481,7 @@ impl Vm {
                 .into_iter()
                 .rev()
                 .collect();
-            let ret = self.exec_builtin(&name, &args)?;
+            let ret = self.exec_builtin(&name, args)?;
             self.stack.push(ret);
             return Ok(());
         }
@@ -173,10 +494,15 @@ impl Vm {
             return Err(RuntimeErrorKind::StackShape);
         }
         self.stack.resize(base + func.locals as usize, Value::Unit);
+        // Inherit `is_future` from the caller: a sync function called from an
+        // async task is part of that task and must be suspended along with it
+        // so that nested `await`s in the callee suspend the entire chain.
+        let is_future = self.frames.last().map(|f| f.is_future).unwrap_or(false);
         self.frames.push(CallFrame {
             func: fid,
             ip: 0,
             stack_base: base,
+            is_future,
         });
         Ok(())
     }
@@ -259,6 +585,12 @@ impl Vm {
             func: frame.func,
             ip: frame.resume_pc,
             stack_base,
+            // A `FutureFrame` only ever comes from `suspend_chain` (which walks
+            // the live `is_future` frames) or from `AsyncStart` (an async body),
+            // so a restored frame is always part of a task's suspendable chain —
+            // including a synchronous frame the chain swallowed because it was
+            // called from an async body.
+            is_future: true,
         });
         let mut locals = frame.locals;
         self.stack.append(&mut locals);
@@ -266,7 +598,7 @@ impl Vm {
         Ok(())
     }
 
-    fn exec_builtin(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+    fn exec_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeErrorKind> {
         match name {
             "print" => {
                 // 0.0.2 U13: scalar rendering shares `fmt_scalar` with `ToStr`
@@ -369,6 +701,78 @@ impl Vm {
                     Ok(d) => Ok(Value::Int(d.as_millis() as i64)),
                     Err(_) => Ok(Value::Int(0)),
                 }
+            }
+            // 0.0.4 T06: cooperative executor builtins. `std.async.run` spawns
+            // multiple root tasks; `std.io.sleep`/`std.async.yield_now` suspect
+            // the running task (the compiler emits a `Suspend` right after their
+            // call inside an async body — see `fleen-compiler/src/lower` — and
+            // the VM's `Suspend` dispatch + `run_inner` park the task).
+            "std.async.run" => {
+                // `run(tasks: [Future<unit>])`: hand every element to the
+                // scheduler as a ready root task and signal a join. Each `Future`
+                // owns a not-yet-started or suspended `FutureFrame`; we move the
+                // frames out of the argument array (never copy — a Future is
+                // non-Copy and holds lifted suspend state, D1). Typeck guarantees
+                // `[Future<unit>]`, so a non-Future element is malformed/defensive.
+                let mut elems = match args.into_iter().next() {
+                    Some(Value::Arr(elems)) => elems.into_vec(),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                let task_count = elems.len();
+                for elem in elems.drain(..) {
+                    let Value::Future(frame) = elem else {
+                        return Err(RuntimeErrorKind::StackShape);
+                    };
+                    self.scheduler.push_ready(Task {
+                        chain: vec![*frame],
+                        ready_at_ms: None,
+                    });
+                }
+                // If called from inside an async body (future-marked frame),
+                // record the expected task count. The following `Suspend`
+                // (emitted by the compiler) will park the caller; `run_inner`
+                // will create a `JoinWait` and drive until all complete.
+                if self.frames.last().is_some_and(|f| f.is_future) {
+                    self.nested_run_expected = Some(task_count);
+                }
+                // Always signal a join: for sync callers (main), this triggers
+                // `run_inner` to call `drive_join`. For async callers, the
+                // `nested_run_expected` mechanism handles the wait.
+                self.need_join = true;
+                Ok(Value::Unit)
+            }
+            "std.io.sleep" => {
+                // `sleep(n: int)` — awaitable timer. Record the wake deadline for
+                // the task that runs the immediately-following `Suspend`; the
+                // `run_inner`/`drive_join` park step copies it onto the parked
+                // task. Only set when executing inside an async (future-marked)
+                // frame — a synchronous caller of `sleep` (the compiler emits no
+                // `Suspend`) is a no-op, and this guard keeps a stale deadline
+                // from leaking into a later unrelated suspension. Returns `unit`.
+                let millis = match args.first() {
+                    Some(Value::Int(n)) if *n >= 0 => *n,
+                    // Negative (or non-int) sleep behaves as a zero delay; typeck
+                    // guarantees an int, so a non-int is defensive.
+                    Some(Value::Int(_)) => return Ok(Value::Unit),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                if let Some(frame) = self.frames.last().filter(|f| f.is_future) {
+                    // Record the deadline keyed by the exact suspension point:
+                    // (function id, instruction pointer of the Suspend that follows).
+                    // The Call to sleep has already advanced the caller's ip to the
+                    // next instruction (the Suspend), so `frame.ip` is that ip.
+                    let now = self.now_mono_ms();
+                    let fid = frame.func.0 as usize;
+                    let ip = frame.ip;
+                    self.sleep_deadline = Some((fid, ip, now + millis));
+                }
+                Ok(Value::Unit)
+            }
+            "std.async.yield_now" => {
+                // Cooperative yield: no deadline, so the task is immediately
+                // re-runnable — the scheduler round-robins to the next task
+                // before coming back. Runs inside an async body.
+                Ok(Value::Unit)
             }
             "std.arr.len" => match self.read_ref(&args[0])? {
                 Value::Arr(elems) => Ok(Value::Int(elems.len() as i64)),
@@ -1189,10 +1593,43 @@ impl Vm {
                 return Ok(());
             }
             Opcode::Suspend => {
-                // Yields `Pending` to a driver. T05 has no executor and no
-                // suspension source, so a verified program never executes
-                // this; hand-written bytecode that does is unsupported.
-                return Err(RuntimeErrorKind::UnsupportedAsyncSuspend);
+                // Cooperative yield boundary (0.0.4 T06): detach the running
+                // task's whole suspended-frame chain from the shared stack and
+                // hand it to `run_inner`, which parks it in the scheduler and
+                // runs the next task. Unlike T05's defensive error, this is now
+                // the real suspension path reached by `yield_now`/`sleep`/and,
+                // from T07, channel send/recv. The chain is moved (never copied)
+                // and resumes at `ip` (the instruction after this one) via
+                // `resume_chain`.
+                // Capture the current frame's identity BEFORE suspend_chain pops it.
+                let suspend_frame = self.frames.last().copied();
+                let chain = self.suspend_chain(ip)?;
+                // Consume a sleep deadline only if it was recorded for this
+                // exact suspension point (function + ip). A stale deadline from a
+                // sync helper's `sleep` (which emits no Suspend) must not leak.
+                let ready_at_ms = if let Some(frame) = suspend_frame {
+                    if let Some((func_id, suspend_ip, deadline)) = self.sleep_deadline {
+                        // The frame's ip points to the Suspend instruction (it's
+                        // advanced at the end of `step`). The deadline was recorded
+                        // with this same ip at the `sleep` builtin (where the caller's
+                        // ip had already been advanced to the Suspend by the Call).
+                        let cur_fid = frame.func.0 as usize;
+                        let cur_ip = frame.ip;
+                        if func_id == cur_fid && suspend_ip == cur_ip {
+                            self.sleep_deadline = None;
+                            Some(deadline)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    self.sleep_deadline = None;
+                    None
+                };
+                self.pending = Some(Task { chain, ready_at_ms });
+                return Ok(());
             }
             Opcode::Poll | Opcode::Await => {
                 // Drive a `Future` to completion. Pop the Future, then advance
@@ -1211,6 +1648,45 @@ impl Vm {
                     .ip = ip;
                 self.resume_frame(*f)?;
                 return Ok(());
+            }
+            // 0.0.4 T07: channel operations (0xC4–0xC7).
+            Opcode::ChannelNew => {
+                // Stack: cap -> ch
+                let cap = self.pop_int()?;
+                if cap < 0 {
+                    return Err(RuntimeErrorKind::InvalidChannelCapacity);
+                }
+                let inner = Rc::new(RefCell::new(ChannelInner {
+                    cap: cap as usize,
+                    buffer: std::collections::VecDeque::new(),
+                    senders: Vec::new(),
+                    receivers: Vec::new(),
+                }));
+                self.stack.push(Value::Channel(inner));
+            }
+            Opcode::ChannelSend => {
+                // Stack: ch v -> (unit). `true` = the task parked on this
+                // send (its chain is in the channel's sender queue, so the
+                // frame no longer exists and the ip tail must not run);
+                // `false` = completed, fall through to advance the ip.
+                if self.do_channel_send(ip)? {
+                    return Ok(());
+                }
+            }
+            Opcode::ChannelRecv => {
+                // Stack: ch -> v (may suspend; same contract as send).
+                if self.do_channel_recv(ip)? {
+                    return Ok(());
+                }
+            }
+            Opcode::ChannelSplit => {
+                // Stack: ch -> ch2
+                let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let Value::Channel(inner) = ch else {
+                    return Err(RuntimeErrorKind::StackShape);
+                };
+                // Split returns a second handle to the same inner buffer.
+                self.stack.push(Value::Channel(inner));
             }
         }
         self.frames
@@ -1235,6 +1711,157 @@ impl Vm {
             (Value::Int(x), Value::Int(y)) => Ok((x, y)),
             _ => Err(RuntimeErrorKind::ArithTypeMismatch),
         }
+    }
+
+    fn pop_int(&mut self) -> Result<i64, RuntimeErrorKind> {
+        let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        match v {
+            Value::Int(n) => Ok(n),
+            _ => Err(RuntimeErrorKind::ArithTypeMismatch),
+        }
+    }
+
+    /// 0.0.4 T07: `channel.send(value)` — may suspend when no receiver is
+    /// waiting and (for a buffered channel) the buffer is full.
+    ///
+    /// The send expression has type `unit`, so on every completion path a
+    /// `Value::Unit` is left on the stack (the statement wrapper pops it).
+    /// Returns `Ok(true)` when the task parked: its whole frame chain was
+    /// detached into the channel's sender queue with the `Unit` already on
+    /// top, and the op is *complete* on resume — the frame resumes at the
+    /// instruction after `ChannelSend`. `Ok(false)` means the value was
+    /// accepted (handed to a parked receiver or buffered) and the sender
+    /// continues in place.
+    fn do_channel_send(&mut self, ip: usize) -> Result<bool, RuntimeErrorKind> {
+        let value = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let Value::Channel(inner) = ch else {
+            return Err(RuntimeErrorKind::StackShape);
+        };
+        let mut ch = inner.borrow_mut();
+
+        // A parked receiver is waiting: hand the value over directly (the
+        // buffer is necessarily empty — a receiver only parks then) and wake
+        // it. The receiver's chain resumes *after* its `recv` instruction,
+        // so the payload is injected into its innermost frame's operands.
+        if let Some(receiver_chain) = ch.receivers.pop() {
+            let chain = Self::inject_value_into_chain(receiver_chain, value);
+            self.scheduler.push_ready(crate::executor::Task {
+                chain,
+                ready_at_ms: None,
+            });
+            self.stack.push(Value::Unit);
+            return Ok(false);
+        }
+
+        // Buffered channel with room: park the value in the buffer (FIFO).
+        if ch.cap > 0 && ch.buffer.len() < ch.cap {
+            ch.buffer.push_back(value);
+            self.stack.push(Value::Unit);
+            return Ok(false);
+        }
+
+        // Rendezvous with no receiver, or full buffer: park the sender. The
+        // payload moves into the queue together with the chain; the `Unit`
+        // result stays on the (detached) operand stack so the resumed frame
+        // continues as if the send had just completed.
+        self.stack.push(Value::Unit);
+        let chain = self.park_on_channel(ip)?;
+        self.remember_channel_waiter(&inner);
+        ch.senders.push((value, chain));
+        Ok(true)
+    }
+
+    /// Root a channel that just gained a parked task (T07): one handle per
+    /// `ChannelInner`, deduplicated by pointer so repeated park/unpark cycles
+    /// on the same channel do not grow the registry.
+    fn remember_channel_waiter(&mut self, inner: &Rc<RefCell<ChannelInner>>) {
+        if !self
+            .channel_waiters
+            .iter()
+            .any(|v| matches!(v, Value::Channel(existing) if Rc::ptr_eq(existing, inner)))
+        {
+            self.channel_waiters.push(Value::Channel(Rc::clone(inner)));
+        }
+    }
+
+    /// Detach the running task's frame chain for a channel park, guarding the
+    /// synchronous cases (0.0.4 T07b): a `send`/`recv` that must block is only
+    /// executable inside an async body (a future-marked innermost frame). In a
+    /// *synchronous* caller nothing else can ever run to satisfy the op —
+    /// that is the T07b deadlock, raised here directly. A sync helper called
+    /// *from* an async body cannot be snapshotted (its `CallFrame` is
+    /// mid-execution), which is the defensive `StackShape`.
+    fn park_on_channel(&mut self, ip: usize) -> Result<Vec<FutureFrame>, RuntimeErrorKind> {
+        if !self.frames.last().is_some_and(|f| f.is_future) {
+            if self.frames.iter().any(|f| f.is_future) {
+                return Err(RuntimeErrorKind::StackShape);
+            }
+            return Err(RuntimeErrorKind::ChannelDeadlock);
+        }
+        self.suspended_on_channel = true;
+        self.suspend_chain(ip)
+    }
+
+    /// Inject a value into the innermost frame's operands of a suspended chain.
+    /// Used for the channel wake paths: the receiver's frame was suspended
+    /// *after* its `recv` instruction with the channel handle popped, so the
+    /// payload goes on top of its operands and the frame resumes holding it.
+    fn inject_value_into_chain(mut chain: Vec<FutureFrame>, value: Value) -> Vec<FutureFrame> {
+        if let Some(innermost) = chain.last_mut() {
+            innermost.operands.push(value);
+        }
+        chain
+    }
+
+    /// 0.0.4 T07: `channel.recv()` — may suspend when no sender is waiting
+    /// and the buffer is empty.
+    ///
+    /// Returns `Ok(true)` when the task parked (its chain is in the channel's
+    /// receiver queue; the waker injects the payload — see
+    /// [`Self::inject_value_into_chain`]). `Ok(false)` means a value was
+    /// produced and pushed; the receiver continues in place.
+    fn do_channel_recv(&mut self, ip: usize) -> Result<bool, RuntimeErrorKind> {
+        let ch = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+        let Value::Channel(inner) = ch else {
+            return Err(RuntimeErrorKind::StackShape);
+        };
+        let mut ch = inner.borrow_mut();
+
+        // Buffered value available: take it (FIFO). If a sender is parked the
+        // buffer was full — its payload now fits into the freed slot.
+        if ch.cap > 0
+            && let Some(value) = ch.buffer.pop_front()
+        {
+            self.stack.push(value);
+            if let Some((parked_value, sender_chain)) = ch.senders.pop() {
+                ch.buffer.push_back(parked_value);
+                self.scheduler.push_ready(crate::executor::Task {
+                    chain: sender_chain,
+                    ready_at_ms: None,
+                });
+            }
+            return Ok(false);
+        }
+
+        // No buffered value (rendezvous, or an emptied buffer): take a parked
+        // sender's payload and wake it — its send is already complete.
+        if let Some((value, sender_chain)) = ch.senders.pop() {
+            self.stack.push(value);
+            self.scheduler.push_ready(crate::executor::Task {
+                chain: sender_chain,
+                ready_at_ms: None,
+            });
+            return Ok(false);
+        }
+
+        // Nothing to receive: park the receiver. On wake a sender injects the
+        // payload into the innermost frame's operands (the resume is *after*
+        // this instruction, with the channel handle already popped).
+        let chain = self.park_on_channel(ip)?;
+        self.remember_channel_waiter(&inner);
+        ch.receivers.push(chain);
+        Ok(true)
     }
 
     fn int_binop(&mut self, f: impl Fn(&i64, &i64) -> Option<i64>) -> Result<(), RuntimeErrorKind> {

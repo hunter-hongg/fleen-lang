@@ -1,0 +1,8 @@
+// 0.0.4 T07a: `send`/`recv` are members of `channel<T>` only — a `send` on
+// any other non-struct type is a member-not-found typeck error.
+import std.concurrent;
+
+func main() {
+    n = 1;
+    n.send(1);
+}

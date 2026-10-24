@@ -239,8 +239,8 @@ impl Parser {
                 let span = self.span(expr.span().start, self.prev_span_end());
                 expr = Expr::Index(Box::new(expr), Box::new(index), span);
             } else if self.matches(&TokenKind::Dot) {
-                // Field access
-                let field = self.parse_ident()?;
+                // Field / module member access
+                let field = self.parse_namespace_segment()?;
                 expr = Expr::Field(Box::new(expr), field);
             } else if self.matches(&TokenKind::Question) {
                 // 0.0.2: Result propagation suffix; binds tighter than any
@@ -323,6 +323,25 @@ impl Parser {
                     return self.parse_struct_literal(name, name_span);
                 }
                 Ok(Expr::Ident(name, span))
+            }
+            TokenKind::Channel => {
+                // channel<T>(capacity) constructor (0.0.4 T07).
+                // `channel` is a reserved keyword, so this is unambiguous at
+                // expression position. We parse the type argument and then the
+                // capacity expression.
+                self.advance();
+                self.expect(&TokenKind::Lt, "expected `<` in channel constructor")?;
+                let ty = self.parse_type()?;
+                self.expect(&TokenKind::Gt, "expected `>` in channel constructor")?;
+                self.expect(&TokenKind::LParen, "expected `(` after channel type")?;
+                let capacity = self.parse_expr()?;
+                self.expect(&TokenKind::RParen, "expected `)` after channel capacity")?;
+                let end = self.prev_span_end();
+                Ok(Expr::ChannelNew {
+                    ty,
+                    capacity: Box::new(capacity),
+                    span: self.span(span.start, end),
+                })
             }
             TokenKind::LParen => {
                 // Parenthesized expression

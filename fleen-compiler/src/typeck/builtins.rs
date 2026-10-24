@@ -108,6 +108,7 @@ pub fn builtins() -> Vec<BuiltinSig> {
     let t1 = || Type::Var(1);
     let arr_t1 = || Type::Array(Box::new(t1()));
     let bool = || Type::Bool;
+    let future_unit = || Type::Future(Box::new(Type::Unit));
     vec![
         // The prelude (`print`): bare name, visible without any import.
         BuiltinSig {
@@ -127,6 +128,46 @@ pub fn builtins() -> Vec<BuiltinSig> {
             name: "std.io.read_line",
             param: BuiltinParam::Fixed(vec![]),
             ret: string(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // std.io.sleep — awaitable timer (0.0.4 F6/T06): inside an async body
+        // the compiler lowers the call to `Call sleep; Suspend` so the task
+        // parks until the deadline; in a sync body it is a no-op.
+        BuiltinSig {
+            name: "std.io.sleep",
+            param: BuiltinParam::Fixed(vec![int()]),
+            ret: unit(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // std.async — 0.0.4 T06 cooperative executor (F6).
+        // `run(tasks: [Future<unit>])` spawns and joins several roots.
+        BuiltinSig {
+            name: "std.async.run",
+            param: BuiltinParam::Fixed(vec![Type::Array(Box::new(future_unit()))]),
+            ret: unit(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // `yield_now()` — explicit cooperative yield; a `Suspend` after the call
+        // re-parks the task in the scheduler so others run.
+        BuiltinSig {
+            name: "std.async.yield_now",
+            param: BuiltinParam::Fixed(vec![]),
+            ret: unit(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // std.concurrent — 0.0.4 T07 channels (F9).
+        // The constructor is the reserved-word expression `channel<T>(cap)`
+        // (T07e — no builtin entry: the payload type would be unknowable at
+        // an untyped constructor call). `split` is the one explicit fork
+        // point (T07d).
+        // `split(ch: channel<T>): channel<T>` — second handle to the same buffer.
+        BuiltinSig {
+            name: "std.concurrent.split",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Channel(Box::new(Type::Var(0)))],
+                ret: Type::Channel(Box::new(Type::Var(0))),
+            },
+            ret: Type::Channel(Box::new(Type::Var(0))),
             lowering: BuiltinLowering::Intrinsic,
         },
         // std.str — no Fleen syntax for these (PLAN §3.5.2: intrinsic).
@@ -439,6 +480,7 @@ fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
         Type::Box(inner) => Type::Box(Box::new(substitute(inner, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
         Type::Future(inner) => Type::Future(Box::new(substitute(inner, subst))),
+        Type::Channel(inner) => Type::Channel(Box::new(substitute(inner, subst))),
         Type::Struct(info) => Type::Struct(info.clone()),
         Type::Int
         | Type::Float

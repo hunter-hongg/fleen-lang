@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T05 implemented; T06–T10 planned.**
+> **Status: IN PROGRESS — T01–T07 implemented (T07 channels); T08–T10 planned.**
 
 ---
 
@@ -178,23 +178,187 @@ only driven by `Await`/`Poll` via `resume_frame`.
 
 ---
 
-## T06 — Multi-thread executor (F6)
+## T06 — Cooperative executor (F6)
 
-- [ ] Worker-thread pool + scheduler queue + cooperative `Pending`
-- [ ] Top-level bare `await` boots a blocking drive until the root completes
-- [ ] `std.io.sleep(n)` awaitable timer; `std.async.yield_now()`
-- [ ] Panic re-raise as `RuntimeError` at the awaiting site
-- [ ] Tests: `tests/vm/async_valid` multi-task, ordering regressions
+Implemented as a **single-threaded cooperative scheduler first** (the accepted
+planning recommendation, and semantically complete for 0.0.4: D3's no-shared-
+memory means one worker is all the features need). A multi-thread **worker-thread
+pool** is a follow-up optimization, not a semantic gap — the scheduler and
+`FutureFrame` chain already encode the boundary (a task's whole suspended frame
+chain detaches when it yields), so pooling can layer on later.
+
+- [x] Cooperative `Pending`: `Suspend` (0xC1) is now a real yield — it detaches
+      the running task's *whole* `is_future` frame chain into the scheduler
+      (`suspend_chain`/`resume_chain`), not T05's defensive `UnsupportedAsyncSuspend`
+- [x] Scheduler queue + timers (`fleen-vm/src/executor.rs`); ready tasks always
+      win (a task that hasn't reached its own sleep is never starved by an earlier
+      timeout)
+- [x] Top-level bare `await` boots a blocking drive until the root completes
+      (`run_inner` drives the scheduler to empty at a sync boundary)
+- [x] `std.io.sleep(n)` awaitable timer; `std.async.yield_now()`; `std.async.run([Future<unit>])`
+      (the compiler lowers `sleep`/`yield_now` in an async body to `Call; Suspend`)
+- [x] Panic re-raise as `RuntimeError` at the awaiting/join site
+      (errors propagate directly from `step()`; `FutureState` is `Resumable` only)
+- [x] Tests: `async` VM unit tests + e2e fixtures `async_multi_task` / `async_sleep_order`
+      (deterministic round-robin + timer ordering regressions)
+- [x] _Enabler_: `import std.async` needed the reserved word `async` to parse as a
+      module/member name — added `parse_namespace_segment` (parser) so `async`/
+      `await`/`channel` are legal only as dotted-path/member names, never bindings.
+- [ ] **Deferred**: multi-thread worker pool (threads) — no 0.0.4 feature needs it.
+
+**Notes (implementation)**: each `Vm` step that yields parks exactly one task in
+`self.pending`; `run_inner` re-enqueues it (with any `sleep` deadline) and, at a
+synchronous boundary, calls `drive_join` to drain the scheduler before stepping
+the sync caller again. A task's suspended state is a `Vec<FutureFrame>` chain
+(outermost-first) moved *out* of the shared operand stack — never copied — so a
+`Suspend` under a nested `await` parks every future-marked frame above the sync
+boundary. Out of scope here, as in the PLAN: language-level `select`/`join`
+composition (0.1.0).
 
 ---
 
 ## T07 — Channels (F9; D3/D6)
 
-- [ ] `channel<T>` type + `ChannelNew/ChannelSend/ChannelRecv` (0xC4–0xC6); runtime variant `Channel`
-- [ ] Bounded buffer; `send` suspends on full, `recv` suspends on empty
-- [ ] Payload move: Copy by copy, owned by ownership; explicit `move x` required (D6)
-- [ ] `std.concurrent.channel<T>(cap)`
-- [ ] Tests: `tests/vm/channel_*`, `tests/e2e/channel_*`
+- [x] `channel<T>` type + `ChannelNew/ChannelSend/ChannelRecv` (0xC4–0xC6); runtime variant `Channel`
+- [x] Bounded buffer; `send` suspends on full, `recv` suspends on empty
+- [x] Payload move: Copy by copy, owned by ownership; explicit `move x` required (D6)
+- [x] Constructor `channel<T>(cap)` (the settled T07e reserved-word syntax; the
+      card's `std.concurrent.channel<T>(cap)` spelling is not implementable —
+      see the notes)
+- [x] Tests: VM unit tests (`fleen-vm/src/tests.rs`, `fleen-verify/src/tests.rs`)
+      + e2e `channel_basic` / `channel_rendezvous` / 5 invalid typeck fixtures
+
+**Decisions (settled before implementation — three forks the card left open):**
+
+- **T07a — `send`/`recv` syntax: recognized in typeck, not in the grammar.**
+  `c.send(v)` / `c.recv()` stay parsed as the existing
+  `Call(Field(recv, "send"), args)` shape (the parser and `SYNTAX.ebnf` gain
+  nothing); when the receiver's type is `channel<T>` and the member name is
+  `send`/`recv`, **typeck** rewrites the node to `TypedExprHir::ChannelSend` /
+  `ChannelRecv`. Rationale: no method-call mechanism exists anywhere in the
+  pipeline (the dot has exactly one meaning today — a struct field read), and
+  0.0.4 would be adding a whole grammar production for two built-in members.
+  Recognition sits in the semantic phase, which is where "is this a valid
+  member of this type" is already decided; no phase is skipped and the
+  receiver is still fully typed first. A `c.send` *not* applied to arguments,
+  or a `send`/`recv` on a non-channel receiver, is a typeck error
+  (`ChannelMemberNotFound` / `ChannelMemberNotCalled`).
+- **T07b — deadlock is a runtime error, detected immediately.** 0.0.4 has no
+  `close` and no `for`-over-channel, so on a single cooperative worker "every
+  task blocked on channels" is a hard deadlock, not a pause. The scheduler
+  raises `RuntimeErrorKind::ChannelDeadlock` at the moment the ready queue is
+  empty, no timer is due, and at least one task is blocked — never by parking
+  forever. Same path covers a *synchronous* `main` that receives from an empty
+  channel (nothing else can ever fill it). Chosen over silent hang so the
+  failure is a located `RuntimeError` (the `drive_join` `?` chain preserves the
+  awaiting site) instead of a silent hang with no exit code.
+- **T07c — the buffer is shared by `Rc<RefCell<Inner>>`, with a written reason.**
+  A channel handle is by definition live in more than one task at a time (via
+  the T07d split), so the payload buffer cannot live inline in the `Value`:
+  `Value: Clone` would give every holder a *fresh* buffer and a parked task
+  would wake to find an empty one — a silent hang. This is a deliberate,
+  documented departure from SPEC §11's blanket `Rc`/`RefCell` prohibition (same
+  reasoning as T04 boxing `Value::Future`): the aliasing *is* the language
+  semantics here, not an implementation shortcut, and it stays inside the VM
+  crate. `size_of::<Value>()` is unchanged (one pointer).
+- **T07d — `channel<T>` stays non-Copy and move-only; `std.concurrent.split`
+  is the one explicit fork point; channels are non-storable.**  PLAN §3.3
+  ("non-Copy; owns its buffer") and §5 (`run([producer(ch), consumer(ch)])`,
+  one move-only value used twice) contradict each other: the rule wins and the
+  example changes.  A channel has exactly one owner — `clone ch` is rejected
+  (`ChannelNotClonable`: a deep copy of a buffer is meaningless, and a shallow
+  one would silently alias while typeck believed it copied), and 0.0.2's
+  read-only-auto-clone path is rejected for channel operands at the same place.
+  Two tasks share a buffer only through `std.concurrent.split(ch)`, which
+  returns a *second independent handle* (same `Inner`, fresh owner) — explicit
+  sharing, no magic, and the only place duplication happens.  §5's example
+  becomes `peer = split(ch); run([producer(move ch), consumer(move peer)])`.
+  Channels are also **non-storable**: `Type::Channel` is rejected as a
+  struct-field or array-element type (`ChannelNotStorable`), because 0.0.3
+  field/index reads deep-copy owned values, which would fork buffers silently.
+- **T07e — `channel<T>(cap)` is constructor syntax; rendezvous (cap = 0) is
+  direct handoff.**  `channel` is a reserved word, `int` is a keyword, and a
+  type is not an expression, so no expression grammar route can express a
+  value expression `channel < int > (16)`; `channel<` at expression position
+  instead parses a type and then the capacity argument (a `>` that does not
+  follow a parseable type stays the ordinary comparison).  `cap = 0` blocks a
+  `send` until a *parked* receiver takes the value directly: the blocked sender
+  carries its pending payload in its own suspended frame and the handoff stages
+  it through a one-slot window, so the value never sits in a buffer it does not
+  have.  A negative capacity is `InvalidChannelCapacity`.
+
+**Consequences the card must carry:**
+
+- `Type::Channel` does not exist yet in either `ast::Type` or
+  `typed_hir::Type`, and `OwnedChannelArgRequiresMove` (PLAN §7) was never
+  implemented: 0.0.2's ownership pass only validates `move`/`clone` *nodes*,
+  so there is no existing "this argument must be a move" check. D6 adds a new
+  direction of check, at the call site, before `prepare_args`.
+- `ChannelSend`/`ChannelRecv` are **not idempotent**, unlike `std.io.sleep`.
+  The T06 `Call intrinsic; Suspend` pattern re-executes the call on resume,
+  which is harmless for a timer and a duplicate delivery for a send. The
+  suspend therefore re-enters the *same* instruction (ip not advanced) rather
+  than the next one.
+- A channel whose type is not statically uniform must be rejected: the payload
+  type is recorded on the buffer and checked at run time as the defensive
+  backstop (verify's stack analysis is type-blind).
+- No `close`, so a channel is never drained to completion by construction: the
+  run's exit condition is "no task is runnable", not "the channels are empty".
+
+**Notes (implementation)**:
+
+- **Constructor syntax, and why there is no `std.concurrent.channel` builtin.**
+  The constructor is the reserved-word expression `channel<T>(cap)` (T07e, the
+  parser's `channel<` route). The card's qualified spelling is not implementable:
+  a builtin `channel(cap)` call has no way to learn its payload type `T` (the
+  schematic table's `Var` would leak into TypedHIR, which 0.0.3 explicitly
+  forbids), so the entry was removed from `typeck/builtins.rs` and only
+  `std.concurrent.split` remains. `std/concurrent.fln` is therefore doc-only
+  (same shape as `std/async.fln` from T06 — `channel` is a reserved word and
+  cannot be declared as a Fleen function).
+- **The suspended op resumes *after* itself, not at itself.** Unlike T06's
+  `Call intrinsic; Suspend` (which re-executes the call on resume — harmless
+  for a timer), `ChannelSend`/`ChannelRecv` suspend with the frame's `ip`
+  already past the instruction and all channel operands popped. A parked
+  receiver resumes with its payload injected into the innermost frame's
+  operands (`inject_value_into_chain`); a parked sender's payload travels in
+  the channel's sender queue, so a woken sender continues as if the send had
+  just completed. This kills the double-delivery risk for non-idempotent ops
+  by construction.
+- **`ChannelSend` produces `unit`.** The send expression's `Unit` is left on
+  the stack (verify Δ−1, min 2) so the statement wrapper's `Pop` stays
+  balanced — on the park path the `Unit` is pushed *before* the chain
+  detaches, so the resumed frame pops it exactly once.
+- **The buffer is FIFO** (`VecDeque`, `push_back`/`pop_front`) — a channel is
+  a queue, not a stack (the first draft used `Vec::pop`, LIFO).
+- **A parked task is registered, not just parked.** A task that parks on a
+  channel is invisible to the scheduler (its chain moved into
+  `ChannelInner`), so: (a) `drive_join` keeps going while any channel has
+  waiters and flags the park with `suspended_on_channel` (a nested join must
+  not count a channel park as a task completion); (b) the VM keeps one
+  handle per waiting channel (`channel_waiters`) — a parked task's own frame
+  no longer holds the handle, so without this root the `Rc<RefCell<Inner>>`
+  could drop and silently destroy the parked task. Deadlock (T07b) is
+  detected when the scheduler is empty (no ready, no timers) and a channel
+  still has waiters; a *synchronous* blocking `send`/`recv` (no future frame
+  live) raises `ChannelDeadlock` directly at the instruction, which also
+  covers sync `main` receiving from an empty channel.
+- **Non-storable and non-clonable are enforced in typeck.** `ChannelNotStorable`
+  fires on struct-field declarations and array literals (both element-type
+  routes); `ChannelNotClonable` on `clone ch`; `OwnedChannelArgRequiresMove` on
+  a bare owned local in `ch.send(x)` (same predicate as
+  `reject_bare_owned_arg` — Copy payloads and owned *globals* pass);
+  `ChannelMemberNotFound` on `send`/`recv` against any non-channel,
+  non-struct receiver; `ChannelMemberNotCalled` on a bare `c.send` field read.
+  A struct *with* a field literally named `send` still resolves through the
+  ordinary field path.
+- **Deferred to T08**: the defensive runtime payload-type backstop (the
+  recorded `payload_ty` in `MirInstrKind::ChannelNew`/`ChannelSend` is
+  currently unused by codegen — typeck guarantees uniformity statically).
+  Also accepted for 0.0.4: a bare read of a channel-*global* lowers to a
+  plain handle load (globals read as deep copies per D5, but a channel's
+  "deep copy" is a handle copy) — an alias without explicit `split`;
+  `ChannelNotClonable` covers the explicit `clone` form only.
 
 ---
 

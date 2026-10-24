@@ -138,6 +138,10 @@ pub enum Type {
     /// `Future<T>` — the type of a suspended async coroutine (0.0.4 F3).
     /// Non-Copy; owns the suspend state; driven once by `await`.
     Future(Box<Type>),
+    /// `channel<T>` — a message-passing channel (0.0.4 F9, D3/D6).
+    /// Non-Copy, move-only; holds a reference to a shared buffer.
+    /// The element type `T` is checked at run time as a defensive backstop.
+    Channel(Box<Type>),
     /// A named user type (a struct, 0.0.3 V02). Whether the name actually
     /// refers to a declared struct is resolved by typeck.
     Named(String),
@@ -194,6 +198,7 @@ impl fmt::Display for Type {
             }
             Type::Range => write!(f, "Range"),
             Type::Future(inner) => write!(f, "Future<{}>", inner),
+            Type::Channel(inner) => write!(f, "channel<{}>", inner),
         }
     }
 }
@@ -276,6 +281,13 @@ pub enum Expr {
     /// consumed and yields `T`). Binds with the tightest suffix group
     /// (`() [i] .f await ?`), chaining left-to-right.
     Await(Box<Expr>, Span),
+    /// `channel<T>(capacity)` (0.0.4 T07: channel constructor).
+    /// `ty` is the element type `T`, `capacity` is the buffer size expression.
+    ChannelNew {
+        ty: Type,
+        capacity: Box<Expr>,
+        span: Span,
+    },
     /// `func(args)`
     Call(Box<Expr>, Vec<Expr>),
     /// `arr[idx]` — span covers the whole `arr[idx]`, including the `]`.
@@ -326,13 +338,14 @@ impl Expr {
             | Expr::Div(l, _)
             | Expr::Mod(l, _) => l.span(),
             Expr::Not(e) | Expr::Neg(e) => e.span(),
-            Expr::Move(_, s)
-            | Expr::Clone(_, s)
-            | Expr::Box(_, s)
-            | Expr::Deref(_, s)
-            | Expr::Cast(_, _, s)
-            | Expr::Question(_, s)
-            | Expr::Await(_, s) => *s,
+            Expr::Move(_, span)
+            | Expr::Clone(_, span)
+            | Expr::Box(_, span)
+            | Expr::Deref(_, span)
+            | Expr::Cast(_, _, span)
+            | Expr::Question(_, span)
+            | Expr::Await(_, span)
+            | Expr::ChannelNew { span, .. } => *span,
             Expr::Call(f, _) => f.span(),
             Expr::Index(_, _, s) => *s,
             Expr::ArrayLit(l) => l.span,
@@ -472,6 +485,7 @@ impl fmt::Display for Expr {
             Expr::Cast(e, ty, _) => write!(f, "({} as {})", e, ty),
             Expr::Question(e, _) => write!(f, "({}?)", e),
             Expr::Await(e, _) => write!(f, "({} await)", e),
+            Expr::ChannelNew { ty, capacity, .. } => write!(f, "channel<{}>({})", ty, capacity),
             Expr::Eq(lhs, rhs) => write!(f, "({} == {})", lhs, rhs),
             Expr::Ne(lhs, rhs) => write!(f, "({} != {})", lhs, rhs),
             Expr::Lt(lhs, rhs) => write!(f, "({} < {})", lhs, rhs),

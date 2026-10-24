@@ -1,0 +1,8 @@
+// 0.0.4 T07b: a synchronous `recv` on an empty rendezvous channel — nothing
+// else can ever fill it, so this is a hard deadlock, not a pause.
+import std.concurrent;
+
+func main() {
+    ch = channel<int>(0);
+    ch.recv();
+}

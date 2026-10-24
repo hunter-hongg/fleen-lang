@@ -258,6 +258,11 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::Suspend => Opcode::Suspend,
         MirInstrKind::Poll => Opcode::Poll,
         MirInstrKind::Await => Opcode::Await,
+        // 0.0.4 T07: channel (bytecode v4, 0xC4–0xC7).
+        MirInstrKind::ChannelNew(_) => Opcode::ChannelNew,
+        MirInstrKind::ChannelSend(_) => Opcode::ChannelSend,
+        MirInstrKind::ChannelRecv(_) => Opcode::ChannelRecv,
+        MirInstrKind::ChannelSplit => Opcode::ChannelSplit,
     })
 }
 

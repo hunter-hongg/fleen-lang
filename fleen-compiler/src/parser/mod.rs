@@ -409,23 +409,12 @@ impl Parser {
         let start = self.current().span.start;
         self.expect(&crate::lexer::TokenKind::Import, "expected `import`")?;
 
-        // Parse module path: ident . ident . ...
+        // Parse module path: segment . segment . ... Each segment is an
+        // identifier or (0.0.4) a keyword-named module member such as
+        // `std.async` (see `parse_namespace_segment`).
         let mut path = Vec::new();
         loop {
-            if let crate::lexer::TokenKind::Ident(name) = self.current_kind().clone() {
-                path.push(name.clone());
-                self.advance();
-            } else {
-                let found = self.current().kind.clone();
-                let span = self.current().span;
-                return Err(ParseError {
-                    kind: ParseErrorKind::Expected {
-                        expected: "module path".to_string(),
-                        found,
-                    },
-                    span,
-                });
-            }
+            path.push(self.parse_namespace_segment()?);
 
             if self.check(&crate::lexer::TokenKind::Dot) {
                 self.advance();
@@ -684,6 +673,59 @@ impl Parser {
         }
     }
 
+    /// Parse a namespace/member segment — an identifier, or one of the
+    /// reserved words `async`/`await`/`channel` which are legal as a *name*
+    /// in a dotted module path and `.member` selector position (0.0.4: this
+    /// is what makes `import std.async` / `std.async.run` parse — the
+    /// concurrency executor module is literally named `async`, PLAN §8).
+    /// Unlike `parse_ident`, binding names stay keyword-protected; only
+    /// namespace/member positions accept a keyword token.
+    fn parse_namespace_segment(&mut self) -> Result<String, ParseError> {
+        match self.current_kind().clone() {
+            crate::lexer::TokenKind::Ident(name) => {
+                if self.check_keyword(&name) {
+                    let found = self.current().kind.clone();
+                    let span = self.current().span;
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected {
+                            expected: format!(
+                                "identifier (keyword `{}` cannot be used as a name)",
+                                name
+                            ),
+                            found,
+                        },
+                        span,
+                    });
+                }
+                self.advance();
+                Ok(name)
+            }
+            crate::lexer::TokenKind::Async => {
+                self.advance();
+                Ok("async".to_string())
+            }
+            crate::lexer::TokenKind::Await => {
+                self.advance();
+                Ok("await".to_string())
+            }
+            crate::lexer::TokenKind::Channel => {
+                self.advance();
+                Ok("channel".to_string())
+            }
+            _ => {
+                let found = self.current().kind.clone();
+                let span = self.current().span;
+                Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "module path member".to_string(),
+                        found,
+                    },
+                    span,
+                })
+            }
+        }
+    }
+
     /// Parse a type annotation.
     fn parse_type(&mut self) -> Result<ast::Type, ParseError> {
         // 0.0.4 F3: `Future<T>` — the async coroutine type. `Future` is *not*
@@ -731,22 +773,11 @@ impl Parser {
                 self.advance();
                 while self.check(&crate::lexer::TokenKind::Dot) {
                     self.advance();
+                    // Namespace segment: `net.Point`, `std.async`-style keyword
+                    // members are accepted here too (0.0.4).
                     name.push('.');
-                    let seg = match self.current_kind().clone() {
-                        crate::lexer::TokenKind::Ident(seg) => seg,
-                        other => {
-                            let span = self.current().span;
-                            return Err(ParseError {
-                                kind: ParseErrorKind::Expected {
-                                    expected: "identifier after `.` in type path".to_string(),
-                                    found: other,
-                                },
-                                span,
-                            });
-                        }
-                    };
+                    let seg = self.parse_namespace_segment()?;
                     name.push_str(&seg);
-                    self.advance();
                 }
                 ast::Type::Named(name)
             }
@@ -809,6 +840,15 @@ impl Parser {
                 let err = self.parse_type()?;
                 self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in Result type")?;
                 ast::Type::Result(Box::new(ok), Box::new(err))
+            }
+            crate::lexer::TokenKind::Channel => {
+                // channel<T> (0.0.4 F9): a message-passing channel type.
+                // `channel` is a reserved keyword (TokenKind::Channel).
+                self.advance();
+                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in channel type")?;
+                let inner = self.parse_type()?;
+                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in channel type")?;
+                ast::Type::Channel(Box::new(inner))
             }
             _ => {
                 let found = self.current().kind.clone();

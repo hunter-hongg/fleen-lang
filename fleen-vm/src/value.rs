@@ -5,6 +5,33 @@ use std::fmt;
 use fleen_compiler::codegen::FuncId;
 
 use crate::frame::FutureFrame;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// Runtime value of `channel<T>` (0.0.4 T07).
+///
+/// The buffer is shared by all handles to the same channel via `Rc<RefCell>`.
+/// This is a deliberate, documented exception to SPEC §11's blanket `Rc`/
+/// `RefCell` prohibition — same reasoning as `Value::Future` (T04): the
+/// aliasing *is* the language semantics, not an implementation shortcut.
+/// `size_of::<Value>()` is unchanged (one pointer).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelInner {
+    /// Bounded buffer capacity. 0 = rendezvous (no buffer at all).
+    pub cap: usize,
+    /// Buffered values, FIFO (only used when `cap > 0`).
+    pub buffer: std::collections::VecDeque<Value>,
+    /// Tasks blocked on `send`, FIFO arrival order, each still holding the
+    /// payload it was sending (the value moves into the queue with the
+    /// parked chain — a parked sender owns its payload until a receiver
+    /// takes it). Used for both cap=0 (rendezvous) and cap>0 (buffer full).
+    pub senders: Vec<(Value, Vec<FutureFrame>)>,
+    /// Tasks blocked on `recv` waiting for a value, FIFO arrival order.
+    /// A parked receiver's chain resumes *after* its `recv` instruction;
+    /// the waking side injects the payload into the innermost frame's
+    /// operands (`Vm::inject_value_into_chain`).
+    pub receivers: Vec<Vec<FutureFrame>>,
+}
 
 /// A self-describing runtime value.
 ///
@@ -80,6 +107,9 @@ pub enum Value {
     /// (`not_copy(Future<T>)`), so compiled code moves it rather than sharing
     /// it.
     Future(Box<FutureFrame>),
+    /// Channel handle (0.0.4 T07).  Shared buffer via `Rc<RefCell<ChannelInner>>`
+    /// — aliasing is the language semantics (SPEC §11 exception, like Future).
+    Channel(Rc<RefCell<ChannelInner>>),
 }
 
 impl fmt::Display for Value {
@@ -124,6 +154,8 @@ impl fmt::Display for Value {
             // A future has no user-visible payload; the frame contents would be
             // noise (and can be large).
             Value::Future(_) => write!(f, "<future>"),
+            // A channel handle — renders as <channel cap=N>.
+            Value::Channel(inner) => write!(f, "<channel cap={}>", inner.borrow().cap),
         }
     }
 }

@@ -1,0 +1,2 @@
+Compile error: typeck: 1 error(s)
+  error: argument 1 type mismatch: expected `[Future<unit>]`, found `string`

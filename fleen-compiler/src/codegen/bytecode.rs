@@ -191,6 +191,16 @@ impl FieldTypeTag {
                 );
                 FieldTypeTag::Unit
             }
+            // `channel<T>` can never be a struct field (T07d: non-storable);
+            // reaching here is a typeck bug. The Unit mapping keeps the match
+            // total; the debug_assert will catch it in debug builds.
+            Type::Channel(_) => {
+                debug_assert!(
+                    false,
+                    "Channel type reached struct-field codegen: a channel cannot be a struct field (T07d)"
+                );
+                FieldTypeTag::Unit
+            }
         }
     }
 }
@@ -320,6 +330,20 @@ pub enum Opcode {
     /// completion and leave its `T` on the operand stack (0.0.4 T05).
     /// Stack effect: `F → T` (Δ0, min 1).
     Await = 0xC3,
+    // 0xC4–0xC7 channel (0.0.4 T07). All inside the reserved 0xBC–0xFF
+    // region.
+    /// Create a new channel with the given payload type (type encoded in
+    /// operand: 4 bytes = type tag, 4 bytes = type parameter for array/box/struct).
+    /// Stack effect: cap → ch (Δ0, min 1).
+    ChannelNew = 0xC4,
+    /// Send a value through a channel; may suspend if full.
+    /// Stack effect: ch v → (Δ-2, min 2).
+    ChannelSend = 0xC5,
+    /// Receive a value from a channel; may suspend if empty.
+    /// Stack effect: ch → v (Δ0, min 1).
+    ChannelRecv = 0xC6,
+    /// Split a channel handle: ch → ch2 (Δ0, min 1).
+    ChannelSplit = 0xC7,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -448,6 +472,11 @@ impl Opcode {
             0xC1 => Opcode::Suspend,
             0xC2 => Opcode::Poll,
             0xC3 => Opcode::Await,
+            // 0.0.4 (v4): channel opcodes (T07).
+            0xC4 => Opcode::ChannelNew,
+            0xC5 => Opcode::ChannelSend,
+            0xC6 => Opcode::ChannelRecv,
+            0xC7 => Opcode::ChannelSplit,
             _ => return None,
         })
     }

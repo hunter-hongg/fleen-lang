@@ -57,6 +57,7 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
             collect_named_type_refs(ret, f);
         }
         ast::Type::Future(inner) => collect_named_type_refs(inner, f),
+        ast::Type::Channel(inner) => collect_named_type_refs(inner, f),
         ast::Type::Base(_) => {}
         ast::Type::Range => {}
     }
@@ -179,6 +180,7 @@ impl TypeChecker {
             ast::Type::Ref(inner) => Type::Ref(Box::new(self.convert_type(inner, span))),
             ast::Type::Range => Type::Range,
             ast::Type::Future(inner) => Type::Future(Box::new(self.convert_type(inner, span))),
+            ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
             ast::Type::Named(name) => match self.struct_by_name.get(name) {
                 Some(&id) => {
                     let entry = &self.structs[id.0 as usize];
@@ -254,13 +256,20 @@ impl TypeChecker {
 
         // Phase 3: convert field types now that every verdict is final.
         for (i, fields) in raw.into_iter().enumerate() {
-            self.structs[i].fields = fields
+            let converted: Vec<(String, Type, Span)> = fields
                 .into_iter()
                 .map(|(name, ty, span)| {
                     let conv = self.convert_type(&ty, span);
+                    // 0.0.4 T07d: channels are non-storable — a field read
+                    // deep-copies owned values, which would fork the shared
+                    // buffer silently.
+                    if matches!(conv, Type::Channel(_)) {
+                        self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+                    }
                     (name, conv, span)
                 })
                 .collect();
+            self.structs[i].fields = converted;
         }
     }
 
@@ -377,6 +386,8 @@ impl TypeChecker {
                     && self.ast_type_is_copy(err, raw, in_progress)
             }
             ast::Type::Func(_, _) => true,
+            // F9: a channel owns its buffer — never Copy (move-only).
+            ast::Type::Channel(_) => false,
         }
     }
 
@@ -1031,6 +1042,15 @@ impl TypeChecker {
                 hir_id,
                 span,
             } => self.typeck_struct_lit(name, inits, hir_id, span),
+            ExprHir::ChannelNew {
+                ty,
+                capacity,
+                hir_id,
+                span,
+            } => {
+                let ty_hir = self.convert_type(&ty, span);
+                self.typeck_channel_new(ty_hir, *capacity, hir_id, span)
+            }
             ExprHir::Field(obj, field) => self.typeck_field(*obj, field),
             ExprHir::Block(block) => {
                 let typed_block = self.typeck_block(&block, expected)?;
@@ -1608,6 +1628,117 @@ impl TypeChecker {
         args: Vec<ExprHir>,
         expected: Option<&Type>,
     ) -> Result<TypedExprHir, ()> {
+        // 0.0.4 T07a: `c.send(v)` / `c.recv()` — recognized in typeck, not grammar.
+        // Parser produces Call(Field(c, "send"), [v]). If receiver type is channel<T>
+        // and member is send/recv, rewrite to ChannelSend/ChannelRecv.
+        if let ExprHir::Field(obj_expr, member) = &func
+            && (member == "send" || member == "recv")
+        {
+            let typed_obj = self.typeck_expr(*obj_expr.clone(), None)?;
+            let obj_span = typed_obj.span();
+            if let Type::Channel(payload_ty) = typed_obj.ty() {
+                // Rewrite to dedicated channel op.
+                return match member.as_str() {
+                    "send" => {
+                        if args.len() != 1 {
+                            self.add_error(
+                                TypeckErrorKind::ArityMismatch {
+                                    expected: 1,
+                                    found: args.len(),
+                                },
+                                obj_span,
+                            );
+                            return Err(());
+                        }
+                        let typed_val = self.typeck_expr(args.into_iter().next().unwrap(), None)?;
+                        // D6: the payload is consumed by the send — a bare
+                        // owned local read would silently deep-copy the
+                        // value; the transfer must be explicit (`move`/`clone`
+                        // — Copy payloads and owned *globals* (deep-copy
+                        // reads, D5) pass, same predicate as
+                        // `reject_bare_owned_arg`).
+                        if let TypedExprHir::Ident {
+                            name,
+                            binding_id,
+                            ty,
+                            access,
+                            ..
+                        } = &typed_val
+                            && *access == Access::Copy
+                            && ty.is_owned()
+                            && !self.global_ids.contains(binding_id)
+                            && !self.global_types.contains_key(name)
+                        {
+                            self.add_error(
+                                TypeckErrorKind::OwnedChannelArgRequiresMove { name: name.clone() },
+                                typed_val.span(),
+                            );
+                            return Err(());
+                        }
+                        // The payload_ty must match.
+                        if !Self::unify_arg_ref_aware(
+                            &payload_ty,
+                            &typed_val.ty(),
+                            0,
+                            typed_val.span(),
+                        )
+                        .is_ok()
+                        {
+                            self.add_error(
+                                TypeckErrorKind::TypeMismatch {
+                                    expected: payload_ty.as_ref().clone(),
+                                    found: typed_val.ty().clone(),
+                                },
+                                typed_val.span(),
+                            );
+                            return Err(());
+                        }
+                        Ok(TypedExprHir::ChannelSend {
+                            channel: Box::new(typed_obj),
+                            value: Box::new(typed_val),
+                            payload_ty: payload_ty.as_ref().clone(),
+                            span: obj_span,
+                        })
+                    }
+                    "recv" => {
+                        if !args.is_empty() {
+                            self.add_error(
+                                TypeckErrorKind::ArityMismatch {
+                                    expected: 0,
+                                    found: args.len(),
+                                },
+                                obj_span,
+                            );
+                            return Err(());
+                        }
+                        Ok(TypedExprHir::ChannelRecv {
+                            channel: Box::new(typed_obj),
+                            payload_ty: payload_ty.as_ref().clone(),
+                            span: obj_span,
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+            }
+            // A `send`/`recv` on a non-channel receiver (T07a): a struct may
+            // legitimately have a field of that name — fall through to the
+            // ordinary call path — but no other type has such a member.
+            let obj_ty = match typed_obj.ty() {
+                Type::Ref(inner) => *inner,
+                ty => ty,
+            };
+            if !matches!(obj_ty, Type::Struct(_)) {
+                self.add_error(
+                    TypeckErrorKind::ChannelMemberNotFound {
+                        member: member.clone(),
+                        found: obj_ty.clone(),
+                    },
+                    obj_span,
+                );
+                return Err(());
+            }
+        }
+
         // `Ok(...)` / `Err(...)`: builtin Result constructors (PLAN §3.4.1),
         // recognized by name unless the user shadowed them with their own
         // function or binding (§4.3 — same mechanism as `print`).
@@ -1832,6 +1963,38 @@ impl TypeChecker {
             let typed_arg = self.typeck_expr(arg, None)?;
             arg_types.push(typed_arg.ty().clone());
             typed_args.push(typed_arg);
+        }
+
+        // 0.0.4 T07d: `std.concurrent.split(ch)` — rewrite to ChannelSplit.
+        // The schematic signature has T0 as the payload type; we bind it and
+        // emit the dedicated node.
+        if name == "std.concurrent.split" {
+            let expected_arity = 1;
+            if arg_types.len() != expected_arity {
+                self.add_error(
+                    TypeckErrorKind::ArityMismatch {
+                        expected: expected_arity,
+                        found: arg_types.len(),
+                    },
+                    func_span,
+                );
+                return Err(());
+            }
+            let arg_ty = &arg_types[0];
+            let Type::Channel(_payload_ty) = arg_ty else {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "std.concurrent.split".to_string(),
+                        ty: arg_ty.clone(),
+                    },
+                    typed_args[0].span(),
+                );
+                return Err(());
+            };
+            return Ok(TypedExprHir::ChannelSplit {
+                channel: Box::new(typed_args.into_iter().next().unwrap()),
+                span: func_span,
+            });
         }
 
         // Bind `T0` from the argument types and substitute it into the
@@ -2161,6 +2324,14 @@ impl TypeChecker {
                     Type::Ref(inner_ty) => *inner_ty,
                     other => other,
                 };
+                // 0.0.4 T07d: channels are move-only — `clone ch` is rejected.
+                // A deep copy of a shared buffer is meaningless, and a shallow
+                // one would alias while typeck believed it copied;
+                // `std.concurrent.split(ch)` is the one explicit fork point.
+                if matches!(value_ty, Type::Channel(_)) {
+                    self.add_error(TypeckErrorKind::ChannelNotClonable, ident_span);
+                    return Err(());
+                }
                 let access = if value_ty.is_copy() {
                     Access::Copy
                 } else {
@@ -2384,6 +2555,11 @@ impl TypeChecker {
                 self.add_error(TypeckErrorKind::CannotInferArrayType, span);
                 return Err(());
             };
+            // 0.0.4 T07d: channels are non-storable.
+            if matches!(elem, Type::Channel(_)) {
+                self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+                return Err(());
+            }
             return Ok(TypedExprHir::ArrayLit {
                 elems: Vec::new(),
                 ty: Type::Array(Box::new(elem)),
@@ -2416,7 +2592,14 @@ impl TypeChecker {
 
         // SAFETY: non-empty elems either took the hint or set `elem_ty`
         // from the first element above, so it cannot be `None` here.
-        let ty = Type::Array(Box::new(elem_ty.expect("element type was established")));
+        let elem = elem_ty.expect("element type was established");
+        // 0.0.4 T07d: channels are non-storable — an element read deep-copies,
+        // which would fork the shared buffer silently.
+        if matches!(elem, Type::Channel(_)) {
+            self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+            return Err(());
+        }
+        let ty = Type::Array(Box::new(elem));
         Ok(TypedExprHir::ArrayLit {
             elems: typed_elems,
             ty,
@@ -2514,6 +2697,17 @@ impl TypeChecker {
             Type::Ref(inner) => inner,
             ty => ty,
         };
+        // 0.0.4 T07a: `c.send` / `c.recv` used as a *value* (not called) on a
+        // channel — the members exist only in call position.
+        if let Type::Channel(_) = target
+            && (field == "send" || field == "recv")
+        {
+            self.add_error(
+                TypeckErrorKind::ChannelMemberNotCalled { member: field },
+                typed_obj.span(),
+            );
+            return Err(());
+        }
         let info = match target {
             Type::Struct(info) => (**info).clone(),
             Type::Box(_) => {
@@ -2637,6 +2831,61 @@ impl TypeChecker {
             inits: typed_inits,
             ty: struct_ty,
             hir_id,
+            span,
+        })
+    }
+
+    /// Type check `channel<T>(capacity)` constructor (0.0.4 T07).
+    ///
+    /// The capacity expression must be an `int`. The element type `T` is
+    /// taken from the type annotation in the constructor and must be a valid
+    /// type (not a type variable, not a `ref` type). The result is a
+    /// non-Copy, move-only `channel<T>` value.
+    fn typeck_channel_new(
+        &mut self,
+        ty: Type,
+        capacity: ExprHir,
+        _hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        // Validate the payload type: must be a concrete type, no type vars.
+        // Reject `ref T` inside channel payloads (would violate D4).
+        if let Type::Ref(_) = &ty {
+            self.add_error(
+                TypeckErrorKind::InvalidOperand {
+                    op: "channel payload".to_string(),
+                    ty: ty.clone(),
+                },
+                span,
+            );
+            return Err(());
+        }
+        if matches!(&ty, Type::Var(_)) {
+            self.add_error(
+                TypeckErrorKind::UnsupportedFeature {
+                    feature: "type variable in channel payload".to_string(),
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        // Type-check capacity expression (must be int).
+        let typed_cap = self.typeck_expr(capacity, Some(&Type::Int))?;
+        if !matches!(typed_cap.ty(), Type::Int) {
+            self.add_error(
+                TypeckErrorKind::TypeMismatch {
+                    expected: Type::Int,
+                    found: typed_cap.ty(),
+                },
+                typed_cap.span(),
+            );
+            return Err(());
+        }
+
+        Ok(TypedExprHir::ChannelNew {
+            capacity: Box::new(typed_cap),
+            payload_ty: ty,
             span,
         })
     }

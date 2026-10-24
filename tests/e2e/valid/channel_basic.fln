@@ -1,0 +1,31 @@
+// 0.0.4 T07: channels — buffered producer/consumer, FIFO order.
+//
+// One channel, split into two handles (T07d), one task producing 0..4 into
+// a capacity-2 buffer, one task receiving all five and printing the sum.
+// The producer parks on its third send (buffer full) and the consumer
+// drains it; the interleaving is deterministic because a ready task always
+// runs to its next suspension point.
+import std.async;
+import std.collection.range;
+import std.concurrent;
+import std.io;
+
+async func producer(ch: channel<int>) {
+    for i in range(5) {
+        ch.send(i);
+    }
+}
+
+async func consumer(ch: channel<int>) {
+    total = 0;
+    for _ in range(5) {
+        total = total + ch.recv();
+    }
+    std.io.println(total as string);
+}
+
+func main() {
+    ch = channel<int>(2);
+    peer = std.concurrent.split(ch);
+    std.async.run([producer(move ch), consumer(move peer)]);
+}

@@ -1418,3 +1418,99 @@ fn v4_async_opcode_numbers_are_locked() {
     assert_eq!(Opcode::Poll as u8, 0xC2);
     assert_eq!(Opcode::Await as u8, 0xC3);
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.4 T07: channels (0xC4–0xC7)
+// ---------------------------------------------------------------------------
+
+/// A v4 module whose `main` is `<setup> ; <op> ; Return` for the channel
+/// opcodes. `setup` is expressed as const pushes (`count` of const idx 1).
+fn v4_channel_module(op: Opcode, setup_pushes: usize) -> Module {
+    let mut code = Vec::new();
+    for _ in 0..setup_pushes {
+        code.extend_from_slice(&[
+            Opcode::Const as u8,
+            1,
+            0,
+            0,
+            0, // const idx 1 (Int(1)) — stand-in operand
+        ]);
+    }
+    code.push(op as u8);
+    code.push(Opcode::Return as u8);
+    Module {
+        struct_defs: Vec::new(),
+        version: 4,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: code.into_boxed_slice(),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn v4_channel_opcode_numbers_are_locked() {
+    // Channels land directly after the async group, still in the reserved
+    // 0xBC–0xFF region (BYTECODE.md §4.2 compat promise).
+    assert_eq!(Opcode::ChannelNew as u8, 0xC4);
+    assert_eq!(Opcode::ChannelSend as u8, 0xC5);
+    assert_eq!(Opcode::ChannelRecv as u8, 0xC6);
+    assert_eq!(Opcode::ChannelSplit as u8, 0xC7);
+}
+
+#[test]
+fn v4_channel_stack_effects_verify() {
+    // `ChannelNew`: cap → ch (Δ0, min1): Const→1, New→1, Return→0.
+    assert_eq!(
+        verify::verify(&v4_channel_module(Opcode::ChannelNew, 1)),
+        Ok(())
+    );
+    // `ChannelSend`: ch v → unit (Δ-1, min2): Const,Const→2, Send→1, Return→0.
+    assert_eq!(
+        verify::verify(&v4_channel_module(Opcode::ChannelSend, 2)),
+        Ok(())
+    );
+    // `ChannelRecv`: ch → v (Δ0, min1): Const→1, Recv→1, Return→0.
+    assert_eq!(
+        verify::verify(&v4_channel_module(Opcode::ChannelRecv, 1)),
+        Ok(())
+    );
+    // `ChannelSplit`: ch → ch2 (Δ0, min1): Const→1, Split→1, Return→0.
+    assert_eq!(
+        verify::verify(&v4_channel_module(Opcode::ChannelSplit, 1)),
+        Ok(())
+    );
+}
+
+#[test]
+fn v4_channel_min_depths_are_enforced() {
+    // `ChannelSend` needs both the handle and the payload (min 2): one
+    // operand is an underflow.
+    assert!(matches!(
+        verify::verify(&v4_channel_module(Opcode::ChannelSend, 1)),
+        Err(VerifyError::StackUnderflow { .. })
+    ));
+    // `ChannelRecv` needs the handle (min 1): an empty stack underflows.
+    assert!(matches!(
+        verify::verify(&v4_channel_module(Opcode::ChannelRecv, 0)),
+        Err(VerifyError::StackUnderflow { .. })
+    ));
+}
+
+#[test]
+fn v4_channel_opcode_in_v3_module_rejected() {
+    // The v4 gate covers the channel group too.
+    let mut m = v4_channel_module(Opcode::ChannelNew, 1);
+    m.version = 3;
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::V4OpcodeInV1V2V3Module { .. })
+    ));
+}

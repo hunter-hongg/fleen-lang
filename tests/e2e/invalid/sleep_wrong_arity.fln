@@ -1,0 +1,2 @@
+import std.io;
+func main() { std.io.sleep(1, 2); }

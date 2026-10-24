@@ -1,0 +1,18 @@
+// 0.0.4 T06: cooperative executor — deterministic round-robin interleaving.
+import std.io;
+import std.async;
+
+async func tick(label: string, steps: int) {
+    for i in range(steps) {
+        std.io.println(label, " step ", i as string);
+        std.async.yield_now();
+    }
+}
+
+func main() {
+    std.async.run([
+        tick("A", 3),
+        tick("B", 3),
+    ]);
+    std.io.println("multi task done");
+}

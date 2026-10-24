@@ -162,6 +162,20 @@ pub enum TypeckErrorKind {
     MoveOutOfArray { path: String },
     /// `b[0]` where `b: box<[T]>`: a box must be read with `deref` first.
     IndexOnBox,
+    // ---- 0.0.4 T07: channel error family ----
+    /// `clone ch` where `ch` is a channel: channels are move-only handles;
+    /// cloning would silently alias the shared buffer.
+    ChannelNotClonable,
+    /// A struct field or array element has type `channel<T>`: 0.0.3 reads
+    /// owned values by deep copy, which would fork the buffer silently.
+    ChannelNotStorable,
+    /// An owned value passed to `channel.send(...)` without `move`: D6
+    /// requires explicit ownership transfer at argument position.
+    OwnedChannelArgRequiresMove { name: String },
+    /// `c.send(v)` or `c.recv()` where `c` is not a channel.
+    ChannelMemberNotFound { member: String, found: Type },
+    /// `c.send` or `c.recv` used without call parentheses.
+    ChannelMemberNotCalled { member: String },
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -511,6 +525,40 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "cannot index a box directly — help: read the pointee \
                      first: `(deref b)[0]`"
+                )
+            }
+            TypeckErrorKind::ChannelNotClonable => {
+                write!(
+                    f,
+                    "channels cannot be cloned — they are move-only handles; \
+                     use `std.concurrent.split(ch)` to get a second handle"
+                )
+            }
+            TypeckErrorKind::ChannelNotStorable => {
+                write!(
+                    f,
+                    "channels cannot be stored in structs or arrays — reads \
+                     would deep-copy the shared buffer; use `split` to share"
+                )
+            }
+            TypeckErrorKind::OwnedChannelArgRequiresMove { name } => {
+                write!(
+                    f,
+                    "owned value `{name}` passed to channel send must be \
+                     transferred explicitly — help: write `move {name}` or `clone {name}`"
+                )
+            }
+            TypeckErrorKind::ChannelMemberNotFound { member, found } => {
+                write!(
+                    f,
+                    "no member `{member}` on type `{}` — only `channel<T>` has `send`/`recv`",
+                    found.name()
+                )
+            }
+            TypeckErrorKind::ChannelMemberNotCalled { member } => {
+                write!(
+                    f,
+                    "`{member}` on a channel must be called — use `{member}(...)`"
                 )
             }
         }

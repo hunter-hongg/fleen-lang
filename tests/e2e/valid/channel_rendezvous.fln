@@ -1,0 +1,28 @@
+// 0.0.4 T07: rendezvous channel (capacity 0) — direct handoff.
+//
+// The sender parks on every `send` until the receiver takes the value, and
+// the receiver parks on `recv` whenever the sender has not arrived yet; the
+// handoff wakes the parked peer. The values still arrive in order.
+import std.async;
+import std.collection.range;
+import std.concurrent;
+import std.io;
+
+async func sender(ch: channel<int>) {
+    for i in range(3) {
+        ch.send(i);
+    }
+}
+
+async func receiver(ch: channel<int>) {
+    for _ in range(3) {
+        v = ch.recv();
+        std.io.println(v as string);
+    }
+}
+
+func main() {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([sender(move ch), receiver(move peer)]);
+}

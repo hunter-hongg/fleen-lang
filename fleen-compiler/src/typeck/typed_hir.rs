@@ -59,6 +59,10 @@ pub enum Type {
     /// `Future<T>` (0.0.4 F3): a suspendable coroutine frame yielding `T`.
     /// Non-Copy — it owns its suspended state and is driven once by `await`.
     Future(Box<Type>),
+    /// `channel<T>` (0.0.4 F9, D3/D6): a message-passing channel.
+    /// Non-Copy, move-only; holds a reference to a shared buffer.
+    /// The element type `T` is checked at run time as a defensive backstop.
+    Channel(Box<Type>),
     /// Type variable (0.0.3 V06): appears **only** in the schematic
     /// signatures of std intrinsics — never in user-visible syntax. A
     /// fresh `Var(n)` is created per call site, unified against the
@@ -88,6 +92,7 @@ impl Type {
             Type::Struct(info) => info.name.to_string(),
             Type::Range => "Range".to_string(),
             Type::Future(inner) => format!("Future<{}>", inner.name()),
+            Type::Channel(inner) => format!("channel<{}>", inner.name()),
             Type::Var(id) => format!("?T{}", id),
             Type::Unsupported(name) => name.clone(),
         }
@@ -115,6 +120,7 @@ impl Type {
             Type::Range => true, // D5: Range is Copy (two ints)
             // F3: a Future owns its suspended state — never Copy (driven once).
             Type::Future(_)
+            | Type::Channel(_)
             | Type::Var(_)
             | Type::String
             | Type::Box(_)
@@ -139,6 +145,8 @@ impl Type {
             // F3: a Future owns its suspended coroutine frame; it is moved
             // (e.g. into `std.async.run` or `await`), never shared.
             Type::Future(_) => true,
+            // F9: a channel owns its buffer; it is move-only (non-Copy).
+            Type::Channel(_) => true,
             _ => false,
         }
     }
@@ -431,6 +439,35 @@ pub enum TypedExprHir {
     },
     /// Block expression
     Block(TypedBlockHir),
+    /// `channel<T>(capacity)` constructor (0.0.4 F9, T07): creates a new channel
+    /// with the given capacity. `payload_ty` is the element type T.
+    ChannelNew {
+        capacity: Box<TypedExprHir>,
+        payload_ty: Type,
+        span: Span,
+    },
+    /// `channel.send(value)` (0.0.4 F9, T07): sends a value, may suspend if full.
+    /// `payload_ty` is the element type T (defensive run-time check).
+    ChannelSend {
+        channel: Box<TypedExprHir>,
+        value: Box<TypedExprHir>,
+        payload_ty: Type,
+        span: Span,
+    },
+    /// `channel.recv()` (0.0.4 F9, T07): receives a value, may suspend if empty.
+    /// `payload_ty` is the element type T (defensive run-time check).
+    ChannelRecv {
+        channel: Box<TypedExprHir>,
+        payload_ty: Type,
+        span: Span,
+    },
+    /// `split(channel)` (0.0.4 F9, T07d): creates a second independent handle
+    /// to the same channel buffer. The original and the split handle are both
+    /// move-only; neither is Copy.
+    ChannelSplit {
+        channel: Box<TypedExprHir>,
+        span: Span,
+    },
 }
 
 impl TypedExprHir {
@@ -482,6 +519,12 @@ impl TypedExprHir {
             TypedExprHir::Str(_, _) => Type::String,
             TypedExprHir::Ident { ty, .. } => ty.clone(),
             TypedExprHir::Block(b) => b.ty.clone(),
+            TypedExprHir::ChannelNew { payload_ty, .. } => {
+                Type::Channel(Box::new(payload_ty.clone()))
+            }
+            TypedExprHir::ChannelSend { .. } => Type::Unit,
+            TypedExprHir::ChannelRecv { payload_ty, .. } => payload_ty.clone(),
+            TypedExprHir::ChannelSplit { channel, .. } => channel.ty(),
         }
     }
 
@@ -526,6 +569,10 @@ impl TypedExprHir {
             | TypedExprHir::Bool(_, s)
             | TypedExprHir::Str(_, s) => *s,
             TypedExprHir::Ident { span, .. } => *span,
+            TypedExprHir::ChannelNew { span, .. }
+            | TypedExprHir::ChannelSend { span, .. }
+            | TypedExprHir::ChannelRecv { span, .. }
+            | TypedExprHir::ChannelSplit { span, .. } => *span,
             TypedExprHir::Block(b) => b.span,
         }
     }

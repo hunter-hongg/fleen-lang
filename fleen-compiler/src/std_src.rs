@@ -23,6 +23,11 @@ pub fn files() -> Vec<(&'static str, &'static str)> {
             "std/collection/iter.fln",
             include_str!("../../std/collection/iter.fln"),
         ),
+        ("std/async.fln", include_str!("../../std/async.fln")),
+        (
+            "std/concurrent.fln",
+            include_str!("../../std/concurrent.fln"),
+        ),
         ("std/os.fln", include_str!("../../std/os.fln")),
         ("std/time.fln", include_str!("../../std/time.fln")),
     ]

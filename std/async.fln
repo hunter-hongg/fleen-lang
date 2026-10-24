@@ -1,0 +1,18 @@
+// 0.0.4 T06 std library: `async` module — the cooperative executor.
+//
+// The functions in this module are implemented by the VM (`exec_builtin`,
+// fleen-vm/src/vm.rs), not in Fleen source (D8); their names live only in the
+// compiler's builtin table and are bound by the resolver from the module path,
+// so this file carries only documentation.
+//
+//     import std.async;
+//
+//     std.async.run([producer(ch), consumer(ch)]);  // spawn + join several roots
+//     std.async.yield_now();                        // explicit cooperative yield
+//
+// `run(tasks: [Future<unit>])` hands each element to the cooperative scheduler,
+// runs all of them to completion (round-robin over suspension points), and
+// returns `unit` — the join. `yield_now()` parks the running task so another
+// one may progress; it is a no-op in a synchronous caller. Both are awaitable
+// suspension sources: inside an async body a `sleep`/`yield_now` call is
+// followed by a `Suspend` opcode that parks the task until its source resolves.

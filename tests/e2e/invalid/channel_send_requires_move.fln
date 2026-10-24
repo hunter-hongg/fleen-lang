@@ -1,0 +1,9 @@
+// 0.0.4 D6: the send payload is consumed — an owned value must be moved (or
+// cloned) explicitly; a bare read would silently deep-copy.
+import std.concurrent;
+
+func main() {
+    ch = channel<string>(2);
+    s = "hello";
+    ch.send(s);
+}

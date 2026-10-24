@@ -122,7 +122,7 @@ error with a `move`/`clone` hint.
 | **F3** | `Future<T>` type + `Future` value tag (non-Copy; owns suspend state) | compiler + VM | type system; D1 |
 | **F4** | VM coroutine frame (operand-stack snapshot + resume PC) | VM | F3, D1 |
 | **F5** | New opcodes in reserved `0xC0+` (no v1–v3 encodings touched) | compiler + VM + verify | F3, F4 |
-| **F6** | **Multi-thread executor**: thread pool + task scheduler + top-level blocking entry | language-semantics + std + VM | F2, F4, F8 |
+| **F6** | **Cooperative executor**: single-threaded scheduler + timers + top-level blocking entry | language-semantics + std + VM | F2, F4, F8 |
 | **F7** | `async` / `await` become reserved words + diagnostics | compiler | throughout |
 | **F8** | `Send` static rule (D4): borrow handles never cross async/task/channel; `async fn` cannot write globals (D5) | compiler (typeck) + VM | D2, D4, D5 |
 | **F9** | **Channels**: first-class `channel<T>` + `std.concurrent.channel` | std + VM | D3, D6, F6 |
@@ -212,16 +212,21 @@ across the await, yields `Pending`, and returns control to the executor.
 
 ### 4.2 Executor (F6)
 
-- **Thread pool**: a fixed pool of worker threads pulls runnable futures off a
-  scheduler queue.
+- **Single-threaded cooperative scheduler**: one worker thread runs tasks in
+  round-robin order.  A task yields only when a suspension source (sleep, yield,
+  channel send/recv) executes inside an async body.  The multi-thread worker
+  pool is a later optimization — not a semantic gap (D3's no-shared-memory
+  means one worker is all 0.0.4 features need).
 - **Top-level entry**: the first bare `e await` (or an explicit `main` awaiting)
-  boots a **blocking** drive that runs the pool until the root future completes —
-  a normal `main` program "just works", preserving 0.0.1 single-command
-  simplicity.
+  boots a **blocking** drive that runs the scheduler until the root future
+  completes — a normal `main` program "just works", preserving 0.0.1
+  single-command simplicity.
 - `std.async.run(tasks: [Future<unit>])`: spawn several futures, run to
-  completion, join.
+  completion, join.  Also usable inside an async body (re-entrant join: the
+  outer task suspends and waits for the inner tasks to complete).
 - Scheduling is cooperative: a future yields when an operation is `Pending`
-  (channel empty/full, sleep, `yield_now`).
+  (channel empty/full, sleep, `yield_now`).  Ready tasks always win over
+  timer-parked tasks.
 
 ### 4.3 Error propagation
 

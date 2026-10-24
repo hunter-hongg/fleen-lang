@@ -1,0 +1,2 @@
+// 0.0.4 T06: `async` cannot be used as a binding name
+async = 1;
