@@ -181,6 +181,11 @@ pub enum TypeckErrorKind {
     /// scheduler, which would carry the borrowed handle across a suspension
     /// (D4's boundary rule at its strongest).
     ChannelNotBorrowable,
+    /// A `ref T` value sent through a channel (0.0.4 review fix): the
+    /// payload travels into another task's frame, and a `Value::Ref` stores
+    /// an absolute operand-stack index that cannot survive a suspension
+    /// snapshot (D4's boundary rule — borrow handles never cross a channel).
+    ChannelPayloadBorrowed,
     // ---- 0.0.4 T08: Future boundary family (D4 wiring) ----
     /// `clone f` where `f` is a `Future<T>`: any Value-level copy of a
     /// Future deep-copies the whole suspended coroutine frame, forking the
@@ -447,13 +452,26 @@ impl fmt::Display for TypeckErrorKind {
                          `std.async.run`",
                         ty.name()
                     )
-                } else if ty.contains_future() {
+                } else if matches!(ty, Type::Array(_)) && ty.contains_future() {
                     write!(
                         f,
                         "cannot use owned value `{name}` (`{}`) without \
                          transferring ownership — copying the array would \
                          duplicate the suspended tasks inside it — help: \
                          `move {name}`, or pass it to `std.async.run`",
+                        ty.name()
+                    )
+                } else if ty.contains_future() {
+                    // A Future inside a `Result` payload (or another
+                    // container): the same fork, one level down.
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — copying the value would \
+                         duplicate the suspended task inside it — help: \
+                         `move {name}`, drive it: `{name} await` after a \
+                         `choose ... when Ok(v)` extraction, or pass it to \
+                         `std.async.run`",
                         ty.name()
                     )
                 } else if matches!(ty, Type::Channel(_)) {
@@ -470,6 +488,18 @@ impl fmt::Display for TypeckErrorKind {
                          be duplicated: two handles would alias the same \
                          buffer — help: `move {name}`, or fork it \
                          explicitly: `std.concurrent.split({name})`",
+                        ty.name()
+                    )
+                } else if ty.contains_channel() {
+                    // A channel inside a `Result` payload: the same aliasing,
+                    // one level down.
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — copying the value would \
+                         alias the channel inside it — help: `move {name}`, \
+                         or fork the channel explicitly: \
+                         `std.concurrent.split`",
                         ty.name()
                     )
                 } else {
@@ -624,6 +654,14 @@ impl fmt::Display for TypeckErrorKind {
                     "a `channel<T>` cannot be borrowed — a `ref` handle must not \
                      cross a channel boundary (D4); help: take the channel by \
                      ownership and `move` it into the task"
+                )
+            }
+            TypeckErrorKind::ChannelPayloadBorrowed => {
+                write!(
+                    f,
+                    "a borrowed value cannot be sent through a channel — a `ref` \
+                     handle must not cross a task boundary (D4); help: send an \
+                     owned value (`clone s` for a copy, `move` for a transfer)"
                 )
             }
             TypeckErrorKind::FutureNotClonable => {

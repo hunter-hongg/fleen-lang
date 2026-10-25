@@ -1,0 +1,15 @@
+// expect-typeck: InvalidOperand
+// 0.0.4 review fix: `==` on a `Result<Future, _>` would run the derived
+// `PartialEq` over two suspended coroutine frames — the operand rule now
+// sees through `Result`, same as for the bare types.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    g = gen(2);
+    r: Result<Future<int>, string> = Ok(move f);
+    s: Result<Future<int>, string> = Ok(move g);
+    if r == s { 1 } else { 0 }
+}

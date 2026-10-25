@@ -1,0 +1,15 @@
+// expect-typeck: FutureNotClonable
+// 0.0.4 review fix: the `Result` walk composes with the array walk —
+// `clone r` on a `Result<[Future<unit>], _>` used to deep-copy the whole
+// array of frames, evading the 10-24 `[T]`-nesting fix through the `Ok`
+// wrapper.
+async func tick(): unit {
+    0
+}
+
+func main(): int {
+    ts = [tick(), tick()];
+    r: Result<[Future<unit>], string> = Ok(move ts);
+    c = clone r;
+    0
+}

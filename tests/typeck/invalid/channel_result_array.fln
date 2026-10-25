@@ -1,0 +1,10 @@
+// expect-typeck: ChannelNotStorable
+// 0.0.4 review fix: the array-literal element check sees through `Result` —
+// a `[Result<channel<_>, _>]` element read would alias the shared buffer
+// without `split`, so the container is rejected at construction (channels
+// have no wholesale array consumer, unlike `[Future]`).
+func main(): int {
+    ch = channel<int>(1);
+    ts: [Result<channel<int>, string>] = [Ok(move ch)];
+    0
+}

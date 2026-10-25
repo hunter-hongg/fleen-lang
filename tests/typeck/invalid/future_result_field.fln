@@ -1,0 +1,11 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 review fix: a struct field may not hold a `Result<Future, _>` — the
+// field-decl check now sees through `Result`, since a field read deep-copies
+// the payload and would fork the suspended frames inside it.
+struct Holder {
+    r: Result<Future<int>, string>,
+}
+
+func main(): int {
+    0
+}

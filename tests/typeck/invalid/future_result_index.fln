@@ -1,0 +1,14 @@
+// expect-typeck: FutureIndexRead
+// 0.0.4 review fix: an element read of `[Result<Future, _>]` deep-copies the
+// payload — the index rule now sees through `Result`, same as through array
+// nesting.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    ts: [Result<Future<int>, string>] = [Ok(move f)];
+    t = ts[0];
+    0
+}

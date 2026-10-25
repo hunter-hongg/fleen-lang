@@ -541,11 +541,18 @@ impl<'a> Cx<'a> {
         // `Value`) deep-copies the suspended coroutine frame, forking the
         // task. The legal spellings all transfer: `f await` (producer), a
         // producing tail, or an explicit `move` — consuming positions already
-        // demand one via `OwnedArgRequiresMove`. The rule sees through array
-        // nesting (a bare read of a `[Future]` local copies every frame);
-        // in practice `reject_bare_owned_arg` rejects these shapes earlier —
-        // this is the backstop for read positions that do not go through it.
-        if ty.contains_future() && *access == Access::Copy && matches!(use_kind, IdentUse::Read) {
+        // demand one via `OwnedArgRequiresMove`. The rule sees through
+        // value-carrying containers (a bare read of a `[Future]` local or a
+        // `Result<Future, _>` local copies every frame inside); in practice
+        // `reject_bare_owned_arg` rejects these shapes earlier — this is the
+        // backstop for read positions that do not go through it. A
+        // channel-*containing* local joins the rule for the same reason (the
+        // copied payload aliases the shared buffer without `split`) — a bare
+        // top-level channel read stays a legal handle load above.
+        if (ty.contains_future() || ty.contains_channel())
+            && *access == Access::Copy
+            && matches!(use_kind, IdentUse::Read)
+        {
             if self.check_use(name, id, span) {
                 self.errors.push(TypeckError::new(
                     TypeckErrorKind::OwnedArgRequiresMove {

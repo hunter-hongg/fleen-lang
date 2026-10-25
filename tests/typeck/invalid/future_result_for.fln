@@ -1,0 +1,17 @@
+// expect-typeck: FutureIndexRead
+// 0.0.4 review fix: the `for` desugar's per-iteration element read is a deep
+// copy — the iterable-element check now sees through `Result`, same as
+// through array nesting.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    ts: [Result<Future<int>, string>] = [Ok(move f)];
+    total = 0;
+    for t in ts {
+        total = total + 1;
+    };
+    total
+}

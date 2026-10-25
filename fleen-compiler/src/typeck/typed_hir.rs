@@ -98,18 +98,39 @@ impl Type {
         }
     }
 
-    /// Check if this type holds a `Future` anywhere inside `[T]` nesting
-    /// (0.0.4 T08): an array of futures is legal *storage* — `std.async.run`
-    /// consumes it by moving the frames out wholesale — but every Value-level
-    /// *copy* of such an array would duplicate the suspended frames. Every
-    /// copy route must therefore be rejected wherever the array sits,
-    /// including nested arrays. Other containers cannot hold a future:
-    /// struct fields, box cells and globals are rejected at declaration
-    /// (`FutureNotStorable`), so only `[T]` needs walking.
+    /// Check if this type holds a `Future` anywhere inside a value-carrying
+    /// container (0.0.4 T08): an array of futures is legal *storage* —
+    /// `std.async.run` consumes it by moving the frames out wholesale — but
+    /// every Value-level *copy* of such an array would duplicate the
+    /// suspended frames. Every copy route must therefore be rejected
+    /// wherever the array sits, including nested arrays. `Result<T, E>` is
+    /// walked too: it carries its payloads by value (`Value::Ok`/`Err` box
+    /// them and the derived `Clone` deep-copies), so a `Result<Future, _>`
+    /// is exactly as fork-prone as the bare future. Struct fields, box
+    /// cells and globals cannot hold a future at all (rejected at
+    /// declaration, `FutureNotStorable`).
     pub fn contains_future(&self) -> bool {
         match self {
             Type::Future(_) => true,
             Type::Array(elem) => elem.contains_future(),
+            Type::Result(t, e) => t.contains_future() || e.contains_future(),
+            _ => false,
+        }
+    }
+
+    /// Check if this type holds a `channel<T>` anywhere inside a
+    /// value-carrying container — the mirror of [`Self::contains_future`]
+    /// for the channel fork discipline (0.0.4 T07d): a Value-level copy of
+    /// a channel (or of a `Result<channel<_>, _>`) would alias the shared
+    /// buffer without the one explicit fork point, `std.concurrent.split`.
+    /// A bare `channel<T>` inside an array is rejected at the array literal
+    /// (`ChannelNotStorable` — channels have no wholesale array consumer),
+    /// and struct fields, box cells and globals are rejected at declaration.
+    pub fn contains_channel(&self) -> bool {
+        match self {
+            Type::Channel(_) => true,
+            Type::Array(elem) => elem.contains_channel(),
+            Type::Result(t, e) => t.contains_channel() || e.contains_channel(),
             _ => false,
         }
     }

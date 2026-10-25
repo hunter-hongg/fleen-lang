@@ -1,0 +1,12 @@
+// expect-typeck: ChannelPayloadBorrowed
+// 0.0.4 review fix: a borrow handle never crosses a channel (D4). A
+// `Value::Ref` stores an absolute operand-stack index that cannot survive a
+// suspension snapshot — the rendezvous path used to trip the VM's
+// debug_assert and the buffered path silently delivered a stale slot.
+func relay(s: ref string, ch: channel<string>) {
+    ch.send(s);
+}
+
+func main(): int {
+    0
+}

@@ -1,0 +1,15 @@
+// expect-typeck: FutureNotClonable
+// 0.0.4 review fix: the copy-fork rules now see through `Result` — a
+// `Result<Future, _>` carries its payload by value and the derived `Clone`
+// deep-copies it, so `clone r` used to fork the suspended frame and drive
+// the same task twice.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    r: Result<Future<int>, string> = Ok(move f);
+    c = clone r;
+    0
+}

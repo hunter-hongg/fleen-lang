@@ -1,0 +1,10 @@
+// expect-typeck: ChannelNotClonable
+// 0.0.4 review fix: `clone r` on a `Result<channel<_>, _>` would unwrap two
+// handles to one buffer — aliasing without the one fork point, `split`. The
+// clone rule now sees through `Result`.
+func main(): int {
+    ch = channel<int>(1);
+    r: Result<channel<int>, string> = Ok(move ch);
+    c = clone r;
+    0
+}

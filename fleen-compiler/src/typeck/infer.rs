@@ -267,8 +267,10 @@ impl TypeChecker {
                     // coroutine frame (this also retires the codegen-side
                     // debug_assert that used to be the only guard). The check
                     // sees through array nesting: a `[Future]` field is
-                    // copied wholesale by a field read.
-                    if matches!(conv, Type::Channel(_)) {
+                    // copied wholesale by a field read, and a
+                    // `Result<Future, _>` / `Result<channel<_>, _>` field
+                    // through the payload the derived `Clone` deep-copies.
+                    if conv.contains_channel() {
                         self.add_error(TypeckErrorKind::ChannelNotStorable, span);
                     } else if conv.contains_future() {
                         self.add_error(TypeckErrorKind::FutureNotStorable, span);
@@ -544,12 +546,12 @@ impl TypeChecker {
     }
 
     /// 0.0.4 T08 (D4 wiring): a global may not hold a `channel<T>`, a
-    /// `Future<T>`, or an array containing either — every global read is a
-    /// deep copy, which would alias the shared buffer without `split` or
-    /// duplicate the suspended frames. Reports the error and returns `true`
-    /// when rejected.
+    /// `Future<T>`, or a value-carrying container of either (`[T]`,
+    /// `Result<T, E>`) — every global read is a deep copy, which would alias
+    /// the shared buffer without `split` or duplicate the suspended frames.
+    /// Reports the error and returns `true` when rejected.
     fn reject_async_global_type(&mut self, ty: &Type, span: Span) -> bool {
-        if matches!(ty, Type::Channel(_)) {
+        if ty.contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, span);
             true
         } else if ty.contains_future() {
@@ -1594,10 +1596,11 @@ impl TypeChecker {
         // a Future has no `==` — the derived comparison would inspect two
         // suspended frames, and either operand's frame read is a fork.
         if matches!(op, "==" | "!=")
-            && matches!(
-                typed_lhs.ty(),
-                Type::Struct(_) | Type::Array(_) | Type::Channel(_) | Type::Future(_)
-            )
+            && (matches!(typed_lhs.ty(), Type::Struct(_) | Type::Array(_))
+                || typed_lhs.ty().contains_channel()
+                || typed_lhs.ty().contains_future()
+                || typed_rhs.ty().contains_channel()
+                || typed_rhs.ty().contains_future())
         {
             self.add_error(
                 TypeckErrorKind::InvalidOperand {
@@ -1721,6 +1724,21 @@ impl TypeChecker {
                             unreachable!("send arity checked to be exactly 1 above")
                         };
                         let typed_val = self.typeck_expr(val, None)?;
+                        // D4 (0.0.4 review fix): a borrow handle never crosses
+                        // a channel — the payload travels into another task's
+                        // frame, and a `Value::Ref` stores an absolute
+                        // operand-stack index that cannot survive a suspension
+                        // snapshot. Note the borrow coercion below
+                        // (`unify_arg_ref_aware`) deliberately does *not*
+                        // apply here: a `ref string` payload is a D4 error,
+                        // not a `string` (send `clone s` for a copy).
+                        if matches!(typed_val.ty(), Type::Ref(_)) {
+                            self.add_error(
+                                TypeckErrorKind::ChannelPayloadBorrowed,
+                                typed_val.span(),
+                            );
+                            return Err(());
+                        }
                         // D6: the payload is consumed by the send — a bare
                         // owned local read would silently deep-copy the
                         // value; the transfer must be explicit (`move`/`clone`
@@ -2426,7 +2444,10 @@ impl TypeChecker {
                 // A deep copy of a shared buffer is meaningless, and a shallow
                 // one would alias while typeck believed it copied;
                 // `std.concurrent.split(ch)` is the one explicit fork point.
-                if matches!(value_ty, Type::Channel(_)) {
+                // The check sees through value-carrying containers: `clone r`
+                // on a `Result<channel<_>, _>` would unwrap two handles to
+                // one buffer.
+                if value_ty.contains_channel() {
                     self.add_error(TypeckErrorKind::ChannelNotClonable, ident_span);
                     return Err(());
                 }
@@ -2434,8 +2455,10 @@ impl TypeChecker {
                 // deep-copies the whole suspended coroutine frame, forking the
                 // task (`clone f` would run it twice). There is no fork point
                 // for futures: `await` drives it, `std.async.run` takes it.
-                // The rule sees through array nesting: `clone ts` on a
-                // `[Future]` copies every frame in the array.
+                // The rule sees through nesting: `clone ts` on a `[Future]`
+                // copies every frame in the array, and `clone r` on a
+                // `Result<Future, _>` (or `Result<[Future], _>`) copies the
+                // frames inside the payload the derived `Clone` deep-copies.
                 if value_ty.contains_future() {
                     self.add_error(TypeckErrorKind::FutureNotClonable, ident_span);
                     return Err(());
@@ -2480,9 +2503,10 @@ impl TypeChecker {
         // 0.0.4 T08: a box cell is a storage position read by deep copy
         // (`deref`), which would fork a suspended Future frame or alias a
         // channel buffer without `split` — the same rule as struct fields.
-        // The check sees through array nesting: `deref` on a `box<[Future]>`
-        // copies every frame in the array.
-        if matches!(typed_inner.ty(), Type::Channel(_)) {
+        // The check sees through value-carrying containers: `deref` on a
+        // `box<[Future]>` copies every frame in the array, and on a
+        // `box<Result<Future, _>>` the frames inside the payload.
+        if typed_inner.ty().contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, typed_inner.span());
             return Err(());
         }
@@ -2687,8 +2711,12 @@ impl TypeChecker {
                 self.add_error(TypeckErrorKind::CannotInferArrayType, span);
                 return Err(());
             };
-            // 0.0.4 T07d: channels are non-storable.
-            if matches!(elem, Type::Channel(_)) {
+            // 0.0.4 T07d: channels are non-storable — a channel (or a
+            // value-carrying container of one, whose copied payload would
+            // alias the shared buffer) has no wholesale array consumer, so
+            // the element type is rejected here; this is the construction
+            // seal that makes the element-read routes unreachable.
+            if elem.contains_channel() {
                 self.add_error(TypeckErrorKind::ChannelNotStorable, span);
                 return Err(());
             }
@@ -2726,8 +2754,11 @@ impl TypeChecker {
         // from the first element above, so it cannot be `None` here.
         let elem = elem_ty.expect("element type was established");
         // 0.0.4 T07d: channels are non-storable — an element read deep-copies,
-        // which would fork the shared buffer silently.
-        if matches!(elem, Type::Channel(_)) {
+        // which would fork the shared buffer silently. The same holds for a
+        // container of channels (the copied payload aliases the buffer), so
+        // the element type is rejected here — the construction seal that
+        // makes the element-read routes unreachable.
+        if elem.contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, span);
             return Err(());
         }
