@@ -1,0 +1,94 @@
+// tasks.fln — the async task helpers of the 0.0.4 tour.
+//
+// Every exported function here is `pub async`: cross-module visibility
+// works for async funcs exactly as for sync ones (the caller's signature
+// wraps the return type in Future<T> — F1), and the module system still
+// uses `import` + dotted paths (0.0.3 V05, with `async`/`await`/`channel`
+// legal as module/member names — F7's reserved-word carve-out).
+
+import std.async;
+import std.collection.range;
+import std.io;
+
+// An async fn: the caller gets `Future<int>` and drives it with `await`.
+pub async func add(a: int, b: int): int {
+    a + b
+}
+
+// Round-robin demo: `yield_now` parks the task so its sibling steps.
+pub async func beat(label: string, steps: int) {
+    for i in range(steps) {
+        std.io.println(label, " tick ", i as string);
+        std.async.yield_now();
+    }
+}
+
+// Timer demo: `sleep(ms)` needs no explicit `await` — in an async body the
+// compiler lowers it to `Call; Suspend` (F6). Ready tasks always beat due
+// timers, so whichever deadline is earlier wakes first.
+pub async func sleeper(label: string, ms: int) {
+    std.io.sleep(ms);
+    std.io.println(label, " woke after ", ms as string, "ms");
+}
+
+// Rendezvous side: three Copy payloads handed over directly (cap 0).
+pub async func ping(ch: channel<int>) {
+    n = 0;
+    while n < 3 {
+        ch.send(n);
+        n = n + 1;
+    }
+}
+
+// Rendezvous counterpart: each `recv` parks until the ping's send hands
+// the value over.
+pub async func pong(peer: channel<int>) {
+    got = 0;
+    while got < 3 {
+        v = peer.recv();
+        std.io.println("pong got ", v as string);
+        got = got + 1;
+    }
+}
+
+// Bounded buffer (cap 2) with owned payloads: the first two `send`s fit
+// and print immediately; the third parks until the consumer drains a slot.
+// Strings are owned, so every send takes an explicit `move` (D6).
+pub async func producer(out: channel<string>) {
+    a = "hello";
+    out.send(move a);
+    std.io.println("producer: hello buffered");
+    b = "world";
+    out.send(move b);
+    std.io.println("producer: world buffered");
+    c = "third";
+    out.send(move c);
+    std.io.println("producer: third sent (a slot freed)");
+}
+
+pub async func consumer(inp: channel<string>) {
+    got = 0;
+    while got < 3 {
+        s = inp.recv();
+        std.io.println("consumer got ", s);
+        got = got + 1;
+    }
+}
+
+// The innermost batch of the nested-composition demo.
+pub async func quick() {
+    std.io.println("quick worker done");
+}
+
+// A *synchronous* helper: `run` joins in place before returning, so every
+// spawned task has finished by the next line (even though, once called from
+// an async body, this frame inherits the task's future context).
+pub func spawn_batch() {
+    std.async.run([quick()]);
+}
+
+// An awaited body that spawns through its sync helper (F6's nested run).
+pub async func orchestrator() {
+    spawn_batch();
+    std.io.println("orchestrator: batch joined");
+}

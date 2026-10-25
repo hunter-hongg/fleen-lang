@@ -1,0 +1,19 @@
+// `flint test` fixture (0.0.4): a channel rendezvous task — the F10
+// concurrency-matrix shape the T09 flint e2e pins for project mode.
+import std.async;
+import std.concurrent;
+import std.io;
+async func ping(ch: channel<int>) {
+    ch.send(1);
+}
+
+async func pong(peer: channel<int>) {
+    n = peer.recv();
+    std.io.println("got ", n as string);
+}
+
+func main() {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([ping(move ch), pong(move peer)]);
+}

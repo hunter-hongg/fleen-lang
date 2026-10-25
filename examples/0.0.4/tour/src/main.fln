@@ -1,0 +1,85 @@
+// 0.0.4 "Moving Parts" feature tour — async/await + channels.
+//
+// Run (module system + std, one command):
+//     cargo fln --project examples/0.0.4/tour
+//   or flint:   cd examples/0.0.4/tour && cargo run -q -p flint-cli -- run
+//   and:        cargo run -q -p flint-cli -- test      (tests/ping.fln)
+//
+// Features loaded by this program:
+//   async fn (F1)       async funcs across modules, callers see Future<T>
+//   await (F2)          postfix `e await`, composes with `?` as `e await?`
+//   Future<T> (F3)      non-Copy coroutine value, movable into run()
+//   executor (F6)       std.async.run / yield_now / std.io.sleep timers,
+//                       top-level bare await, sync-helper in-place join
+//   channels (F9)       channel<T>(cap) constructor, send/recv, split,
+//                       rendezvous + bounded buffer, owned payload move
+//
+// The static boundary rules (F8: no `ref` in async, no global writes in
+// async, move-only Future/channel, explicit payload move) are *rejections* —
+// they have no runtime demo; see docs/0.0.4/TICKETS.md and the e2e invalid
+// fixtures for the error shapes.
+
+import pipeline;
+import std.async;
+import std.concurrent;
+import std.io;
+import tasks;
+
+// ── `await?` composition (F2): drive the future, then propagate its Err ──
+func halve(n: int): Result<int, string> {
+    v = pipeline.half(n) await?;
+    Ok(v)
+}
+
+func main() {
+    // 1. async fn + await: an async call yields Future<int>; `await` drives
+    //    it to completion and hands back the payload.
+    std.io.println("== 1. async fn + await ==");
+    f: Future<int> = tasks.add(20, 22);
+    std.io.println("add(20, 22) = ", (f await) as string);
+
+    // 2. await + ?: `pipeline.half(n) await?` is `(half(n) await)?` — the
+    //    Err path propagates out of `halve`, the Ok path continues.
+    std.io.println("== 2. await? over a Result ==");
+    good = halve(10);
+    choose move good {
+        when Ok(v) { std.io.println("half(10) = ", v as string); }
+        when Err(e) { std.io.println("unexpected: ", e); }
+    };
+    bad = halve(0);
+    choose move bad {
+        when Ok(v) { std.io.println("unexpected: ", v as string); }
+        when Err(e) { std.io.println("caught: ", e); }
+    };
+
+    // 3. the cooperative executor: two tasks interleave at their yields
+    //    (round-robin), then two sleepers wake in deadline order — the
+    //    earlier-enlisted `slow` timer does not starve `fast`.
+    std.io.println("== 3. round-robin + timers ==");
+    std.async.run([tasks.beat("A", 2), tasks.beat("B", 2)]);
+    std.async.run([tasks.sleeper("slow", 30), tasks.sleeper("fast", 5)]);
+
+    // 4. rendezvous channel (cap 0): a `send` parks until the receiver
+    //    takes the value directly. The two tasks share one buffer through
+    //    `split` — the one explicit fork point (T07d).
+    std.io.println("== 4. rendezvous channel ==");
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([tasks.ping(move ch), tasks.pong(move peer)]);
+
+    // 5. bounded buffer + owned payload move (D6): the first two sends fit
+    //    in the cap-2 buffer and print immediately; the third parks until
+    //    the consumer drains a slot. Strings are owned — the send needs an
+    //    explicit `move`.
+    std.io.println("== 5. buffered channel + move ==");
+    buf = channel<string>(2);
+    bpeer = std.concurrent.split(buf);
+    std.async.run([tasks.producer(move buf), tasks.consumer(move bpeer)]);
+
+    // 6. nested composition: an awaited async body whose sync helper spawns
+    //    its own batch (the in-place join), then a second run level.
+    std.io.println("== 6. nested run + sync helper ==");
+    std.async.run([tasks.orchestrator()]);
+
+    std.io.println("tour done");
+}

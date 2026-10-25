@@ -1,0 +1,8 @@
+# example project manifest (0.0.4 `flint`).
+# A project name is the module root of its crate, so it must be a valid
+# identifier (no hyphens) — "tour" qualifies.
+[package]
+name = "tour"
+version = "0.0.4"
+
+[dependencies]

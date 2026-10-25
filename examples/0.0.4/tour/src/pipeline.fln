@@ -1,0 +1,7 @@
+// pipeline.fln — async funcs that return `Result`, feeding the `await?`
+// composition demo. An async fn's own signature stays `Result<...>`: the
+// Future<T> wrapping is what the *caller* sees (F1), so `?` operates on the
+// awaited payload exactly as in synchronous code.
+pub async func half(n: int): Result<int, string> {
+    if n == 0 { Err("cannot halve zero") } else { Ok(n / 2) }
+}
