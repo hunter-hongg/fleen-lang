@@ -1,0 +1,5 @@
+// 0.0.5 ptr/addr/unsafe/trusted keywords test (lexer only - not a valid program)
+// This file tests that `ptr` / `addr` / `unsafe` / `trusted` are recognized by
+// the lexer as reserved words. It is NOT expected to parse successfully
+// (parser wiring lands with T02); reserving a word never fails tokenization.
+ptr addr unsafe trusted

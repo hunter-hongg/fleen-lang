@@ -152,6 +152,23 @@ pub enum TokenKind {
     /// `channel` keyword (0.0.4: first-class channel type constructor)
     Channel,
 
+    // Pointer / unsafe keywords (0.0.5) — reserved here only; the parser wires
+    // `ptr<T>` (T02), the `addr` unary prefix (T02) and the `unsafe`/`trusted`
+    // `func` modifiers (T02/T03), so misuse surfaces at the generic
+    // statement/expr entry guards until then.
+    // T02 memo: wiring `addr` as a unary prefix must also add it to
+    // `can_start_stmt` (parser/asi.rs, alongside `box`/`deref`/`move`/`clone`)
+    // and update the ASI `can_start_stmt_table` test — otherwise `addr x`
+    // after a newline is rejected at the statement entry instead of parsing.
+    /// `ptr` keyword (0.0.5: raw pointer type constructor `ptr<T>`; no bare-`ptr` type)
+    Ptr,
+    /// `addr` keyword (0.0.5: unsafe prefix operator taking the address of a place)
+    Addr,
+    /// `unsafe` keyword (0.0.5: `func` modifier whose body may contain unsafe ops)
+    Unsafe,
+    /// `trusted` keyword (0.0.5: `func` modifier, author-attested safe wrapper)
+    Trusted,
+
     // Literals
     /// Integer literal (e.g., `42`)
     IntLit(i64),
@@ -266,6 +283,10 @@ impl TokenKind {
                 | TokenKind::Async
                 | TokenKind::Await
                 | TokenKind::Channel
+                | TokenKind::Ptr
+                | TokenKind::Addr
+                | TokenKind::Unsafe
+                | TokenKind::Trusted
         )
     }
 
@@ -306,6 +327,10 @@ impl TokenKind {
             TokenKind::Async => "async",
             TokenKind::Await => "await",
             TokenKind::Channel => "channel",
+            TokenKind::Ptr => "ptr",
+            TokenKind::Addr => "addr",
+            TokenKind::Unsafe => "unsafe",
+            TokenKind::Trusted => "trusted",
             _ => return None,
         })
     }

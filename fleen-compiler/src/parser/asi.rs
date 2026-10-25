@@ -395,6 +395,14 @@ mod tests {
             // it opens an `async func` declaration (F1).
             TokenKind::Await,
             TokenKind::Channel,
+            // 0.0.5: `ptr` / `unsafe` / `trusted` are non-expression-starting
+            // reserved words (same guard path as `await` / `channel`); `addr`
+            // is a unary prefix, but until T02 wires it into `can_start_stmt`
+            // (alongside `box` / `deref` / `move` / `clone`) it stays here.
+            TokenKind::Ptr,
+            TokenKind::Addr,
+            TokenKind::Unsafe,
+            TokenKind::Trusted,
         ];
         for k in no {
             assert!(!can_start_stmt(k), "{k} should not start a stmt");

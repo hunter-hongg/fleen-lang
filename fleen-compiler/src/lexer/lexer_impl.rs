@@ -315,6 +315,10 @@ impl<'a> Lexer<'a> {
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
             "channel" => TokenKind::Channel,
+            "ptr" => TokenKind::Ptr,
+            "addr" => TokenKind::Addr,
+            "unsafe" => TokenKind::Unsafe,
+            "trusted" => TokenKind::Trusted,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -561,6 +565,47 @@ mod tests {
         assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "awaiting"));
         assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "channel_id"));
         assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "awaitable"));
+    }
+
+    #[test]
+    fn tokenize_ptr_keywords() {
+        // 0.0.5: `ptr` / `addr` / `unsafe` / `trusted` are reserved words.
+        // They no longer lex as identifiers.
+        let tokens = tokenize("ptr addr unsafe trusted").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Ptr);
+        assert_eq!(tokens[1].kind, TokenKind::Addr);
+        assert_eq!(tokens[2].kind, TokenKind::Unsafe);
+        assert_eq!(tokens[3].kind, TokenKind::Trusted);
+        assert_eq!(TokenKind::Ptr.keyword_str(), Some("ptr"));
+        assert_eq!(TokenKind::Addr.keyword_str(), Some("addr"));
+        assert_eq!(TokenKind::Unsafe.keyword_str(), Some("unsafe"));
+        assert_eq!(TokenKind::Trusted.keyword_str(), Some("trusted"));
+        // Metadata stays consistent with the reserved-word spelling.
+        assert!(TokenKind::Ptr.is_keyword());
+        assert!(TokenKind::Addr.is_keyword());
+        assert!(TokenKind::Unsafe.is_keyword());
+        assert!(TokenKind::Trusted.is_keyword());
+        assert_eq!(TokenKind::Ptr.to_string(), "ptr");
+        assert_eq!(TokenKind::Addr.to_string(), "addr");
+        assert_eq!(TokenKind::Unsafe.to_string(), "unsafe");
+        assert_eq!(TokenKind::Trusted.to_string(), "trusted");
+    }
+
+    #[test]
+    fn tokenize_ptr_keyword_prefix_identifiers() {
+        // 0.0.5 keywords must keep from swallowing longer identifiers that
+        // merely start with them (`ptr_count` etc. stay identifiers), and
+        // keyword spellings are case-sensitive (`Ptr` stays an identifier,
+        // like `Result` vs `result`).
+        let tokens = tokenize("ptrx addr_of unsafe_id trusted1 Ptr ADDR Unsafe Trusted").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "ptrx"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "addr_of"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "unsafe_id"));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "trusted1"));
+        assert!(matches!(tokens[4].kind, TokenKind::Ident(ref s) if s == "Ptr"));
+        assert!(matches!(tokens[5].kind, TokenKind::Ident(ref s) if s == "ADDR"));
+        assert!(matches!(tokens[6].kind, TokenKind::Ident(ref s) if s == "Unsafe"));
+        assert!(matches!(tokens[7].kind, TokenKind::Ident(ref s) if s == "Trusted"));
     }
 
     #[test]

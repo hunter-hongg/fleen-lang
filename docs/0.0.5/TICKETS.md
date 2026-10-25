@@ -38,6 +38,11 @@ respectively — `addr` joins the unary prefix group (`box deref move clone addr
 - [ ] Type rules: `addr place : ptr<T>`; read/write through ptr typed `T`
 - [ ] `ptr<T>` non-Copy (D1); `clone p` → `CloneOfPointer`
 - [ ] `Func` gains `is_unsafe` / `is_trusted` (parse-level, consumed by T03)
+- [ ] ASI: adding `addr` to the unary prefix group requires adding
+      `TokenKind::Addr` to `can_start_stmt` (parser/asi.rs, alongside
+      `box`/`deref`/`move`/`clone`) and updating the
+      `can_start_stmt_table` test — otherwise `addr x` on a fresh line is
+      rejected at the statement-entry guard instead of parsing
 - [ ] Tests: `tests/parser` + `tests/typeck` ptr suites
 - [ ] Update DESIGN §10 (`ptr` / `addr` lines) **deferred to T10** — record
       here, don't edit early
