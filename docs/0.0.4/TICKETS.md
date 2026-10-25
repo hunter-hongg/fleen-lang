@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T09 implemented; T10 planned.**
+> **Status: COMPLETE — T01–T10 implemented (T10 = docs & version sync).**
 
 ---
 
@@ -696,10 +696,22 @@ gained its missing trailing newline.
 
 ## T10 — Docs & version sync
 
-- [ ] DESIGN.md async/await + channels sections; §17 matrix; §18 roadmap 0.0.4 ✅
-- [ ] BYTECODE.md async opcodes + `Future`/`Channel` value tags + version 4 tables
-- [ ] SYNTAX.ebnf bump; CHANGELOG 0.0.4 + reserved-word breaking note
-- [ ] version `0.0.3` → `0.0.4`
+- [x] DESIGN.md async/await + channels sections (§2 keywords, §6 async/await,
+      §9.6/§9.7 `Future<T>` / `channel<T>`, §10.6 borrow-free boundary); §17 matrix; §18 roadmap 0.0.4 ✅
+- [x] BYTECODE.md async opcodes + `Future`/`Channel` value tags + version 4 tables
+      (§3.2 values, §4.2 allocation, §5.15, §6.10, §8 Δdepth + gate, §9/§10)
+- [x] SYNTAX.ebnf bump (v0.0.4; `channel_type` + `channel_ctor` — async/await/Future
+      already landed with T02); CHANGELOG 0.0.4 + reserved-word breaking note; README headline
+- [x] version `0.0.3` → `0.0.4` (workspace `Cargo.toml`)
+
+Notes:
+- All numeric claims were verified against the source before writing (LESSON L3):
+  opcodes 0xC0–0xC7 (`codegen/bytecode.rs`), `MODULE_VERSION = 4` and
+  `READ_VERSIONS = {1,2,3,4}` (`codegen/mod.rs`, `codegen/flnc.rs`),
+  `V4_OPCODE_BASE = 0xC0` and the verify Δdepth table (`fleen-verify/src/verify.rs`).
+- The 0.0.4 doc sections are placed **inside the existing section numbers** (§2/§6/§9/§10)
+  instead of renumbering §11+ — historical docs (0.0.1–0.0.3 plans, release notes) cite
+  DESIGN §15/§17/§18, and a renumber would stale-ify those citations for no reader gain.
 
 ---
 

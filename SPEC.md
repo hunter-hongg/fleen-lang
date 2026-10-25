@@ -527,6 +527,14 @@ bytecode v3, module system, std, iterator helpers, flint) are implemented and gr
 V09 integrated and gated the full matrix; V10 synced the docs and bumped the version (release
 publication — tag/archives — is separate and pending).**
 
+**0.0.4 goal: cooperative concurrency — `async` / `await` over `Future<T>` coroutine frames,
+the single-threaded cooperative executor, and message-passing `channel<T>` with the
+borrow-free boundary (plan in `docs/0.0.4/PLAN.md`, decisions D1–D6 settled, tickets in
+`docs/0.0.4/TICKETS.md`). T01–T09 are implemented and green (keywords, async frontend,
+boundary rules, lowering, opcodes 0xC0–0xC7, executor, channels, hardening, integration
+fixtures); T10 synced the docs and bumped the version to 0.0.4 (release publication —
+tag/archives — is separate and not yet performed).**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -543,6 +551,8 @@ unit     // empty-value type
 [T]      // array (0.0.3, owned even for [int]) | deeply covered in "Aggregation Types" below
 Range    // builtin Copy type, start..end end-exclusive (0.0.3 V04)
 MyStruct // a user-defined struct name is a type (0.0.3 V02)
+Future<T>  // a suspended async coroutine, non-Copy, driven once by `e await` (0.0.4)
+channel<T> // message-passing channel, non-Copy and move-only (0.0.4)
 ```
 
 ### Declarations
@@ -637,6 +647,42 @@ import std.collection.range;   // the Range constructors: range(n) / range_from(
 for i in range_from(0, 10) { std.io.println(i as string); };   // 0..10, end-exclusive
 ```
 
+### Async / await and Channels (0.0.4)
+
+```fleen
+// async func: the caller sees Future<T>; the body still returns T
+async func half(n: int): Result<int, string> {
+    if n == 0 { Err("cannot halve 0") } else { Ok(n / 2) }
+}
+
+r = half(10) await;               // postfix `e await` drives the future (Future<T> → T)
+// `e await?` composes with ?: drive, then propagate the Err — inside a
+// Result-returning function:
+func halve(n: int): Result<int, string> {
+    v = half(n) await?;
+    Ok(v)
+}
+
+std.async.run([task_a(), task_b()]);   // cooperative executor: spawn + join (round-robin);
+                                       // the tasks are [Future<unit>]
+std.io.sleep(5);                  // awaitable timer (parks the task inside an async body)
+
+ch = channel<string>(4);          // bounded buffer; channel<T>(0) is a rendezvous channel
+peer = std.concurrent.split(ch);  // the one explicit fork point (a second handle, same buffer)
+async func producer(c: channel<string>) { c.send("hi"); }   // fresh values transfer naturally
+async func consumer(c: channel<string>) {
+    s = c.recv();                 // receiver takes ownership of the payload
+    std.io.println(s);
+}
+std.async.run([producer(move ch), consumer(move peer)]);    // move a handle into each task
+std.async.run([producer(move ch), consumer(move peer)]);    // move a handle into each task
+```
+
+> **Ownership boundary (0.0.4)**: `async` / `await` / `channel` are reserved words; the async
+> world is borrow-free — no `ref` crosses an await/task/channel boundary and async bodies may
+> read but never write globals; channels are move-only (`clone ch` is an error) and payloads
+> travel by ownership `move`. See `docs/DESIGN.md` §6/§9.6/§9.7/§10.6 and `docs/0.0.4/PLAN.md` D1–D6.
+
 ### Control Flow
 
 > **Note on semicolons**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 ASI (automatic semicolon insertion) is in place,
@@ -723,7 +769,7 @@ and
 as     (type cast, 0.0.2: binds tighter than binary operators, looser than unary prefixes, same as Rust)
 ?      (postfix, 0.0.2)
 box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2)
-() [i] .f ?   (postfix suffixes: call, index, field access (0.0.3), and `?` — bind tightest, chain left-to-right)
+() [i] .f await ?   (postfix suffixes: call, index, field access (0.0.3), `await` (0.0.4), and `?` — bind tightest, chain left-to-right)
 ;       (explicit semicolon: required in 0.0.1, optional from 0.0.2)
 ```
 

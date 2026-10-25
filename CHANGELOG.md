@@ -3,6 +3,66 @@
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and version semantics follow [SPEC.md](SPEC.md) §13 (`0.0.x` = early development, unstable API).
 
+## 0.0.4 — Patient Ants (2026-10-25) 🐜
+
+The release that lets tasks talk: cooperative `async` / `await` over `Future<T>` coroutine
+frames, a single-threaded cooperative executor, and message-passing `channel<T>` — with an
+ownership boundary (async is borrow-free) that keeps the 0.0.2 model intact without a borrow
+checker. Planning and design decisions: [docs/0.0.4/PLAN.md](docs/0.0.4/PLAN.md)
+(D1–D6); implementation tickets: [docs/0.0.4/TICKETS.md](docs/0.0.4/TICKETS.md) (T01–T10 all landed).
+
+### Language Features
+
+- **`async` functions + `await`** (from T02/T05): `async func f(...): T` returns `Future<T>`
+  to the caller while the body still returns `T`; the future is a heap coroutine frame
+  (D1 — locals + saved operand stack + resume PC) driven by the postfix operator
+  `e await` (`Future<T>` → `T`), composable with `?` as `e await?`. `Future<T>` is non-Copy,
+  movable, and driven once; `await` on a non-future is `AwaitNonFuture`
+- **Cooperative executor** (from T06): a single-threaded round-robin scheduler in the VM.
+  `std.async.run(tasks: [Future<unit>])` spawns and joins several roots (re-entrant inside
+  async bodies); `std.async.yield_now()` is an explicit cooperative yield; `std.io.sleep(n)`
+  is an awaitable timer (ready tasks always beat due timers, and timer wake order is
+  deterministic). A top-level await in `main` boots a blocking drive, so a normal program
+  "just works"
+- **Channels** (from T07): `channel<T>(cap)` is a reserved-word constructor — `cap = 0` is a
+  rendezvous channel (direct handoff), `cap > 0` a bounded buffer. `c.send(v)` / `c.recv()`
+  suspend on full/empty; payloads travel by **ownership move** (Copy payloads copy). Channels
+  are non-Copy and move-only (`clone ch` is rejected by `ChannelNotClonable`);
+  `std.concurrent.split(ch)` is the **one explicit fork point** giving a second handle to the
+  same buffer. There is no `close` / `select` / `for`-over-channel in 0.0.4 (deferred to
+  0.1.0); a run where every remaining task is blocked on channels is a `ChannelDeadlock`
+  runtime error
+- **Static concurrency boundary** (from T03/T07, D2/D4/D5): an `async func` cannot take a
+  `ref` parameter or move a borrow across any await/task/channel boundary (`RefInAsync`,
+  `ChannelNotBorrowable`) — the entire `Send` rule is one line; async bodies may read globals
+  (auto deep copy) but never write them (`AsyncGlobalWrite`); an owned variable handed to
+  `send` needs an explicit `move`/`clone` (D6, `OwnedArgRequiresMove` with a channel branch)
+
+### Toolchain
+
+- **Bytecode v4** (T05/T07): async/channel instructions in the reserved 0xC0+ region —
+  `AsyncStart` / `Suspend` / `Poll` / `Await` (0xC0–0xC3) and `ChannelNew` / `ChannelSend` /
+  `ChannelRecv` / `ChannelSplit` (0xC4–0xC7); `Value::Future` / `Value::Channel` join the
+  value model as **non-serialized** runtime variants; `.flnc` version writes `4`, readers
+  accept `{1, 2, 3, 4}` with **zero layout changes** (no new table) — v1/v2/v3 `.flnc`
+  fixtures still decode, verify and execute unchanged, and a v4 opcode in a v1–v3 module is
+  rejected (`BadOpcode`). Specification: [docs/BYTECODE.md](docs/BYTECODE.md) §5.15
+- **std additions**: `std.async` (`run` / `yield_now`) and `std.concurrent` (`split`) —
+  compiler/VM primitives documented in `std/async.fln` / `std/concurrent.fln`;
+  `std.io.sleep` joins `std.io`
+- **Verify** gains the Δdepth table for the eight new instructions and the v4 opcode gate
+- **Project demo**: `examples/0.0.4/tour` — a flint project exercising async fn, await,
+  the executor, and both channel shapes end to end
+
+### ⚠️ Breaking
+
+- **`async`, `await`, and `channel` become reserved words**: 0.0.3 programs using them as
+  identifiers must rename them. Nothing else breaks — `Future` stays a plain identifier
+  (only the `Future<T>` type form is new), Copy/owned semantics are unchanged, and every
+  0.0.3 program compiles as-is modulo these three renames
+- `.flnc` `version` is now written as `4` (0.0.3 files with `version = 3` remain readable —
+  the format has no layout change)
+
 ## 0.0.3 — Busy Beaver (2026-10-18) 🦫
 
 The release that gives values shape: aggregation types (`struct`, `[T]`), the `for` loop,

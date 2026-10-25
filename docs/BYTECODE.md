@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.3
+# Fleen Bytecode Specification v0.0.4
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -10,6 +10,12 @@
 > **v0.0.3 additions**: aggregation instructions — struct (0xB0–0xB3), array (0xB4–0xB8),
 > and Range/iteration (0xB9–0xBB). `Value::Struct` / `Value::Arr` / `Value::Range` join the
 > value model. Design decisions are in `docs/0.0.3/PLAN.md`.
+> **v0.0.4 additions**: async / channel instructions (0xC0–0xC7) — coroutine-frame futures
+> (`AsyncStart` / `Suspend` / `Poll` / `Await`) and message-passing channels
+> (`ChannelNew` / `ChannelSend` / `ChannelRecv` / `ChannelSplit`). `Value::Future` /
+> `Value::Channel` join the value model as non-serialized runtime variants, and the
+> `.flnc` version bumps to 4 (no layout change — no new tables). Design decisions are
+> in `docs/0.0.4/PLAN.md`.
 
 ---
 
@@ -44,11 +50,11 @@ Rules:
 
 ```rust
 pub struct Module {
-    pub version: u16,          // bytecode version: 0.0.3 writes 3, readers accept {1, 2, 3}
+    pub version: u16,          // bytecode version: 0.0.4 writes 4, readers accept {1, 2, 3, 4}
     pub constants: Vec<Const>, // constant pool
     pub functions: Vec<Func>,  // function table
     pub globals: Vec<Global>,  // global variable table
-    pub struct_defs: Vec<StructDef>, // struct field table (0.0.3, version 3 only, §2)
+    pub struct_defs: Vec<StructDef>, // struct field table (0.0.3, present when version >= 3, §2)
     pub entry: FuncId,         // entry function: usually main; synthesized __init__ when globals exist
 }
 ```
@@ -211,6 +217,8 @@ pub enum Value {
     Struct(Box<[Value]>),          // 0.0.3: struct fields in declaration order (owned/ Copy per is_copy)
     Arr(Box<[Value]>),             // 0.0.3: array elements (owned for every T)
     Range { start: i64, end: i64 },// 0.0.3: builtin int interval (Copy)
+    Future(Box<FutureFrame>),      // 0.0.4: suspendable coroutine frame (Future<T>; non-Copy, not serialized)
+    Channel(Rc<RefCell<ChannelInner>>), // 0.0.4: channel handle — handles share one buffer (Rc is the semantics, not a shortcut)
     Unit,           // empty value, placeholder
     Func(FuncId),   // first-class function reference
 }
@@ -231,6 +239,15 @@ Rules:
 - `Ref` handles cannot escape: they are only produced by `MakeRefLocal` during argument preparation, are read-only, cannot be stored,
   and die when the call ends (out-of-range read → `RuntimeError::BorrowOutOfRange`, defensive)
 - `Value` is never serialized: the constant pool has no `Ref` / `Boxed` / `Ok` / `Err` variants
+- **0.0.4**: `Future` / `Channel` are likewise **not serialized** (no `.flnc` tag, no
+  constant-pool or `FieldTypeTag` change — the disk format is untouched). `Future<T>` is
+  non-Copy: the coroutine frame moves like any owned value. A `channel<T>` handle is also
+  non-Copy and move-only (`clone` is a typeck error); two handles may only share a buffer
+  via the explicit fork point `ChannelSplit`, which is why the `Rc` inside `Value::Channel`
+  is the language semantics (single-owner channels, documented exception to SPEC §11),
+  not an implementation shortcut. Defensive runtime checks: awaiting a non-future is a
+  `FutureExpected` error, and a program whose tasks are all blocked on channels with
+  nothing runnable is `ChannelDeadlock`.
 
 > **0.0.2 decision**: 0.0.1's `Str(Rc<str>)` was a temporary decision — strings are immutable with no
 > reference-cycle risk, and `Rc`'s deterministic destruction is not GC. After introducing `move` / `clone`,
@@ -303,7 +320,10 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0xB0–0xB3  struct (0.0.3 V02, §5.12)
 0xB4–0xB8  array (0.0.3 V03, §5.13)
 0xB9–0xBB  Range / iteration (0.0.3 V04, §5.14)
-0xBC–0xFF  Reserved
+0xBC–0xBF  Reserved
+0xC0–0xC7  async / channel (0.0.4, §5.15)
+0xC8–0xDF  Reserved (0.0.4 expansion space)
+0xE0–0xFF  Reserved
 ```
 
 ---
@@ -535,6 +555,36 @@ Rules:
 - Source construction is via `std.collection.range` / `std.collection.range_from` (0.0.3 V06,
   D5): the two recognized names lower directly to `MakeRange` (the `Ok`/`Err` constructor
   mechanism), so the compiler emits `MakeRange` for them and the desugar above applies.
+
+### 5.15 async / channel (v0.0.4)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `AsyncStart` | — | 1 | `args… → f` | Head of an `async func` body: packages the parameter slots into a not-yet-started coroutine frame and delivers the `Future` value to the caller (verify treats the rest of the body as a fresh call boundary, net Δ0) |
+| `Suspend` | — | 1 | `… → …` (Δ0) | Suspension point: snapshots the running coroutine frame (locals + operand stack + resume PC), yields `Pending` to the driver, and parks the task. Emitted after each suspension source (`std.io.sleep`, `std.async.yield_now`, a channel `send`/`recv` that may block) |
+| `Poll` | — | 1 | `f → t` | Drive a `Future` to completion and leave its `T` on the stack. Same semantics as `Await` in the VM; 0.0.4 lowering emits only `Await` — `Poll` is the poll-shaped form kept for future driving styles |
+| `Await` | — | 1 | `f → t` | Drive a `Future` to completion (`F → T`); the resumed body's `Return` hands the payload back to the awaiting frame. Postfix `e await` lowers to this; `e await?` composes with the `?` propagation rules (§6.7) |
+| `ChannelNew` | — | 1 | `cap → ch` | Allocate a channel with the payload type carried in MIR only (T08 defensive backstop) — the encoded instruction has **no operand**. `cap = 0` is a rendezvous channel (direct handoff), `cap > 0` a bounded buffer |
+| `ChannelSend` | — | 1 | `ch v → unit` | Send a value through the channel; **may suspend** while the buffer is full (or, at `cap = 0`, until a receiver takes the value). The payload is moved — ownership transfers to the buffer/receiver |
+| `ChannelRecv` | — | 1 | `ch → v` | Receive a value; **may suspend** while the buffer is empty. The receiver takes ownership of the payload |
+| `ChannelSplit` | — | 1 | `ch → ch2` | The one explicit fork point (T07d): return a second independent handle to the *same* buffer. `clone` on a channel is a typeck error — this is the only way a buffer gains a second handle |
+
+Rules:
+- All eight slots sit inside the **reserved `0xBC–0xFF` region** (§4.2); no v1/v2/v3 encoding
+  changes (§10 compatibility promise)
+- `AsyncStart` is operand-less: the future value it produces owns the coroutine frame
+  (`Value::Future(Box<FutureFrame>)` — `func`, `resume_pc`, the frame's `locals`, the saved
+  `operands`, the frame `state`, and the executor's `task_id`)
+- A suspension parks a **chain** of frames (the coroutine's live call chain), not just one frame;
+  the parked sender of a rendezvous/full channel keeps owning its payload inside the channel's
+  waiting queue until a receiver takes it
+- Channel semantics: payloads travel by ownership move (Copy payloads copy); channel
+  payload kind is fixed by the first accepted value and re-checked defensively in the VM
+  (T08 backstop) — static uniformity is typeck's rule
+- Scheduling is the VM's **single-threaded cooperative executor**: a task runs until a
+  suspension source yields `Pending`; ready tasks always run before timer-parked ones
+  (wake order is deterministic); when no task is runnable and all remaining ones are
+  blocked on channels, the run fails with `ChannelDeadlock` (there is no `close` in 0.0.4)
 
 ---
 
@@ -799,6 +849,59 @@ Unit                          ; for's value is unit
   `ExprFor` / `ExprForHir` node so Resolve/Typeck see the loop structure (no phase is skipped,
   SPEC §6)
 
+### 6.10 async / await / channel (v0.0.4)
+
+```fleen
+async func producer(c: channel<string>) {
+    c.send("hi");
+}
+async func consumer(c: channel<string>): int {
+    s = c.recv();
+    std.str.len(s)
+}
+
+ch = channel<string>(4);
+peer = std.concurrent.split(ch);
+std.async.run([producer(move ch), consumer(move peer)]);
+```
+
+```text
+; channel construction / fork (channel<T>(cap) and split are real HIR nodes)
+Const    4            ; capacity
+ChannelNew            ; cap → ch
+; std.concurrent.split(ch) lowers to <eval ch>; ChannelSplit — ch → ch2
+
+; producer's body (the function body's first instruction is AsyncStart):
+L_body:
+AsyncStart            ; coroutine frame → f (delivered to the caller)
+<eval c>              ; LoadLocal 0
+<eval "hi">           ; Const <s>
+ChannelSend           ; ch v → unit (followed by Suspend — send may block)
+Unit
+Return
+
+; driving: `f await` lowers to <eval f>; Await (f → t); `e await?` reuses
+; the §6.7 ? machinery on the awaited value; a bare `await;` statement
+; discards the payload with Pop. `std.async.run(...)` is a VM builtin whose
+; call hands the futures to the cooperative scheduler and joins.
+```
+
+Rules:
+- `async func f(...)` compiles to a **normal function whose body starts with `AsyncStart`**:
+  the call itself does not run the body — it packages the arguments into a not-yet-started
+  coroutine frame and returns the `Future`; the caller sees `Future<T>` while the body still
+  returns `T`
+- `c.send(v)` lowers to `<eval c>; <eval v>; ChannelSend`; `c.recv()` to `<eval c>; ChannelRecv`;
+  `std.concurrent.split(ch)` to `<eval ch>; ChannelSplit` — all recognized in typeck (T07a)
+  and lowered as first-class MIR instructions, never as ordinary calls
+- Suspension sources (`std.io.sleep`, `std.async.yield_now`, a blocking `ChannelSend` /
+  `ChannelRecv`) lower to the call followed by `Suspend` — the compiler emits the suspension
+  point, the executor decides whether the task actually parks
+- The channel payload move is a typeck rule (D6): an owned variable handed to `send` requires
+  an explicit `move`/`clone` (the `OwnedArgRequiresMove` hint, with a channel branch naming
+  `move` / `std.concurrent.split`), and a `ref` payload is rejected outright
+  (`ChannelNotBorrowable`) — no bytecode-level check needed
+
 ---
 
 ## 7. Complete Example
@@ -873,10 +976,10 @@ Constant pool:
 - [ ] Every function has `locals >= params`, and all `LoadLocal` / `StoreLocal` / `BindMatch` /
       `MakeRefLocal` / `MoveLocal` / `CloneLocal` slot operands are < `locals`;
       `CloneGlobal`'s gid is within the global table's range (0.0.2 U07)
-- [ ] **v2/v3 instructions must not appear in a lower-version module**: all v1 opcodes are < 0x80,
-      all v2 opcodes are in 0x80–0xAF, and all v3 opcodes are ≥ 0xB0 (§4.2), so range comparisons
-      suffice (verify's `V2OpcodeInV1Module` and the v3 gate); a v3 opcode in a v2 module →
-      `BadOpcode`
+- [ ] **v2/v3/v4 instructions must not appear in a lower-version module**: all v1 opcodes are < 0x80,
+      all v2 opcodes are in 0x80–0xAF, all v3 opcodes are ≥ 0xB0, and all v4 opcodes are ≥ 0xC0 (§4.2),
+      so range comparisons suffice (verify's `V2OpcodeInV1Module` and the v3/v4 gates); a v3 opcode
+      in a v2 module — or a v4 opcode in any v1–v3 module — → `BadOpcode`
 - [ ] **`StructNew(id)` indexes `struct_defs`** and carries exactly `field_types.len()` values;
       `StructIndexOutOfRange` otherwise (0.0.3 V02)
 
@@ -911,6 +1014,13 @@ The stack-depth analysis is based on a static table (`n` is the operand count):
 | `ArrGet` | −1 (`a i → v`) | 2 |
 | `ArrSetLocal` / `ArrSetGlobal` | −2 (−1 value, −1 index) | 2 |
 | `MakeRange` | −1 | 2 |
+| `AsyncStart` | 0 (call boundary — the body is verified as a fresh call) | 0 |
+| `Suspend` | 0 | 0 |
+| `Poll` / `Await` | 0 (`f → t`) | 1 |
+| `ChannelNew` | +1 (`cap → ch`) | 1 |
+| `ChannelSend` | −2 (`ch v → unit`) | 2 |
+| `ChannelRecv` | +1 (`ch → v`) | 1 |
+| `ChannelSplit` | 0 (`ch → ch2`) | 1 |
 | `Return` | treated as a path terminator | 1 (the return value is on the stack top) |
 
 > **U07 erratum**: `AllocBox`'s net effect is **0** (`v → b`: the value is replaced by the box),
@@ -937,13 +1047,16 @@ Rules:
 0.0.2 makes **zero layout changes**: `version` is bumped to `2`, readers accept `{1, 2}`; `span_map` is populated from 0.0.2 on (§2).
 0.0.3 (V02) writes `version = 3`, readers accept `{1, 2, 3}`; it appends **one** new table
 (`struct_defs`) at the end — the field order and widths of every existing table are unchanged.
+0.0.4 writes `version = 4`, readers accept `{1, 2, 3, 4}`; it makes **zero layout changes** —
+the new async/channel instructions live inside function bodies and `Value::Future` /
+`Value::Channel` are not serialized, so no new table and no field change is needed.
 
 ### File Header
 
 | Field | Width | Value |
 |------|------|-----|
 | magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
-| version | u16 | bytecode version: the 0.0.3 compiler writes `3`, readers accept `{1, 2, 3}` |
+| version | u16 | bytecode version: the 0.0.4 compiler writes `4`, readers accept `{1, 2, 3, 4}` |
 
 ### Constant Pool
 
@@ -1002,7 +1115,7 @@ Rules:
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2, 3}` (from 0.0.3 on); v3 changes none of the existing tables — it only appends `struct_defs`.
+- `version` accepts `{1, 2, 3, 4}` (from 0.0.4 on); v3 appends `struct_defs`; v4 changes no table.
 
 ---
 
@@ -1013,6 +1126,7 @@ Rules:
 | 1 | 0.0.1 | The instruction set defined in this document |
 | 2 | 0.0.2 | + ownership instructions `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal` (0x80–0x83), `DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal` (0x90–0x93), Result instructions (0xA0–0xA4), `ToStr` (0xA5, `as` conversion); `span_map` starts being populated (§5.9–5.11, §2) |
 | 3 | 0.0.3 | + aggregation instructions: `StructNew`/`GetField`/`SetFieldLocal`/`SetFieldGlobal` (0xB0–0xB3), `ArrNew`/`ArrLen`/`ArrGet`/`ArrSetLocal`/`ArrSetGlobal` (0xB4–0xB8), `MakeRange`/`RangeStart`/`RangeEnd` (0xB9–0xBB); `Struct`/`Arr`/`Range` values; the appended `struct_defs` table (§2, §9) |
+| 4 | 0.0.4 | + async / channel instructions: `AsyncStart`/`Suspend`/`Poll`/`Await` (0xC0–0xC3), `ChannelNew`/`ChannelSend`/`ChannelRecv`/`ChannelSplit` (0xC4–0xC7); `Future`/`Channel` runtime values (not serialized); **zero layout changes** — no new table (§5.15) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

@@ -16,9 +16,13 @@
 (* part of the .fln grammar).                   *)
 (* New in 0.0.4: async / await (T02): the       *)
 (* `async` modifier on func_decl, the postfix   *)
-(* `await` operator, and the `Future<T>` type.  *)
-(* (VM coroutine frames, channels, and the      *)
-(* executor land in T04-T10.)                   *)
+(* `await` operator, and the `Future<T>` type;  *)
+(* channels (T07): the reserved word `channel`, *)
+(* the `channel<T>` type, and the               *)
+(* `channel<T>(capacity)` constructor.          *)
+(* (`async` / `await` / `channel` are reserved  *)
+(* words — a 0.0.3 program using them as        *)
+(* identifiers must rename.)                    *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -79,6 +83,7 @@ type            = base_type
                 | result_type
                 | func_type
                 | future_type
+                | channel_type
                 | named_type ;
 
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
@@ -98,6 +103,11 @@ result_type     = "Result" , "<" , type , "," , type , ">" ;
    `Future` is not a reserved word; a bare `Future` stays a named_type
    (a struct named Future). Only `Future<T>` is recognized in type position. *)
 future_type     = "Future" , "<" , type , ">" ;
+
+(* 0.0.4 T07: `channel<T>` — a first-class message-passing channel type.
+   `channel` IS a reserved word (unlike `Future`): it has both a type form
+   and a constructor form, so it can never be a plain identifier. *)
+channel_type    = "channel" , "<" , type , ">" ;
 
 func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 
@@ -233,7 +243,16 @@ primary         = literal
                 | "(" , expr , ")"
                 | block
                 | array_literal
-                | struct_literal ;
+                | struct_literal
+                | channel_ctor ;
+
+(* 0.0.4 T07: `channel<T>(capacity)` — the reserved-word channel constructor.
+   capacity 0 is a rendezvous channel (direct handoff), > 0 a bounded buffer;
+   the payload type is required, so the grammar is unambiguous in primary
+   position. Whether the constructed channel is allowed to escape (move-only,
+   no `clone`, `split` as the one fork point) is checked by the semantic
+   phases. *)
+channel_ctor    = "channel" , "<" , type , ">" , "(" , expr , ")" ;
 
 (* 0.0.3 V03: array literal; an empty literal needs a type annotation
    (CannotInferArrayType in typeck). Distinct from the index suffix `[ expr ]`

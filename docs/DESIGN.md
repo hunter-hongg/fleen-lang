@@ -1,4 +1,4 @@
-# Fleen Language Draft v0.0.3
+# Fleen Language Draft v0.0.4
 
 > **Fast, Simple, Safe, Intuitive**
 > Fast to compile and run · Concise and clear · Memory safe · Intuitive and friendly
@@ -15,6 +15,12 @@
 > decisions D1–D10 are recorded as settled (§11 summary table). Bytecode in `docs/BYTECODE.md` §5.12–5.14.
 > The corresponding sections below have been annotated accordingly
 > (content marked "0.0.2"/"0.0.3" reflects current toolchain behavior from the ticket it landed in).
+>
+> **0.0.4 additions**: cooperative concurrency — `async func` + postfix `await` over
+> `Future<T>` coroutine frames (§6), the `channel<T>` message-passing type (§9.7), and the
+> ownership boundary that keeps the async world borrow-free (§10.6). Decisions D1–D6 are
+> recorded in `docs/0.0.4/PLAN.md`; bytecode v4 (async / channel opcodes 0xC0–0xC7) is in
+> `docs/BYTECODE.md` §5.15. `async` / `await` / `channel` are new reserved words (§2).
 
 ---
 
@@ -65,6 +71,7 @@ true / false // bool
 func  const  struct  if  elif  else  while  for  in  choose
 when  otherwise  return  import  pub  unsafe  trusted
 box  ref  deref  move  clone  as  true  false
+async  await  channel
 ```
 
 > `deref` is a new keyword in 0.0.2 (reads/writes the value inside a box, see §10.3);
@@ -72,6 +79,11 @@ box  ref  deref  move  clone  as  true  false
 > `struct` (V02) / `for` / `in` (V04) / `pub` (V05) are new reserved words in 0.0.3 —
 > programs using them as identifiers are the **only** source breaking change of 0.0.3
 > (the CHANGELOG ⚠️ Breaking list; see `docs/0.0.3/PLAN.md` D4/D6).
+> `async` / `await` / `channel` are new reserved words in 0.0.4 (see §6, §9.6, §9.7) —
+> 0.0.3 programs using them as identifiers must rename (the CHANGELOG ⚠️ Breaking list;
+> see `docs/0.0.4/PLAN.md` §11). Note `Future` is **not** reserved: only the `Future<T>`
+> type form is recognized in type position, and a bare `Future` identifier still names a
+> user struct.
 
 ---
 
@@ -539,6 +551,59 @@ for i in range_from(0, 10) {
 - Assignment to an outer mutable variable inside the loop body works like a `while` body (§4.5)
 - `for` and `in` are now **reserved keywords** (breaking change from 0.0.2)
 
+### async / await (0.0.4)
+
+```fleen
+// async function: the caller sees Future<T>; the body still returns T
+async func producer(c: channel<string>) {
+    c.send("hi");              // a fresh value transfers naturally (§9.7, D6)
+}
+
+async func fib(n: int): int {
+    if n < 2 { n }
+    else { fib(n - 1) await + fib(n - 2) await }   // await binds like a postfix suffix
+}
+
+// driving a future
+f = fib(10);
+n = f await;                   // postfix: Future<int> → int (drives to completion)
+fib(10) await;                 // statement form: drive and discard the payload
+
+// `e await?` composes with ? — inside a Result-returning function:
+func halve(n: int): Result<int, string> {
+    v = half(n) await?;        // (half(n) await)? — the §8 propagation rules
+    Ok(v)
+}
+```
+
+**Rules:**
+- `async func f(...): T` — calling `f` does **not** run the body: it packages the arguments
+  into a coroutine frame and returns a `Future<T>`; the body runs when something drives the
+  future (`e await`, or the executor via `std.async.run`). `Future<T>` is non-Copy — it moves
+  like any owned value, and it can be driven only once
+- `await` is a **postfix operator** (reserved word), binding with the tightest suffixes
+  (`() [i] .f await ?` — chain left-to-right, same layer as `?`), so `Future<T>` stays a
+  first-class, passable value and `fib(n - 1) await + fib(n - 2) await` needs no parentheses
+- **Cooperative executor** (single-threaded, in the VM): a task runs until a suspension
+  source — `std.io.sleep(n)`, `std.async.yield_now()`, or a channel `send`/`recv` that cannot
+  proceed — yields; ready tasks always run before timer-parked ones. `std.async.run(tasks:
+  [Future<unit>])` spawns all the roots, runs them to completion round-robin, and joins
+  (usable inside an async body too — a nested, re-entrant join)
+- A **top-level** `e await` (or `std.async.run(...)`) in `main` boots a blocking drive that
+  runs the scheduler until the root completes — a normal program "just works", preserving
+  the single-command simplicity
+- Inside an async body a suspension source needs **no explicit await**: the compiler lowers
+  `std.io.sleep(n)` to the call followed by a `Suspend` (the task parks until its timer
+  fires); a synchronous caller gets a no-op
+- A panicked/failed future surfaces its error at the awaiting site as a runtime error, like
+  any other
+- **Out of scope in 0.0.4** (deferred to 0.1.0 with traits/generics): `async {}` blocks,
+  `select`/`join!` fan-out, language-level composing/generic async (`dyn Future`-style
+  polymorphism) — see `docs/0.0.4/PLAN.md` §9
+- The ownership boundary of async code (no `ref`, no global writes) is §10.6; the bytecode
+  (coroutine frames, opcodes 0xC0–0xC7) is `docs/BYTECODE.md` §5.15; decisions D1–D6 are in
+  `docs/0.0.4/PLAN.md`
+
 ---
 
 ## 7. Pattern Matching: choose
@@ -642,6 +707,8 @@ Range            // builtin Copy type (0.0.3 V04): an int interval, end-exclusiv
 box<T>           // heap pointer, single ownership; box expr allocates, deref reads/writes (0.0.2, §10.3)
 ref T            // read-only borrow, function parameters only (0.0.2, §10.4)
 Result<T, E>     // error handling (Ok/Err/? officially adopted in 0.0.2, §8)
+Future<T>        // a suspended async coroutine (0.0.4, §9.6): non-Copy, driven once by `e await`
+channel<T>       // message-passing channel (0.0.4, §9.7): non-Copy, move-only, owns its buffer
 ```
 
 > For struct / array syntax and rules see the §9.4 and §9.5 subsections below; the bytecode for
@@ -690,6 +757,78 @@ u = move a;               // transfer; a is unusable afterwards
 - **`move a[i]` is forbidden** (`MoveOutOfArray`); element reads are copies, writes are in place
 - Arrays are legal as struct fields, `box<[T]>` pointees, `Result` components, parameters
   (owned → `move`/`clone`; `ref [T]` allowed, parameters only), and globals
+
+### 9.6 `Future<T>` (0.0.4)
+
+```fleen
+async func half(n: int): Result<int, string> {
+    if n == 0 { Err("cannot halve 0") } else { Ok(n / 2) }
+}
+
+func halve(n: int): Result<int, string> {
+    v = half(n) await?;          // drive, then propagate (§8 rules)
+    Ok(v)
+}
+```
+
+**Rules:**
+- `Future<T>` is the type of a **suspended async coroutine** (a heap frame holding the
+  function, its locals, the saved operand stack, and the resume PC — D1,
+  `docs/0.0.4/PLAN.md`): `e await` with `e: Future<T>` yields `T`
+- **Non-Copy, moves like an owned value, driven once**: a future can be passed to another
+  function or stored, but not cloned and not driven twice
+- `Future` itself is **not** a reserved word — a bare `Future` identifier remains a named
+  type (a user struct); only the `Future<T>` parameterized form is recognized in type
+  position
+- `Future<T>` composes with `Result`: `e await?` on a `Future<Result<T, E>>` drives the
+  future and propagates the `Err` (the `?` machinery of §8, applied after the await)
+- Copy types (`int` / `float` / `bool` / `unit` / function values) remain Copy inside async
+  functions; the async body works exclusively on owned + Copy values (§10.6)
+
+### 9.7 `channel<T>` (0.0.4)
+
+```fleen
+ch = channel<int>(16);            // bounded buffer of 16 (reserved-word constructor)
+ch = channel<string>(0);          // rendezvous: a send parks until a receiver takes the value
+peer = std.concurrent.split(ch);  // the one explicit fork point: a second handle, same buffer
+
+async func producer(c: channel<string>) {
+    c.send("hi");                 // fresh value transfers naturally
+}
+async func consumer(c: channel<string>) {
+    s = c.recv();                 // s owns the received string
+    std.io.println(s);
+}
+
+std.async.run([producer(move ch), consumer(move peer)]);   // move a handle into each task;
+                                                           // run's tasks are Future<unit>
+```
+
+| Operation | Kind | Blocks when |
+|-----------|------|-------------|
+| `channel<T>(capacity)` | constructor (reserved word) | — |
+| `c.send(v)` | awaitable | buffer full (or, at cap 0, until a receiver takes the value) |
+| `c.recv()` | awaitable | buffer empty |
+| `std.concurrent.split(ch)` | plain call | — (returns a second handle) |
+
+**Rules:**
+- `channel` **is a reserved word**: it has both a type form (`channel<T>`) and a constructor
+  form (`channel<T>(cap)`), so it can never be a plain identifier
+- Channels are **non-Copy and move-only**: `clone ch` is a compile error
+  (`ChannelNotClonable`); `split` is the **only** way a buffer gains a second handle — two
+  tasks share one buffer only through handles the program explicitly forked (T07d)
+- Payloads travel by **ownership move** (D3/D6): owned payloads transfer real ownership to
+  the receiver; Copy payloads (`int` / `float` / `bool` / `unit` / function values) copy.
+  A `ref` payload is rejected outright (`ChannelNotBorrowable`) — a borrow never crosses a
+  channel (§10.6)
+- An **owned variable** handed to `send` needs an explicit `move x` (or `clone x`); a fresh
+  value produced on the spot (`c.send(expr)`) transfers naturally — the same rule as any
+  owned function argument (D6; the `OwnedArgRequiresMove` diagnostic names `move` and
+  `std.concurrent.split`)
+- **No `close`, no `for` over a channel, no `select`** in 0.0.4 (deferred to 0.1.0); no
+  shared-memory containers (`Mutex`/`Atomic`) — channels are the only cross-task
+  communication (D3). A run ends when no task is runnable; a program whose tasks are all
+  blocked on channels is a `ChannelDeadlock` runtime error
 
 ### Function Types
 
@@ -858,6 +997,26 @@ func main(): int {
   function body** that passes a global ref argument, it uses a temporary slot `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` to receive it;
   a **global initializer** (`lower_global_init`) has no frame that could borrow its slot, so a global-initializer
   call containing ref arguments reports `RefArgInGlobalInit` directly (typeck passes, lower rejects).
+
+### 10.6 The async world is borrow-free (0.0.4, D2/D4/D5)
+
+§10.4's "no borrow checker needed" argument relies on the borrowed slot being untouched for
+the duration of a **single synchronous call** — the caller is suspended while the handle is
+alive. A concurrent task breaks that premise (nothing suspends the rest of the program while
+a task holds a handle), so 0.0.4 keeps the invariant the simple way: **borrows never reach
+concurrent code**.
+
+- An `async func` **may not take a `ref` parameter** at all (`RefInAsync`); a `ref` handle
+  cannot be captured, stored, or passed across any `await`, task, or channel boundary — the
+  entire static `Send` rule of 0.0.4 is this one line (D4)
+- An async task **may read** globals (auto deep copy, the §10.2 rules) but **may not write**
+  them (`AsyncGlobalWrite`) — a write would be a cross-task shared mutation, which the
+  message-passing model excludes (D5); route the value through a channel instead
+- Channels follow the same rule: a `ref` payload is rejected (`ChannelNotBorrowable`,
+  §9.7) — only owned and Copy values ever cross a task boundary
+- Watchword: **async works exclusively on owned and Copy values**. The async world and the
+  borrowing world are cleanly separated; `Mutex`/`Atomic`-style shared-memory containers are
+  not introduced in 0.0.4 (D3)
 
 ---
 
@@ -1053,34 +1212,36 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 |
-|---------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ |
-| Function types | ✅ | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ |
-| `?` | ❌ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03) |
-| `Range` / `for` | ❌ | ❌ | ✅ (V04) |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) |
-| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) |
-| `async` | ❌ | ❌ | ❌ (0.0.4) |
-| FFI | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
-| Pointers `ptr` / `addr` / `unsafe` | ❌ | ❌ | ❌ (0.0.5) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 |
+|---------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ |
+| Function types | ✅ | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) |
+| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) |
+| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) |
+| FFI | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) |
+| Pointers `ptr` / `addr` / `unsafe` | ❌ | ❌ | ❌ (0.0.5) | ❌ (0.0.5) |
 
 **0.0.1 goal: Fibonacci runs.**
 
@@ -1092,6 +1253,11 @@ the module system (implemented, V05), the `std` library (implemented, V06), its 
 V09, with docs and version synced in V10
 — see `docs/0.0.3/PLAN.md` and `docs/0.0.3/TICKETS.md`.**
 
+**0.0.4 goal: cooperative concurrency — `async` / `await` over `Future<T>` coroutine frames,
+the single-threaded cooperative executor, and message-passing `channel<T>` with the
+borrow-free boundary (T01–T09 implemented; see `docs/0.0.4/PLAN.md` decisions D1–D6 and
+`docs/0.0.4/TICKETS.md`).**
+
 ---
 
 ## 18. Roadmap
@@ -1100,7 +1266,7 @@ V09, with docs and version synced in V10
 |---------|----------|
 | 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
 | 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; iterator helpers — **implemented (V07)**; flint — **implemented (V08)**; integrated & gated (V09); docs & version synced (V10). 0.0.3 is **complete** |
-| 0.0.4 | `async` / `await` |
+| 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
 | 0.1.0 | Generics / operator overloading |
 

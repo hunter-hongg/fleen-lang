@@ -5,8 +5,8 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.3 · Busy Beaver 🦫 · aggregation and organization** — the `struct` /
-> `[T]` / `for` + `Range` / modules / `std` / `flint` release, complete (V01–V10; built on
+> Current version **0.0.4 · Patient Ants 🐜 · cooperative concurrency** — the `async` /
+> `await` / `channel<T>` release, complete (T01–T10; built on **0.0.3 · Busy Beaver 🦫**,
 > **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
 
 ## Language at a Glance
@@ -52,6 +52,17 @@ evaluated once); a module system (`import` / `pub`, qualified paths, cycle detec
 `new` / `build` / `run` / `test` / `check`). `struct` / `for` / `in` / `pub` are now reserved
 words (the only source breaking change of 0.0.3).
 See [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) and [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md).
+
+**0.0.4 · Cooperative concurrency**: `async func` returns `Future<T>` (a heap coroutine frame)
+while the body still returns `T`; the postfix operator `e await` drives it (composing with `?`
+as `e await?`); a single-threaded cooperative executor runs tasks round-robin
+(`std.async.run` / `std.async.yield_now` / `std.io.sleep` timers, top-level await just works);
+`channel<T>(cap)` gives message-passing concurrency — rendezvous (`cap = 0`) or bounded
+buffer, payloads travel by ownership `move`, `std.concurrent.split` is the one explicit fork
+point. The async world is borrow-free: no `ref` crosses an await/task/channel boundary and
+async bodies cannot write globals, so no borrow checker and no shared memory.
+`async` / `await` / `channel` are now reserved words (the only source breaking change of 0.0.4).
+See [docs/0.0.4/PLAN.md](docs/0.0.4/PLAN.md) and [docs/0.0.4/TICKETS.md](docs/0.0.4/TICKETS.md).
 
 ## Quick Start
 

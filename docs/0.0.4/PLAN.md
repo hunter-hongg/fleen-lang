@@ -9,10 +9,12 @@
 > handles (`ref`) are confined to the synchronous call depth — the async world
 > and the borrowing world are cleanly separated.
 >
-> **Status**: IN PROGRESS.  Decisions D1–D6 below are **settled** after review
+> **Status**: COMPLETE.  Decisions D1–D6 below are **settled** after review
 > and recorded here; `TICKETS.md` carries the per-ticket cards and encoding
-> tables.  T01–T03 (keywords, async fn frontend, borrow/global boundaries) are
-> implemented; the lowering/VM/executor work (T04–T10) is planned.
+> tables.  T01–T10 are implemented — T10 synced the docs
+> (DESIGN.md / BYTECODE.md / SYNTAX.ebnf / CHANGELOG / README) and bumped the
+> workspace version to 0.0.4 (public release — tag and archives — is separate
+> and not yet performed).
 
 ---
 
@@ -151,14 +153,15 @@ async func producer(c: channel<string>) {
     c.send("hi");                    // fresh value transfers naturally (D6)
 }
 
-async func consumer(c: channel<string>): int {
+async func consumer(c: channel<string>) {
     s = c.recv();                    // s owns the string; receiver takes ownership
-    s.len()
+    std.io.println(s);
 }
 
 // a synchronous caller drives a future with await
-n = consumer(ch)?;                   // e await? : composed with ?
-await;                               // statement form: drive and discard
+n = fib(10) await;                   // postfix: Future<int> → int
+fib(10) await;                       // statement form: drive and discard
+// `e await?` composes with ? inside a Result-returning function (§3.3)
 ```
 
 - `await` is **postfix** (like Rust), so `Future<T>` stays a first-class,
@@ -246,9 +249,9 @@ peer = std.concurrent.split(ch);             // the one explicit fork point (T07
 async func producer(c: channel<string>) {
     c.send("hi");                       // fresh value transfers naturally
 }
-async func consumer(c: channel<string>): int {
+async func consumer(c: channel<string>) {
     s = c.recv();                       // transfers ownership to s
-    s.len()
+    std.io.println(s);
 }
 
 // T07d: a channel has exactly one owner — move it into each task, never
