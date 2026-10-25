@@ -12,6 +12,40 @@ use std::rc::Rc;
 
 pub(crate) const MAX_CALL_DEPTH: usize = 1024;
 
+/// The process-wide monotonic-clock epoch: one `OnceLock` start instant
+/// shared by the VM (`Vm::now_mono_ms`) and the scheduler
+/// (`Scheduler::now_ms`), so sleep deadlines are computed and compared on
+/// a single timebase.
+pub(crate) fn mono_ms() -> i64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as i64
+}
+
+/// What a deep copy of a value would fork or alias (0.0.4 review fix): a
+/// `Future` anywhere inside the value duplicates the suspended frame, a
+/// `Channel` aliases the shared buffer. The walk mirrors typeck's
+/// container-aware rules (`Type::contains_future` / `contains_channel` see
+/// through `Result` payloads and array elements), so backstops that copy a
+/// whole value use it instead of matching only the top variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepFork {
+    Future,
+    Channel,
+}
+
+fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
+    match v {
+        Value::Future(_) => Some(DeepFork::Future),
+        Value::Channel(_) => Some(DeepFork::Channel),
+        Value::Ok(inner) | Value::Err(inner) => deep_fork_kind(inner),
+        Value::Arr(elems) => elems.iter().find_map(deep_fork_kind),
+        _ => None,
+    }
+}
+
 /// The virtual machine.
 ///
 /// Executes the bytecode produced by `fleen-compiler::codegen`. Builtin
@@ -129,14 +163,11 @@ impl Vm {
     }
 
     /// Monotonic clock in milliseconds for deadline calculations.
-    /// Uses a process-wide start instant so all VM instances share the same
-    /// timebase (avoids clock skew between multiple VMs in the same test).
+    /// Uses a process-wide start instant so all clock readers (the VM and
+    /// the scheduler) share the same timebase — deadlines are computed and
+    /// compared against one epoch, never two.
     fn now_mono_ms(&self) -> i64 {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as i64
+        mono_ms()
     }
 
     /// Run the module's `entry` function to completion.
@@ -146,7 +177,33 @@ impl Vm {
     /// failure the [`RuntimeError`] carries the source location of the
     /// failing instruction when one can be determined (0.0.2 U10).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
-        self.run_inner().map_err(|kind| self.locate_error(kind))
+        match self.run_inner() {
+            Ok(value) => Ok(value),
+            Err(kind) => {
+                // The run is aborting: drain every channel's parked chains and
+                // buffered payloads. The parked frames hold their channel's
+                // handle (the `move ch` parameter), so the chain ↔ `ChannelInner`
+                // queues edges form an `Rc` cycle that would otherwise keep the
+                // aborted tasks' stacks alive until process exit (0.0.4 review
+                // fix). Aborting drops the coroutines — the documented `Drop`
+                // release path for a future that is never resumed (D1).
+                self.release_channel_waiters();
+                Err(self.locate_error(kind))
+            }
+        }
+    }
+
+    /// Drain every rooted channel's sender/receiver queues and buffer
+    /// (abort path — see [`Self::run`]).
+    fn release_channel_waiters(&mut self) {
+        for waiter in &self.channel_waiters {
+            if let Value::Channel(inner) = waiter {
+                let mut ch = inner.borrow_mut();
+                ch.senders.clear();
+                ch.receivers.clear();
+                ch.buffer.clear();
+            }
+        }
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
@@ -237,6 +294,13 @@ impl Vm {
                 if self.has_blocked_channel_tasks() {
                     return Err(RuntimeErrorKind::ChannelDeadlock);
                 }
+                // A join waiter whose pending ids can no longer run is the
+                // same deadlock one level up (0.0.4 review fix): reporting it
+                // beats silently dropping the parked chains (the pre-fix
+                // behavior — `Ok` with a non-empty `waiting_join`).
+                if !self.waiting_join.is_empty() {
+                    return Err(RuntimeErrorKind::JoinDeadlock);
+                }
                 break;
             };
             // A completion counts against the waiter waiting for *this* task
@@ -273,6 +337,14 @@ impl Vm {
                     Some(f) if f.is_future => self.step()?,
                     // Back at the synchronous join caller: the task completed.
                     _ => {
+                        // A `run`-spawned task (root id != 0) leaves its
+                        // `unit` payload as a stray above the join caller's
+                        // operand region — pop it (0.0.4 review fix). A bare
+                        // awaited root (id 0) must keep its payload: it is
+                        // exactly what the caller's `Await` consumes.
+                        if task_id != 0 {
+                            self.stack.pop();
+                        }
                         self.complete_task(task_id);
                         break;
                     }
@@ -329,6 +401,97 @@ impl Vm {
             let wait = self.waiting_join.remove(pos);
             self.scheduler.enqueue(wait.task);
         }
+    }
+
+    /// Whether `f` executes an `async func`'s body. An async body frame is
+    /// only ever installed by `resume_frame` — a direct `Call` runs
+    /// `AsyncStart` at pc 0, which packages the frame into a `Future`
+    /// instead — and an async fn's `code` always opens with `AsyncStart`
+    /// (pinned by the lower-pass test). A *sync helper* called from a task
+    /// inherits `is_future` but its code does not open with `AsyncStart`,
+    /// which is exactly the distinction the `std.async.run` join contract
+    /// and the `std.io.sleep` deadline guard key on: the compiler pairs
+    /// those builtins with a `Suspend` in async bodies only.
+    fn frame_is_async_body(&self, f: &CallFrame) -> bool {
+        f.is_future
+            && self.module.functions[f.func.0 as usize].code.first()
+                == Some(&(Opcode::AsyncStart as u8))
+    }
+
+    /// Convenience for the innermost frame (see [`Self::frame_is_async_body`]).
+    fn caller_is_async_body(&self) -> bool {
+        self.frames
+            .last()
+            .is_some_and(|f| self.frame_is_async_body(f))
+    }
+
+    /// Join `std.async.run`'s spawned tasks *in place* — the join of a
+    /// synchronous helper running inside a task (0.0.4 review fix). The
+    /// helper frame cannot suspend (the compiler emits no `Suspend` there),
+    /// so the builtin drives the spawned ids to completion before returning;
+    /// the helper's live frames sit untouched below the driven tasks, which
+    /// is why completion is detected by frame depth, not by `frames.last()`.
+    ///
+    /// Semantics mirror the async-body path: only the spawned ids are waited
+    /// for (a sibling task keeps its scheduler slot), completions are matched
+    /// by task id, a deeper nested `run` from an async body parks its caller
+    /// in `waiting_join` as usual, and a spawned task blocked on a channel
+    /// with nothing left to run is the T07b `ChannelDeadlock`.
+    fn join_spawn_ids(&mut self, ids: Vec<u64>) -> Result<(), RuntimeErrorKind> {
+        let mut pending = ids;
+        // Depth of the live frames below the driven tasks (the helper and
+        // everything under it). A driven task has completed when the frame
+        // count returns to this depth.
+        let base_depth = self.frames.len();
+        while !pending.is_empty() {
+            let Some(task) = self.scheduler.next_task() else {
+                if self.has_blocked_channel_tasks() {
+                    return Err(RuntimeErrorKind::ChannelDeadlock);
+                }
+                // Defensive: the static rules keep every spawned task
+                // reachable (scheduler, timer, or channel queue) until it
+                // completes, so an uncompletable id is malformed bytecode.
+                return Err(RuntimeErrorKind::JoinDeadlock);
+            };
+            let task_id = task.chain.first().map_or(0, |f| f.task_id);
+            self.resume_chain(task.chain)?;
+            loop {
+                // The task parked on a channel: its chain moved into the
+                // channel's queue (the waker owns it) — not a completion.
+                if self.suspended_on_channel {
+                    self.suspended_on_channel = false;
+                    break;
+                }
+                if let Some(task) = self.pending.take() {
+                    // A nested `std.async.run` from an async body parks the
+                    // caller in `waiting_join`, exactly as at the top-level
+                    // boundary; anything else re-enters the scheduler.
+                    match self.nested_run_expected.take() {
+                        Some(ids) if !ids.is_empty() => {
+                            self.waiting_join.push(JoinWait { task, pending: ids });
+                        }
+                        _ => self.scheduler.enqueue(task),
+                    }
+                    break;
+                }
+                if self.frames.len() <= base_depth {
+                    // The driven task returned. Its `unit` payload is a
+                    // stray above the helper's operand region — pop it so
+                    // the helper continues on a clean stack.
+                    self.stack.pop();
+                    if pending.contains(&task_id) {
+                        pending.retain(|&id| id != task_id);
+                    } else {
+                        // A completion no in-place join waits for (a sibling
+                        // task, or a deeper nested join's waiter).
+                        self.complete_task(task_id);
+                    }
+                    break;
+                }
+                self.step()?;
+            }
+        }
+        Ok(())
     }
 
     /// Check if any task is blocked on a channel (waiting in senders/receivers
@@ -808,20 +971,30 @@ impl Vm {
                         ready_at_ms: None,
                     });
                 }
-                // If called from inside an async body (future-marked frame),
-                // record the expected task count — but do NOT signal the join
-                // here. The compiler emits a `Suspend` immediately after this
-                // call (T06 contract); that Suspend parks the caller and
-                // `run_inner` builds the `JoinWait` (setting `need_join`
-                // itself). Signaling here instead would start `drive_join`
-                // while the caller is still a live frame: the spawned tasks
-                // would complete "into" the future-marked caller (never
-                // counted by the JoinWait), and the caller's own Suspend
-                // would then create a JoinWait that never fills — the caller
-                // parks forever and the awaiting caller below loses its
-                // value (a StackShape at the next store).
-                if self.frames.last().is_some_and(|f| f.is_future) {
+                // The join expectation is armed only when the caller is an
+                // *async body* — the compiler emits the pairing `Suspend`
+                // immediately after this call in async bodies only (T06
+                // contract), and that Suspend parks the caller so `run_inner`
+                // builds the `JoinWait` (setting `need_join` itself). Signaling
+                // here instead would start `drive_join` while the caller is
+                // still a live frame: the spawned tasks would complete "into"
+                // the future-marked caller (never counted by the JoinWait),
+                // and the caller's own Suspend would then create a JoinWait
+                // that never fills — the caller parks forever and the
+                // awaiting caller below loses its value (a StackShape at the
+                // next store). A *sync helper* running inside a task also
+                // inherits `is_future`, but it emits no `Suspend` — arming
+                // the expectation there would strand the ids until some
+                // unrelated task's `Suspend` consumed them (the review-found
+                // join-contract break), so its join happens in place below.
+                if self.caller_is_async_body() {
                     self.nested_run_expected = Some(spawned_ids);
+                } else if self.frames.last().is_some_and(|f| f.is_future) {
+                    // Synchronous helper inside a task: the frame cannot
+                    // suspend, so join right here — drive the spawned ids to
+                    // completion before the builtin returns. The helper's
+                    // live frames sit untouched below the driven tasks.
+                    self.join_spawn_ids(spawned_ids)?;
                 } else {
                     // Synchronous caller (main): nothing will park it, so the
                     // join must be signaled by the builtin itself.
@@ -844,7 +1017,12 @@ impl Vm {
                     Some(Value::Int(_)) => return Ok(Value::Unit),
                     _ => return Err(RuntimeErrorKind::StackShape),
                 };
-                if let Some(frame) = self.frames.last().filter(|f| f.is_future) {
+                // Record the deadline only when executing an async *body* —
+                // the compiler emits the pairing `Suspend` there and nowhere
+                // else, so a deadline keyed to a sync frame (even one that
+                // inherited `is_future` from an async caller) could never be
+                // consumed. A synchronous caller of `sleep` is a no-op.
+                if let Some(frame) = self.frames.last().filter(|f| self.frame_is_async_body(f)) {
                     // Record the deadline keyed by the exact suspension point:
                     // (function id, instruction pointer of the Suspend that follows).
                     // The Call to sleep has already advanced the caller's ip to the
@@ -866,48 +1044,81 @@ impl Vm {
                 Value::Arr(elems) => Ok(Value::Int(elems.len() as i64)),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.arr.get" => match (self.read_ref(&args[0])?, &args[1]) {
-                (Value::Arr(elems), Value::Int(i)) => {
-                    // Out of bounds is a *value* (`Err`), not a crash (D3:
-                    // the raw `a[i]` syntax keeps the runtime-error path).
-                    match elems.get(*i as usize).filter(|_| *i >= 0) {
-                        Some(v) => Ok(Value::Ok(Box::new(v.clone()))),
-                        None => Ok(Value::Err(Box::new(Value::Str(
-                            format!("index {i} out of range (array length {})", elems.len()).into(),
-                        )))),
+            "std.arr.get" | "std.arr.push" | "std.arr.set" => {
+                // These builtins copy their arguments (whole-array `to_vec`
+                // or an element clone). The schematic/fixed arg guards reject
+                // future-typed *bare reads*, but a `move`'d array whose
+                // elements carry a Future inside an `Ok` wrapper (or a
+                // Channel) passes them — the copy happens here, so the deep
+                // backstop lives here (0.0.4 review fix).
+                for arg in &args {
+                    if let Some(kind) = deep_fork_kind(arg) {
+                        return Err(match kind {
+                            DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                            DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                        });
                     }
                 }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.arr.set" => {
-                let elems: Vec<Value> = match self.read_ref(&args[0])? {
-                    Value::Arr(elems) => elems.to_vec(),
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                };
-                let (&Value::Int(i), v) = (&args[1], &args[2]) else {
-                    return Err(RuntimeErrorKind::StackShape);
-                };
-                // Arrays are owned (D3): `set` returns a fresh array; the
-                // negative/overflow case fails the index conversion the
-                // same way as a too-large index.
-                let idx = usize::try_from(i).map_err(|_| self.arr_index_error(i, elems.len()))?;
-                let mut elems = elems;
-                if idx >= elems.len() {
-                    return Err(self.arr_index_error(i, elems.len()));
+                match name {
+                    "std.arr.get" => self.builtin_arr_get(&args),
+                    "std.arr.push" => self.builtin_arr_push(&args),
+                    _ => self.builtin_arr_set(&args),
                 }
-                elems[idx] = v.clone();
-                Ok(Value::Arr(elems.into_boxed_slice()))
-            }
-            "std.arr.push" => {
-                let mut elems: Vec<Value> = match self.read_ref(&args[0])? {
-                    Value::Arr(elems) => elems.to_vec(),
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                };
-                elems.push(args[1].clone());
-                Ok(Value::Arr(elems.into_boxed_slice()))
             }
             _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
         }
+    }
+
+    /// `std.arr.get` — element read as a `Result` value (D3: out of bounds
+    /// is a value, not a crash). The deep-fork guard on the arguments runs
+    /// in the dispatch arm above.
+    fn builtin_arr_get(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        match (self.read_ref(&args[0])?, &args[1]) {
+            (Value::Arr(elems), Value::Int(i)) => {
+                match elems.get(*i as usize).filter(|_| *i >= 0) {
+                    // The element result is a copy (the array is untouched);
+                    // a Future inside would be a forked frame and a Channel
+                    // an alias without `split` — guarded above.
+                    Some(v) => Ok(Value::Ok(Box::new(v.clone()))),
+                    None => Ok(Value::Err(Box::new(Value::Str(
+                        format!("index {i} out of range (array length {})", elems.len()).into(),
+                    )))),
+                }
+            }
+            _ => Err(RuntimeErrorKind::StackShape),
+        }
+    }
+
+    /// `std.arr.set` — arrays are owned (D3): a fresh array with the slot
+    /// replaced.
+    fn builtin_arr_set(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let elems: Vec<Value> = match self.read_ref(&args[0])? {
+            Value::Arr(elems) => elems.to_vec(),
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let (&Value::Int(i), v) = (&args[1], &args[2]) else {
+            return Err(RuntimeErrorKind::StackShape);
+        };
+        // The negative/overflow case fails the index conversion the same way
+        // as a too-large index.
+        let idx = usize::try_from(i).map_err(|_| self.arr_index_error(i, elems.len()))?;
+        let mut elems = elems;
+        if idx >= elems.len() {
+            return Err(self.arr_index_error(i, elems.len()));
+        }
+        elems[idx] = v.clone();
+        Ok(Value::Arr(elems.into_boxed_slice()))
+    }
+
+    /// `std.arr.push` — arrays are owned (D3): a fresh array with the
+    /// element appended.
+    fn builtin_arr_push(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let mut elems: Vec<Value> = match self.read_ref(&args[0])? {
+            Value::Arr(elems) => elems.to_vec(),
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        elems.push(args[1].clone());
+        Ok(Value::Arr(elems.into_boxed_slice()))
     }
 
     /// The out-of-bounds runtime error for `std.arr.set`, matching the raw
@@ -984,14 +1195,23 @@ impl Vm {
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
                 let idx = frame.stack_base + slot;
                 let v = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
-                // 0.0.4 T08 defensive backstop (Future only): a plain load
-                // clones the `Value`, which for a Future deep-copies the
-                // whole suspended frame — a fork. Typeck/ownership reject
-                // every bare read of a Future local, so reaching this needs
-                // malformed bytecode. A Channel load stays legal: the clone
-                // is an Rc bump, the intended handle-load semantics.
-                if matches!(v, Value::Future(_)) {
-                    return Err(RuntimeErrorKind::FutureNotClonable);
+                // 0.0.4 T08 defensive backstop: a plain load clones the
+                // `Value`, which for a Future deep-copies the whole suspended
+                // frame — a fork. Typeck/ownership reject every bare read of
+                // a Future local, so reaching this needs malformed bytecode.
+                // A top-level Channel load stays legal: the clone is an Rc
+                // bump, the intended handle-load semantics — but a channel
+                // *buried* in a container (`Ok(...)`, an array) is a silent
+                // alias; typeck rejects the bare read of such a local, and
+                // the deep walk mirrors it (0.0.4 review fix).
+                match deep_fork_kind(v) {
+                    Some(DeepFork::Future) => {
+                        return Err(RuntimeErrorKind::FutureNotClonable);
+                    }
+                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
+                        return Err(RuntimeErrorKind::ChannelNotClonable);
+                    }
+                    _ => {}
                 }
                 self.stack.push(v.clone());
             }
@@ -1015,6 +1235,20 @@ impl Vm {
                     .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
                     ))?;
+                // 0.0.4 review-fix backstop, matching `LoadLocal`: a global
+                // load clones the `Value`, which for a Future deep-copies the
+                // suspended frame. Typeck rejects Future globals outright
+                // (`FutureNotStorable`), so this is malformed-bytecode-only;
+                // the deep walk also covers a container of either kind.
+                match deep_fork_kind(&v) {
+                    Some(DeepFork::Future) => {
+                        return Err(RuntimeErrorKind::FutureNotClonable);
+                    }
+                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
+                        return Err(RuntimeErrorKind::ChannelNotClonable);
+                    }
+                    _ => {}
+                }
                 self.stack.push(v);
             }
             Opcode::StoreGlobal => {
@@ -1328,10 +1562,17 @@ impl Vm {
                 // 0.0.4 T08 defensive backstop: a Future clone forks the
                 // suspended frame; a Channel clone is an alias without
                 // `split`. Typeck rejects both source forms, so this only
-                // fires for malformed bytecode.
-                match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
-                    Value::Future(_) => return Err(RuntimeErrorKind::FutureNotClonable),
-                    Value::Channel(_) => return Err(RuntimeErrorKind::ChannelNotClonable),
+                // fires for malformed bytecode; the deep walk covers the
+                // same kinds inside `Ok`/`Err`/array containers (0.0.4
+                // review fix).
+                let cloned = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
+                if let Some(kind) = deep_fork_kind(cloned) {
+                    return Err(match kind {
+                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                    });
+                }
+                match cloned {
                     v @ Value::Ref { .. } => {
                         let copy = self.read_ref(v)?.clone();
                         self.stack.push(copy);
@@ -1346,21 +1587,25 @@ impl Vm {
                 // (the read would fork the frame) or a Channel (the read
                 // would alias the buffer without `split`) — typeck rejects
                 // both global types, so this only fires for malformed
-                // bytecode.
-                match self
+                // bytecode; the deep walk covers the same kinds inside
+                // `Ok`/`Err`/array containers (0.0.4 review fix).
+                let g = self
                     .globals
                     .get(id)
                     .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
-                    ))? {
-                    Value::Future(_) => return Err(RuntimeErrorKind::FutureNotClonable),
-                    Value::Channel(_) => return Err(RuntimeErrorKind::ChannelNotClonable),
-                    // Globals never hold borrow handles in compiled code (typeck
-                    // forbids storing a `Ref`); the defensive backstop for
-                    // hand-written modules is the dereference at the consumption
-                    // point, not the copy here.
-                    g => self.stack.push(g.clone()),
+                    ))?;
+                if let Some(kind) = deep_fork_kind(g) {
+                    return Err(match kind {
+                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                    });
                 }
+                // Globals never hold borrow handles in compiled code (typeck
+                // forbids storing a `Ref`); the defensive backstop for
+                // hand-written modules is the dereference at the consumption
+                // point, not the copy here.
+                self.stack.push(g.clone());
             }
             Opcode::PackOk => {
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
@@ -1558,15 +1803,17 @@ impl Vm {
                             // would fork a suspended Future frame or alias a
                             // channel buffer. Typeck rejects arrays that
                             // hold either as element type, so this only fires
-                            // for malformed bytecode.
-                            match &elems[i as usize] {
-                                Value::Future(_) => {
-                                    return Err(RuntimeErrorKind::FutureNotClonable);
+                            // for malformed bytecode; the deep walk covers
+                            // the same kinds inside `Ok`/`Err`/nested-array
+                            // containers (0.0.4 review fix).
+                            match deep_fork_kind(&elems[i as usize]) {
+                                Some(kind) => {
+                                    return Err(match kind {
+                                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                                    });
                                 }
-                                Value::Channel(_) => {
-                                    return Err(RuntimeErrorKind::ChannelNotClonable);
-                                }
-                                elem => elem.clone(),
+                                None => elems[i as usize].clone(),
                             }
                         }
                         _ => return Err(RuntimeErrorKind::StackShape),
@@ -1760,16 +2007,32 @@ impl Vm {
                 // resumed body — which `resume_frame` pushes above it — hands
                 // control back to the instruction after `Await` once its own
                 // `Return` unwinds. `Call` does the same advance before pushing
-                // a callee frame (the U09 ip-rewind lesson).
+                // a callee frame (the U09 ip-rewind lesson). On failure the
+                // advance is rolled back: `step()` only writes `frame.ip` on
+                // the success path (the `locate_error` invariant), so a failed
+                // resume reports the `Await` itself, not the next instruction.
                 let fut = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let Value::Future(f) = fut else {
                     return Err(RuntimeErrorKind::FutureExpected);
                 };
+                let await_pc = self
+                    .frames
+                    .last()
+                    .ok_or(RuntimeErrorKind::StackUnderflow)?
+                    .ip;
                 self.frames
                     .last_mut()
                     .ok_or(RuntimeErrorKind::StackUnderflow)?
                     .ip = ip;
-                self.resume_frame(*f)?;
+                // `resume_frame` validates before pushing, so on failure no
+                // callee frame was installed and the awaiting frame is still
+                // the innermost one.
+                if let Err(kind) = self.resume_frame(*f) {
+                    if let Some(awaiting) = self.frames.last_mut() {
+                        awaiting.ip = await_pc;
+                    }
+                    return Err(kind);
+                }
                 return Ok(());
             }
             // 0.0.4 T07: channel operations (0xC4–0xC7).
@@ -1858,6 +2121,14 @@ impl Vm {
         let inner = self.pop_channel_handle()?;
         let mut ch = inner.borrow_mut();
 
+        // 0.0.4 review-fix backstop: a borrow handle never crosses a channel
+        // (D4). A `Value::Ref` stores an absolute operand-stack index that
+        // cannot survive a suspension snapshot — typeck rejects the send
+        // (`ChannelPayloadBorrowed`), so reaching this is malformed bytecode.
+        if matches!(value, Value::Ref { .. }) {
+            return Err(RuntimeErrorKind::ChannelPayloadBorrowed);
+        }
+
         // 0.0.4 T08 defensive backstop: the first accepted payload fixes the
         // channel's runtime kind and every later send must match it. Typeck
         // owns the static uniformity rule, so a mismatch here is malformed
@@ -1936,11 +2207,13 @@ impl Vm {
 
     /// Detach the running task's frame chain for a channel park, guarding the
     /// synchronous cases (0.0.4 T07b): a `send`/`recv` that must block is only
-    /// executable inside an async body (a future-marked innermost frame). In a
-    /// *synchronous* caller nothing else can ever run to satisfy the op —
-    /// that is the T07b deadlock, raised here directly. A sync helper called
-    /// *from* an async body cannot be snapshotted (its `CallFrame` is
-    /// mid-execution), which is the defensive `StackShape`.
+    /// executable inside a task — the innermost frame must be future-marked.
+    /// In a *synchronous* caller (no future frame anywhere) nothing else can
+    /// ever run to satisfy the op — that is the T07b deadlock, raised here
+    /// directly. A sync helper called *from* an async body parks fine: it
+    /// inherits `is_future`, so `suspend_chain` captures the whole live chain
+    /// below the task boundary (its mid-execution `CallFrame` snapshots
+    /// soundly — locals and operands are moved out wholesale).
     fn park_on_channel(&mut self, ip: usize) -> Result<Vec<FutureFrame>, RuntimeErrorKind> {
         if !self.frames.last().is_some_and(|f| f.is_future) {
             if self.frames.iter().any(|f| f.is_future) {

@@ -264,6 +264,48 @@ composition (0.1.0).
   deadlines fall in the same promotion pass wake in the order they went to
   sleep (regression: e2e `timer_wake_order`).
 
+**Review fixes (2026-10-25 completion review):**
+
+- **`std.async.run` from a *sync helper* inside a task now joins in place.**
+  The builtin armed the async-body join expectation on the runtime inherited
+  `is_future` flag, but the compiler emits the pairing `Suspend` only in
+  source-async bodies — a sync helper inherits the flag and emits none, so
+  the ids were stranded until some unrelated task's `Suspend` consumed them
+  (the join contract broke: the caller continued past `run(...)` before its
+  tasks ran, and a timer-ordered variant lost a continuation silently). The
+  VM now distinguishes the two by code shape — an async body's `code` always
+  opens with `AsyncStart` (`frame_is_async_body`; pinned by the lower-pass
+  test) — and a sync-helper caller drives its spawned ids to completion
+  inside the builtin (`join_spawn_ids`, frame-depth completion detection, by
+  task id). The same helper makes `std.io.sleep`'s deadline guard precise
+  (no more dead deadline entries for sync helpers). Regressions:
+  `run_from_a_sync_helper_joins_in_place` (a spawned task satisfiable only
+  by the helper's continuation is now `ChannelDeadlock` — it used to
+  complete),
+  `run_from_a_sync_helper_completes_spawned_tasks_before_returning`,
+  `nested_sync_helper_run_inside_a_driven_task_completes`, e2e
+  `run_from_sync_helper` (worker output before "after join").
+- **`drive_join` reports a stuck join instead of dropping it**: the empty-
+  scheduler exit used to return `Ok` with a non-empty `waiting_join`
+  (silent loss); it now raises the new `JoinDeadlock` (defensive — the
+  static rules keep every spawned task reachable). Spawned-task completions
+  pop their stray `unit` payload (root id ≠ 0) instead of leaving one slot
+  per task on the join caller's region until the final unwind.
+- **Error aborts drain the channel waiter queues** (`release_channel_waiters`
+  in `Vm::run`): a parked chain holds its channel's handle, so the
+  chain ↔ `ChannelInner` edges formed an `Rc` cycle that kept the aborted
+  tasks' stacks alive until process exit.
+- **`Await`/`Poll` roll back the awaiting frame's ip when `resume_frame`
+  fails**, restoring the `locate_error` invariant (`step()` writes `ip` only
+  on success) — a failed resume now reports the `Await`, not the next
+  instruction.
+- **One clock epoch**: the scheduler's and the VM's `OnceLock` start
+  instants are unified (`vm::mono_ms`), so sleep deadlines are computed and
+  compared on a single timebase.
+- Stale `park_on_channel` doc comment corrected: a sync helper called from
+  an async body *does* snapshot soundly (inherited `is_future` passes the
+  guard; the whole live chain detaches).
+
 ---
 
 ## T07 — Channels (F9; D3/D6)
@@ -553,6 +595,52 @@ names `move` / `await` / `std.async.run`), and the runtime
 so the message names both (this also gives the previously dead
 `PayloadKind::name` its documented caller). `tests/typeck/valid/async_fn.fln`
 gained its missing trailing newline.
+
+**Review fixes (2026-10-25 completion review):**
+
+- **The fork rules now see through `Result`** — the 10-24 `[T]`-nesting fix
+  had a sibling hole: `Type::contains_future` walked only `Type::Array`,
+  while `Result<T, E>` carries both payloads *by value* (`Value::Ok`/`Err`
+  box them; the derived `Clone` deep-copies), and every channel check was a
+  top-level `matches!` with no mirror predicate at all. Eight source shapes
+  forked a suspended frame or aliased a buffer through a `Result` wrapper:
+  `clone r` (Future *and* Channel), a `Result<Future, _>` struct field, box
+  cell, `ts[i]`, `for`-over-`[...]`, `std.arr.push`/`get` on the moved
+  array, and `r == c`. The fixes: `contains_future` walks `Result` too; a
+  new mirrored `Type::contains_channel` joins the field/global/box/clone/`==`
+  rules and the array-literal element seal (channels, unlike futures, have
+  no wholesale array consumer); the ownership bare-read backstop covers
+  channel-containing locals; and the `OwnedArgRequiresMove` help gained
+  Result-shaped branches (the old text called every non-top-level Future an
+  "array"). `?` on a `Result<Future, _>` local is now rejected
+  (`OwnedArgRequiresMove`) — extracting through `?` clones the payload while
+  the binding stays live, the same fork; the legal spelling is `choose move
+  r { when Ok(v) { v await } ... }`. Regressions: typeck invalid
+  `future_result_{clone,field,index,for,box,eq,nested_array_clone}`,
+  `channel_result_{clone,array}`.
+- **A `ref` payload cannot cross a channel (D4 at the send).** `ch.send(s)`
+  with `s: ref string` typecked — `unify_arg_ref_aware` strips `Ref` when
+  checking the payload, and the send move-check only fired for owned types —
+  and the VM had no `Value::Ref` backstop in `do_channel_send`: the
+  rendezvous path tripped `suspend_top_frame`'s debug_assert (a
+  user-reachable panic) and the buffered path silently delivered a stale
+  operand-stack slot as the "value" (exit 0). The send path now rejects a
+  borrowed payload outright (`ChannelPayloadBorrowed`: send `clone s` for a
+  copy), and the VM backstops the same condition for malformed bytecode.
+  Regression: typeck invalid `channel_ref_payload`; VM raw
+  `raw_channel_send_with_a_ref_payload_is_rejected`.
+- **The VM copy backstops walk containers** (`deep_fork_kind` over
+  `Ok`/`Err`/arrays, mirroring the typeck predicates): `LoadLocal`/
+  `LoadGlobal` (a top-level channel load stays the legal handle load; a
+  buried one is an alias), `CloneLocal`/`CloneGlobal`/`ArrGet`, and the
+  `std.arr.get`/`push`/`set` builtins — whose `move`'d-array argument passes
+  the bare-read guards and then clones its elements host-side. Regressions:
+  VM raw `raw_load_global_on_a_future_is_rejected`,
+  `raw_arr_get_builtin_on_an_ok_future_element_is_rejected`.
+- Accepted, documented language limit: `?` cannot take a `move` operand
+  (`move r?` does not parse), so a `Result<Future, _>` local has no `?`
+  propagation spelling — `choose move r` extraction is the route. Tightening
+  the postfix grammar is a 0.1.0 decision alongside the other ergonomics.
 
 ---
 

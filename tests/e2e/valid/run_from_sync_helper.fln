@@ -1,0 +1,27 @@
+// 0.0.4 review fix: `std.async.run` from a *synchronous* helper inside a
+// task must join in place — the helper frame inherits `is_future` but emits
+// no `Suspend`, so arming the async-body join expectation there stranded the
+// spawned ids and broke the join contract (`after join` printed before the
+// worker ran). The builtin detects the sync-helper frame (its code does not
+// open with `AsyncStart`) and drives the spawned ids to completion before
+// the builtin returns.
+import std.io;
+import std.async;
+
+func spawn_helper() {
+    std.async.run([worker()]);
+}
+
+async func worker() {
+    std.io.println("worker ran");
+}
+
+async func driver() {
+    spawn_helper();
+    std.io.println("after join");
+}
+
+func main() {
+    std.async.run([driver()]);
+    std.io.println("done");
+}

@@ -102,6 +102,16 @@ pub enum RuntimeErrorKind {
     /// (0.0.4 T08). Defensive: `std.concurrent.split` is the one fork point —
     /// typeck rejects `clone ch` and channel globals/fields.
     ChannelNotClonable,
+    /// A `send` pushed a `Value::Ref` payload (0.0.4 review fix). Defensive:
+    /// a borrow handle stores an absolute operand-stack index that cannot
+    /// survive a suspension snapshot — typeck rejects `ch.send(s)` with
+    /// `s: ref T` (`ChannelPayloadBorrowed`).
+    ChannelPayloadBorrowed,
+    /// A nested join cannot complete: the scheduler is empty, no timer is
+    /// pending, no task is blocked on a channel, but a `std.async.run` join
+    /// still waits for spawned task ids (0.0.4 review fix). Defensive — the
+    /// static rules guarantee every spawned task stays reachable.
+    JoinDeadlock,
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -181,6 +191,20 @@ impl std::fmt::Display for RuntimeErrorKind {
                 write!(
                     f,
                     "a channel cannot be copied — `split` is the only fork point"
+                )
+            }
+            RuntimeErrorKind::ChannelPayloadBorrowed => {
+                write!(
+                    f,
+                    "a borrowed value cannot be sent through a channel — a `ref` \
+                     handle cannot cross a task boundary"
+                )
+            }
+            RuntimeErrorKind::JoinDeadlock => {
+                write!(
+                    f,
+                    "join deadlock: a `std.async.run` join waits for spawned \
+                     tasks that can no longer run"
                 )
             }
         }

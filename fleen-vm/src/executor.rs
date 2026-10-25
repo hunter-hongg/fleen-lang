@@ -84,13 +84,12 @@ impl Scheduler {
         self.ready.iter().chain(self.timers.iter())
     }
 
-    /// The current monotonic clock in milliseconds.
+    /// The current monotonic clock in milliseconds. Shares the VM's
+    /// process-wide epoch (`Vm::now_mono_ms`): deadlines are computed and
+    /// compared on one timebase, so two `OnceLock` start instants can never
+    /// skew a timer's wake by a sub-millisecond mismatch.
     fn now_ms(&self) -> i64 {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as i64
+        super::vm::mono_ms()
     }
 
     /// Promote every timer task whose deadline has passed onto the ready queue.

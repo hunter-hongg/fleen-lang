@@ -2596,6 +2596,90 @@ fn raw_clone_global_on_a_channel_is_rejected() {
 }
 
 #[test]
+fn raw_channel_send_with_a_ref_payload_is_rejected() {
+    // 0.0.4 review-fix backstop: a `Value::Ref` payload stores an absolute
+    // operand-stack index that cannot survive a suspension snapshot — the
+    // rendezvous path used to trip the `suspend_top_frame` debug_assert and
+    // the buffered path silently delivered a stale slot. Typeck rejects the
+    // send (`ChannelPayloadBorrowed`), so this is malformed bytecode only.
+    let mut module = async_opcode_module();
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(2)),        // Int(1): a value for slot 0
+            (Opcode::StoreLocal, u16b(0)),   // slot 0 = Int
+            (Opcode::Const, u32b(2)),        // Int(1): the capacity
+            (Opcode::ChannelNew, vec![]),    // ch on the stack
+            (Opcode::MakeRefLocal, u16b(0)), // Ref on top ([ch, ref])
+            (Opcode::ChannelSend, vec![]),   // payload = the Ref
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelPayloadBorrowed
+    );
+}
+
+#[test]
+fn raw_load_global_on_a_future_is_rejected() {
+    // 0.0.4 review-fix backstop, matching `LoadLocal`: a global load clones
+    // the `Value`, which for a Future deep-copies the suspended frame.
+    // Typeck rejects Future globals (`FutureNotStorable`), so this is
+    // malformed bytecode only.
+    let mut module = async_opcode_module();
+    module.constants.push(Const::Str("g".into())); // id 4
+    module.globals.push(fleen_compiler::codegen::Global {
+        name: fleen_compiler::codegen::ConstId(4),
+        mutable: true,
+    });
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(3)), // Int(40): the arg to gen
+            (Opcode::Call, u16b(1)),  // Future on the stack
+            (Opcode::StoreGlobal, u16b(0)),
+            (Opcode::LoadGlobal, u16b(0)), // clone of the Future
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::FutureNotClonable
+    );
+}
+
+#[test]
+fn raw_arr_get_builtin_on_an_ok_future_element_is_rejected() {
+    // 0.0.4 review-fix backstop: `std.arr.get` copies the element out — for
+    // a `Result<Future, _>` payload that deep-copies the suspended frame
+    // hiding inside the `Ok`. Typeck now sees through `Result` (the bare
+    // `ts` spelling is rejected, so the array is passed by `move`), making
+    // this reachable only through a `move`'d array — the copy happens at the
+    // element clone, which the VM backstops.
+    let err = run_src(
+        r#"
+import std.arr;
+async func gen(x: int): int {
+    x + 1
+}
+func main(): int {
+    f = gen(1);
+    ts: [Result<Future<int>, string>] = [Ok(move f)];
+    r = std.arr.get(move ts, 0);
+    0
+}
+"#,
+    )
+    .expect_err("the Ok payload carries a suspended frame");
+    assert_eq!(err.kind, RuntimeErrorKind::FutureNotClonable);
+}
+
+#[test]
 fn channel_send_on_a_non_channel_is_channel_expected() {
     // `ChannelSend` with a non-channel under the payload reports
     // `ChannelExpected` (mirroring `FutureExpected`), not a bare StackShape.
@@ -2897,6 +2981,110 @@ func main(): int {
     )
     .expect("awaiting an async body that runs a channel task completes");
     assert_eq!(v, Value::Int(99));
+}
+
+#[test]
+fn run_from_a_sync_helper_joins_in_place() {
+    // Regression (0.0.4 review): a *synchronous* helper running inside a task
+    // inherits `is_future` but emits no `Suspend`, so arming the async-body
+    // join expectation there stranded the spawned ids until some unrelated
+    // task's `Suspend` consumed them — the join contract broke (the caller
+    // continued past `run(...)` before its tasks ran, and a timer-ordered
+    // variant lost a continuation silently). The builtin now detects the
+    // sync-helper frame (its code does not open with `AsyncStart`) and joins
+    // in place. This pins the in-place join through its consequence: a
+    // spawned task that can only be satisfied by the helper's *continuation*
+    // is a `ChannelDeadlock` — under the old behavior the helper kept
+    // running and the program completed with the value.
+    let err = run_src(
+        r#"
+import std.async;
+import std.concurrent;
+async func waiter(ch: channel<int>) {
+    v = ch.recv();
+}
+func helper(ch: channel<int>) {
+    std.async.run([waiter(move ch)]);
+}
+async func orch(): int {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    helper(move peer);
+    ch.send(5);
+    5
+}
+func main(): int {
+    orch() await
+}
+"#,
+    )
+    .expect_err("the in-place join cannot satisfy a task waiting on the helper's continuation");
+    assert_eq!(err.kind, RuntimeErrorKind::ChannelDeadlock);
+}
+
+#[test]
+fn run_from_a_sync_helper_completes_spawned_tasks_before_returning() {
+    // The positive twin of the in-place-join pin: the spawned task completes
+    // *during* the builtin, so the buffered value is already there when the
+    // helper's caller receives.
+    let v = run_src(
+        r#"
+import std.async;
+import std.concurrent;
+async func sender(ch: channel<int>) {
+    ch.send(99);
+}
+func helper(ch: channel<int>) {
+    std.async.run([sender(move ch)]);
+}
+async func orch(): int {
+    ch = channel<int>(1);
+    peer = std.concurrent.split(ch);
+    helper(move peer);
+    ch.recv()
+}
+func main(): int {
+    orch() await
+}
+"#,
+    )
+    .expect("the sync helper's run joins before returning");
+    assert_eq!(v, Value::Int(99));
+}
+
+#[test]
+fn nested_sync_helper_run_inside_a_driven_task_completes() {
+    // The in-place join runs *inside* `drive_join`'s task loop (the helper's
+    // task was resumed by an outer join): the driven ids complete without
+    // disturbing the outer bookkeeping, and the outer task continues.
+    let v = run_src(
+        r#"
+import std.async;
+import std.concurrent;
+async func leaf(ch: channel<int>) {
+    ch.send(7);
+}
+func helper(ch: channel<int>) {
+    std.async.run([leaf(move ch)]);
+}
+async func mid(res: channel<int>) {
+    ch = channel<int>(1);
+    peer = std.concurrent.split(ch);
+    helper(move peer);
+    got = ch.recv();
+    res.send(got);
+}
+func main(): int {
+    res = channel<int>(1);
+    rpeer = std.concurrent.split(res);
+    tasks = [mid(move rpeer)];
+    std.async.run(move tasks);
+    res.recv()
+}
+"#,
+    )
+    .expect("an in-place join nested inside a driven task completes");
+    assert_eq!(v, Value::Int(7));
 }
 
 // ---------------------------------------------------------------------------
