@@ -456,6 +456,22 @@ impl fmt::Display for TypeckErrorKind {
                          `move {name}`, or pass it to `std.async.run`",
                         ty.name()
                     )
+                } else if matches!(ty, Type::Channel(_)) {
+                    // Arrays of channels cannot exist (T07d rejects the
+                    // element type at the array literal), so the top-level
+                    // match is exhaustive for reachable shapes. `clone` is
+                    // never the answer for a channel — it is rejected by
+                    // `ChannelNotClonable` — so the help names the one legal
+                    // fork point instead.
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — a channel handle must not \
+                         be duplicated: two handles would alias the same \
+                         buffer — help: `move {name}`, or fork it \
+                         explicitly: `std.concurrent.split({name})`",
+                        ty.name()
+                    )
                 } else {
                     write!(
                         f,

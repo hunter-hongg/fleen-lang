@@ -592,6 +592,11 @@ gained its missing trailing newline.
   existing e2e `channel_send_requires_move` (the send-payload direction).
 - The invalid fixtures' `.stderr` needles quote the typeck messages verbatim
   (the harness matches `contains`); exit code is 1 (compile failure).
+- **Diagnostic fix (found while writing the fixtures)**: the
+  `OwnedArgRequiresMove` help suggested `clone ch` for a channel-typed value,
+  which `ChannelNotClonable` then rejects. The message now has a channel
+  branch (it names `move` / `std.concurrent.split`, the one legal fork
+  point); the e2e `owned_channel_arg` needle pins the corrected text.
 - The §10-through-`flint` item is `flint-cli/tests/e2e.rs::
   flint_async_and_channel_projects_run_and_test`: project-mode compile of
   async/await/channel (reserved words legal as module/member paths),
