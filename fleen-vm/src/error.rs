@@ -1,5 +1,6 @@
 //! VM runtime errors (BYTECODE.md §3.4). Never catchable from Fleen code.
 
+use crate::value::PayloadKind;
 use fleen_compiler::codegen::{ConstId, FuncId, GlobalId};
 
 /// The specific failure behind a [`RuntimeError`].
@@ -80,6 +81,27 @@ pub enum RuntimeErrorKind {
     /// and no ready task exists (0.0.4 T07b). Raised immediately in
     /// `drive_join` rather than parking forever.
     ChannelDeadlock,
+    /// `ChannelSend`/`ChannelRecv`/`ChannelSplit` found a non-channel value
+    /// on the operand stack (0.0.4 T08). Defensive: typeck produces these
+    /// opcodes only under a `channel<T>` receiver.
+    ChannelExpected,
+    /// A `send` pushed a payload whose runtime kind differs from the kind
+    /// this channel already accepted (0.0.4 T08 defensive backstop — the
+    /// channel records the first payload's kind; typeck owns the static
+    /// uniformity rule, so reaching this needs malformed bytecode). Carries
+    /// the recorded and the offending kind so the message is actionable.
+    ChannelPayloadMismatch {
+        recorded: PayloadKind,
+        found: PayloadKind,
+    },
+    /// A copy opcode (`CloneLocal`/`CloneGlobal`) found a `Future` value
+    /// (0.0.4 T08). Defensive: a Future moves (`await`, `std.async.run`,
+    /// `move`) — typeck rejects every source-level copy route.
+    FutureNotClonable,
+    /// A copy opcode (`CloneLocal`/`CloneGlobal`) found a `Channel` value
+    /// (0.0.4 T08). Defensive: `std.concurrent.split` is the one fork point —
+    /// typeck rejects `clone ch` and channel globals/fields.
+    ChannelNotClonable,
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -134,6 +156,31 @@ impl std::fmt::Display for RuntimeErrorKind {
                 write!(
                     f,
                     "channel deadlock: all tasks blocked with no ready task and no pending timer"
+                )
+            }
+            RuntimeErrorKind::ChannelExpected => {
+                write!(
+                    f,
+                    "channel opcode expected a `channel<T>` value on the stack"
+                )
+            }
+            RuntimeErrorKind::ChannelPayloadMismatch { recorded, found } => write!(
+                f,
+                "channel payload kind mismatch on send: this channel already \
+                 carries `{}` but a `{}` was sent",
+                recorded.name(),
+                found.name()
+            ),
+            RuntimeErrorKind::FutureNotClonable => {
+                write!(
+                    f,
+                    "a Future cannot be copied — it moves (await / run / move)"
+                )
+            }
+            RuntimeErrorKind::ChannelNotClonable => {
+                write!(
+                    f,
+                    "a channel cannot be copied — `split` is the only fork point"
                 )
             }
         }

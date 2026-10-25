@@ -1,0 +1,13 @@
+// expect-typeck: FutureNotClonable
+// 0.0.4 T08 (review follow-up): `clone` on an array of futures copies every
+// suspended frame in the array — the whole-array spelling of the fork the
+// `clone f` rule already rejects. `std.async.run` moves the array instead.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    ts = [gen(1)];
+    u = clone ts;
+    0
+}

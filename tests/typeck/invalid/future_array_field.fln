@@ -1,0 +1,15 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08 (review follow-up): a struct field of array-of-futures type is
+// copied wholesale by a field read — the array spelling of the `Future`
+// field rule. The check sees through array nesting.
+async func gen(x: int): int {
+    x + 1
+}
+
+struct Holder {
+    ts: [Future<int>],
+}
+
+func main(): int {
+    0
+}

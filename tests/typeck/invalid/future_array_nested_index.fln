@@ -1,0 +1,13 @@
+// expect-typeck: FutureIndexRead
+// 0.0.4 T08 (review follow-up): an element of `[[Future<int>]]` is itself an
+// array of suspended frames — reading it copies the frames wholesale. The
+// element-read rule sees through array nesting.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    tss = [[gen(1)]];
+    u = tss[0];
+    0
+}

@@ -1,0 +1,12 @@
+// expect-typeck: InvalidOperand
+// 0.0.4 T08: a Future has no `==` — the derived comparison would inspect two
+// suspended coroutine frames, and either operand's frame read is a fork.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    a = gen(1);
+    b = gen(2);
+    if a == b { 1 } else { 0 }
+}

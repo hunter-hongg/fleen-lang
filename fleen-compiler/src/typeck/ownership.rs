@@ -536,6 +536,27 @@ impl<'a> Cx<'a> {
             }
             return;
         }
+        // 0.0.4 T08: a Future has no legal bare read. Every Value-level read
+        // of a future local (`LoadLocal` and `CloneLocal` both clone the
+        // `Value`) deep-copies the suspended coroutine frame, forking the
+        // task. The legal spellings all transfer: `f await` (producer), a
+        // producing tail, or an explicit `move` — consuming positions already
+        // demand one via `OwnedArgRequiresMove`. The rule sees through array
+        // nesting (a bare read of a `[Future]` local copies every frame);
+        // in practice `reject_bare_owned_arg` rejects these shapes earlier —
+        // this is the backstop for read positions that do not go through it.
+        if ty.contains_future() && *access == Access::Copy && matches!(use_kind, IdentUse::Read) {
+            if self.check_use(name, id, span) {
+                self.errors.push(TypeckError::new(
+                    TypeckErrorKind::OwnedArgRequiresMove {
+                        name: name.to_string(),
+                        ty: ty.clone(),
+                    },
+                    span,
+                ));
+            }
+            return;
+        }
         if self.globals.contains(id) || self.global_names.contains(name) {
             *access = Access::Clone;
             return;

@@ -1,0 +1,13 @@
+// expect-typeck: FutureIndexRead
+// 0.0.4 T08: an element read is a deep copy — copying a Future out of an
+// array would fork the suspended frame. An array of futures exists for one
+// consumer: `std.async.run` moves the frames out wholesale.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    ts = [gen(1)];
+    v = ts[0] await;
+    v
+}

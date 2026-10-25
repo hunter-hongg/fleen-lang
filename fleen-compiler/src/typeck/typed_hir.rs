@@ -98,6 +98,22 @@ impl Type {
         }
     }
 
+    /// Check if this type holds a `Future` anywhere inside `[T]` nesting
+    /// (0.0.4 T08): an array of futures is legal *storage* — `std.async.run`
+    /// consumes it by moving the frames out wholesale — but every Value-level
+    /// *copy* of such an array would duplicate the suspended frames. Every
+    /// copy route must therefore be rejected wherever the array sits,
+    /// including nested arrays. Other containers cannot hold a future:
+    /// struct fields, box cells and globals are rejected at declaration
+    /// (`FutureNotStorable`), so only `[T]` needs walking.
+    pub fn contains_future(&self) -> bool {
+        match self {
+            Type::Future(_) => true,
+            Type::Array(elem) => elem.contains_future(),
+            _ => false,
+        }
+    }
+
     /// Check if this type is a numeric type (Int or Float).
     pub fn is_numeric(&self) -> bool {
         matches!(self, Type::Int | Type::Float)

@@ -262,9 +262,16 @@ impl TypeChecker {
                     let conv = self.convert_type(&ty, span);
                     // 0.0.4 T07d: channels are non-storable — a field read
                     // deep-copies owned values, which would fork the shared
-                    // buffer silently.
+                    // buffer silently. 0.0.4 T08: a Future is non-storable
+                    // for the same reason — the read would fork the suspended
+                    // coroutine frame (this also retires the codegen-side
+                    // debug_assert that used to be the only guard). The check
+                    // sees through array nesting: a `[Future]` field is
+                    // copied wholesale by a field read.
                     if matches!(conv, Type::Channel(_)) {
                         self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+                    } else if conv.contains_future() {
+                        self.add_error(TypeckErrorKind::FutureNotStorable, span);
                     }
                     (name, conv, span)
                 })
@@ -497,22 +504,32 @@ impl TypeChecker {
             let typed_decl = match item {
                 HirItem::Decl(DeclHir::Var(v)) => {
                     if let Ok(typed) = self.typeck_var_binding(v.clone()) {
-                        self.global_types.insert(
-                            v.name.clone(),
-                            typed.ty.clone().unwrap_or_else(|| typed.init.ty()),
-                        );
-                        Some(TypedHirItem::Decl(TypedDeclHir::Var(typed)))
+                        let ty = typed.ty.clone().unwrap_or_else(|| typed.init.ty());
+                        // 0.0.4 T08: globals are module-wide readable storage,
+                        // and every read is a deep copy (`CloneGlobal`) — a
+                        // channel global would hand every reader an alias
+                        // without `split` (T07's accepted-for-0.0.4 alias is
+                        // withdrawn here), and a Future global would fork the
+                        // suspended frame on every read.
+                        if self.reject_async_global_type(&ty, v.span) {
+                            None
+                        } else {
+                            self.global_types.insert(v.name.clone(), ty);
+                            Some(TypedHirItem::Decl(TypedDeclHir::Var(typed)))
+                        }
                     } else {
                         None
                     }
                 }
                 HirItem::Decl(DeclHir::Const(c)) => {
                     if let Ok(typed) = self.typeck_const_decl(c.clone()) {
-                        self.global_types.insert(
-                            c.name.clone(),
-                            typed.ty.clone().unwrap_or_else(|| typed.init.ty()),
-                        );
-                        Some(TypedHirItem::Decl(TypedDeclHir::Const(typed)))
+                        let ty = typed.ty.clone().unwrap_or_else(|| typed.init.ty());
+                        if self.reject_async_global_type(&ty, c.span) {
+                            None
+                        } else {
+                            self.global_types.insert(c.name.clone(), ty);
+                            Some(TypedHirItem::Decl(TypedDeclHir::Const(typed)))
+                        }
                     } else {
                         None
                     }
@@ -524,6 +541,23 @@ impl TypeChecker {
             }
         }
         typed
+    }
+
+    /// 0.0.4 T08 (D4 wiring): a global may not hold a `channel<T>`, a
+    /// `Future<T>`, or an array containing either — every global read is a
+    /// deep copy, which would alias the shared buffer without `split` or
+    /// duplicate the suspended frames. Reports the error and returns `true`
+    /// when rejected.
+    fn reject_async_global_type(&mut self, ty: &Type, span: Span) -> bool {
+        if matches!(ty, Type::Channel(_)) {
+            self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+            true
+        } else if ty.contains_future() {
+            self.add_error(TypeckErrorKind::FutureNotStorable, span);
+            true
+        } else {
+            false
+        }
     }
 
     /// 0.0.2 U05: record the binding IDs of top-level variables and consts.
@@ -1183,7 +1217,17 @@ impl TypeChecker {
         // Determine the loop-variable (element) type and validate the iterable
         // is in the closed set.
         let elem_ty = match &iterable_ty {
-            Type::Array(elem) => (**elem).clone(),
+            Type::Array(elem) => {
+                // 0.0.4 T08: the desugar's element read is a deep copy, which
+                // would fork a suspended Future frame — same rule as `ts[i]`.
+                // The check sees through nesting: iterating `[[Future]]`
+                // copies whole arrays of frames.
+                if elem.contains_future() {
+                    self.add_error(TypeckErrorKind::FutureIndexRead, for_expr.span);
+                    return Err(());
+                }
+                (**elem).clone()
+            }
             Type::Range => Type::Int,
             other => {
                 self.add_error(
@@ -1546,11 +1590,13 @@ impl TypeChecker {
         // `==` either — the derived `PartialEq` would compare *buffer
         // contents*, so two distinct channels that happen to hold equal
         // values would compare equal, which silently aliases what the
-        // handle discipline (split-only forking) keeps distinct.
+        // handle discipline (split-only forking) keeps distinct. 0.0.4 (T08):
+        // a Future has no `==` — the derived comparison would inspect two
+        // suspended frames, and either operand's frame read is a fork.
         if matches!(op, "==" | "!=")
             && matches!(
                 typed_lhs.ty(),
-                Type::Struct(_) | Type::Array(_) | Type::Channel(_)
+                Type::Struct(_) | Type::Array(_) | Type::Channel(_) | Type::Future(_)
             )
         {
             self.add_error(
@@ -1936,6 +1982,17 @@ impl TypeChecker {
                 );
                 return Err(());
             }
+            // 0.0.4 T08: a builtin that consumes a Future-typed argument
+            // (`std.async.run`) must not receive a bare read — the read would
+            // clone the array and its suspended frames, leaving the original
+            // binding alive to hand the same task out again (`run(ts);
+            // run(ts)` would drive the task twice). `move` is required,
+            // exactly as for a user-function owned parameter. Scalar/string
+            // arguments are unaffected (D3 auto-copy), and channel handles
+            // read as plain loads by design (T07d).
+            if typed_arg.ty().contains_future() {
+                self.reject_bare_owned_arg(&typed_arg, typed_arg.span())?;
+            }
             typed_args.push(typed_arg);
         }
 
@@ -1987,6 +2044,18 @@ impl TypeChecker {
             let typed_arg = self.typeck_expr(arg, None)?;
             arg_types.push(typed_arg.ty().clone());
             typed_args.push(typed_arg);
+        }
+
+        // 0.0.4 T08: same bare-read rule as the fixed builtin path — a
+        // schematic call over an array of futures (`std.arr.get(ts, 0)`)
+        // would copy frames through the element read. No schematic builtin
+        // legitimately takes a future-typed argument today: element access
+        // is `FutureIndexRead`'s job to reject, and the whole-array consumer
+        // is `std.async.run`.
+        for typed_arg in &typed_args {
+            if typed_arg.ty().contains_future() {
+                self.reject_bare_owned_arg(typed_arg, typed_arg.span())?;
+            }
         }
 
         // 0.0.4 T07d: `std.concurrent.split(ch)` — rewrite to ChannelSplit.
@@ -2361,6 +2430,16 @@ impl TypeChecker {
                     self.add_error(TypeckErrorKind::ChannelNotClonable, ident_span);
                     return Err(());
                 }
+                // 0.0.4 T08: a Future is move-only too — a Value-level copy
+                // deep-copies the whole suspended coroutine frame, forking the
+                // task (`clone f` would run it twice). There is no fork point
+                // for futures: `await` drives it, `std.async.run` takes it.
+                // The rule sees through array nesting: `clone ts` on a
+                // `[Future]` copies every frame in the array.
+                if value_ty.contains_future() {
+                    self.add_error(TypeckErrorKind::FutureNotClonable, ident_span);
+                    return Err(());
+                }
                 let access = if value_ty.is_copy() {
                     Access::Copy
                 } else {
@@ -2398,6 +2477,19 @@ impl TypeChecker {
     fn typeck_box(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
         let typed_inner = self.typeck_expr(inner, None)?;
         self.reject_bare_owned_arg(&typed_inner, typed_inner.span())?;
+        // 0.0.4 T08: a box cell is a storage position read by deep copy
+        // (`deref`), which would fork a suspended Future frame or alias a
+        // channel buffer without `split` — the same rule as struct fields.
+        // The check sees through array nesting: `deref` on a `box<[Future]>`
+        // copies every frame in the array.
+        if matches!(typed_inner.ty(), Type::Channel(_)) {
+            self.add_error(TypeckErrorKind::ChannelNotStorable, typed_inner.span());
+            return Err(());
+        }
+        if typed_inner.ty().contains_future() {
+            self.add_error(TypeckErrorKind::FutureNotStorable, typed_inner.span());
+            return Err(());
+        }
         Ok(TypedExprHir::Box(Box::new(typed_inner), span))
     }
 
@@ -2546,6 +2638,17 @@ impl TypeChecker {
                 return Err(());
             }
         };
+
+        // 0.0.4 T08: an element read is a deep copy, which would fork a
+        // suspended Future frame. Arrays of futures exist for one consumer —
+        // `std.async.run` moves the frames out; elements are never read.
+        // (`clone a[i]` delegates here, so the clone spelling is covered too.)
+        // The check sees through nesting: `tss[0]` on `[[Future]]` copies a
+        // whole array of frames.
+        if elem_ty.contains_future() {
+            self.add_error(TypeckErrorKind::FutureIndexRead, span);
+            return Err(());
+        }
 
         // Span covers the whole `a[i]` chain — it is what the runtime
         // `IndexOutOfRange` error points at. The span is threaded from the

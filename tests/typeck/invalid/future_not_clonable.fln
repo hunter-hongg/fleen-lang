@@ -1,0 +1,14 @@
+// expect-typeck: FutureNotClonable
+// 0.0.4 T08: a Future is move-only — any Value-level copy deep-copies the
+// whole suspended coroutine frame, forking the task (`clone f` would run it
+// twice). `await` drives it; `std.async.run` consumes it.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    g = clone f;
+    v = f await;
+    v
+}

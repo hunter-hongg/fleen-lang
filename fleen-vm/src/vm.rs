@@ -983,12 +983,17 @@ impl Vm {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
                 let idx = frame.stack_base + slot;
-                let v = self
-                    .stack
-                    .get(idx)
-                    .cloned()
-                    .ok_or(RuntimeErrorKind::StackShape)?;
-                self.stack.push(v);
+                let v = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
+                // 0.0.4 T08 defensive backstop (Future only): a plain load
+                // clones the `Value`, which for a Future deep-copies the
+                // whole suspended frame — a fork. Typeck/ownership reject
+                // every bare read of a Future local, so reaching this needs
+                // malformed bytecode. A Channel load stays legal: the clone
+                // is an Rc bump, the intended handle-load semantics.
+                if matches!(v, Value::Future(_)) {
+                    return Err(RuntimeErrorKind::FutureNotClonable);
+                }
+                self.stack.push(v.clone());
             }
             Opcode::StoreLocal => {
                 let s = take!(2);
@@ -1320,28 +1325,42 @@ impl Vm {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
                 let idx = frame.stack_base + slot;
-                let copy = match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
-                    // Cloning a borrowed parameter deep-copies its target.
-                    v @ Value::Ref { .. } => self.read_ref(v)?.clone(),
-                    other => other.clone(),
-                };
-                self.stack.push(copy);
+                // 0.0.4 T08 defensive backstop: a Future clone forks the
+                // suspended frame; a Channel clone is an alias without
+                // `split`. Typeck rejects both source forms, so this only
+                // fires for malformed bytecode.
+                match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
+                    Value::Future(_) => return Err(RuntimeErrorKind::FutureNotClonable),
+                    Value::Channel(_) => return Err(RuntimeErrorKind::ChannelNotClonable),
+                    v @ Value::Ref { .. } => {
+                        let copy = self.read_ref(v)?.clone();
+                        self.stack.push(copy);
+                    }
+                    other => self.stack.push(other.clone()),
+                }
             }
             Opcode::CloneGlobal => {
                 let s = take!(2);
                 let id = u16::from_le_bytes([s[0], s[1]]) as usize;
-                let g = self
+                // 0.0.4 T08 defensive backstop: globals may not hold a Future
+                // (the read would fork the frame) or a Channel (the read
+                // would alias the buffer without `split`) — typeck rejects
+                // both global types, so this only fires for malformed
+                // bytecode.
+                match self
                     .globals
                     .get(id)
-                    .cloned()
                     .ok_or(RuntimeErrorKind::GlobalOutOfRange(
                         fleen_compiler::codegen::GlobalId(id as u32),
-                    ))?;
-                // Globals never hold borrow handles in compiled code (typeck
-                // forbids storing a `Ref`); the defensive backstop for
-                // hand-written modules is the dereference at the consumption
-                // point, not the copy here.
-                self.stack.push(g);
+                    ))? {
+                    Value::Future(_) => return Err(RuntimeErrorKind::FutureNotClonable),
+                    Value::Channel(_) => return Err(RuntimeErrorKind::ChannelNotClonable),
+                    // Globals never hold borrow handles in compiled code (typeck
+                    // forbids storing a `Ref`); the defensive backstop for
+                    // hand-written modules is the dereference at the consumption
+                    // point, not the copy here.
+                    g => self.stack.push(g.clone()),
+                }
             }
             Opcode::PackOk => {
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
@@ -1535,7 +1554,20 @@ impl Vm {
                                     len: elems.len(),
                                 });
                             }
-                            elems[i as usize].clone()
+                            // 0.0.4 T08 defensive backstop: the element copy
+                            // would fork a suspended Future frame or alias a
+                            // channel buffer. Typeck rejects arrays that
+                            // hold either as element type, so this only fires
+                            // for malformed bytecode.
+                            match &elems[i as usize] {
+                                Value::Future(_) => {
+                                    return Err(RuntimeErrorKind::FutureNotClonable);
+                                }
+                                Value::Channel(_) => {
+                                    return Err(RuntimeErrorKind::ChannelNotClonable);
+                                }
+                                elem => elem.clone(),
+                            }
                         }
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
@@ -1752,6 +1784,7 @@ impl Vm {
                     buffer: std::collections::VecDeque::new(),
                     senders: std::collections::VecDeque::new(),
                     receivers: std::collections::VecDeque::new(),
+                    payload_kind: None,
                 }));
                 self.stack.push(Value::Channel(inner));
             }
@@ -1825,6 +1858,24 @@ impl Vm {
         let inner = self.pop_channel_handle()?;
         let mut ch = inner.borrow_mut();
 
+        // 0.0.4 T08 defensive backstop: the first accepted payload fixes the
+        // channel's runtime kind and every later send must match it. Typeck
+        // owns the static uniformity rule, so a mismatch here is malformed
+        // bytecode — better reported at the send than surfacing delayed and
+        // mislocated at the receiver's next typed instruction. `Ok`/`Err`
+        // collapse to one `Result` kind (see `Value::payload_kind`).
+        let kind = value.payload_kind();
+        match ch.payload_kind {
+            Some(recorded) if recorded != kind => {
+                return Err(RuntimeErrorKind::ChannelPayloadMismatch {
+                    recorded,
+                    found: kind,
+                });
+            }
+            Some(_) => {}
+            None => ch.payload_kind = Some(kind),
+        }
+
         // A parked receiver is waiting: hand the value over directly (the
         // buffer is necessarily empty — a receiver only parks then) and wake
         // it. The receiver's chain resumes *after* its `recv` instruction,
@@ -1857,16 +1908,16 @@ impl Vm {
         Ok(true)
     }
 
-    /// Pop a channel handle off the operand stack (0.0.4 T07). `StackShape`
-    /// is the defensive backstop for malformed bytecode — typeck only
-    /// produces `ChannelSend`/`ChannelRecv`/`ChannelSplit` under a
-    /// `channel<T>` receiver, and the shared `ChannelInner` root is what
-    /// all three operate on.
+    /// Pop a channel handle off the operand stack (0.0.4 T07). T08: a
+    /// non-channel operand is `ChannelExpected` (mirroring `FutureExpected`)
+    /// — defensive only, since typeck produces `ChannelSend`/`ChannelRecv`/
+    /// `ChannelSplit` only under a `channel<T>` receiver, and the shared
+    /// `ChannelInner` root is what all three operate on.
     fn pop_channel_handle(&mut self) -> Result<Rc<RefCell<ChannelInner>>, RuntimeErrorKind> {
         let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
         match v {
             Value::Channel(inner) => Ok(inner),
-            _ => Err(RuntimeErrorKind::StackShape),
+            _ => Err(RuntimeErrorKind::ChannelExpected),
         }
     }
 

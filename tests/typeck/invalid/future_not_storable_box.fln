@@ -1,0 +1,14 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08: a box cell is storage read by deep copy (`deref`) — a boxed
+// Future would fork the suspended frame on every read, same rule as a
+// struct field.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    b = box gen(1);
+    f = deref b;
+    v = f await;
+    v
+}

@@ -1,0 +1,15 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08 (review follow-up): a global array of futures is copied wholesale
+// by every global read (`CloneGlobal`), duplicating the suspended frames —
+// the array spelling of the `Future` global rule. The check sees through
+// array nesting, so `[[Future<int>]]` globals are rejected too.
+async func gen(x: int): int {
+    x + 1
+}
+
+ts = [gen(1)];
+
+func main(): int {
+    u = ts;
+    0
+}

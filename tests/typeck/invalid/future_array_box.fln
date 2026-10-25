@@ -1,0 +1,12 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08 (review follow-up): a box cell of array-of-futures type is
+// copied wholesale by `deref` — the array spelling of the `box Future` rule.
+// The check sees through array nesting.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    b = box [gen(1)];
+    0
+}

@@ -1,0 +1,16 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08: a struct field read deep-copies owned values — a Future field
+// would fork the suspended coroutine frame on every read.
+async func gen(x: int): int {
+    x + 1
+}
+
+struct Holder {
+    f: Future<int>,
+}
+
+func main(): int {
+    h = Holder { f: gen(1) };
+    v = h.f await;
+    v
+}

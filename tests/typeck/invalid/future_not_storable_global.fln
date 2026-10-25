@@ -1,0 +1,13 @@
+// expect-typeck: FutureNotStorable
+// 0.0.4 T08: globals are read as deep copies — a Future global would fork
+// the suspended coroutine frame on every read. Keep the future in a binding.
+async func gen(x: int): int {
+    x + 1
+}
+
+f = gen(1);
+
+func main(): int {
+    v = f await;
+    v
+}

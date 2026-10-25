@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T07 implemented (T07 channels); T08–T10 planned.**
+> **Status: IN PROGRESS — T01–T08 implemented; T09–T10 planned.**
 
 ---
 
@@ -81,7 +81,8 @@ Global reads are unchanged (deep copies via the ownership pass). Known gap,
 out of scope: an async fn calling a sync helper that writes its own module's
 global is not caught without a call graph (T06/T08). Because functions are
 first-class values, call-graph analysis is necessarily incomplete; T08 must
-either accept and document that limit or tighten D5.
+either accept and document that limit or tighten D5. *(Settled by T08c:
+accepted and documented — see the T08 card.)*
 
 ---
 
@@ -133,7 +134,9 @@ treats it as an ordinary owned type, and `CloneGlobal` deep-copies on every
 global read), which would snapshot a suspended coroutine. `Value` derives
 `Clone`/`PartialEq` regardless, so the language rule and the defensive backstop
 are T08's to settle; D2 already guarantees no `ref` handle can appear in a
-snapshot, checked by a `debug_assert` here.
+snapshot, checked by a `debug_assert` here. *(Settled by T08a/T08d: every
+copy route is rejected statically and backstopped in the VM — see the T08
+card.)*
 
 ---
 
@@ -425,17 +428,131 @@ composition (0.1.0).
   plain handle load (globals read as deep copies per D5, but a channel's
   "deep copy" is a handle copy) — an alias without explicit `split`;
   `ChannelNotClonable` covers the explicit `clone` form only.
+  *(Settled by T08b/T08d: the global alias is withdrawn — channel globals
+  are now rejected — and the backstop records the runtime payload kind; see
+  the T08 card.)*
 
 ---
 
 ## T08 — Send static rule integration (F8; D4)
 
-- [ ] Wire D4 as the single cross-thread rule: borrow handles never cross
+- [x] Wire D4 as the single cross-thread rule: borrow handles never cross
       async/task/channel (with T03); everything else unsafely-free (no sharing)
-- [ ] Decide the D5 enforcement boundary for sync helpers (call-graph analysis
-      is incomplete with first-class function values)
-- [ ] Defensive runtime `RuntimeError` backstop on misused `Future`/`Channel`
-- [ ] Tests: typeck boundary suite + defensive VM paths
+      — the audit found D4's *ref* half already complete (T03 lexical rule +
+      `ChannelNotBorrowable`), so the work closed the **copy-fork** half: every
+      Value-level copy route that would fork a suspended `Future` frame or
+      alias a channel buffer is now rejected statically (decisions T08a/T08b)
+- [x] Decide the D5 enforcement boundary for sync helpers (decision T08c:
+      accepted and documented — no call-graph analysis)
+- [x] Defensive runtime `RuntimeError` backstop on misused `Future`/`Channel`
+      (`FutureNotClonable`, `ChannelNotClonable`, `ChannelExpected`,
+      `ChannelPayloadMismatch` — decision T08d)
+- [x] Tests: typeck boundary suite (15 invalid fixtures) + defensive VM paths
+      (7 raw-opcode unit tests)
+
+**Decisions (settled during implementation — four forks the card left open):**
+
+- **T08a — a `Future<T>` is move-only everywhere a copy could fork it; the
+  array element type is the one storable exception.** Every position that is
+  read by deep copy would fork the suspended coroutine frame, so typeck now
+  rejects: `clone f` (`FutureNotClonable`), a `Future<T>` struct field, box
+  cell, or global (`FutureNotStorable`), `ts[i]` / `for`-over-`[Future]`
+  (`FutureIndexRead`), and `f == g` (`InvalidOperand`, same rule as struct/
+  array/channel). Arrays stay legal as element *storage* only because
+  `std.async.run` consumes them by moving the frames out wholesale — element
+  reads are rejected, so no source shape can copy a frame. This retires the
+  T04 open item (`clone` of a `Future` used to typeck as an ordinary owned
+  type) and the codegen-side `debug_assert!` panic for `Future` struct fields
+  (a user error must be a Diagnostic, never a compiler panic — SPEC §4). The
+  ownership pass additionally rejects a bare *read* of a Future local
+  (`OwnedArgRequiresMove`) because `LoadLocal` clones the `Value` too —
+  defense in depth; every source shape already trips an earlier rule.
+  What this locks: no language route may observe or duplicate a suspended
+  frame — swapping the coroutine representation later (D1) stays invisible.
+- **T08b — the T07 accepted-for-0.0.4 channel-global alias is withdrawn.**
+  T07 had accepted "a bare read of a channel-global lowers to a plain handle
+  load — an alias without explicit `split`". Wiring D4 ("borrow handles never
+  cross; everything else unsafely-free, no sharing") exposed the contradiction:
+  the alias *is* sharing without the one fork point. A channel (like a Future)
+  is now rejected as a global type (`ChannelNotStorable`), and `box channel`
+  is rejected for the same reason. Channels move through bindings and
+  `std.concurrent.split`; the split-only fork discipline now has no
+  exception. What this locks: handle aliasing is observable only through an
+  explicit `split` in source.
+- **T08c — the D5 sync-helper gap is accepted and documented, not closed.**
+  T03's known gap stands: an async fn calling a *synchronous* helper that
+  writes its own module's global is not caught, because catching it needs a
+  call graph and functions are first-class values, which makes call-graph
+  analysis necessarily incomplete. Accepted on two grounds: (1) the current
+  executor is single-threaded cooperative (T06; the worker pool is a deferred
+  optimization), so such a write cannot actually race in 0.0.4 — D5
+  future-proofs the semantics, it does not defend a present race; (2) D4's
+  value is being one static rule — an interprocedural approximation would
+  add false positives without proving absence. Recorded as a documented
+  language limit (this card + DESIGN wording in T10); tightening would be a
+  0.1.0+ decision alongside traits/closures.
+- **T08d — the payload backstop records the runtime *kind*, not an encoded
+  static type.** T07 deferred the defensive payload check because the MIR's
+  `payload_ty` is dropped by codegen and the channel opcodes are operand-less.
+  Extending the 0xC4–0xC7 encoding (or the const pool) was considered and
+  rejected while version 4 is unreleased-but-frozen-in-docs: it would touch
+  encoder/decoder/verify for a check that (per D4) is only ever a backstop —
+  typeck owns static uniformity and verify already gates hand-written
+  bytecode. Instead `ChannelInner` records the `PayloadKind` of the first
+  accepted payload (one `Value` variant per *static* type; `Ok`/`Err` collapse
+  to `Result` because they are two constructors of one type) and a later
+  `send` of a different kind raises `ChannelPayloadMismatch` at the send,
+  rather than letting the corruption surface delayed and mislocated at the
+  receiver's next typed instruction. The recorded `payload_ty` in MIR stays
+  unused by codegen (a future encoding change can pick it up; nothing to
+  remove). No opcode, encoding, or version change — BYTECODE.md §10 and the
+  locked opcode map are untouched.
+
+**Notes (implementation):**
+
+- The VM backstops are unreachable from compiled source by construction —
+  each one mirrors a typeck rule and fires only for malformed bytecode:
+  `LoadLocal`/`CloneLocal`/`CloneGlobal`/`ArrGet` on a `Future` (a copy would
+  fork the frame → `FutureNotClonable`), the same on a `Channel` (an alias
+  without `split` → `ChannelNotClonable`), non-channel operands of the
+  channel opcodes (`ChannelExpected`, mirroring `FutureExpected`). Deliberate
+  non-backstops: `LoadLocal` on a channel stays legal (the Rc-bump clone *is*
+  the handle-load semantics) and `DupDeep` is untouched (it is the compiled
+  form of every owned-RHS assignment, including `f = gen(1)` — the clone of a
+  not-yet-started frame there is the assignment's move, observed once).
+- The T04 test `nested_future_survives_an_outer_snapshot` read its slot back
+  with `LoadLocal` — exactly the fork path T08 now rejects; the fixture's
+  host func uses `MoveLocal` instead (the semantics compiled source is
+  forced into). Its intent (a nested future survives an outer snapshot
+  unchanged) is unchanged.
+- `tests/typeck/valid/async_fn.fln` moved its `f: Future<int>` annotation
+  binding from top level into a function — T08 forbids Future globals, and
+  the fixture's intent (annotation-position support) is preserved.
+
+**Notes (review follow-ups, 2026-10-24):** a review found the array-storage
+exception of T08a leaking: the storable/copy rules matched a bare `Future`
+type directly, so a Future *inside an array* slipped through every position
+that copies the array wholesale — `clone ts`, a global/field/box `[Future]`,
+and nested `tss[0]` / `for`-over-`[[Future]]` (channel arrays were already
+sealed at the array literal by T07d, so only the Future side leaked). All
+copy routes now see through `[T]` nesting via `Type::contains_future`:
+`clone` → `FutureNotClonable`, global/field/box → `FutureNotStorable`,
+element reads → `FutureIndexRead`; the ownership bare-read rule uses the
+same predicate as its backstop. One route sat in the std builtins: a bare
+`[Future]` ident argument to `std.async.run` cloned the array while leaving
+the binding alive, so `run(ts); run(ts)` drove the task twice — builtin
+calls (fixed and schematic) now run `reject_bare_owned_arg` on any
+future-typed argument, so the spelling is `std.async.run(move ts)` (the T06
+`run_with_an_empty_task_list_completes` fixture updated accordingly; the
+`run([...])` literal spelling is unchanged). Two diagnostic fixes rode
+along: the
+`OwnedArgRequiresMove` help text no longer suggests `clone` for a
+Future-typed value (it would be rejected by `FutureNotClonable` — it now
+names `move` / `await` / `std.async.run`), and the runtime
+`ChannelPayloadMismatch` carries the recorded and offending `PayloadKind`s
+so the message names both (this also gives the previously dead
+`PayloadKind::name` its documented caller). `tests/typeck/valid/async_fn.fln`
+gained its missing trailing newline.
 
 ---
 

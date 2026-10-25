@@ -1,0 +1,10 @@
+// expect-typeck: ChannelNotStorable
+// 0.0.4 T08 (withdraws T07's accepted-for-0.0.4 alias): globals are read as
+// deep copies, but a channel's "deep copy" is a handle copy — a channel
+// global would hand every reader an alias without `split`, the one fork
+// point. Pass channels through bindings and `move` them into tasks.
+ch = channel<int>(1);
+
+func main(): int {
+    0
+}

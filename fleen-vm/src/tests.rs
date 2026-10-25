@@ -2,7 +2,7 @@
 
 use super::diag::line_col;
 use super::error::{RuntimeError, RuntimeErrorKind};
-use super::value::Value;
+use super::value::{PayloadKind, Value};
 use super::vm::Vm;
 use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode, SpanEntry};
 
@@ -2082,8 +2082,11 @@ fn async_worker_func() -> Func {
 /// `locals = 1`, `params = 0`: loads slot 0 and returns it.  Used to prove a
 /// nested `Value::Future` travels through a snapshot untouched.
 fn async_host_func() -> Func {
+    // T08: the host reads its slot back out with a *move* — a plain load
+    // would clone the `Value`, which the nested-future test parks in the
+    // slot, and cloning a Future is the backstopped fork path.
     func(
-        enc(&[(Opcode::LoadLocal, u16b(0)), (Opcode::Return, vec![])]),
+        enc(&[(Opcode::MoveLocal, u16b(0)), (Opcode::Return, vec![])]),
         0,
         1,
     )
@@ -2482,6 +2485,200 @@ fn suspend_outside_a_future_context_is_a_defensive_error() {
 }
 
 // ---------------------------------------------------------------------------
+// 0.0.4 T08: D4 wiring — defensive backstops for a misused Future/Channel.
+// None of these paths is reachable from compiled source: typeck/ownership
+// reject every copy route (`FutureNotClonable` / `FutureNotStorable` /
+// `FutureIndexRead`, `ChannelNotClonable` / `ChannelNotStorable`), so these
+// hand-written modules exercise the malformed-bytecode defense only.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn raw_load_local_on_a_future_is_rejected() {
+    // A plain load clones the `Value` — for a Future that deep-copies the
+    // whole suspended frame (a fork). Ownership rejects every bare read of a
+    // future local, so only malformed bytecode reaches this. (A Channel load
+    // stays legal: the clone is an Rc bump, the handle-load semantics.)
+    let mut module = async_opcode_module();
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(3)), // Int(40): the arg to gen
+            (Opcode::Call, u16b(1)),  // call async fn -> Future on stack
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::FutureNotClonable
+    );
+}
+
+#[test]
+fn raw_clone_local_on_a_future_is_rejected() {
+    // `clone` lowers to `CloneLocal` for locals; typeck rejects `clone f`, so
+    // a Future here is malformed bytecode forking the frame.
+    let mut module = async_opcode_module();
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(3)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::CloneLocal, u16b(0)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::FutureNotClonable
+    );
+}
+
+#[test]
+fn raw_clone_global_on_a_future_is_rejected() {
+    // Globals are read as deep copies (`CloneGlobal`); typeck rejects a
+    // Future-typed global (T08), so this is malformed bytecode forking the
+    // frame on every read.
+    let mut module = async_opcode_module();
+    module.globals = vec![fleen_compiler::codegen::Global {
+        name: ConstId(0),
+        mutable: true,
+    }];
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(3)),
+            (Opcode::Call, u16b(1)),
+            (Opcode::StoreGlobal, u16b(0)),
+            (Opcode::CloneGlobal, u16b(0)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::FutureNotClonable
+    );
+}
+
+#[test]
+fn raw_clone_global_on_a_channel_is_rejected() {
+    // Same defensive rule for a channel global: the read would hand out an
+    // alias without `split`, the one fork point (T07d/T08).
+    let mut module = async_opcode_module();
+    module.globals = vec![fleen_compiler::codegen::Global {
+        name: ConstId(0),
+        mutable: true,
+    }];
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(2)), // Int(1): capacity
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::StoreGlobal, u16b(0)),
+            (Opcode::CloneGlobal, u16b(0)),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelNotClonable
+    );
+}
+
+#[test]
+fn channel_send_on_a_non_channel_is_channel_expected() {
+    // `ChannelSend` with a non-channel under the payload reports
+    // `ChannelExpected` (mirroring `FutureExpected`), not a bare StackShape.
+    let mut module = async_opcode_module();
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(2)), // Int(1): the "channel"
+            (Opcode::Const, u32b(2)), // Int(1): the payload
+            (Opcode::ChannelSend, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelExpected
+    );
+}
+
+#[test]
+fn channel_send_payload_kind_mismatch_is_rejected() {
+    // The channel records the first accepted payload's runtime kind; a later
+    // send of a different kind is malformed bytecode (typeck guarantees a
+    // uniform static payload type) and fails at the send instead of
+    // surfacing delayed at the receiver's next typed instruction.
+    let mut module = async_opcode_module();
+    module.constants.push(Const::Str("s".into())); // id 4
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(2)), // Int(1): capacity
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::Dup, vec![]),         // keep a second handle ([ch, ch])
+            (Opcode::Const, u32b(2)),      // Int payload
+            (Opcode::ChannelSend, vec![]), // ok: kind fixed to Int ([ch, unit])
+            (Opcode::Pop, vec![]),         // drop the unit ([ch])
+            (Opcode::Const, u32b(4)),      // Str payload
+            (Opcode::ChannelSend, vec![]), // kind Str != Int
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(
+        vm.run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelPayloadMismatch {
+            recorded: PayloadKind::Int,
+            found: PayloadKind::Str,
+        }
+    );
+}
+
+#[test]
+fn channel_send_accepts_ok_and_err_of_one_result_channel() {
+    // `Ok`/`Err` collapse to one `Result` payload kind: a
+    // `channel<Result<int, string>>` legitimately carries both constructors.
+    let mut module = async_opcode_module();
+    module.constants.push(Const::Str("e".into())); // id 4
+    module.constants.push(Const::Int(2)); // id 5: capacity
+    module.functions[0] = func(
+        enc(&[
+            (Opcode::Const, u32b(5)), // Int(2): capacity (two payloads)
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::Dup, vec![]),
+            (Opcode::Const, u32b(2)),      // Int(1)
+            (Opcode::PackOk, vec![]),      // Ok(1)
+            (Opcode::ChannelSend, vec![]), // kind Result ([ch, unit])
+            (Opcode::Pop, vec![]),
+            (Opcode::Const, u32b(4)),      // Str("e")
+            (Opcode::PackErr, vec![]),     // Err("e")
+            (Opcode::ChannelSend, vec![]), // Result again — accepted
+            (Opcode::Return, vec![]),      // returns the send's unit
+        ]),
+        0,
+        0,
+    );
+    let mut vm = Vm::new(module);
+    assert_eq!(vm.run().unwrap(), Value::Unit);
+}
+
+// ---------------------------------------------------------------------------
 // 0.0.4 T06: the cooperative executor (F6). `run_src` compiles a `.fln` source
 // through the full pipeline; each test drives a small async concurrency program
 // and asserts on its printed output / return value. These are deterministic:
@@ -2644,7 +2841,7 @@ fn run_with_an_empty_task_list_completes() {
     let v = run_src(
         r#"
 import std.async;
-async func worker() { tasks: [Future<unit>] = []; std.async.run(tasks); }
+async func worker() { tasks: [Future<unit>] = []; std.async.run(move tasks); }
 func main() { std.async.run([worker()]); }
 "#,
     )

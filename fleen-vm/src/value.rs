@@ -33,6 +33,82 @@ pub struct ChannelInner {
     /// the waking side injects the payload into the innermost frame's
     /// operands (`Vm::inject_value_into_chain`).
     pub receivers: std::collections::VecDeque<Vec<FutureFrame>>,
+    /// Payload kind of the values this channel has accepted so far
+    /// (0.0.4 T08 defensive backstop). `None` until the first payload; the
+    /// first accepted value fixes the kind and every later `send` must match
+    /// it. Coarser than the static type on purpose — `Ok`/`Err` collapse to
+    /// `Result`, every struct is `Struct` — because typeck owns the real
+    /// uniformity rule; this only catches malformed bytecode that pushes
+    /// heterogeneous payloads into one channel, where the failure would
+    /// otherwise surface delayed and mislocated at the receiver's next typed
+    /// instruction.
+    pub payload_kind: Option<PayloadKind>,
+}
+
+/// The runtime "kind" of a [`Value`] at the granularity of one variant per
+/// *static* type — `Ok`/`Err` collapse to `Result` because they are the two
+/// constructors of one type (0.0.4 T08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadKind {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Boxed,
+    Ref,
+    Result,
+    Struct,
+    Arr,
+    Range,
+    Unit,
+    Func,
+    Future,
+    Channel,
+}
+
+impl PayloadKind {
+    /// The kind's user-facing name (used in the payload-mismatch message).
+    pub fn name(self) -> &'static str {
+        match self {
+            PayloadKind::Int => "int",
+            PayloadKind::Float => "float",
+            PayloadKind::Bool => "bool",
+            PayloadKind::Str => "string",
+            PayloadKind::Boxed => "box",
+            PayloadKind::Ref => "ref",
+            PayloadKind::Result => "Result",
+            PayloadKind::Struct => "struct",
+            PayloadKind::Arr => "array",
+            PayloadKind::Range => "Range",
+            PayloadKind::Unit => "unit",
+            PayloadKind::Func => "function",
+            PayloadKind::Future => "Future",
+            PayloadKind::Channel => "channel",
+        }
+    }
+}
+
+impl Value {
+    /// The value's [`PayloadKind`] (0.0.4 T08) — see the enum's doc for why
+    /// `Ok`/`Err` collapse.
+    pub fn payload_kind(&self) -> PayloadKind {
+        match self {
+            Value::Int(_) => PayloadKind::Int,
+            Value::Float(_) => PayloadKind::Float,
+            Value::Bool(_) => PayloadKind::Bool,
+            Value::Str(_) => PayloadKind::Str,
+            Value::Boxed(_) => PayloadKind::Boxed,
+            Value::Ref { .. } => PayloadKind::Ref,
+            Value::Ok(_) | Value::Err(_) => PayloadKind::Result,
+            Value::Struct(_) => PayloadKind::Struct,
+            Value::Arr(_) => PayloadKind::Arr,
+            Value::Range { .. } => PayloadKind::Range,
+            Value::Unit => PayloadKind::Unit,
+            Value::Func(_) => PayloadKind::Func,
+            Value::Future(_) => PayloadKind::Future,
+            Value::Channel(_) => PayloadKind::Channel,
+        }
+    }
 }
 
 /// A self-describing runtime value.

@@ -181,6 +181,20 @@ pub enum TypeckErrorKind {
     /// scheduler, which would carry the borrowed handle across a suspension
     /// (D4's boundary rule at its strongest).
     ChannelNotBorrowable,
+    // ---- 0.0.4 T08: Future boundary family (D4 wiring) ----
+    /// `clone f` where `f` is a `Future<T>`: any Value-level copy of a
+    /// Future deep-copies the whole suspended coroutine frame, forking the
+    /// task. A Future moves (`await`, `std.async.run`, `move`) — never copies.
+    FutureNotClonable,
+    /// A struct field, box cell, or global has type `Future<T>`: reading any
+    /// of these positions deep-copies, which would fork the suspended frame.
+    /// (Arrays are the one storage exception — `std.async.run` consumes them
+    /// by moving the frames out; element reads are `FutureIndexRead`.)
+    FutureNotStorable,
+    /// `ts[i]` where the element type is `Future<T>`: an element read is a
+    /// deep copy, which would fork the suspended frame. An array of futures
+    /// exists to be moved into `std.async.run` as a whole.
+    FutureIndexRead,
 }
 
 impl fmt::Display for TypeckErrorKind {
@@ -423,13 +437,34 @@ impl fmt::Display for TypeckErrorKind {
                 )
             }
             TypeckErrorKind::OwnedArgRequiresMove { name, ty } => {
-                write!(
-                    f,
-                    "cannot use owned value `{name}` (`{}`) without \
-                     transferring ownership — help: transfer it: `move {name}`, \
-                     or copy it: `clone {name}`",
-                    ty.name()
-                )
+                if matches!(ty, Type::Future(_)) {
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — a Future has no copy: any \
+                         read would fork the suspended task — help: `move \
+                         {name}`, drive it: `{name} await`, or pass it to \
+                         `std.async.run`",
+                        ty.name()
+                    )
+                } else if ty.contains_future() {
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — copying the array would \
+                         duplicate the suspended tasks inside it — help: \
+                         `move {name}`, or pass it to `std.async.run`",
+                        ty.name()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "cannot use owned value `{name}` (`{}`) without \
+                         transferring ownership — help: transfer it: `move {name}`, \
+                         or copy it: `clone {name}`",
+                        ty.name()
+                    )
+                }
             }
             TypeckErrorKind::BorrowArgWithMove { name } => {
                 write!(
@@ -542,8 +577,9 @@ impl fmt::Display for TypeckErrorKind {
             TypeckErrorKind::ChannelNotStorable => {
                 write!(
                     f,
-                    "channels cannot be stored in structs or arrays — reads \
-                     would deep-copy the shared buffer; use `split` to share"
+                    "channels cannot be stored in structs, arrays, boxes, or \
+                     globals — reads would copy or alias the shared buffer; \
+                     use `split` to share"
                 )
             }
             TypeckErrorKind::OwnedChannelArgRequiresMove { name } => {
@@ -572,6 +608,33 @@ impl fmt::Display for TypeckErrorKind {
                     "a `channel<T>` cannot be borrowed — a `ref` handle must not \
                      cross a channel boundary (D4); help: take the channel by \
                      ownership and `move` it into the task"
+                )
+            }
+            TypeckErrorKind::FutureNotClonable => {
+                write!(
+                    f,
+                    "a Future cannot be cloned — a copy would fork the suspended \
+                     task (the same holds for `clone` on an array of futures) — \
+                     help: move it (`move f`, `f await`, or pass it to \
+                     `std.async.run`)"
+                )
+            }
+            TypeckErrorKind::FutureNotStorable => {
+                write!(
+                    f,
+                    "a Future cannot be stored in a struct field, box, or global \
+                     — reads deep-copy and would fork the suspended task (an \
+                     array of futures counts too: copying the array copies the \
+                     frames) — help: keep it in a binding and move it into \
+                     `await` or `std.async.run`"
+                )
+            }
+            TypeckErrorKind::FutureIndexRead => {
+                write!(
+                    f,
+                    "a Future cannot be copied out of an array — an element read \
+                     is a deep copy; help: move the whole array into \
+                     `std.async.run`"
                 )
             }
         }

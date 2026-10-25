@@ -1,0 +1,13 @@
+// expect-typeck: OwnedArgRequiresMove
+// 0.0.4 T08 (review follow-up): a Future has no legal bare read — a binding
+// from a bare future read would copy the suspended frame. The diagnostic's
+// help names the transfers (`move`, `await`, `std.async.run`), never `clone`.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    f = gen(1);
+    g = f;
+    0
+}

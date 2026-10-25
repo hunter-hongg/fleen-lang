@@ -24,6 +24,11 @@ async func accumulate(a: int, b: int): int {
 
 // `Future<T>` works in a user type annotation; a bare owned future must be
 // driven with `await` (moving it), which is what the ownership pass sees.
+// (T08: the binding lives inside a function — a *global* may no more hold a
+// Future than a struct field can; every global read is a deep copy.)
 async func two(): int = 2
-f: Future<int> = two();
-m = f await;
+func use_annotation(): int {
+    f: Future<int> = two();
+    m = f await;
+    m
+}

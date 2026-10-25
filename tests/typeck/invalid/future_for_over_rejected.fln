@@ -1,0 +1,16 @@
+// expect-typeck: FutureIndexRead
+// 0.0.4 T08: the `for` desugar reads each element by deep copy — iterating
+// an array of Futures would fork the suspended frames. `std.async.run` takes
+// the array wholesale instead.
+async func gen(x: int): int {
+    x + 1
+}
+
+func main(): int {
+    ts = [gen(1)];
+    total = 0;
+    for f in ts {
+        total = total + (f await);
+    };
+    total
+}
