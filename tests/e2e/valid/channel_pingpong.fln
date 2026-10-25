@@ -1,0 +1,32 @@
+// 0.0.4 T09: ping-pong over one rendezvous channel (cap = 0, direct
+// handoff), shared through std.concurrent.split — the one explicit fork
+// point (T07d).  pinger sends the round number, ponger echoes it back;
+// with an empty buffer each send parks until the peer is parked on the
+// matching op, so the interleaving is fully deterministic.  Both sides do
+// exactly 3 sends and 3 recvs, so no task is left parked on a channel at
+// the end (T07b would raise ChannelDeadlock otherwise — there is no close).
+import std.io;
+import std.async;
+import std.concurrent;
+
+async func pinger(ch: channel<int>) {
+    for i in range(3) {
+        ch.send(i);
+        n = ch.recv();
+        std.io.println("round ", n as string, " done");
+    }
+}
+
+async func ponger(peer: channel<int>) {
+    for i in range(3) {
+        n = peer.recv();
+        peer.send(n);
+    }
+}
+
+func main() {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([pinger(move ch), ponger(move peer)]);
+    std.io.println("pingpong done");
+}

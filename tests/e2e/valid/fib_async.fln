@@ -1,0 +1,21 @@
+// 0.0.4 T09: async recursion through the full pipeline.  An async fn's
+// caller-side signature is Future<int> (T02), so every recursive call
+// produces a Future that the body awaits; `await` binds tighter than `+`,
+// so `fib(n - 1) await + fib(n - 2) await` needs no parentheses.
+// fib has no suspend source (no sleep/channel/yield), so each await drives
+// its future to completion synchronously — this exercises AsyncStart/Await
+// across a recursive boundary, not the suspended-frame resume path.
+import std.io;
+
+async func fib(n: int): int {
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) await + fib(n - 2) await
+    }
+}
+
+func main() {
+    f = fib(10);
+    std.io.println((f await) as string);
+}

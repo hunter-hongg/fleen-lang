@@ -1,0 +1,7 @@
+// 0.0.4 T09 e2e: `ref` may not appear inside an async function (T03, D2) —
+// the borrow would have to survive the await/suspend boundary.
+async func show(s: ref string) {
+    print(s);
+}
+
+func main() {}

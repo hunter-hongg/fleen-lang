@@ -1,0 +1,5 @@
+// 0.0.4 T09 e2e: `await` requires a `Future<T>` operand (T02).  `await` is
+// postfix (D1), so the ill-formed shape is `5 await` on a plain int.
+func main() {
+    n = 5 await;
+}

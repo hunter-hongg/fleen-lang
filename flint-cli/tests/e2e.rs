@@ -251,6 +251,43 @@ fn flint_test_compares_against_expected() {
     assert!(out.contains("1 passed, 0 failed"), "summary: {out}");
 }
 
+/// 0.0.4 T09: the §10 async/channel matrix also holds through `flint` —
+/// project-mode compilation of `async`/`await`/`channel` (all reserved words
+/// legal only as module/member paths), an awaited async fn in `flint run`,
+/// and a channel rendezvous task run by `flint test`.
+#[test]
+fn flint_async_and_channel_projects_run_and_test() {
+    let tmp = Temp::new("async");
+    let proj = tmp.path().join("app");
+    write(
+        &proj.join("flint.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n",
+    );
+    write(
+        &proj.join("src/main.fln"),
+        "import std.io;\nimport std.async;\n\nasync func tick(n: int): int {\n    \
+         std.io.println(\"tick \", n as string);\n    n\n}\n\nfunc main() {\n    \
+         v = tick(7) await;\n    std.io.println((v + 1) as string);\n}\n",
+    );
+    write(
+        &proj.join("tests/ping.fln"),
+        "import std.io;\nimport std.async;\nimport std.concurrent;\n\nasync func ping(ch: channel<int>) {\n    \
+         ch.send(1);\n}\n\nasync func pong(peer: channel<int>) {\n    \
+         n = peer.recv();\n    std.io.println(\"got \", n as string);\n}\n\nfunc main() {\n    \
+         ch = channel<int>(0);\n    peer = std.concurrent.split(ch);\n    \
+         std.async.run([ping(move ch), pong(move peer)]);\n}\n",
+    );
+    write(&proj.join("tests/ping.expected"), "got 1\n");
+
+    let (code, out, err) = run_in(&proj, &["run"]);
+    assert_eq!(code, 0, "async project run (stderr: {err})");
+    assert_eq!(out, "tick 7\n8\n", "async project output");
+
+    let (code, out, err) = run_in(&proj, &["test"]);
+    assert_eq!(code, 0, "channel project test (stderr: {err})");
+    assert!(out.contains("1 passed, 0 failed"), "summary: {out}");
+}
+
 #[test]
 fn flint_dependency_graph_cycle_is_reported() {
     let tmp = Temp::new("cycle");

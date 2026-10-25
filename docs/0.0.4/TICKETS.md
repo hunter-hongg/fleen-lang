@@ -2,7 +2,7 @@
 
 > Companion to `docs/0.0.4/PLAN.md`.  One card = one unit of work, closed with
 > tests.  Decisions D1–D6 referenced here are **settled** (see PLAN §1).
-> **Status: IN PROGRESS — T01–T08 implemented; T09–T10 planned.**
+> **Status: IN PROGRESS — T01–T09 implemented; T10 planned.**
 
 ---
 
@@ -558,10 +558,46 @@ gained its missing trailing newline.
 
 ## T09 — Integration fixtures & std e2e
 
-- [ ] `tests/e2e/valid/fib_async`, `channel_pingpong`, `channel_buffer`, `multi_task` (.fln + .expected)
-- [ ] `tests/e2e/invalid/await_non_future`, `ref_in_async`, `async_global_write`, `owned_channel_arg` (.fln + .exit + .stderr)
-- [ ] Full §10 matrix through `cargo fln` and `flint`
-- [ ] Fixed-byte v1 + v2/v3 `.flnc` fixtures still execute (BYTECODE.md §10)
+- [x] `tests/e2e/valid/fib_async`, `channel_pingpong`, `channel_buffer`, `multi_task` (.fln + .expected)
+- [x] `tests/e2e/invalid/await_non_future`, `ref_in_async`, `async_global_write`, `owned_channel_arg` (.fln + .exit + .stderr)
+- [x] Full §10 matrix through `cargo fln` and `flint`
+- [x] Fixed-byte v1 + v2/v3 `.flnc` fixtures still execute (BYTECODE.md §10)
+
+**Notes (implementation):**
+
+- **`fib_async` exercises the sync-drive path, not the suspend path.** fib has
+  no suspend source, so every `await` drives its future to completion
+  synchronously (T05); the fixture pins async recursion through the full
+  pipeline — each recursive call yields a `Future<int>` awaited inline
+  (`fib(n - 1) await + fib(n - 2) await`; `await` binds tighter than `+`).
+  Suspended-frame resume stays covered by the T06/T07 fixtures
+  (`async_multi_task` / `channel_*`).
+- **`channel_pingpong` shares one rendezvous channel through `split`** (T07d's
+  one fork point) and terminates by construction: both sides do exactly 3
+  sends and 3 recvs, so no task is left parked when `run` joins — with no
+  `close`, any unbalanced send/recv would end in `ChannelDeadlock` (T07b).
+- **`channel_buffer` pins the bounded-buffer boundary without timers**: the
+  producer prints after each send, so "sent 0/1" (buffered immediately) vs
+  the blocked send 2 marks the capacity-2 edge; the interleaving relies only
+  on the locked T07 rules (complete-before-park, FIFO buffer + sender queue).
+- **`multi_task` composes every executor feature** — sleep timer, yields, a
+  rendezvous channel shared via `split`, sequential awaits in a driver, and a
+  nested `std.async.run` from an awaited body (the T06 review-fix path).
+  Ordering relies only on the locked rules: ready tasks beat due timers,
+  timers promote in insertion order, channel queues are FIFO, nested joins
+  match task ids. `sleep` in an async body needs no explicit `await` (the
+  compiler lowers `std.io.sleep(n)` to `Call; Suspend`).
+- **`owned_channel_arg` is the call-site direction** of the move rule (a bare
+  channel as a task-fn argument → `OwnedArgRequiresMove`), distinct from the
+  existing e2e `channel_send_requires_move` (the send-payload direction).
+- The invalid fixtures' `.stderr` needles quote the typeck messages verbatim
+  (the harness matches `contains`); exit code is 1 (compile failure).
+- The §10-through-`flint` item is `flint-cli/tests/e2e.rs::
+  flint_async_and_channel_projects_run_and_test`: project-mode compile of
+  async/await/channel (reserved words legal as module/member paths),
+  `flint run` of an awaited async fn, and `flint test` of a channel
+  rendezvous task. The v1/v2/v3 fixed-byte `.flnc` fixtures keep their
+  dedicated suites (`v1_compat.rs`, `compat.rs`) — re-run green, no changes.
 
 ---
 

@@ -1,0 +1,45 @@
+// 0.0.4 T09: integration of every 0.0.4 executor feature in one run —
+// timers (std.io.sleep), cooperative yields (std.async.yield_now), a
+// rendezvous channel shared via split, sequential awaits inside a driver,
+// and a nested std.async.run from an awaited async body.  Ordering relies
+// only on the locked rules: ready tasks beat due timers, timers promote in
+// insertion order, channel queues are FIFO, and a nested run's join matches
+// task ids (T06 + review fixes).  sleep in an async body needs no explicit
+// await — the compiler lowers `std.io.sleep(n)` to Call; Suspend (T06).
+import std.io;
+import std.async;
+import std.concurrent;
+
+async func noop() {
+    std.async.yield_now();
+}
+
+async func worker(ch: channel<int>) {
+    std.io.sleep(2);
+    for i in range(2) {
+        ch.send(10 + i);
+        std.async.yield_now();
+    }
+}
+
+async func collector(peer: channel<int>) {
+    for i in range(4) {
+        n = peer.recv();
+        std.io.println("got ", n as string);
+    }
+}
+
+async func driver(ch: channel<int>) {
+    second = std.concurrent.split(ch);
+    worker(move ch) await;
+    worker(move second) await;
+    std.async.run([noop(), noop()]);
+    std.io.println("workers joined");
+}
+
+func main() {
+    ch = channel<int>(0);
+    peer = std.concurrent.split(ch);
+    std.async.run([driver(move ch), collector(move peer)]);
+    std.io.println("multi task done");
+}

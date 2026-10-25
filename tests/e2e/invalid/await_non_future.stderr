@@ -1,0 +1,1 @@
+`await` applies to a `Future<T>` value

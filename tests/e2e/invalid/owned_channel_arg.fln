@@ -1,0 +1,13 @@
+// 0.0.4 T09 e2e: a channel is owned and move-only (T07d) — passing it bare
+// as a task-function argument would silently copy the handle, so the
+// transfer must be explicit: `std.async.run([produce(move ch)])`.
+import std.async;
+
+async func produce(ch: channel<int>) {
+    ch.send(1);
+}
+
+func main() {
+    ch = channel<int>(1);
+    std.async.run([produce(ch)]);
+}

@@ -1,0 +1,29 @@
+// 0.0.4 T09: bounded buffer semantics.  The producer sends 4 ints into a
+// channel of capacity 2 and prints after each send: sends 0 and 1 complete
+// immediately (buffered), send 2 blocks until the consumer drains — the
+// "sent" lines therefore pin the buffer boundary without any timer.  FIFO
+// order of the buffer (T07) shows up as recv 0..3 in send order.
+import std.io;
+import std.async;
+import std.concurrent;
+
+async func producer(ch: channel<int>) {
+    for i in range(4) {
+        ch.send(i);
+        std.io.println("sent ", i as string);
+    }
+}
+
+async func consumer(peer: channel<int>) {
+    for i in range(4) {
+        n = peer.recv();
+        std.io.println("recv ", n as string);
+    }
+}
+
+func main() {
+    ch = channel<int>(2);
+    peer = std.concurrent.split(ch);
+    std.async.run([producer(move ch), consumer(move peer)]);
+    std.io.println("buffer done");
+}
