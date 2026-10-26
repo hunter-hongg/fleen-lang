@@ -1,0 +1,6 @@
+// 0.0.5 T02: `addr` of a field whose base binding is immutable is rejected
+// too (here the base is an immutable parameter) — the write through the
+// pointer would mutate a binding the language declares read-only.
+func f(s: S): ptr<int> {
+    addr s.x
+}

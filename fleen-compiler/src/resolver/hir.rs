@@ -91,6 +91,12 @@ pub struct FuncDeclHir {
     pub span: Span,
     /// `async func` (0.0.4 F1): caller sees `Future<T>`, body returns `T`.
     pub is_async: bool,
+    /// `unsafe func` (0.0.5 T02, D3): the body may contain unsafe ops
+    /// (`addr`, ptr read/write). Consumed by typeck's context tracking (T03).
+    pub is_unsafe: bool,
+    /// `trusted func` (0.0.5 T02, D3): the author attests the body is safe
+    /// despite containing unsafe ops. Consumed by typeck (T03).
+    pub is_trusted: bool,
 }
 
 /// Function parameter in HIR.
@@ -172,6 +178,17 @@ pub enum ExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// Write through a pointer: `deref_ptr p = expr` (0.0.5 T02).
+    /// `binding_id` refers to the pointer variable `p`; writing through the
+    /// pointer does not rebind `p` itself (mirror of `AssignDeref`). The
+    /// pointer type is enforced by typeck.
+    AssignDerefPtr {
+        name: String,
+        binding_id: BindingId,
+        rhs: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
     /// Field assignment: `p.f = expr` (0.0.3 V02, one level). `binding_id`
     /// refers to the struct variable `p`; writing a field does not rebind
     /// `p` itself (mirror of `AssignDeref`). Place rules are re-asserted
@@ -240,6 +257,18 @@ pub enum ExprHir {
     Box(Box<ExprHir>, Span),
     /// `deref <unary>` (0.0.2)
     Deref(Box<ExprHir>, Span),
+    /// `addr <place>` (0.0.5 T02, D2): take the address of a place. The
+    /// place shapes (one-level binding/field/element/box interior) and the
+    /// referent's mutability were validated by the resolver; typeck types
+    /// the place and wraps it in `ptr<T>`.
+    Addr {
+        place: Box<ExprHir>,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `deref_ptr <unary>` (0.0.5 T02): read through a `ptr<T>`; the same
+    /// spelling in assignment-target position is `AssignDerefPtr`.
+    DerefPtr(Box<ExprHir>, Span),
     /// `<expr> as <type>` (0.0.2 U13: type cast; 0.0.2 whitelist: scalar → string only)
     Cast(Box<ExprHir>, Type, Span),
     /// `<expr>?` (0.0.2 Result propagation; span covers operand and `?`)
@@ -281,6 +310,7 @@ impl ExprHir {
         match self {
             ExprHir::Assign { span, .. } => *span,
             ExprHir::AssignDeref { span, .. } => *span,
+            ExprHir::AssignDerefPtr { span, .. } => *span,
             ExprHir::AssignField { span, .. } => *span,
             ExprHir::AssignIndex { span, .. } => *span,
             ExprHir::ArrayLit(_, s) => *s,
@@ -308,10 +338,12 @@ impl ExprHir {
             | ExprHir::Clone(_, span)
             | ExprHir::Box(_, span)
             | ExprHir::Deref(_, span)
+            | ExprHir::DerefPtr(_, span)
             | ExprHir::Cast(_, _, span)
             | ExprHir::Question(_, span)
             | ExprHir::Await(_, span)
             | ExprHir::ChannelNew { span, .. } => *span,
+            ExprHir::Addr { span, .. } => *span,
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(_, _, s) => *s,
             ExprHir::Field(o, _) => o.span(),

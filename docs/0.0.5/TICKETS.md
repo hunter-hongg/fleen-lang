@@ -4,7 +4,8 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: PLANNED — no ticket started.**
+> **Status: T01, T02 implemented and green (2026-10-25, uncommitted at
+> implementation time); T03+ PLANNED.**
 
 ---
 
@@ -29,21 +30,26 @@ respectively — `addr` joins the unary prefix group (`box deref move clone addr
 
 ## T02 — Parser + type system for `ptr<T>` / `addr` (F1/F2; D1/D2)
 
-- [ ] AST: `ptr<T>` in `parse_type` (constructor position, like `Future<T>` /
+- [x] AST: `ptr<T>` in `parse_type` (constructor position, like `Future<T>` /
       `channel<T>`); `ExprAddr` prefix expr in the unary group
-- [ ] Settle the **write-through-ptr spelling** (the one open syntax question —
-      PLAN §3.2): candidates are a builtin `deref_ptr` in expression *and*
-      assignment-target position, vs. a postfix form; fold the answer back
-      into PLAN §3.2
-- [ ] Type rules: `addr place : ptr<T>`; read/write through ptr typed `T`
-- [ ] `ptr<T>` non-Copy (D1); `clone p` → `CloneOfPointer`
-- [ ] `Func` gains `is_unsafe` / `is_trusted` (parse-level, consumed by T03)
-- [ ] ASI: adding `addr` to the unary prefix group requires adding
+- [x] Settle the **write-through-ptr spelling** (the one open syntax question —
+      PLAN §3.2): settled on the builtin `deref_ptr` prefix keyword (read and
+      write share the spelling, mirroring `deref b = v`); folded back into
+      PLAN §3.2 together with the addr-of-immutable / addr-of-ref-param
+      rejections and the non-storable (`PtrNotStorable`) family entry
+- [x] Type rules: `addr place : ptr<T>`; read/write through ptr typed `T`
+- [x] `ptr<T>` non-Copy (D1); `clone p` → `CloneOfPointer`
+- [x] `Func` gains `is_unsafe` / `is_trusted` (parse-level, consumed by T03);
+      `unsafe`/`trusted` compose with `async` in both orders (one AST state)
+- [x] ASI: adding `addr` to the unary prefix group requires adding
       `TokenKind::Addr` to `can_start_stmt` (parser/asi.rs, alongside
       `box`/`deref`/`move`/`clone`) and updating the
-      `can_start_stmt_table` test — otherwise `addr x` on a fresh line is
-      rejected at the statement-entry guard instead of parsing
-- [ ] Tests: `tests/parser` + `tests/typeck` ptr suites
+      `can_start_stmt_table` test — done, together with `DerefPtr` and the
+      now declaration-starting `Unsafe`/`Trusted`
+- [x] Tests: `tests/parser` + `tests/typeck` ptr suites (plus resolver
+      `addr`-place fixtures and parser/typeck unit tests); lowering stubs
+      reject ptr programs with `UnsupportedFeature` at the correct phase
+      (opcodes land in T05)
 - [ ] Update DESIGN §10 (`ptr` / `addr` lines) **deferred to T10** — record
       here, don't edit early
 

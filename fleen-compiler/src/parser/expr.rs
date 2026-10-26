@@ -171,8 +171,8 @@ impl Parser {
     ///
     /// 0.0.2 U13: `box` is special — its operand is parsed at the `cast`
     /// level (so `box 1 as string` = `box (1 as string)`). All other prefixes
-    /// (`deref`/`move`/`clone`/`-`/`!`) take a `unary` operand, so
-    /// `deref b as string` = `(deref b) as string`.
+    /// (`deref`/`move`/`clone`/`addr`/`deref_ptr`/`-`/`!`) take a `unary`
+    /// operand, so `deref b as string` = `(deref b) as string`.
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let span = self.current().span;
 
@@ -198,9 +198,16 @@ impl Parser {
 
         // 0.0.2 prefix keyword expressions (non-box). `deref`/`move`/`clone`
         // take a `unary` operand, so `deref b as string` = `(deref b) as string`.
+        // 0.0.5 T02: `addr` / `deref_ptr` join the same group (`addr p.f`,
+        // `addr a[i]`, `addr deref b` chain naturally; operand legality is
+        // the resolver's job, the types typeck's).
         if !matches!(
             self.current_kind(),
-            TokenKind::Deref | TokenKind::Move | TokenKind::Clone
+            TokenKind::Deref
+                | TokenKind::Move
+                | TokenKind::Clone
+                | TokenKind::Addr
+                | TokenKind::DerefPtr
         ) {
             return self.parse_postfix();
         }
@@ -212,6 +219,8 @@ impl Parser {
             TokenKind::Deref => Expr::Deref(Box::new(operand), span),
             TokenKind::Move => Expr::Move(Box::new(operand), span),
             TokenKind::Clone => Expr::Clone(Box::new(operand), span),
+            TokenKind::Addr => Expr::Addr(Box::new(operand), span),
+            TokenKind::DerefPtr => Expr::DerefPtr(Box::new(operand), span),
             // SAFETY: the kind was filtered by the `matches!` above, so no
             // other TokenKind variant can reach this arm.
             _ => unreachable!("prefix keyword was matched before advancing"),

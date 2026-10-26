@@ -34,6 +34,14 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::Struct
             // 0.0.4 F1: `async` opens an `async func` declaration.
             | TokenKind::Async
+            // 0.0.5 T02: `addr` / `deref_ptr` are unary prefixes (same group
+            // as `box`/`deref`/`move`/`clone`); `unsafe` / `trusted` open an
+            // `unsafe func` / `trusted func` declaration (same shape as
+            // `async`).
+            | TokenKind::Addr
+            | TokenKind::DerefPtr
+            | TokenKind::Unsafe
+            | TokenKind::Trusted
             | TokenKind::Ident(_)
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
@@ -341,6 +349,13 @@ mod tests {
             TokenKind::Deref,
             TokenKind::Move,
             TokenKind::Clone,
+            // 0.0.5 T02: `addr` / `deref_ptr` join the unary prefix group;
+            // `unsafe` / `trusted` open an `unsafe func` / `trusted func`
+            // declaration (same shape as `async`).
+            TokenKind::Addr,
+            TokenKind::DerefPtr,
+            TokenKind::Unsafe,
+            TokenKind::Trusted,
             TokenKind::Not,
             TokenKind::Bang,
             TokenKind::Minus,
@@ -395,14 +410,12 @@ mod tests {
             // it opens an `async func` declaration (F1).
             TokenKind::Await,
             TokenKind::Channel,
-            // 0.0.5: `ptr` / `unsafe` / `trusted` are non-expression-starting
-            // reserved words (same guard path as `await` / `channel`); `addr`
-            // is a unary prefix, but until T02 wires it into `can_start_stmt`
-            // (alongside `box` / `deref` / `move` / `clone`) it stays here.
+            // 0.0.5: `ptr` is a non-expression-starting reserved word (type
+            // constructor position only, same guard path as `await` /
+            // `channel`). `addr` / `deref_ptr` are unary prefixes and
+            // `unsafe` / `trusted` open a func declaration — all four moved
+            // to the start set in T02.
             TokenKind::Ptr,
-            TokenKind::Addr,
-            TokenKind::Unsafe,
-            TokenKind::Trusted,
         ];
         for k in no {
             assert!(!can_start_stmt(k), "{k} should not start a stmt");
@@ -422,6 +435,12 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::BoxType));
         assert!(implies_stmt_end(&TokenKind::Move));
         assert!(implies_stmt_end(&TokenKind::Clone));
+        // 0.0.5 T02: the new prefix/declaration-starting keywords imply an
+        // end too (none of them is a continuation token).
+        assert!(implies_stmt_end(&TokenKind::Addr));
+        assert!(implies_stmt_end(&TokenKind::DerefPtr));
+        assert!(implies_stmt_end(&TokenKind::Unsafe));
+        assert!(implies_stmt_end(&TokenKind::Trusted));
         assert!(implies_stmt_end(&TokenKind::True));
         assert!(implies_stmt_end(&TokenKind::If));
         assert!(implies_stmt_end(&TokenKind::While));

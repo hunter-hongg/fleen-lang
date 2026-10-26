@@ -164,6 +164,11 @@ pub enum TokenKind {
     Ptr,
     /// `addr` keyword (0.0.5: unsafe prefix operator taking the address of a place)
     Addr,
+    /// `deref_ptr` keyword (0.0.5 T02: read/write through a `ptr<T>`).
+    /// Deliberately *not* an overload of `deref` (which stays box-only, PLAN
+    /// §3.2 L2 note): overloading would silently re-type existing safe call
+    /// sites that might one day receive a ptr.
+    DerefPtr,
     /// `unsafe` keyword (0.0.5: `func` modifier whose body may contain unsafe ops)
     Unsafe,
     /// `trusted` keyword (0.0.5: `func` modifier, author-attested safe wrapper)
@@ -285,6 +290,7 @@ impl TokenKind {
                 | TokenKind::Channel
                 | TokenKind::Ptr
                 | TokenKind::Addr
+                | TokenKind::DerefPtr
                 | TokenKind::Unsafe
                 | TokenKind::Trusted
         )
@@ -329,6 +335,7 @@ impl TokenKind {
             TokenKind::Channel => "channel",
             TokenKind::Ptr => "ptr",
             TokenKind::Addr => "addr",
+            TokenKind::DerefPtr => "deref_ptr",
             TokenKind::Unsafe => "unsafe",
             TokenKind::Trusted => "trusted",
             _ => return None,

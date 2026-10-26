@@ -1,0 +1,8 @@
+// 0.0.5 T02: `addr` of a call result is not a place — no storage slot.
+func g(): int {
+    42
+}
+
+func f(): ptr<int> {
+    addr g()
+}

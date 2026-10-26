@@ -1,0 +1,6 @@
+// 0.0.5 T02: `addr` of an immutable binding is rejected — writing through
+// the pointer would bypass the immutability check.
+func f(): ptr<int> {
+    const x = 42;
+    addr x
+}

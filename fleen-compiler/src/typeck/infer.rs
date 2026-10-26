@@ -58,6 +58,7 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
         }
         ast::Type::Future(inner) => collect_named_type_refs(inner, f),
         ast::Type::Channel(inner) => collect_named_type_refs(inner, f),
+        ast::Type::Ptr(inner) => collect_named_type_refs(inner, f),
         ast::Type::Base(_) => {}
         ast::Type::Range => {}
     }
@@ -181,6 +182,8 @@ impl TypeChecker {
             ast::Type::Range => Type::Range,
             ast::Type::Future(inner) => Type::Future(Box::new(self.convert_type(inner, span))),
             ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
+            // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
+            ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
             ast::Type::Named(name) => match self.struct_by_name.get(name) {
                 Some(&id) => {
                     let entry = &self.structs[id.0 as usize];
@@ -274,6 +277,11 @@ impl TypeChecker {
                         self.add_error(TypeckErrorKind::ChannelNotStorable, span);
                     } else if conv.contains_future() {
                         self.add_error(TypeckErrorKind::FutureNotStorable, span);
+                    } else if conv.contains_ptr() {
+                        // 0.0.5 T02 D1/D2: a pointer field read is a
+                        // safe-code deep copy that would hand out a pointer
+                        // without `unsafe` — pointers are non-storable.
+                        self.add_error(TypeckErrorKind::PtrNotStorable, span);
                     }
                     (name, conv, span)
                 })
@@ -397,6 +405,9 @@ impl TypeChecker {
             ast::Type::Func(_, _) => true,
             // F9: a channel owns its buffer — never Copy (move-only).
             ast::Type::Channel(_) => false,
+            // 0.0.5 T02 D1: a ptr is a move-only handle — never Copy (and
+            // cannot be a struct field at all; `PtrNotStorable`).
+            ast::Type::Ptr(_) => false,
         }
     }
 
@@ -556,6 +567,11 @@ impl TypeChecker {
             true
         } else if ty.contains_future() {
             self.add_error(TypeckErrorKind::FutureNotStorable, span);
+            true
+        } else if ty.contains_ptr() {
+            // 0.0.5 T02 D1/D2: every global read is a deep copy, which would
+            // hand out a pointer in safe code — pointers are non-storable.
+            self.add_error(TypeckErrorKind::PtrNotStorable, span);
             true
         } else {
             false
@@ -1044,6 +1060,15 @@ impl TypeChecker {
             ExprHir::Clone(inner, span) => self.typeck_clone(*inner, span),
             ExprHir::Box(inner, span) => self.typeck_box(*inner, span),
             ExprHir::Deref(inner, span) => self.typeck_deref(*inner, span),
+            // 0.0.5 T02 (D2): `addr <place>` — unsafe op; the place shape
+            // and the referent's mutability were validated by the resolver.
+            ExprHir::Addr {
+                place,
+                hir_id,
+                span,
+            } => self.typeck_addr(*place, hir_id, span),
+            // 0.0.5 T02: `deref_ptr p` — read through a `ptr<T>`.
+            ExprHir::DerefPtr(inner, span) => self.typeck_deref_ptr(*inner, span),
             // 0.0.2 U13: `as` cast — whitelist: only scalar (int/float/bool) → string.
             ExprHir::Cast(inner, ty, span) => self.typeck_cast(*inner, ty, span),
             // 0.0.2 U04: `?` Result propagation.
@@ -1057,6 +1082,14 @@ impl TypeChecker {
                 hir_id,
                 span,
             } => self.typeck_assign_deref(name, binding_id, *rhs, hir_id, span),
+            // 0.0.5 T02: `deref_ptr p = v` — write through a `ptr<T>`.
+            ExprHir::AssignDerefPtr {
+                name,
+                binding_id,
+                rhs,
+                hir_id,
+                span,
+            } => self.typeck_assign_deref_ptr(name, binding_id, *rhs, hir_id, span),
             ExprHir::AssignField {
                 obj_name,
                 obj_binding_id,
@@ -2463,6 +2496,17 @@ impl TypeChecker {
                     self.add_error(TypeckErrorKind::FutureNotClonable, ident_span);
                     return Err(());
                 }
+                // 0.0.5 T02 D1/D2: a pointer is move-only — any Value-level
+                // copy of a pointer hands out aliasing access in safe code,
+                // which would break D2's "the pointer-exists state sits
+                // behind `unsafe`". The rule sees through value-carrying
+                // containers: `clone r` on a `Result<ptr<_>, _>` would copy
+                // the pointer inside the payload the derived `Clone`
+                // deep-copies.
+                if value_ty.contains_ptr() {
+                    self.add_error(TypeckErrorKind::CloneOfPointer, ident_span);
+                    return Err(());
+                }
                 let access = if value_ty.is_copy() {
                     Access::Copy
                 } else {
@@ -2512,6 +2556,13 @@ impl TypeChecker {
         }
         if typed_inner.ty().contains_future() {
             self.add_error(TypeckErrorKind::FutureNotStorable, typed_inner.span());
+            return Err(());
+        }
+        // 0.0.5 T02 D1/D2: a box cell is read by deep copy (`deref`), which
+        // would hand out the pointer in safe code — pointers are
+        // non-storable (same rule as struct fields).
+        if typed_inner.ty().contains_ptr() {
+            self.add_error(TypeckErrorKind::PtrNotStorable, typed_inner.span());
             return Err(());
         }
         Ok(TypedExprHir::Box(Box::new(typed_inner), span))
@@ -2582,6 +2633,103 @@ impl TypeChecker {
         self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
 
         Ok(TypedExprHir::AssignDeref {
+            name,
+            binding_id,
+            rhs: Box::new(typed_rhs),
+            ty: Type::Unit,
+            hir_id,
+            span,
+        })
+    }
+
+    /// 0.0.5 T02 (D2): type check `addr <place>`.
+    ///
+    /// The place shape (one-level binding/field/element/box interior) and
+    /// the referent's mutability/borrowedness were validated by the
+    /// resolver; here the place is typed and wrapped in `ptr<T>`. The
+    /// unsafe-context gating (D3, "only unsafe/trusted bodies may run this")
+    /// is T03's job — this pass only establishes the type rules.
+    ///
+    /// `addr` is a non-consuming read: the referent's slot is untouched and
+    /// stays usable afterwards (the ownership pass records a plain read).
+    fn typeck_addr(
+        &mut self,
+        place: ExprHir,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let typed_place = self.typeck_expr(place, None)?;
+        // A global place would be read by deep copy everywhere else, but
+        // `addr` captures the slot itself, so globals are legal (PLAN §3.3).
+        let pointee = typed_place.ty();
+        Ok(TypedExprHir::Addr {
+            place: Box::new(typed_place),
+            ty: Type::Ptr(Box::new(pointee)),
+            hir_id,
+            span,
+        })
+    }
+
+    /// 0.0.5 T02: type check `deref_ptr <p>` — read through a `ptr<T>`.
+    ///
+    /// Reads the pointee as a copy; the pointer itself is untouched (the
+    /// operand access is non-consuming, like `deref` on a box). The operand
+    /// must be a `ptr<T>` expression. The unsafe-context gating is T03's.
+    fn typeck_deref_ptr(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        let typed_inner = self.typeck_expr(inner, None)?;
+        if !matches!(typed_inner.ty(), Type::Ptr(_)) {
+            self.add_error(
+                TypeckErrorKind::InvalidOperand {
+                    op: "deref_ptr".to_string(),
+                    ty: typed_inner.ty().clone(),
+                },
+                typed_inner.span(),
+            );
+            return Err(());
+        }
+        Ok(TypedExprHir::DerefPtr(Box::new(typed_inner), span))
+    }
+
+    /// 0.0.5 T02: type check `deref_ptr <p> = <expr>` — write through a
+    /// `ptr<T>`.
+    ///
+    /// Writing through the pointer does not rebind `p`, so immutability of
+    /// `p` is not required (same rule as `deref b = v`). A global pointer
+    /// binding cannot exist (`PtrNotStorable` seals the declaration), so no
+    /// global-write guard is reachable here — unlike the box form, whose
+    /// `DerefAssignOfGlobalBox` covers storable global boxes. The
+    /// unsafe-context gating is T03's.
+    fn typeck_assign_deref_ptr(
+        &mut self,
+        name: String,
+        binding_id: BindingId,
+        rhs: ExprHir,
+        hir_id: HirId,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let target_ty = self.lookup_type(&name, span)?;
+        let pointee_ty = match target_ty {
+            Type::Ptr(pointee) => *pointee,
+            other => {
+                self.add_error(
+                    TypeckErrorKind::InvalidOperand {
+                        op: "deref_ptr =".to_string(),
+                        ty: other,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+        };
+
+        let typed_rhs = self.typeck_expr(rhs, None)?;
+        if let Err(e) = unify_assign(&pointee_ty, &typed_rhs.ty(), typed_rhs.span()) {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        self.reject_bare_owned_arg(&typed_rhs, typed_rhs.span())?;
+
+        Ok(TypedExprHir::AssignDerefPtr {
             name,
             binding_id,
             rhs: Box::new(typed_rhs),
@@ -2720,6 +2868,12 @@ impl TypeChecker {
                 self.add_error(TypeckErrorKind::ChannelNotStorable, span);
                 return Err(());
             }
+            // 0.0.5 T02 D1/D2: pointers are non-storable — an element read
+            // deep-copies, which would hand out the pointer in safe code.
+            if elem.contains_ptr() {
+                self.add_error(TypeckErrorKind::PtrNotStorable, span);
+                return Err(());
+            }
             return Ok(TypedExprHir::ArrayLit {
                 elems: Vec::new(),
                 ty: Type::Array(Box::new(elem)),
@@ -2760,6 +2914,12 @@ impl TypeChecker {
         // makes the element-read routes unreachable.
         if elem.contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+            return Err(());
+        }
+        // 0.0.5 T02 D1/D2: pointers are non-storable — an element read
+        // deep-copies, which would hand out the pointer in safe code.
+        if elem.contains_ptr() {
+            self.add_error(TypeckErrorKind::PtrNotStorable, span);
             return Err(());
         }
         let ty = Type::Array(Box::new(elem));

@@ -1,0 +1,8 @@
+// 0.0.5 T02 D1/D2: a ptr cannot be a global — every global read is a deep
+// copy, which would hand out the pointer in safe code.
+g: ptr<int> = make();
+
+func make(): ptr<int> {
+    x = 1;
+    addr x
+}

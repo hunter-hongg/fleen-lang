@@ -186,6 +186,18 @@ pub enum TypeckErrorKind {
     /// an absolute operand-stack index that cannot survive a suspension
     /// snapshot (D4's boundary rule — borrow handles never cross a channel).
     ChannelPayloadBorrowed,
+    // ---- 0.0.5 T02: pointer family (D1/D2) ----
+    /// `clone p` where `p` is (or contains) a `ptr<T>`: any Value-level
+    /// copy of a pointer hands out aliasing access in safe code, breaking
+    /// D2's "the entire pointer-exists state sits behind `unsafe`". A
+    /// pointer moves (`move p`) — never copies.
+    CloneOfPointer,
+    /// A struct field, array element, box cell, or global has type
+    /// `ptr<T>` (or a container of one): reading any of these positions is
+    /// a safe-code deep copy that would hand out a pointer without
+    /// `unsafe`. A pointer lives in a local, a parameter, or a return
+    /// value — created by `addr`, moved by `move`.
+    PtrNotStorable,
     // ---- 0.0.4 T08: Future boundary family (D4 wiring) ----
     /// `clone f` where `f` is a `Future<T>`: any Value-level copy of a
     /// Future deep-copies the whole suspended coroutine frame, forking the
@@ -646,6 +658,23 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`{member}` on a channel must be called — use `{member}(...)`"
+                )
+            }
+            TypeckErrorKind::CloneOfPointer => {
+                write!(
+                    f,
+                    "pointers cannot be cloned — they are move-only handles \
+                     (copying one would alias without `unsafe`); help: write \
+                     `move p` to transfer the pointer"
+                )
+            }
+            TypeckErrorKind::PtrNotStorable => {
+                write!(
+                    f,
+                    "pointers cannot be stored in structs, arrays, boxes, or \
+                     globals — reading such a position would copy the pointer \
+                     in safe code; help: keep the pointer in a local, a \
+                     parameter, or a return value"
                 )
             }
             TypeckErrorKind::ChannelNotBorrowable => {

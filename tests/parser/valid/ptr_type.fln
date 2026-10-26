@@ -1,0 +1,27 @@
+// 0.0.5 T02: `ptr<T>` parses in every type position (constructor position
+// like `Future<T>` / `channel<T>`; there is no bare-`ptr` type).
+// Parser-valid only: whether the program type-checks is the typeck suite's
+// business (a ptr global/field is rejected there).
+g: ptr<int> = pick();
+
+struct Holder {
+    p: ptr<int>,
+}
+
+func pick(): ptr<int> {
+    x = 42;
+    addr x
+}
+
+func read_through(p: ptr<int>): int {
+    deref_ptr p
+}
+
+func boxed(): box<ptr<string>> {
+    s = "hi";
+    box addr s
+}
+
+func nested(p: ptr<int>): ptr<ptr<int>> {
+    box p
+}

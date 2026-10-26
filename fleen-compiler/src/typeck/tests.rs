@@ -2445,3 +2445,123 @@ fn local_shadowing_a_function_name_resolves_to_the_local() {
     // A local may also shadow a *builtin* name in value position.
     compile_ok("func f(print: int): int = print\n");
 }
+
+// ========== 0.0.5 T02: ptr / addr / deref_ptr (D1/D2) ==========
+
+#[test]
+fn infer_addr_yields_ptr_type() {
+    let hir = compile_ok("func f(): ptr<int> {\n    x = 1;\n    addr x\n}\n");
+    let last = hir.items.last().expect("items");
+    let TypedHirItem::Decl(TypedDeclHir::Func(f)) = last else {
+        panic!("expected function decl");
+    };
+    let TypedFuncBodyHir::Block(body) = &f.body else {
+        panic!("expected block body");
+    };
+    let tail = body.tail_expr.as_ref().expect("tail expression");
+    assert_eq!(tail.ty(), Type::Ptr(Box::new(Type::Int)));
+}
+
+#[test]
+fn infer_deref_ptr_read_yields_pointee() {
+    let hir = compile_ok("func f(p: ptr<int>): int {\n    deref_ptr p\n}\n");
+    let last = hir.items.last().expect("items");
+    let TypedHirItem::Decl(TypedDeclHir::Func(f)) = last else {
+        panic!("expected function decl");
+    };
+    let TypedFuncBodyHir::Block(body) = &f.body else {
+        panic!("expected block body");
+    };
+    let tail = body.tail_expr.as_ref().expect("tail expression");
+    assert_eq!(tail.ty(), Type::Int);
+}
+
+#[test]
+fn typeck_rejects_clone_of_pointer() {
+    let errs = compile_err(
+        "func f(): int {\n    x = 1;\n    p = addr x;\n    q = clone p;\n    deref_ptr q\n}\n",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::CloneOfPointer))
+    );
+}
+
+#[test]
+fn typeck_rejects_ptr_struct_field() {
+    let errs = compile_err("struct Holder {\n    p: ptr<int>,\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable))
+    );
+}
+
+#[test]
+fn typeck_rejects_ptr_global() {
+    let errs = compile_err(
+        "g: ptr<int> = make();\n\nfunc make(): ptr<int> {\n    x = 1;\n    addr x\n}\n",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable))
+    );
+}
+
+#[test]
+fn typeck_rejects_ptr_array_element() {
+    let errs = compile_err("func f(): int {\n    x = 1;\n    a = [addr x];\n    a[0]\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable))
+    );
+}
+
+#[test]
+fn typeck_rejects_ptr_in_box() {
+    let errs = compile_err("func f(): int {\n    x = 1;\n    b = box addr x;\n    deref b\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable))
+    );
+}
+
+#[test]
+fn typeck_rejects_deref_ptr_on_box() {
+    // `deref` stays box-only and `deref_ptr` stays ptr-only (PLAN §3.2 L2).
+    let errs = compile_err("func f(b: box<int>): int {\n    deref_ptr b\n}\n");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { .. }))
+    );
+}
+
+#[test]
+fn typeck_rejects_deref_ptr_write_mismatch() {
+    let errs = compile_err(
+        "func f(): int {\n    x = 1;\n    p = addr x;\n    deref_ptr p = \"no\";\n    0\n}\n",
+    );
+    assert!(!errs.is_empty(), "write-through type mismatch must fail");
+}
+
+#[test]
+fn typeck_ptr_is_not_copy_and_moves_explicitly() {
+    // D1: `move p` transfers the handle; a bare pass to an owned position
+    // demands the explicit move (same rule as channel/future).
+    compile_ok(
+        "func g(p: ptr<int>): int {\n    deref_ptr p\n}\n\nfunc f(): int {\n    x = 1;\n    p = addr x;\n    g(move p)\n}\n",
+    );
+    let errs = compile_err(
+        "func g(p: ptr<int>): int {\n    deref_ptr p\n}\n\nfunc f(): int {\n    x = 1;\n    p = addr x;\n    g(p)\n}\n",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. }))
+    );
+}

@@ -266,6 +266,33 @@ here.  `deref` itself (0.0.2) stays box-only — overloading it for `ptr` in
 0.0.5 would silently change the meaning of existing safe code if `deref`
 received a pointer.
 
+**T02 decision (settled 2026-10-25)**: the write/read spelling is the
+**builtin `deref_ptr`**, a prefix keyword in the unary group (same precedence
+slot as `deref`/`move`/`clone`; operand parses at the `unary` level, so
+`addr p.f` / `addr a[i]` / `addr deref b` chain naturally and
+`deref_ptr p + 1` = `(deref_ptr p) + 1`).  Read and write share the spelling,
+mirroring `deref b = v`.  Consequences:
+
+- `deref_ptr` becomes a **reserved word**, extending T01's four-word set —
+  `TokenKind::DerefPtr` joins the keyword table in T02 (additive; breaking
+  change recorded for the T10 CHANGELOG entry together with the other four).
+- **Rejected**: postfix `.deref` — it reuses `Expr::Field`, muddying the
+  field-access match in every phase, and reads like a method call in a
+  language with no methods.  **Rejected**: overloading `deref` (the §3.2 L2
+  note above).
+- Two more T02 call-outs, decided with the same entry: `addr` **rejects an
+  immutable base binding** (const, or an immutable base for a field/element
+  — a write through the pointer would bypass the immutability check the ptr
+  write cannot see) and **rejects `ref`-parameter bases** (a pointer would
+  outlive the borrow's write protection); box interiors stay writable
+  regardless of the box binding's mutability, same as `deref b = v`.
+  Parameters count as immutable bindings, so `addr param` is rejected.
+- `ptr<T>` joins the 0.0.4 **non-storable family**: no struct fields, array
+  elements, box cells, or globals (`PtrNotStorable`) — every one of those
+  reads is a *safe-code* deep copy that would hand out a pointer without
+  `unsafe`, breaking D2's "the pointer-exists state sits behind `unsafe`".
+  A pointer lives in a local, a parameter, or a return value.
+
 ### 3.3 Type rules
 
 | Construct | Rule |
@@ -281,7 +308,11 @@ received a pointer.
 
 `addr` accepts any place expression with a storage slot: locals, globals,
 struct fields of a local/global, array elements of a local/global, and box
-interiors (`deref b`).  Referent validity after moves/aliasing is the unsafe
+interiors (`deref b`) — one level deep, the same shape family as the write
+targets.  An immutable base (const, immutable field/element base, or
+parameter — parameters are immutable) is rejected (`AddrOfImmutable`), as is
+a `ref`-parameter base (`AddrOfRefParam`); see the T02 decision above.
+Referent validity after moves/aliasing is the unsafe
 author's contract — that is what `unsafe` means here (D2).
 
 ---

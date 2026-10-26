@@ -1,0 +1,5 @@
+// 0.0.5 T02: `deref_ptr` requires a `ptr<T>` operand — `deref` stays
+// box-only (PLAN §3.2 L2 note), so a box is not a pointer.
+func f(b: box<int>): int {
+    deref_ptr b
+}

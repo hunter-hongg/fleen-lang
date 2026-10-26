@@ -1,0 +1,3 @@
+// 0.0.5 T02: `ptr` is recognized only in constructor position `ptr<T>`;
+// there is no bare-`ptr` type.
+x: ptr = 1;

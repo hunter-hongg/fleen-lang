@@ -1,0 +1,3 @@
+// 0.0.5 T02: the new reserved words cannot be binding names
+// (`addr = 1;` surfaces at the existing keyword-binding guard).
+addr = 1;

@@ -1,0 +1,7 @@
+// 0.0.5 T02 D1/D2: an array element cannot be a ptr — an element read is a
+// deep copy, which would hand out the pointer in safe code.
+func f(): int {
+    x = 1;
+    a = [addr x];
+    a[0]
+}

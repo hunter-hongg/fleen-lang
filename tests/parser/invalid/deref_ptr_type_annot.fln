@@ -1,0 +1,7 @@
+// 0.0.5 T02: a `deref_ptr` assignment target cannot carry a type annotation
+// (same rule as `deref b: int = v`; only plain bindings annotate).
+func f() {
+    x = 1;
+    p = addr x;
+    deref_ptr p: int = 2;
+}

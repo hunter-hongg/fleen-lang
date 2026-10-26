@@ -221,6 +221,13 @@ impl Parser {
             crate::lexer::TokenKind::BoxType => "box",
             crate::lexer::TokenKind::RefType => "ref",
             crate::lexer::TokenKind::As => "as",
+            // 0.0.5 T02: the new reserved words cannot be binding names
+            // either (`addr = 1;`).
+            crate::lexer::TokenKind::Ptr => "ptr",
+            crate::lexer::TokenKind::Addr => "addr",
+            crate::lexer::TokenKind::DerefPtr => "deref_ptr",
+            crate::lexer::TokenKind::Unsafe => "unsafe",
+            crate::lexer::TokenKind::Trusted => "trusted",
             _ => return Ok(()),
         };
         let next_starts_binding = matches!(
@@ -243,13 +250,17 @@ impl Parser {
         }
     }
 
-    /// Reject a type annotation on a `deref` assignment target
-    /// (`deref b: int = v`). Only plain bindings may be annotated
-    /// (DESIGN.md §3.4); erroring here gives an actionable message
-    /// instead of a generic "expected `;`" at the colon.
+    /// Reject a type annotation on a `deref` / `deref_ptr` assignment target
+    /// (`deref b: int = v`, `deref_ptr p: int = v`). Only plain bindings may
+    /// be annotated (DESIGN.md §3.4); erroring here gives an actionable
+    /// message instead of a generic "expected `;`" at the colon.
     fn reject_deref_assign_type_annot(&self) -> Result<(), ParseError> {
-        if matches!(self.current_kind(), crate::lexer::TokenKind::Deref)
-            && matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Ident(_)))
+        let (kw, target) = match self.current_kind() {
+            crate::lexer::TokenKind::Deref => ("deref", "`b: box<int> = box v`"),
+            crate::lexer::TokenKind::DerefPtr => ("deref_ptr", "`p: ptr<int> = addr x`"),
+            _ => return Ok(()),
+        };
+        if matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Ident(_)))
             && matches!(self.peek_kind(2), Some(crate::lexer::TokenKind::Colon))
         {
             let found = self
@@ -259,10 +270,11 @@ impl Parser {
             let span = self.tokens[self.pos + 2].span;
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "`=` (a `deref` assignment target cannot carry a type \
+                    expected: format!(
+                        "`=` (a `{kw}` assignment target cannot carry a type \
                                annotation; annotate the binding instead, e.g. \
-                               `b: box<int> = box v`)"
-                        .to_string(),
+                               `{target}`)"
+                    ),
                     found,
                 },
                 span,
@@ -327,7 +339,11 @@ impl Parser {
 
         // 0.0.4 F1: `async func` — the `async` modifier introduces a func
         // declaration (so it is statement-startable, unlike `await`).
-        if self.check(&crate::lexer::TokenKind::Async) {
+        // 0.0.5 T02: `unsafe func` / `trusted func` join the same shape.
+        if self.check(&crate::lexer::TokenKind::Async)
+            || self.check(&crate::lexer::TokenKind::Unsafe)
+            || self.check(&crate::lexer::TokenKind::Trusted)
+        {
             let mut decl = self.parse_func_decl()?;
             decl.is_pub = is_pub;
             return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
@@ -568,7 +584,23 @@ impl Parser {
         // 0.0.4 F1: optional `async` modifier. Only `func` may follow it (so
         // a stray `async const`/`async x` errors here, at `expect`, rather
         // than being silently accepted).
-        let is_async = self.matches(&crate::lexer::TokenKind::Async);
+        //
+        // 0.0.5 T02: `unsafe` / `trusted` join the modifier group. The
+        // `async`/`unsafe`/`trusted` order is free (`async unsafe func` and
+        // `unsafe async func` are the same declaration state — D3/T04); the
+        // flags are consumed by typeck's unsafe-context tracking (T03).
+        let mut is_async = false;
+        let mut is_unsafe = false;
+        let mut is_trusted = false;
+        loop {
+            match self.current_kind() {
+                crate::lexer::TokenKind::Async if !is_async => is_async = true,
+                crate::lexer::TokenKind::Unsafe if !is_unsafe => is_unsafe = true,
+                crate::lexer::TokenKind::Trusted if !is_trusted => is_trusted = true,
+                _ => break,
+            }
+            self.advance();
+        }
 
         self.expect(&crate::lexer::TokenKind::Func, "expected `func`")?;
 
@@ -622,6 +654,8 @@ impl Parser {
             span: self.span(start, end),
             is_pub: false,
             is_async,
+            is_unsafe,
+            is_trusted,
         })
     }
 
@@ -850,6 +884,16 @@ impl Parser {
                 self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in channel type")?;
                 ast::Type::Channel(Box::new(inner))
             }
+            crate::lexer::TokenKind::Ptr => {
+                // ptr<T> (0.0.5 T02, D1): a raw pointer type. `ptr` is a
+                // reserved keyword recognized only in constructor position —
+                // there is no bare-`ptr` type (same shape as `channel<T>`).
+                self.advance();
+                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in ptr type")?;
+                let inner = self.parse_type()?;
+                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in ptr type")?;
+                ast::Type::Ptr(Box::new(inner))
+            }
             _ => {
                 let found = self.current().kind.clone();
                 let span = self.current().span;
@@ -911,7 +955,10 @@ impl Parser {
             let is_decl = self.check(&crate::lexer::TokenKind::Const)
                 || self.check(&crate::lexer::TokenKind::Func)
                 // 0.0.4 F1: `async` at statement start opens an `async func`.
+                // 0.0.5 T02: `unsafe` / `trusted` open their func forms too.
                 || self.check(&crate::lexer::TokenKind::Async)
+                || self.check(&crate::lexer::TokenKind::Unsafe)
+                || self.check(&crate::lexer::TokenKind::Trusted)
                 || (self.check(&crate::lexer::TokenKind::Ident(String::new())) && {
                     matches!(
                         self.peek_kind(1),

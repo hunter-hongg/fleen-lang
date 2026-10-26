@@ -1082,6 +1082,35 @@ impl<'a> FnBodyCx<'a> {
                 fb.emit(MirInstr::new(MirInstrKind::Pop, *span));
                 fb.emit(MirInstr::new(MirInstrKind::LoadLocal(tmp), *span));
             }
+            // 0.0.5 T02: the pointer surface is fully typed by typeck, but
+            // its bytecode encoding (`AddrOf` 0xC8 / `LoadPtr` 0xC9 /
+            // `StorePtr` 0xCA, `.flnc` version 5) lands with T05 — a
+            // ptr program is rejected here at the correct phase, never
+            // mis-lowered.
+            TypedExprHir::Addr { span, .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
+                    },
+                    *span,
+                ));
+            }
+            TypedExprHir::DerefPtr(_, span) => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
+                    },
+                    *span,
+                ));
+            }
+            TypedExprHir::AssignDerefPtr { span, .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
+                    },
+                    *span,
+                ));
+            }
             // 0.0.2 U06: deref assignment.
             TypedExprHir::AssignDeref {
                 binding_id,

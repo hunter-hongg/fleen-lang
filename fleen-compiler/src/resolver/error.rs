@@ -72,6 +72,20 @@ pub enum ResolveErrorKind {
     /// ref parameter would silently shadow the borrow instead of writing
     /// through it — flagged rather than shadowed.
     AssignToRefParam { name: String },
+    /// 0.0.5 T02 (D2): the operand of `addr` is not a place with a storage
+    /// slot (a call result, a literal, a deeper-than-one-level path, ...).
+    /// Only locals/globals, one-level fields/elements of those, and box
+    /// interiors (`deref b`) are addressable.
+    AddrOfInvalidPlace,
+    /// 0.0.5 T02: `addr` of an immutable binding (const, or an immutable
+    /// base for a field/element). A write through the resulting pointer
+    /// would bypass the immutability check, so the address itself is
+    /// rejected — the static check ptr writes cannot see.
+    AddrOfImmutable { name: String },
+    /// 0.0.5 T02: `addr` of (part of) a `ref` parameter. The borrow is
+    /// read-only (DESIGN §10.4); a pointer would extend the write path
+    /// past the borrow's lifetime and read-only guarantee.
+    AddrOfRefParam { name: String },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -169,6 +183,31 @@ impl fmt::Display for ResolveErrorKind {
                     "cannot assign to `ref` parameter `{name}` — a borrow is \
                      read-only; help: the `ref` parameter shadows the caller's \
                      value, rebind a fresh local with a different name instead"
+                )
+            }
+            ResolveErrorKind::AddrOfInvalidPlace => {
+                write!(
+                    f,
+                    "`addr` needs a place with a storage slot — a local or \
+                     global, a one-level field/element of one, or a box \
+                     interior (`deref b`)"
+                )
+            }
+            ResolveErrorKind::AddrOfImmutable { name } => {
+                write!(
+                    f,
+                    "cannot take the address of immutable binding `{name}` — \
+                     writing through the pointer would bypass the \
+                     immutability check; help: bind a mutable copy and take \
+                     its address"
+                )
+            }
+            ResolveErrorKind::AddrOfRefParam { name } => {
+                write!(
+                    f,
+                    "cannot take the address of `ref` parameter `{name}` — \
+                     a borrow is read-only and a pointer would outlive the \
+                     write protection it provides"
                 )
             }
         }

@@ -1,0 +1,5 @@
+// 0.0.5 T02: `addr` accepts one-level places only (the same rule as the
+// write targets): `p.a.b` has no single slot to capture.
+func f(p: P): ptr<int> {
+    addr p.a.b
+}

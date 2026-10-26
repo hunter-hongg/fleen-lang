@@ -76,6 +76,14 @@ pub struct FuncDecl {
     /// Whether the declaration was prefixed with `async` (0.0.4 F1): the
     /// function's *caller* sees `Future<T>` while the body still returns `T`.
     pub is_async: bool,
+    /// Whether the declaration was prefixed with `unsafe` (0.0.5 T02): the
+    /// body may contain unsafe ops (`addr`, ptr read/write). Consumed by
+    /// typeck's context tracking (T03).
+    pub is_unsafe: bool,
+    /// Whether the declaration was prefixed with `trusted` (0.0.5 T02): the
+    /// author attests the body is safe despite containing unsafe ops.
+    /// Consumed by typeck's context tracking (T03).
+    pub is_trusted: bool,
 }
 
 /// Parameter in a function declaration.
@@ -142,6 +150,9 @@ pub enum Type {
     /// Non-Copy, move-only; holds a reference to a shared buffer.
     /// The element type `T` is checked at run time as a defensive backstop.
     Channel(Box<Type>),
+    /// `ptr<T>` — a raw pointer (0.0.5 T02, D1/D2). Non-Copy, move-only;
+    /// produced only by the unsafe op `addr`. There is no bare-`ptr` type.
+    Ptr(Box<Type>),
     /// A named user type (a struct, 0.0.3 V02). Whether the name actually
     /// refers to a declared struct is resolved by typeck.
     Named(String),
@@ -199,6 +210,7 @@ impl fmt::Display for Type {
             Type::Range => write!(f, "Range"),
             Type::Future(inner) => write!(f, "Future<{}>", inner),
             Type::Channel(inner) => write!(f, "channel<{}>", inner),
+            Type::Ptr(inner) => write!(f, "ptr<{}>", inner),
         }
     }
 }
@@ -273,6 +285,15 @@ pub enum Expr {
     Box(Box<Expr>, Span),
     /// `deref <unary>` (0.0.2: box pointee read)
     Deref(Box<Expr>, Span),
+    /// `addr <place>` (0.0.5 T02: take the address of a place — an unsafe
+    /// op, D2; the place shapes are validated by the resolver, the types by
+    /// typeck). Operand parses at the `unary` level, so `addr p.f`,
+    /// `addr a[i]` and `addr deref b` chain naturally.
+    Addr(Box<Expr>, Span),
+    /// `deref_ptr <unary>` (0.0.5 T02: read through a `ptr<T>`; the same
+    /// spelling in assignment-target position writes through it). Kept
+    /// distinct from `deref`, which stays box-only (PLAN §3.2).
+    DerefPtr(Box<Expr>, Span),
     /// `<expr> as <type>` (0.0.2 U13: type cast; 0.0.2 whitelist: scalar → string only)
     Cast(Box<Expr>, Type, Span),
     /// `<expr>?` (0.0.2: Result propagation suffix)
@@ -342,6 +363,8 @@ impl Expr {
             | Expr::Clone(_, span)
             | Expr::Box(_, span)
             | Expr::Deref(_, span)
+            | Expr::Addr(_, span)
+            | Expr::DerefPtr(_, span)
             | Expr::Cast(_, _, span)
             | Expr::Question(_, span)
             | Expr::Await(_, span)
@@ -482,6 +505,8 @@ impl fmt::Display for Expr {
             Expr::Clone(e, _) => write!(f, "(clone {})", e),
             Expr::Box(e, _) => write!(f, "(box {})", e),
             Expr::Deref(e, _) => write!(f, "(deref {})", e),
+            Expr::Addr(e, _) => write!(f, "(addr {})", e),
+            Expr::DerefPtr(e, _) => write!(f, "(deref_ptr {})", e),
             Expr::Cast(e, ty, _) => write!(f, "({} as {})", e, ty),
             Expr::Question(e, _) => write!(f, "({}?)", e),
             Expr::Await(e, _) => write!(f, "({} await)", e),

@@ -173,6 +173,18 @@ impl FieldTypeTag {
                 );
                 FieldTypeTag::Unit
             }
+            // A `ptr` can never be a *struct field* either (0.0.5 T02,
+            // `PtrNotStorable`): the disk-format tags are untouched and a
+            // pointer handle is not serializable as a field. The Unit
+            // mapping keeps the match total; reaching it is a typeck/lower
+            // bug.
+            Type::Ptr(_) => {
+                debug_assert!(
+                    false,
+                    "ptr type reached struct-field codegen: a ptr cannot be a struct field"
+                );
+                FieldTypeTag::Unit
+            }
             // `Var` is only in std builtin signatures (V06); it is always
             // resolved to a concrete type before codegen ever runs.
             Type::Var(_) => {

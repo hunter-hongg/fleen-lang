@@ -1,0 +1,7 @@
+// 0.0.5 T02: the write through `deref_ptr p` must match the pointee type T.
+func f(): int {
+    x = 1;
+    p = addr x;
+    deref_ptr p = "no";
+    0
+}

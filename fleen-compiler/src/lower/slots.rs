@@ -171,6 +171,17 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
         TypedExprHir::ResultCtor { value, .. } => collect_expr(alloc, value),
         TypedExprHir::Box(inner, _) => collect_expr(alloc, inner),
         TypedExprHir::Deref(inner, _) => collect_expr(alloc, inner),
+        // 0.0.5 T02: pointer nodes never lower yet (T05 stubs reject them),
+        // but the slot collector must stay total; collect the operands so
+        // error-recovery trees do not miss reservations.
+        TypedExprHir::DerefPtr(inner, _) => collect_expr(alloc, inner),
+        TypedExprHir::Addr { place, .. } => collect_expr(alloc, place),
+        TypedExprHir::AssignDerefPtr {
+            rhs, binding_id, ..
+        } => {
+            collect_expr(alloc, rhs);
+            alloc.slot_for(*binding_id);
+        }
         TypedExprHir::AssignDeref {
             rhs, binding_id, ..
         } => {

@@ -1,0 +1,5 @@
+// 0.0.5 T02: `addr` of a `ref` parameter is rejected — the borrow is
+// read-only and a pointer would outlive the write protection it provides.
+func f(s: ref string): ptr<string> {
+    addr s
+}

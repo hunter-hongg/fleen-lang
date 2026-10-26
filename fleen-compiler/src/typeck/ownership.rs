@@ -326,6 +326,36 @@ impl<'a> Cx<'a> {
             }
             // The pointee is replaced and consumed; the box is untouched.
             TypedExprHir::AssignDeref { rhs, .. } => self.walk_expr(rhs, true),
+            // Reading through a pointer does not move it: the pointer
+            // binding stays in its slot (mirror of the `deref` arm; a ptr
+            // is an owned handle, so the load must stay a plain copy).
+            TypedExprHir::DerefPtr(inner, _) => {
+                if let TypedExprHir::Ident {
+                    name,
+                    binding_id,
+                    ty,
+                    access,
+                    span,
+                    ..
+                } = inner.as_mut()
+                {
+                    // State check first (a moved pointer is unusable), then
+                    // force the load form.
+                    self.walk_ident(name, binding_id, ty, access, *span, IdentUse::ReadBorrow);
+                    if ty.is_owned() || self.globals.contains(binding_id) {
+                        *access = Access::Copy;
+                    }
+                } else {
+                    self.walk_expr(inner, false);
+                }
+            }
+            // `addr <place>` captures the slot of the place; nothing is
+            // loaded, so no access upgrade happens — only the moved-state
+            // check applies to the base binding (a moved value has no slot
+            // to point at). The index of `addr a[i]` is an ordinary read.
+            TypedExprHir::Addr { place, .. } => self.walk_addr_place(place),
+            // The pointee is replaced and consumed; the pointer is untouched.
+            TypedExprHir::AssignDerefPtr { rhs, .. } => self.walk_expr(rhs, true),
             TypedExprHir::Assign {
                 name,
                 binding_id,
@@ -536,6 +566,18 @@ impl<'a> Cx<'a> {
             }
             return;
         }
+        // 0.0.5 T02 D1: a bare *read* of a pointer local is a plain handle
+        // load — the pointer travels to `deref_ptr`/`move`/`addr` untouched
+        // and `clone p` is rejected in typeck, so the auto-clone deep copy
+        // must never fire. A producing tail still transfers (`Move`), and
+        // the moved-state check applies to every use.
+        if matches!(ty, Type::Ptr(_)) && *access == Access::Copy {
+            if self.check_use(name, id, span) && matches!(use_kind, IdentUse::Producer) {
+                *access = Access::Move;
+                self.register_moved(id, span);
+            }
+            return;
+        }
         // 0.0.4 T08: a Future has no legal bare read. Every Value-level read
         // of a future local (`LoadLocal` and `CloneLocal` both clone the
         // `Value`) deep-copies the suspended coroutine frame, forking the
@@ -549,7 +591,7 @@ impl<'a> Cx<'a> {
         // channel-*containing* local joins the rule for the same reason (the
         // copied payload aliases the shared buffer without `split`) — a bare
         // top-level channel read stays a legal handle load above.
-        if (ty.contains_future() || ty.contains_channel())
+        if (ty.contains_future() || ty.contains_channel() || ty.contains_ptr())
             && *access == Access::Copy
             && matches!(use_kind, IdentUse::Read)
         {
@@ -589,6 +631,58 @@ impl<'a> Cx<'a> {
             Access::Clone => {
                 self.check_use(name, id, span);
             }
+        }
+    }
+
+    /// Walk the place of an `addr` expression: the base binding gets the
+    /// moved-state check, but no access upgrade — the address capture loads
+    /// nothing (an upgrade to `Clone` on an owned global or a plain read on
+    /// a local would make lowering copy the slot instead of taking it).
+    fn walk_addr_place(&mut self, place: &mut TypedExprHir) {
+        match place {
+            TypedExprHir::Ident {
+                name,
+                binding_id,
+                ty,
+                access,
+                span,
+                ..
+            } => {
+                self.walk_ident(name, binding_id, ty, access, *span, IdentUse::ReadBorrow);
+                if self.globals.contains(binding_id) || ty.is_owned() {
+                    *access = Access::Copy;
+                }
+            }
+            // `addr p.f` / `addr a[i]`: the base is captured, the index is
+            // an ordinary (non-consuming) read.
+            TypedExprHir::Field { obj, .. } => self.walk_addr_place(obj),
+            TypedExprHir::Index { arr, idx, .. } => {
+                self.walk_addr_place(arr);
+                self.walk_expr(idx, false);
+            }
+            // `addr deref b`: the box interior is captured; the box binding
+            // gets the moved-state check and stays a plain load.
+            TypedExprHir::Deref(inner, _) => {
+                if let TypedExprHir::Ident {
+                    name,
+                    binding_id,
+                    ty,
+                    access,
+                    span,
+                    ..
+                } = inner.as_mut()
+                {
+                    self.walk_ident(name, binding_id, ty, access, *span, IdentUse::ReadBorrow);
+                    if ty.is_owned() || self.globals.contains(binding_id) {
+                        *access = Access::Copy;
+                    }
+                } else {
+                    self.walk_expr(inner, false);
+                }
+            }
+            // Well-formed places are exactly the shapes above (the resolver
+            // enforces them); keep the walk total regardless.
+            other => self.walk_expr(other, false),
         }
     }
 
@@ -812,9 +906,12 @@ fn scan_owned_local_uses(
         | TypedExprHir::ResultCtor { value: inner, .. }
         | TypedExprHir::Box(inner, _)
         | TypedExprHir::Deref(inner, _)
+        | TypedExprHir::DerefPtr(inner, _)
+        | TypedExprHir::Addr { place: inner, .. }
         | TypedExprHir::Await { operand: inner, .. }
         | TypedExprHir::Assign { rhs: inner, .. }
-        | TypedExprHir::AssignDeref { rhs: inner, .. } => {
+        | TypedExprHir::AssignDeref { rhs: inner, .. }
+        | TypedExprHir::AssignDerefPtr { rhs: inner, .. } => {
             scan_owned_local_uses(inner, out, globals, global_names, entry);
         }
         TypedExprHir::Call(f, args, _) => {

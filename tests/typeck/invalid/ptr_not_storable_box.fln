@@ -1,0 +1,7 @@
+// 0.0.5 T02 D1/D2: a box cell cannot hold a ptr — `deref` reads it by deep
+// copy, which would hand out the pointer in safe code.
+func f(): int {
+    x = 1;
+    b = box addr x;
+    deref b
+}

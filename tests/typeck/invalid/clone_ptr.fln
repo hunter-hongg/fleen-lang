@@ -1,0 +1,8 @@
+// 0.0.5 T02 D1: `clone p` on a pointer is rejected (CloneOfPointer) — a
+// Value-level copy would alias without the explicit `move`.
+func f(): int {
+    x = 1;
+    p = addr x;
+    q = clone p;
+    deref_ptr q
+}

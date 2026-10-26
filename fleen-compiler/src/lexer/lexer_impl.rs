@@ -190,9 +190,8 @@ impl<'a> Lexer<'a> {
                     Some('\\') => value.push('\\'),
                     Some('"') => value.push('"'),
                     Some('\'') => value.push('\''),
-                    // TODO: Future versions may support additional escapes:
-                    // \0 (null), \b (backspace), \f (form feed),
-                    // \xHH (hex), \uXXXX (unicode)
+                    // Extended string escapes (\0, \b, \f, \xHH, \uXXXX) are
+                    // tracked on the 0.1.0 roadmap (DESIGN §18).
                     Some(ch) => {
                         let err_span = Span::new(
                             self.file,
@@ -317,6 +316,7 @@ impl<'a> Lexer<'a> {
             "channel" => TokenKind::Channel,
             "ptr" => TokenKind::Ptr,
             "addr" => TokenKind::Addr,
+            "deref_ptr" => TokenKind::DerefPtr,
             "unsafe" => TokenKind::Unsafe,
             "trusted" => TokenKind::Trusted,
             "or" => TokenKind::Or,
@@ -565,6 +565,22 @@ mod tests {
         assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "awaiting"));
         assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "channel_id"));
         assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "awaitable"));
+    }
+
+    #[test]
+    fn tokenize_deref_ptr_keyword() {
+        // 0.0.5 T02: `deref_ptr` is the ptr read/write spelling (settled in
+        // T02, folded back into PLAN §3.2) — a distinct reserved word, *not*
+        // an overload of `deref` (which stays box-only). It lexes as a
+        // keyword, and longer identifiers starting with it stay identifiers.
+        let tokens = tokenize("deref_ptr").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DerefPtr);
+        assert_eq!(TokenKind::DerefPtr.keyword_str(), Some("deref_ptr"));
+        assert!(TokenKind::DerefPtr.is_keyword());
+        assert_eq!(TokenKind::DerefPtr.to_string(), "deref_ptr");
+        let tokens = tokenize("deref_ptrx deref_ptr_2").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "deref_ptrx"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "deref_ptr_2"));
     }
 
     #[test]

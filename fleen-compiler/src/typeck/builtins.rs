@@ -481,6 +481,7 @@ fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
         Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
         Type::Future(inner) => Type::Future(Box::new(substitute(inner, subst))),
         Type::Channel(inner) => Type::Channel(Box::new(substitute(inner, subst))),
+        Type::Ptr(inner) => Type::Ptr(Box::new(substitute(inner, subst))),
         Type::Struct(info) => Type::Struct(info.clone()),
         Type::Int
         | Type::Float

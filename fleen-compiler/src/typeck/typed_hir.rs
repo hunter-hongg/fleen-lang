@@ -63,6 +63,12 @@ pub enum Type {
     /// Non-Copy, move-only; holds a reference to a shared buffer.
     /// The element type `T` is checked at run time as a defensive backstop.
     Channel(Box<Type>),
+    /// `ptr<T>` (0.0.5 T02, D1/D2): a raw pointer. Non-Copy, move-only;
+    /// produced only by the unsafe op `addr`. Not a storage type — it
+    /// cannot sit in a struct field, array element, box cell or global
+    /// (`PtrNotStorable`), because every one of those reads is a safe-code
+    /// Value-level copy that would hand out a pointer without `unsafe`.
+    Ptr(Box<Type>),
     /// Type variable (0.0.3 V06): appears **only** in the schematic
     /// signatures of std intrinsics — never in user-visible syntax. A
     /// fresh `Var(n)` is created per call site, unified against the
@@ -93,6 +99,7 @@ impl Type {
             Type::Range => "Range".to_string(),
             Type::Future(inner) => format!("Future<{}>", inner.name()),
             Type::Channel(inner) => format!("channel<{}>", inner.name()),
+            Type::Ptr(inner) => format!("ptr<{}>", inner.name()),
             Type::Var(id) => format!("?T{}", id),
             Type::Unsupported(name) => name.clone(),
         }
@@ -135,6 +142,26 @@ impl Type {
         }
     }
 
+    /// Check if this type holds a `ptr<T>` anywhere inside a value-carrying
+    /// container — the mirror of [`Self::contains_future`] /
+    /// [`Self::contains_channel`] for the pointer discipline (0.0.5 T02,
+    /// D1/D2). A Value-level copy of a pointer hands out aliasing access in
+    /// *safe* code, which would break D2's "the entire pointer-exists state
+    /// sits behind `unsafe`": creating a pointer is an unsafe op, so every
+    /// safe copy route must be sealed. `ptr<T>` is rejected as a struct
+    /// field, array element, box cell and global at declaration
+    /// (`PtrNotStorable`); `clone` of anything containing a pointer is
+    /// rejected (`CloneOfPointer`), and `Result<ptr, _>` payloads ride the
+    /// same rejection through this walk.
+    pub fn contains_ptr(&self) -> bool {
+        match self {
+            Type::Ptr(_) => true,
+            Type::Array(elem) => elem.contains_ptr(),
+            Type::Result(t, e) => t.contains_ptr() || e.contains_ptr(),
+            _ => false,
+        }
+    }
+
     /// Check if this type is a numeric type (Int or Float).
     pub fn is_numeric(&self) -> bool {
         matches!(self, Type::Int | Type::Float)
@@ -156,8 +183,11 @@ impl Type {
             Type::Struct(info) => info.copy,
             Type::Range => true, // D5: Range is Copy (two ints)
             // F3: a Future owns its suspended state — never Copy (driven once).
+            // 0.0.5 T02 D1: a ptr is a move-only handle — copying it would
+            // alias without the explicit `move` at every boundary.
             Type::Future(_)
             | Type::Channel(_)
+            | Type::Ptr(_)
             | Type::Var(_)
             | Type::String
             | Type::Box(_)
@@ -184,6 +214,8 @@ impl Type {
             Type::Future(_) => true,
             // F9: a channel owns its buffer; it is move-only (non-Copy).
             Type::Channel(_) => true,
+            // 0.0.5 T02 D1: a ptr is an owned, move-only handle (`move p`).
+            Type::Ptr(_) => true,
             _ => false,
         }
     }
@@ -388,6 +420,28 @@ pub enum TypedExprHir {
     /// `deref <box>` (0.0.2 U05/U06: read the pointee copy; type is the
     /// pointee type, the box itself is untouched)
     Deref(Box<TypedExprHir>, Span),
+    /// `deref_ptr <p>` (0.0.5 T02: read through a `ptr<T>`; type is the
+    /// pointee type `T`, the pointer itself is untouched)
+    DerefPtr(Box<TypedExprHir>, Span),
+    /// `addr <place>` (0.0.5 T02, D2: take the address of a place; type is
+    /// `ptr<T>` where `T` is the place type)
+    Addr {
+        place: Box<TypedExprHir>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `deref_ptr <p> = <expr>` (0.0.5 T02: write through a `ptr<T>`;
+    /// replaces the pointee, old value released; the pointer binding itself
+    /// is untouched)
+    AssignDerefPtr {
+        name: String,
+        binding_id: BindingId,
+        rhs: Box<TypedExprHir>,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
     /// `deref <b> = <expr>` (0.0.2 U05: write a box's pointee; replaces the
     /// pointee, old value released; the box binding itself is untouched)
     AssignDeref {
@@ -543,8 +597,16 @@ impl TypedExprHir {
                 other => other,
             },
             TypedExprHir::AssignDeref { .. } => Type::Unit,
+            TypedExprHir::AssignDerefPtr { .. } => Type::Unit,
             TypedExprHir::AssignField { .. } => Type::Unit,
             TypedExprHir::AssignIndex { .. } => Type::Unit,
+            TypedExprHir::DerefPtr(inner, _) => match inner.ty() {
+                // typeck guarantees the deref_ptr operand is a `ptr<T>`;
+                // the fallback keeps `ty()` total for error-recovery trees.
+                Type::Ptr(pointee) => *pointee,
+                other => other,
+            },
+            TypedExprHir::Addr { ty, .. } => ty.clone(),
             TypedExprHir::ArrayLit { ty, .. } => ty.clone(),
             TypedExprHir::StructLit { ty, .. } => ty.clone(),
             TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
@@ -592,8 +654,12 @@ impl TypedExprHir {
             TypedExprHir::Question { span, .. } => *span,
             TypedExprHir::Await { span, .. } => *span,
             TypedExprHir::ResultCtor { span, .. } => *span,
-            TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) => *s,
+            TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) | TypedExprHir::DerefPtr(_, s) => {
+                *s
+            }
+            TypedExprHir::Addr { span, .. } => *span,
             TypedExprHir::AssignDeref { span, .. } => *span,
+            TypedExprHir::AssignDerefPtr { span, .. } => *span,
             TypedExprHir::AssignField { span, .. } => *span,
             TypedExprHir::AssignIndex { span, .. } => *span,
             TypedExprHir::ArrayLit { span, .. } => *span,

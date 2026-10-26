@@ -1,0 +1,34 @@
+// 0.0.5 T02: `addr` / `deref_ptr` parse as unary prefixes, and the
+// `unsafe` / `trusted` func modifiers parse (any order with `async`).
+// Parser-valid only: unsafe-context gating lands in T03, so these bodies
+// are accepted without modifiers here too.
+x = 1;
+
+func forms(): int {
+    p = addr x;
+    n = deref_ptr p;
+    deref_ptr p = n + 1;
+    p2 = addr x;
+    deref_ptr p2 as int
+}
+
+func chained(s: Holder): ptr<int> {
+    addr s.p
+}
+
+unsafe func raw_op(): int {
+    p = addr x;
+    deref_ptr p
+}
+
+trusted func safe_wrapper(): int {
+    raw_op()
+}
+
+async unsafe func risky(): int {
+    raw_op()
+}
+
+unsafe async func risky_other_order(): int {
+    raw_op()
+}

@@ -1833,4 +1833,98 @@ func main() {
         // The explicit-semi form parses cleanly.
         parse_str("x = 1;\n[1, 2];");
     }
+
+    // ========== 0.0.5 T02: ptr / addr / deref_ptr / unsafe / trusted ==========
+
+    #[test]
+    fn parse_ptr_type_in_annotation() {
+        // `ptr<T>` is parsed in constructor position; there is no
+        // bare-`ptr` type (mirrors the `channel<T>` shape).
+        let ast = parse_str("p: ptr<int> = make();\n");
+        let Item::Decl(Decl::Var(v)) = &ast.items[0] else {
+            panic!("expected var binding");
+        };
+        assert_eq!(v.ty, Some(Type::Ptr(Box::new(Type::Base(BaseType::Int)))));
+    }
+
+    #[test]
+    fn parse_bare_ptr_type_is_error() {
+        parse_err("x: ptr = 1;");
+    }
+
+    #[test]
+    fn parse_addr_prefix_expr() {
+        // `addr` joins the unary prefix group: it chains with postfixes
+        // (`addr p.f`) and composes with other prefixes (`addr deref b`).
+        let ast = parse_str("p = addr x;\nq = addr p.f;\nr = addr deref b;\n");
+        let Item::Decl(Decl::Var(v)) = &ast.items[0] else {
+            panic!("expected var binding");
+        };
+        assert!(matches!(&*v.init, Expr::Addr(inner, _) if matches!(**inner, Expr::Ident(_, _))));
+        let Item::Decl(Decl::Var(v)) = &ast.items[1] else {
+            panic!("expected var binding");
+        };
+        assert!(matches!(&*v.init, Expr::Addr(inner, _) if matches!(**inner, Expr::Field(_, _))));
+        let Item::Decl(Decl::Var(v)) = &ast.items[2] else {
+            panic!("expected var binding");
+        };
+        assert!(matches!(&*v.init, Expr::Addr(inner, _) if matches!(**inner, Expr::Deref(_, _))));
+    }
+
+    #[test]
+    fn parse_addr_starts_statement_without_semi() {
+        // T02 ASI obligation: `addr x` on a fresh line starts a statement
+        // (`addr` is in `can_start_stmt` alongside box/deref/move/clone).
+        parse_str("x = 1\naddr x");
+    }
+
+    #[test]
+    fn parse_deref_ptr_read_and_write() {
+        // The read form is a prefix expression; the same spelling in
+        // assignment-target position is the write form (T02 settled).
+        let ast = parse_str("n = deref_ptr p;\nderef_ptr p = n;\n");
+        let Item::Decl(Decl::Var(v)) = &ast.items[0] else {
+            panic!("expected var binding");
+        };
+        assert!(matches!(&*v.init, Expr::DerefPtr(_, _)));
+        let Item::Expr(Expr::Assign(lhs, _)) = &ast.items[1] else {
+            panic!("expected assignment");
+        };
+        assert!(matches!(**lhs, Expr::DerefPtr(_, _)));
+    }
+
+    #[test]
+    fn parse_deref_ptr_type_annot_is_error() {
+        parse_err("deref_ptr p: int = 2;");
+    }
+
+    #[test]
+    fn parse_unsafe_trusted_func_modifiers() {
+        // `unsafe` / `trusted` open a func declaration like `async`; the
+        // `async` order is free (D3/T04: both spellings, one AST state).
+        let ast = parse_str("unsafe func f(): int = 1\ntrusted func g(): int = 2\n");
+        let Item::Decl(Decl::Func(f)) = &ast.items[0] else {
+            panic!("expected func decl");
+        };
+        assert!(f.is_unsafe && !f.is_trusted);
+        let Item::Decl(Decl::Func(g)) = &ast.items[1] else {
+            panic!("expected func decl");
+        };
+        assert!(!g.is_unsafe && g.is_trusted);
+
+        let ast = parse_str("async unsafe func h(): int = 1\nunsafe async func i(): int = 2\n");
+        let Item::Decl(Decl::Func(h)) = &ast.items[0] else {
+            panic!("expected func decl");
+        };
+        assert!(h.is_async && h.is_unsafe);
+        let Item::Decl(Decl::Func(i)) = &ast.items[1] else {
+            panic!("expected func decl");
+        };
+        assert!(i.is_async && i.is_unsafe);
+    }
+
+    #[test]
+    fn parse_unsafe_modifier_without_func_is_error() {
+        parse_err("unsafe x = 1;");
+    }
 }

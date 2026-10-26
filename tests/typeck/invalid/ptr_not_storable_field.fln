@@ -1,0 +1,5 @@
+// 0.0.5 T02 D1/D2: a ptr cannot be a struct field — the field read is a
+// safe-code deep copy that would hand out a pointer without `unsafe`.
+struct Holder {
+    p: ptr<int>,
+}

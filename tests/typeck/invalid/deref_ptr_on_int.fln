@@ -1,0 +1,7 @@
+// 0.0.5 T02: `deref_ptr p = v` where p is not a pointer is rejected (the
+// write form checks the target type, same as the read form).
+func f(): int {
+    x = 1;
+    deref_ptr x = 2;
+    0
+}

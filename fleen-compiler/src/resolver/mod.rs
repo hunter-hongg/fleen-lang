@@ -55,6 +55,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Func(params, ret) => params.iter().any(type_contains_ref) || type_contains_ref(ret),
         Type::Future(inner) => type_contains_ref(inner),
         Type::Channel(inner) => type_contains_ref(inner),
+        Type::Ptr(inner) => type_contains_ref(inner),
         Type::Range => false,
         Type::Base(_) => false,
         Type::Named(_) => false,
@@ -66,6 +67,8 @@ enum AssignTarget {
     Ident(String),
     /// `deref b` — write the pointee of the box held by `b`.
     Deref(String),
+    /// `deref_ptr p` — write through the pointer held by `p` (0.0.5 T02).
+    DerefPtr(String),
     /// `p.f` — write field `f` of the struct held by `p` (0.0.3 V02, one
     /// level; deeper paths fall into the generic invalid-target case).
     Field {
@@ -196,6 +199,8 @@ impl Resolver {
             Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, span))),
             // 0.0.4 F9: `channel<T>` recurses so the payload type resolves.
             Type::Channel(inner) => Type::Channel(Box::new(self.resolve_type(inner, span))),
+            // 0.0.5 T02: `ptr<T>` recurses so the pointee type resolves.
+            Type::Ptr(inner) => Type::Ptr(Box::new(self.resolve_type(inner, span))),
             Type::Base(_) | Type::Range => ty.clone(),
         }
     }
@@ -604,6 +609,8 @@ impl Resolver {
             hir_id,
             span: func.span,
             is_async: func.is_async,
+            is_unsafe: func.is_unsafe,
+            is_trusted: func.is_trusted,
         })
     }
 
@@ -1011,6 +1018,13 @@ impl Resolver {
             Expr::Clone(expr, span) => ExprHir::Clone(Box::new(self.resolve_expr(*expr)?), span),
             Expr::Box(expr, span) => ExprHir::Box(Box::new(self.resolve_expr(*expr)?), span),
             Expr::Deref(expr, span) => ExprHir::Deref(Box::new(self.resolve_expr(*expr)?), span),
+            // 0.0.5 T02 (D2): `addr <place>` — the place shape and the base
+            // binding's mutability/borrowedness are validated here (they are
+            // binding-table properties); the type-level rules are typeck's.
+            Expr::Addr(operand, span) => self.resolve_addr(*operand, span)?,
+            Expr::DerefPtr(expr, span) => {
+                ExprHir::DerefPtr(Box::new(self.resolve_expr(*expr)?), span)
+            }
             // 0.0.2 U13: type cast; operand resolved, target type passed through as-is.
             Expr::Cast(expr, ty, span) => {
                 let resolved_ty = self.resolve_type(&ty, span);
@@ -1092,6 +1106,89 @@ impl Resolver {
         Ok(hir)
     }
 
+    /// Resolve `addr <place>` (0.0.5 T02, D2).
+    ///
+    /// The place must be a one-level storage slot, the same shape family as
+    /// the write targets (V02/V03): a local/global binding, a field or
+    /// element of one, or a box interior (`deref b`). Deeper paths
+    /// (`p.f.g`, `a[i][j]`) fall into the invalid-place case.
+    ///
+    /// Writing through the resulting pointer would mutate the referent, so
+    /// the binding-level write protections the ptr write cannot see are
+    /// enforced here at the source: an immutable (const) base binding is
+    /// rejected (`AddrOfImmutable`), and a `ref` parameter is read-only in
+    /// all forms (`AddrOfRefParam`, DESIGN §10.4). A box interior stays
+    /// writable regardless of the box binding's mutability (same rule as
+    /// `deref b = v`), but never through a borrowed box.
+    ///
+    /// Whether the referent is later moved away is the unsafe author's
+    /// contract (D2) — no aliasing analysis happens here or in typeck.
+    fn resolve_addr(&mut self, operand: Expr, span: Span) -> Result<ExprHir, ()> {
+        // The base binding behind the place, if the shape is addressable.
+        // Only these four shapes are places; everything else — a call
+        // result, a literal, a deeper path — is rejected here.
+        let base: Option<(&str, bool)> = match &operand {
+            Expr::Ident(name, _) => Some((name, false)),
+            Expr::Field(obj, _) => match &**obj {
+                Expr::Ident(name, _) => Some((name, false)),
+                _ => None,
+            },
+            Expr::Index(obj, _, _) => match &**obj {
+                Expr::Ident(name, _) => Some((name, false)),
+                _ => None,
+            },
+            // Box interior (`deref b`): writable regardless of `b`'s
+            // mutability (same rule as `deref b = v`), so `immutable` is
+            // irrelevant here — but never through a borrowed box.
+            Expr::Deref(inner, _) => match &**inner {
+                Expr::Ident(name, _) => Some((name, true)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((name, box_interior)) = base else {
+            self.add_error(ResolveErrorKind::AddrOfInvalidPlace, operand.span());
+            return Err(());
+        };
+
+        let Some(binding) = self.scopes.get(name) else {
+            self.add_error(
+                ResolveErrorKind::UndeclaredVariable {
+                    name: name.to_string(),
+                },
+                span,
+            );
+            return Err(());
+        };
+        if !box_interior && !binding.mutable {
+            self.add_error(
+                ResolveErrorKind::AddrOfImmutable {
+                    name: name.to_string(),
+                },
+                span,
+            );
+            return Err(());
+        }
+        if binding.ref_param {
+            self.add_error(
+                ResolveErrorKind::AddrOfRefParam {
+                    name: name.to_string(),
+                },
+                span,
+            );
+            return Err(());
+        }
+
+        // Resolve the place as an ordinary expression: typeck types it (the
+        // place type becomes the pointee type `T` of `ptr<T>`).
+        let place_hir = self.resolve_expr(operand)?;
+        Ok(ExprHir::Addr {
+            place: Box::new(place_hir),
+            hir_id: self.next_hir_id(),
+            span,
+        })
+    }
+
     /// Resolve an expression-position assignment: `x = rhs` or `deref b = rhs`.
     ///
     /// Expression-position `=` is assignment only — it never binds and never
@@ -1166,6 +1263,17 @@ impl Resolver {
                     return Err(());
                 }
             },
+            // 0.0.5 T02: one-level write through a pointer `deref_ptr p = v`.
+            // The one-level rule is enforced here at the cheapest stage: the
+            // receiver must be a bare binding, so `deref_ptr p.f` falls into
+            // the invalid-target case below (same shape rule as `deref b`).
+            Expr::DerefPtr(inner, span) => match *inner {
+                Expr::Ident(name, _) => (AssignTarget::DerefPtr(name), span),
+                other => {
+                    self.add_error(ResolveErrorKind::InvalidAssignmentTarget, other.span());
+                    return Err(());
+                }
+            },
             // 0.0.3 V02: one-level field write `p.f = e`. The one-level rule
             // is enforced here at the cheapest stage: `p.a.b` (Field of a
             // Field) and any other receiver shape fall through to the
@@ -1211,6 +1319,7 @@ impl Resolver {
         let (name, binding) = match &target {
             AssignTarget::Ident(name) => (name, self.scopes.find_assign_target(name)),
             AssignTarget::Deref(name)
+            | AssignTarget::DerefPtr(name)
             | AssignTarget::Field { obj: name, .. }
             | AssignTarget::Index { obj: name, .. } => (name, self.scopes.get(name)),
         };
@@ -1255,6 +1364,13 @@ impl Resolver {
                 span,
             }),
             AssignTarget::Deref(_) => Ok(ExprHir::AssignDeref {
+                name,
+                binding_id,
+                rhs: Box::new(rhs_hir),
+                hir_id: self.next_hir_id(),
+                span: Span::new(span.file, span.start, rhs_span.end),
+            }),
+            AssignTarget::DerefPtr(_) => Ok(ExprHir::AssignDerefPtr {
                 name,
                 binding_id,
                 rhs: Box::new(rhs_hir),
