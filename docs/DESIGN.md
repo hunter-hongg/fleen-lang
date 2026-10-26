@@ -1268,7 +1268,7 @@ borrow-free boundary (T01–T09 implemented; see `docs/0.0.4/PLAN.md` decisions 
 | 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; iterator helpers — **implemented (V07)**; flint — **implemented (V08)**; integrated & gated (V09); docs & version synced (V10). 0.0.3 is **complete** |
 | 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
-| 0.1.0 | Generics / operator overloading |
+| 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks
 
