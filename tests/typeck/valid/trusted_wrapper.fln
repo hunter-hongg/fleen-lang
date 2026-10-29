@@ -1,0 +1,15 @@
+// 0.0.5 T03: trusted function can call unsafe functions from safe context
+
+unsafe func raw_op(): int {
+    x = 42;
+    y = x;
+    y
+}
+
+trusted func safe_wrapper(): int {
+    raw_op()
+}
+
+func main(): int {
+    safe_wrapper()
+}

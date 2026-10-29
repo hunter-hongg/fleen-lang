@@ -63,16 +63,16 @@ The new spelling is additive, so nothing existing changes.
 
 ## T03 — Unsafe-context gating (F3; D3)
 
-- [ ] typeck tracks the enclosing function's `unsafe` / `trusted` flags down
+- [x] typeck tracks the enclosing function's `unsafe` / `trusted` flags down
       the body walk (nested `func` declarations carry their own flags, not the
       parent's)
-- [ ] Unsafe ops (`addr`, ptr read, ptr write) outside an unsafe/trusted body
+- [x] Unsafe ops (`addr`, ptr read, ptr write) outside an unsafe/trusted body
       → `UnsafeOpOutsideUnsafe`
-- [ ] Call to an `unsafe func` from a plain `func` → `UnsafeCallOutsideUnsafe`;
+- [x] Call to an `unsafe func` from a plain `func` → `UnsafeCallOutsideUnsafe`;
       calls from `unsafe`/`trusted` bodies pass
-- [ ] `trusted` bodies may contain unsafe ops (that is their entire purpose —
+- [x] `trusted` bodies may contain unsafe ops (that is their entire purpose —
       the author attests); no runtime distinction between unsafe and trusted
-- [ ] Tests: `tests/typeck/invalid/unsafe_op_outside.fln`,
+- [x] Tests: `tests/typeck/invalid/unsafe_op_outside.fln`,
       `unsafe_call_outside.fln`; valid: `trusted_wrapper.fln`
 
 **Depends on**: T02.

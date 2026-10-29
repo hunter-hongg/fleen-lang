@@ -1,0 +1,8 @@
+// 0.0.5 T03: unsafe operation outside unsafe/trusted function
+// expect-typeck: UnsafeOpOutsideUnsafe
+
+func main(): int {
+    x = 42;
+    p = addr x  // ERROR: UnsafeOpOutsideUnsafe
+    p
+}

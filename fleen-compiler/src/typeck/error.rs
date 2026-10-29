@@ -198,6 +198,11 @@ pub enum TypeckErrorKind {
     /// `unsafe`. A pointer lives in a local, a parameter, or a return
     /// value — created by `addr`, moved by `move`.
     PtrNotStorable,
+    // ---- 0.0.5 T03: unsafe/trusted context family ----
+    /// An unsafe operation (`addr`, `deref_ptr` read/write) used outside an `unsafe` or `trusted` function; unsafe ops require an unsafe context to prevent dangling pointers in safe code.
+    UnsafeOpOutsideUnsafe,
+    /// An `unsafe` function call from a plain (non-unsafe) function; unsafe functions must be called from within `unsafe` or `trusted` contexts.
+    UnsafeCallOutsideUnsafe { func_name: String },
     // ---- 0.0.4 T08: Future boundary family (D4 wiring) ----
     /// `clone f` where `f` is a `Future<T>`: any Value-level copy of a
     /// Future deep-copies the whole suspended coroutine frame, forking the
@@ -675,6 +680,22 @@ impl fmt::Display for TypeckErrorKind {
                      globals — reading such a position would copy the pointer \
                      in safe code; help: keep the pointer in a local, a \
                      parameter, or a return value"
+                )
+            }
+            TypeckErrorKind::UnsafeOpOutsideUnsafe => {
+                write!(
+                    f,
+                    "unsafe operation used outside an `unsafe` or `trusted` function — \
+                     help: wrap this code in `unsafe func` / `trusted func` or move \
+                     the operation into a safe (non-unsafe) context"
+                )
+            }
+            TypeckErrorKind::UnsafeCallOutsideUnsafe { func_name } => {
+                write!(
+                    f,
+                    "call to `unsafe` function `{func_name}` from a safe function — \
+                     help: wrap the call in `unsafe func` / `trusted func` or change \
+                     the function to `unsafe` / `trusted`"
                 )
             }
             TypeckErrorKind::ChannelNotBorrowable => {

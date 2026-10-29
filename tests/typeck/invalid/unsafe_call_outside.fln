@@ -1,0 +1,11 @@
+// 0.0.5 T03: unsafe function call from safe function
+// expect-typeck: UnsafeCallOutsideUnsafe
+
+unsafe func raw_op(): int {
+    x = 42;
+    x
+}
+
+func main(): int {
+    raw_op()  // ERROR: UnsafeCallOutsideUnsafe
+}

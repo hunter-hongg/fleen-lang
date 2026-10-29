@@ -94,6 +94,13 @@ pub struct TypeChecker {
     /// T03 (D2): a borrow may not appear anywhere lexically inside an
     /// `async` fn, nested sync declarations included.
     fn_async_stack: Vec<bool>,
+    /// Whether each enclosing function is `unsafe` (innermost last). 0.0.5
+    /// T03 (D3): unsafe ops and unsafe calls require an unsafe/trusted context.
+    fn_unsafe_stack: Vec<bool>,
+    /// Whether each enclosing function is `trusted` (innermost last). 0.0.5
+    /// T03 (D3): trusted functions may contain unsafe ops and are callable
+    /// from anywhere.
+    fn_trusted_stack: Vec<bool>,
     /// Ref bindings already diagnosed by `RefInAsync`; a ref parameter is
     /// reported once at its declaration, so later uses do not repeat it.
     reported_ref_ids: HashSet<BindingId>,
@@ -111,6 +118,8 @@ pub struct TypeChecker {
     structs: Vec<StructEntry>,
     /// Struct name → id (declaration order; duplicates are rejected).
     struct_by_name: HashMap<String, StructId>,
+    /// Function name → (is_unsafe, is_trusted) mapping. Built during typeck.
+    func_flags: HashMap<String, (bool, bool)>,
 }
 
 impl TypeChecker {
@@ -123,12 +132,15 @@ impl TypeChecker {
             user_func_names: HashSet::new(),
             fn_ret_stack: Vec::new(),
             fn_async_stack: Vec::new(),
+            fn_unsafe_stack: Vec::new(),
+            fn_trusted_stack: Vec::new(),
             reported_ref_ids: HashSet::new(),
             binding_types: HashMap::new(),
             global_types: HashMap::new(),
             global_ids: HashSet::new(),
             structs: Vec::new(),
             struct_by_name: HashMap::new(),
+            func_flags: HashMap::new(),
         }
     }
 
@@ -140,6 +152,21 @@ impl TypeChecker {
     /// Whether any lexically enclosing function is `async` (0.0.4 T03/D2).
     fn in_async_context(&self) -> bool {
         self.fn_async_stack.iter().any(|&is_async| is_async)
+    }
+
+    /// Whether any lexically enclosing function is `unsafe` (0.0.5 T03/D3).
+    fn in_unsafe_context(&self) -> bool {
+        self.fn_unsafe_stack.iter().any(|&is_unsafe| is_unsafe)
+    }
+
+    /// Whether any lexically enclosing function is `trusted` (0.0.5 T03/D3).
+    fn in_trusted_context(&self) -> bool {
+        self.fn_trusted_stack.iter().any(|&is_trusted| is_trusted)
+    }
+
+    /// Whether the current context permits unsafe operations (unsafe or trusted).
+    fn can_use_unsafe(&self) -> bool {
+        self.in_unsafe_context() || self.in_trusted_context()
     }
 
     /// Report a `ref` use inside async code (0.0.4 T03/D2). A binding is
@@ -618,6 +645,8 @@ impl TypeChecker {
         // Enter function scope
         self.scopes.enter_function_scope();
         self.fn_async_stack.push(func.is_async);
+        self.fn_unsafe_stack.push(func.is_unsafe);
+        self.fn_trusted_stack.push(func.is_trusted);
 
         // Add parameters to scope
         let mut typed_params = Vec::new();
@@ -682,13 +711,19 @@ impl TypeChecker {
         self.fn_ret_stack.push(ret_ty.clone());
         let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
         self.fn_ret_stack.pop();
-        // Pop before `?`: errors are collected, so a leaked async flag would
+        // Pop before `?`: errors are collected, so a leaked flags would
         // misclassify every later function.
         self.fn_async_stack.pop();
+        self.fn_unsafe_stack.pop();
+        self.fn_trusted_stack.pop();
         let typed_body = body_result?;
 
         // Exit function scope
         self.scopes.exit_scope();
+
+        // Record this function's flags for call-checked later.
+        self.func_flags
+            .insert(func.name.clone(), (func.is_unsafe, func.is_trusted));
 
         Ok(TypedFuncDeclHir {
             name: func.name,
@@ -1886,6 +1921,23 @@ impl TypeChecker {
             return self.typeck_builtin_call(&sig, func, args);
         }
 
+        // 0.0.5 T03: Check for unsafe function call (direct identifier).
+        // This is lexical: if the callee is `unsafe func`, it must be called from an unsafe/trusted context.
+        // First-class functions (function values) are not covered by this static check — documented limitation.
+        if let ExprHir::Ident { name, .. } = &func
+            && let Some(&(is_unsafe, _)) = self.func_flags.get(name)
+            && is_unsafe
+            && !self.can_use_unsafe()
+        {
+            self.add_error(
+                TypeckErrorKind::UnsafeCallOutsideUnsafe {
+                    func_name: name.clone(),
+                },
+                func.span(),
+            );
+            return Err(());
+        }
+
         let typed_func = self.typeck_expr(func, None)?;
         let func_type = typed_func.ty().clone();
 
@@ -2658,6 +2710,11 @@ impl TypeChecker {
         hir_id: HirId,
         span: Span,
     ) -> Result<TypedExprHir, ()> {
+        // 0.0.5 T03: unsafe-context check; addr is an unsafe operation.
+        if !self.can_use_unsafe() {
+            self.add_error(TypeckErrorKind::UnsafeOpOutsideUnsafe, span);
+            return Err(());
+        }
         let typed_place = self.typeck_expr(place, None)?;
         // A global place would be read by deep copy everywhere else, but
         // `addr` captures the slot itself, so globals are legal (PLAN §3.3).
@@ -2676,6 +2733,11 @@ impl TypeChecker {
     /// operand access is non-consuming, like `deref` on a box). The operand
     /// must be a `ptr<T>` expression. The unsafe-context gating is T03's.
     fn typeck_deref_ptr(&mut self, inner: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
+        // 0.0.5 T03: unsafe-context check; deref_ptr read is an unsafe operation.
+        if !self.can_use_unsafe() {
+            self.add_error(TypeckErrorKind::UnsafeOpOutsideUnsafe, span);
+            return Err(());
+        }
         let typed_inner = self.typeck_expr(inner, None)?;
         if !matches!(typed_inner.ty(), Type::Ptr(_)) {
             self.add_error(
@@ -2707,6 +2769,11 @@ impl TypeChecker {
         hir_id: HirId,
         span: Span,
     ) -> Result<TypedExprHir, ()> {
+        // 0.0.5 T03: unsafe-context check; deref_ptr write is an unsafe operation.
+        if !self.can_use_unsafe() {
+            self.add_error(TypeckErrorKind::UnsafeOpOutsideUnsafe, span);
+            return Err(());
+        }
         let target_ty = self.lookup_type(&name, span)?;
         let pointee_ty = match target_ty {
             Type::Ptr(pointee) => *pointee,

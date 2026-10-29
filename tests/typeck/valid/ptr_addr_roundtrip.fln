@@ -1,43 +1,43 @@
 // 0.0.5 T02: the ptr/addr type rules (PLAN §3.3, D1/D2).
 // addr place : ptr<T>; deref_ptr read yields T; deref_ptr p = v writes T;
-// ptr<T> is non-Copy and moves explicitly. Unsafe-context gating is T03 —
-// these bodies run without modifiers here by design.
+// ptr<T> is non-Copy and moves explicitly. Unsafe-context gating (T03)
+// requires unsafe/trusted bodies, so every fn here is `unsafe func`.
 g_counter = 7;
 
-func make(x: int): ptr<int> {
+unsafe func make(x: int): ptr<int> {
     slot = x;
     addr slot
 }
 
-func read_through(p: ptr<int>): int {
+unsafe func read_through(p: ptr<int>): int {
     deref_ptr p
 }
 
-func write_through(): int {
+unsafe func write_through(): int {
     x = 1;
     p = addr x;
     deref_ptr p = 10;
     deref_ptr p
 }
 
-func hand_off(p: ptr<int>): ptr<int> {
+unsafe func hand_off(p: ptr<int>): ptr<int> {
     move p
 }
 
-func addr_of_global(): ptr<int> {
+unsafe func addr_of_global(): ptr<int> {
     addr g_counter
 }
 
-func addr_of_element(): ptr<int> {
+unsafe func addr_of_element(): ptr<int> {
     a = [1, 2, 3];
     addr a[1]
 }
 
-func addr_of_box_interior(b: box<int>): ptr<int> {
+unsafe func addr_of_box_interior(b: box<int>): ptr<int> {
     addr deref b
 }
 
-func composed(): int {
+unsafe func composed(): int {
     p = make(5);
     read_through(hand_off(move p))
 }
