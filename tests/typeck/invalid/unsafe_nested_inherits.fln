@@ -1,0 +1,10 @@
+// 0.0.5 T03: a nested plain func carries its own flags, not the parent's
+// expect-typeck: UnsafeOpOutsideUnsafe
+
+unsafe func outer(): int {
+    func inner(): ptr<int> {
+        x = 1;
+        addr x  // ERROR: UnsafeOpOutsideUnsafe — inner is a plain func
+    }
+    0
+}

@@ -2501,7 +2501,7 @@ fn typeck_rejects_ptr_struct_field() {
 #[test]
 fn typeck_rejects_ptr_global() {
     let errs = compile_err(
-        "g: ptr<int> = make();\n\nunsafe func make(): ptr<int> {\n    x = 1;\n    addr x\n}\n",
+        "g: ptr<int> = make();\n\ntrusted func make(): ptr<int> {\n    x = 1;\n    addr x\n}\n",
     );
     assert!(
         err_kinds(&errs)

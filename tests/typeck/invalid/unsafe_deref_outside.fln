@@ -1,0 +1,11 @@
+// 0.0.5 T03: ptr read/write (deref_ptr) outside unsafe/trusted function
+// expect-typeck: UnsafeOpOutsideUnsafe
+
+func read_through(p: ptr<int>): int {
+    deref_ptr p  // ERROR: UnsafeOpOutsideUnsafe
+}
+
+func write_through(p: ptr<int>): int {
+    deref_ptr p = 10;  // ERROR: UnsafeOpOutsideUnsafe
+    0
+}

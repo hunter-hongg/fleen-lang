@@ -1,8 +1,11 @@
 // 0.0.5 T02 D1/D2: a ptr cannot be a global — every global read is a deep
 // copy, which would hand out the pointer in safe code.
+// expect-typeck: PtrNotStorable
 g: ptr<int> = make();
 
-func make(): ptr<int> {
+// `trusted` is callable from anywhere, so the global initializer reaches the
+// ptr type; the non-storable check is what rejects it.
+trusted func make(): ptr<int> {
     x = 1;
     addr x
 }

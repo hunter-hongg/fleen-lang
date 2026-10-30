@@ -154,14 +154,19 @@ impl TypeChecker {
         self.fn_async_stack.iter().any(|&is_async| is_async)
     }
 
-    /// Whether any lexically enclosing function is `unsafe` (0.0.5 T03/D3).
+    /// Whether the innermost enclosing function is `unsafe` (0.0.5 T03/D3).
+    ///
+    /// Nested `func` declarations carry their own flags, not the parent's, so
+    /// only the innermost stack entry decides the context (contrast with
+    /// `in_async_context`, where the async rule *does* extend to nested sync
+    /// declarations).
     fn in_unsafe_context(&self) -> bool {
-        self.fn_unsafe_stack.iter().any(|&is_unsafe| is_unsafe)
+        self.fn_unsafe_stack.last().copied().unwrap_or(false)
     }
 
-    /// Whether any lexically enclosing function is `trusted` (0.0.5 T03/D3).
+    /// Whether the innermost enclosing function is `trusted` (0.0.5 T03/D3).
     fn in_trusted_context(&self) -> bool {
-        self.fn_trusted_stack.iter().any(|&is_trusted| is_trusted)
+        self.fn_trusted_stack.last().copied().unwrap_or(false)
     }
 
     /// Whether the current context permits unsafe operations (unsafe or trusted).
@@ -492,6 +497,10 @@ impl TypeChecker {
                 self.func_signatures
                     .insert(func.name.clone(), (param_types, ret_type));
                 self.user_func_names.insert(func.name.clone());
+                // 0.0.5 T03: collect unsafe/trusted flags in the same forward
+                // pass so a call to a later-defined unsafe func is still gated.
+                self.func_flags
+                    .insert(func.name.clone(), (func.is_unsafe, func.is_trusted));
             }
         }
     }
@@ -711,7 +720,7 @@ impl TypeChecker {
         self.fn_ret_stack.push(ret_ty.clone());
         let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
         self.fn_ret_stack.pop();
-        // Pop before `?`: errors are collected, so a leaked flags would
+        // Pop before `?`: errors are collected, so a leaked flag would
         // misclassify every later function.
         self.fn_async_stack.pop();
         self.fn_unsafe_stack.pop();
@@ -720,10 +729,6 @@ impl TypeChecker {
 
         // Exit function scope
         self.scopes.exit_scope();
-
-        // Record this function's flags for call-checked later.
-        self.func_flags
-            .insert(func.name.clone(), (func.is_unsafe, func.is_trusted));
 
         Ok(TypedFuncDeclHir {
             name: func.name,

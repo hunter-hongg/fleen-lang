@@ -1,0 +1,11 @@
+// 0.0.5 T03: a call to an unsafe func defined later is still gated
+// expect-typeck: UnsafeCallOutsideUnsafe
+
+func main(): int {
+    raw_op()  // ERROR: UnsafeCallOutsideUnsafe (forward call)
+}
+
+unsafe func raw_op(): int {
+    x = 42;
+    x
+}

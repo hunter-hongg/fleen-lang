@@ -1,0 +1,9 @@
+// 0.0.5 T03: a trusted body may use unsafe ops directly
+trusted func make_ptr(): ptr<int> {
+    x = 42;
+    addr x
+}
+
+func main(): int {
+    0
+}
