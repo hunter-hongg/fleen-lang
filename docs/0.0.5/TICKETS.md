@@ -4,8 +4,9 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T04 implemented and green (T01–T03 uncommitted at
-> implementation time; T04 implemented 2026-10-25). T05+ PLANNED.**
+> **Status: T01–T05 implemented and green (T01–T03 uncommitted at
+> implementation time; T04 implemented 2026-10-25; T05 implemented
+> 2026-10-31). T06+ PLANNED.**
 
 ---
 
@@ -120,17 +121,28 @@ carry a pointer into the async world.
 
 ## T05 — Lowering + opcodes + verify (F5; D5)
 
-- [ ] Lower `addr place` → `AddrOf` (0xC8); ptr read → `LoadPtr` (0xC9);
+- [x] Lower `addr place` → `AddrOf` (0xC8); ptr read → `LoadPtr` (0xC9);
       ptr write → `StorePtr` (0xCA)
-- [ ] Codegen: `.flnc` version **5**; verify version gate `{1, 2, 3, 4, 5}`;
+- [x] Codegen: `.flnc` version **5**; verify version gate `{1, 2, 3, 4, 5}`;
       `Δdepth` for the three new instructions; v<5 module with a 0xC8+ opcode
-      → `BadOpcode`
-- [ ] BYTECODE.md edits (§4.2 band label "0.0.4 expansion space" → note the
-      0xC8–0xCA occupancy; §5.x instruction specs; §10 version history) —
+      → dedicated `V5OpcodeInV1V2V3V4Module` (the same explicit-gate shape
+      as `V4OpcodeInV1V2V3Module`, per the 0.0.2 U07 lesson — not a shared
+      `BadOpcode`)
+- [x] BYTECODE.md edits (§4.2 band label "0.0.4 expansion space" → note the
+      0xC8–0xCA occupancy; §5.16 instruction specs; §10 version history) —
       **in this ticket**, not T10, since BYTECODE.md is the authoritative
       encoding doc (LESSON L3)
-- [ ] Tests: verify unit tests (depth, version gate); fixed-byte v3/v4
-      fixtures still execute (compat promise)
+- [x] Tests: verify unit tests (depth, version gate, opcode-number lock,
+      operand range, end-to-end compile); fixed-byte v3/v4 fixtures still
+      execute (compat promise); VM dispatch arms return
+      `Unimplemented` until T06 lands the pointer representation
+- [x] One `AddrOf` opcode covers local + global places via bit 15 of its
+      u16 operand (clear = local slot, set = global id); field/element/
+      box-interior places stay typeck-legal but lower rejects them with
+      `UnsupportedFeature` — their VM representation is T06's decision
+      (PLAN §4)
+- [x] Workspace `Cargo.toml` versions stay at 0.0.4 — the version bump is
+      T10, not T05
 
 **Depends on**: T02 (AST), T03/T04 (gating must exist so only unsafe code can
 reach the opcodes).

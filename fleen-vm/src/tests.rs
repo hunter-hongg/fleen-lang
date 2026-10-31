@@ -270,12 +270,12 @@ fn v2_module_gate() {
     // Unknown module versions are rejected before execution.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 5,
+        version: 6,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(5)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(6)))
     );
 }
 
@@ -1174,13 +1174,13 @@ fn unsupported_version_has_no_location() {
     // No frame is ever pushed, so no location can be attached.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 5,
+        version: 6,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(5))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(6))
     );
 }
 
@@ -2328,7 +2328,7 @@ fn future_value_is_opaque_and_does_not_grow_value() {
 
 fn run_src(src: &str) -> Result<Value, RuntimeError> {
     let module = fleen_compiler::compile(src).expect("compile async source");
-    assert_eq!(module.version, 4, "compiler must emit bytecode v4 now");
+    assert_eq!(module.version, 5, "compiler must emit bytecode v5 now");
     Vm::new(module).run()
 }
 
@@ -2388,8 +2388,8 @@ fn await_emitted_by_lower_produces_v4_and_still_verifies() {
     // and the whole module must still pass fleen-verify's v4 gate.
     let src = "async func f(): int = 5\nfunc main(): int = f() await\n";
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 4);
-    fleen_verify::verify(&module).expect("v4 async module verifies");
+    assert_eq!(module.version, 5);
+    fleen_verify::verify(&module).expect("v5 async module verifies");
     assert_eq!(Vm::new(module).run().unwrap(), Value::Int(5));
 }
 

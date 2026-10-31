@@ -271,4 +271,14 @@ pub enum MirInstrKind {
     /// Split a channel handle, producing a second handle to the same buffer.
     /// Stack effect: ch → ch2 (Δ0, min 1).
     ChannelSplit,
+    // 0.0.5 T05: pointer / unsafe instructions (bytecode v5, 0xC8–0xCA).
+    /// Take the address of a place: -> `ptr<T>` (delta +1, min 0). The u16
+    /// operand identifies the place: bit 15 clear means local slot (bits 0-14);
+    /// bit 15 set means global id (bits 0-14).
+    /// Stack effect: -> ptr (delta +1, min 0).
+    AddrOf(u16),
+    /// Read through a pointer: ptr -> v (delta 0, min 1). Operand-less.
+    LoadPtr,
+    /// Write through a pointer: v ptr -> (delta -1, min 2). Operand-less.
+    StorePtr,
 }

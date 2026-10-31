@@ -9,7 +9,7 @@ mod tests;
 
 pub use bytecode::{
     Bytecode, Const, ConstId, FieldTypeTag, Func, FuncId, Global, GlobalId, Module, Opcode,
-    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
+    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE, V5_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -24,7 +24,7 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table.
 /// Version 4 (0.0.4) adds the async/channel instructions 0xC0–0xC7. Readers
 /// accept all four.
-pub const MODULE_VERSION: u16 = 4;
+pub const MODULE_VERSION: u16 = 5;
 
 /// Lower MIR into a bytecode module.
 ///

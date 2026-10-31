@@ -657,7 +657,7 @@ func main(): int {
 }
 "#;
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 4);
+    assert_eq!(module.version, 5);
     assert!(
         crate::verify(&module).is_ok(),
         "{:?}",
@@ -1513,4 +1513,185 @@ fn v4_channel_opcode_in_v3_module_rejected() {
         verify::verify(&m),
         Err(VerifyError::V4OpcodeInV1V2V3Module { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.5 T05 pointer opcodes (bytecode v5, 0xC8–0xCA).
+// ---------------------------------------------------------------------------
+
+/// A hand-built v5 module exercising the pointer opcodes in a depth-balanced
+/// way: `main` takes the address of local slot 0 and reads through it.
+fn v5_ptr_module() -> Module {
+    // constants: [0]=main.
+    // `main`: AddrOf(local slot 0) ; LoadPtr ; Return.
+    // Depth: AddrOf(+1)->1, LoadPtr (delta 0, min 1)->1, Return (needs 1).
+    Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 1,
+            code: Box::new([
+                Opcode::AddrOf as u8,
+                0,
+                0, // place id: local slot 0 (bit 15 clear)
+                Opcode::LoadPtr as u8,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn ptr_opcode_numbers() {
+    // Lock the numbering (0.0.5 T05): the pointer group follows the channel
+    // group at 0xC8, inside the reserved 0xBC-0xFF region.
+    assert_eq!(Opcode::AddrOf as u8, 0xC8);
+    assert_eq!(Opcode::LoadPtr as u8, 0xC9);
+    assert_eq!(Opcode::StorePtr as u8, 0xCA);
+}
+
+#[test]
+fn v5_ptr_program_verifies() {
+    let m = v5_ptr_module();
+    assert_eq!(m.version, 5);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn addr_of_global_verifies() {
+    // Bit 15 set marks a global place id; one global must exist.
+    let mut m = v5_ptr_module();
+    m.globals = vec![Global {
+        name: ConstId(0),
+        mutable: true,
+    }];
+    m.functions[0].code = Box::new([
+        Opcode::AddrOf as u8,
+        0x00,
+        0x80, // 0x8000: global id 0
+        Opcode::Return as u8,
+    ]);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn store_ptr_depth_balanced_verifies() {
+    // `Const` (+1), `AddrOf` (+1), `StorePtr` (delta -1, min 2) leaves one
+    // value on the stack — exactly what `Return` needs.
+    let mut m = v5_ptr_module();
+    m.constants = vec![Const::Str("main".into()), Const::Int(7)];
+    m.functions[0].code = Box::new([
+        Opcode::Const as u8,
+        1,
+        0,
+        0,
+        0, // const idx 1 (Int(7))
+        Opcode::AddrOf as u8,
+        0,
+        0, // local slot 0
+        Opcode::StorePtr as u8,
+        Opcode::Return as u8,
+    ]);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn ptr_opcode_in_v4_module_rejected() {
+    // The explicit v5 gate (the 0.0.2 U07 lesson): a 0xCx pointer opcode is
+    // rejected in a v4 module, where the v4 gate does not apply.
+    let mut m = v5_ptr_module();
+    m.version = 4;
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::V5OpcodeInV1V2V3V4Module { .. })
+    ));
+    // In a v1-v3 module the older gates fire first: the v4 gate (opcode
+    // >= 0xC0) covers v3, and a v1 module cannot even carry v2 opcodes.
+    m.version = 3;
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::V4OpcodeInV1V2V3Module { .. })
+    ));
+    m.version = 1;
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::V2OpcodeInV1Module { .. })
+    ));
+}
+
+#[test]
+fn addr_of_local_slot_out_of_range_rejected() {
+    // locals = 1, so slot 5 is out of range.
+    let mut m = v5_ptr_module();
+    m.functions[0].code = Box::new([
+        Opcode::AddrOf as u8,
+        5,
+        0, // local slot 5 (bit 15 clear)
+        Opcode::Return as u8,
+    ]);
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::LocalSlotOutOfRange { slot: 5, .. })
+    ));
+}
+
+#[test]
+fn addr_of_global_out_of_range_rejected() {
+    // No globals declared, so global id 0 is out of range.
+    let mut m = v5_ptr_module();
+    m.functions[0].code = Box::new([
+        Opcode::AddrOf as u8,
+        0x00,
+        0x80, // 0x8000: global id 0
+        Opcode::Return as u8,
+    ]);
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::GlobalIndexOutOfRange { index: 0, .. })
+    ));
+}
+
+#[test]
+fn store_ptr_underflow_rejected() {
+    // `StorePtr` needs the value and the pointer (min 2): one operand is an
+    // underflow.
+    let mut m = v5_ptr_module();
+    m.functions[0].code = Box::new([
+        Opcode::AddrOf as u8,
+        0,
+        0, // -> one pointer on the stack
+        Opcode::StorePtr as u8,
+        Opcode::Return as u8,
+    ]);
+    assert!(matches!(
+        verify::verify(&m),
+        Err(VerifyError::StackUnderflow { needed: 2, .. })
+    ));
+}
+
+#[test]
+fn compiled_ptr_program_verifies() {
+    // The full pipeline on a `trusted` pointer program: the emitted module is
+    // v5 and verifies (T05's end-to-end contract).
+    let src = "trusted func make_ptr(): ptr<int> { x = 42; addr x }\nfunc main(): int = 0";
+    let module = fleen_compiler::compile(src).expect("compile");
+    assert_eq!(module.version, 5);
+    verify::verify(&module).expect("compiled ptr module verifies");
+    // The pointer opcode must appear in make_ptr's body.
+    let f = module
+        .functions
+        .iter()
+        .find(|f| match module.constants.get(f.name.0 as usize) {
+            Some(Const::Str(s)) => &**s == "make_ptr",
+            _ => false,
+        })
+        .expect("make_ptr function");
+    assert!(f.code.contains(&(Opcode::AddrOf as u8)));
 }

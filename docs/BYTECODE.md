@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.4
+# Fleen Bytecode Specification v0.0.5
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -16,6 +16,7 @@
 > `Value::Channel` join the value model as non-serialized runtime variants, and the
 > `.flnc` version bumps to 4 (no layout change — no new tables). Design decisions are
 > in `docs/0.0.4/PLAN.md`.
+> **v0.0.5 additions**: pointer / unsafe instructions (0xC8–0xCA) — `AddrOf` / `LoadPtr` / `StorePtr` — and the `.flnc` version bumps to 5 (no layout change — no new tables). Design decisions are in `docs/0.0.5/PLAN.md`.
 
 ---
 
@@ -322,7 +323,8 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0xB9–0xBB  Range / iteration (0.0.3 V04, §5.14)
 0xBC–0xBF  Reserved
 0xC0–0xC7  async / channel (0.0.4, §5.15)
-0xC8–0xDF  Reserved (0.0.4 expansion space)
+0xC8–0xCA  pointer / unsafe (0.0.5 T05, §5.16)
+0xCB–0xDF  Reserved
 0xE0–0xFF  Reserved
 ```
 
@@ -585,6 +587,21 @@ Rules:
   suspension source yields `Pending`; ready tasks always run before timer-parked ones
   (wake order is deterministic); when no task is runnable and all remaining ones are
   blocked on channels, the run fails with `ChannelDeadlock` (there is no `close` in 0.0.4)
+
+---
+
+### 5.16 pointer / unsafe (v0.0.5 T05)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `AddrOf` | u16 place id | 3 | `→ ptr` (delta +1, min 0) | Take the address of a place: bit 15 of the operand clear → local slot (bits 0-14); bit 15 set → global id (bits 0-14). Pushes a `ptr<T>` to the place without reading it. A pointer is move-only — `clone` on a pointer is a typeck error |
+| `LoadPtr` | — | 1 | `ptr → v` (delta 0, min 1) | Read through a pointer: pop the pointer, push a copy of the pointee. The pointer value itself is untouched (it was already consumed on the stack); a second read requires re-taking the address |
+| `StorePtr` | — | 1 | `v ptr →` (delta -1, min 2) | Write through a pointer: pop the pointee value `v`, then the pointer `p`, overwrite `*p` with `v` (the old pointee is released). Stack effect net delta -1 |
+
+Rules:
+- All three sit inside the **reserved `0xBC–0xFF` region** (§4.2); no v1/v2/v3/v4 encoding change (§10 compatibility promise)
+- `AddrOf` of a local slot / global id is a *source-level* unsafe op — typeck gates it behind `unsafe` / `trusted` functions (PLAN §3.3); the verifier only checks index ranges (§8)
+- Pointers are **move-only**: `clone_ptr` / `move` on pointers is rejected by typeck (PLAN D1), and pointers — like `Future`/`channel` — never cross an `await` / task / channel boundary
 
 ---
 
@@ -1021,6 +1038,9 @@ The stack-depth analysis is based on a static table (`n` is the operand count):
 | `ChannelSend` | −2 (`ch v → unit`) | 2 |
 | `ChannelRecv` | +1 (`ch → v`) | 1 |
 | `ChannelSplit` | 0 (`ch → ch2`) | 1 |
+| `AddrOf` | +1 (`→ ptr`) | 0 |
+| `LoadPtr` | 0 (`ptr → v`) | 1 |
+| `StorePtr` | −1 (`v ptr →`) | 2 |
 | `Return` | treated as a path terminator | 1 (the return value is on the stack top) |
 
 > **U07 erratum**: `AllocBox`'s net effect is **0** (`v → b`: the value is replaced by the box),
@@ -1050,13 +1070,16 @@ Rules:
 0.0.4 writes `version = 4`, readers accept `{1, 2, 3, 4}`; it makes **zero layout changes** —
 the new async/channel instructions live inside function bodies and `Value::Future` /
 `Value::Channel` are not serialized, so no new table and no field change is needed.
+0.0.5 writes `version = 5`, readers accept `{1, 2, 3, 4, 5}`; it makes **zero layout changes** —
+the pointer / unsafe instructions live inside function bodies, so no new table
+and no field change is needed.
 
 ### File Header
 
 | Field | Width | Value |
 |------|------|-----|
 | magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
-| version | u16 | bytecode version: the 0.0.4 compiler writes `4`, readers accept `{1, 2, 3, 4}` |
+| version | u16 | bytecode version: the 0.0.5 compiler writes `5`, readers accept `{1, 2, 3, 4, 5}` |
 
 ### Constant Pool
 
@@ -1127,6 +1150,7 @@ Rules:
 | 2 | 0.0.2 | + ownership instructions `AllocBox` / `DerefBox` / `StoreDerefBox` / `MakeRefLocal` (0x80–0x83), `DupDeep` / `MoveLocal` / `CloneLocal` / `CloneGlobal` (0x90–0x93), Result instructions (0xA0–0xA4), `ToStr` (0xA5, `as` conversion); `span_map` starts being populated (§5.9–5.11, §2) |
 | 3 | 0.0.3 | + aggregation instructions: `StructNew`/`GetField`/`SetFieldLocal`/`SetFieldGlobal` (0xB0–0xB3), `ArrNew`/`ArrLen`/`ArrGet`/`ArrSetLocal`/`ArrSetGlobal` (0xB4–0xB8), `MakeRange`/`RangeStart`/`RangeEnd` (0xB9–0xBB); `Struct`/`Arr`/`Range` values; the appended `struct_defs` table (§2, §9) |
 | 4 | 0.0.4 | + async / channel instructions: `AsyncStart`/`Suspend`/`Poll`/`Await` (0xC0–0xC3), `ChannelNew`/`ChannelSend`/`ChannelRecv`/`ChannelSplit` (0xC4–0xC7); `Future`/`Channel` runtime values (not serialized); **zero layout changes** — no new table (§5.15) |
+| 5 | 0.0.5 | + pointer / unsafe instructions: `AddrOf`/`LoadPtr`/`StorePtr` (0xC8–0xCA); **zero layout changes** — no new table (§5.16) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

@@ -172,8 +172,7 @@ impl Vm {
 
     /// Run the module's `entry` function to completion.
     ///
-    /// Accepts bytecode versions 1 (0.0.1), 2 (0.0.2), 3 (0.0.3) and 4
-    /// (0.0.4). On
+    /// Accepts bytecode versions 1 (0.0.1) through 5 (0.0.5). On
     /// failure the [`RuntimeError`] carries the source location of the
     /// failing instruction when one can be determined (0.0.2 U10).
     pub fn run(&mut self) -> Result<Value, RuntimeError> {
@@ -207,7 +206,7 @@ impl Vm {
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
-        if !(1..=4).contains(&self.module.version) {
+        if !(1..=5).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -2072,6 +2071,12 @@ impl Vm {
                 // Split returns a second handle to the same inner buffer.
                 self.stack.push(Value::Channel(inner));
             }
+            // 0.0.5 T05: pointer / unsafe opcodes are encoded and verified,
+            // but their VM execution lands with T06 — hitting one here means
+            // hand-written or ahead-of-its-time bytecode.
+            Opcode::AddrOf => return Err(RuntimeErrorKind::Unimplemented("AddrOf")),
+            Opcode::LoadPtr => return Err(RuntimeErrorKind::Unimplemented("LoadPtr")),
+            Opcode::StorePtr => return Err(RuntimeErrorKind::Unimplemented("StorePtr")),
         }
         self.frames
             .last_mut()

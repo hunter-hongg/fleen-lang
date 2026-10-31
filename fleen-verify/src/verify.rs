@@ -2,6 +2,7 @@
 
 use fleen_compiler::codegen::{
     Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
+    V5_OPCODE_BASE,
 };
 
 /// A verification failure.
@@ -99,6 +100,12 @@ pub enum VerifyError {
     /// A v4 instruction (opcode >= 0xC0) appears in a v1–v3 module
     /// (0.0.4 T05; the explicit gate).
     V4OpcodeInV1V2V3Module {
+        pc: usize,
+        byte: u8,
+    },
+    /// A v5 instruction (opcode >= 0xC8) appears in a v1–v4 module
+    /// (0.0.5 T05; the explicit gate).
+    V5OpcodeInV1V2V3V4Module {
         pc: usize,
         byte: u8,
     },
@@ -226,6 +233,12 @@ impl std::fmt::Display for VerifyError {
                 write!(
                     f,
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v4, module is v1/v2/v3"
+                )
+            }
+            Self::V5OpcodeInV1V2V3V4Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v5, module is v1/v2/v3/v4"
                 )
             }
             Self::StructIndexOutOfRange { pc, index } => {
@@ -464,6 +477,13 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         Opcode::ChannelRecv => (0, 1),
         // `ChannelSplit`: ch → ch2 (Δ0, min 1).
         Opcode::ChannelSplit => (0, 1),
+        // 0.0.5 T05: pointers (BYTECODE v5, 0xC8–0xCA).
+        // `AddrOf`: → ptr (Δ+1, min 0).
+        Opcode::AddrOf => (1, 0),
+        // `LoadPtr`: ptr → v (Δ0, min 1).
+        Opcode::LoadPtr => (0, 1),
+        // `StorePtr`: v ptr → (Δ−1, min 2).
+        Opcode::StorePtr => (-1, 2),
     })
 }
 
@@ -522,6 +542,13 @@ fn walk_function(
         // same explicit comparison as the v2/v3 gates.
         if module.version < 4 && (d.opcode as u8) >= V4_OPCODE_BASE {
             return Err(VerifyError::V4OpcodeInV1V2V3Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
+        // 0.0.5 T05: v5 (pointer, >= 0xC8) is kept out of v1–v4 modules.
+        if module.version < 5 && (d.opcode as u8) >= V5_OPCODE_BASE {
+            return Err(VerifyError::V5OpcodeInV1V2V3V4Module {
                 pc: d.pc,
                 byte: d.opcode as u8,
             });
@@ -595,12 +622,22 @@ fn walk_function(
             | Opcode::MakeRefLocal
             | Opcode::MoveLocal
             | Opcode::CloneLocal
-            | Opcode::ArrSetLocal => {
-                let slot = slot_index(code, d)?;
-                if slot >= func.locals {
+            | Opcode::ArrSetLocal
+            | Opcode::AddrOf => {
+                let place = slot_index(code, d)?;
+                let global = place & 0x8000 != 0;
+                let id = place & 0x7FFF;
+                if global {
+                    if id as usize >= module.globals.len() {
+                        return Err(VerifyError::GlobalIndexOutOfRange {
+                            pc: d.pc,
+                            index: id,
+                        });
+                    }
+                } else if id as usize >= func.locals as usize {
                     return Err(VerifyError::LocalSlotOutOfRange {
                         pc: d.pc,
-                        slot,
+                        slot: id,
                         locals: func.locals,
                     });
                 }

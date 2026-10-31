@@ -112,6 +112,11 @@ pub enum RuntimeErrorKind {
     /// still waits for spawned task ids (0.0.4 review fix). Defensive — the
     /// static rules guarantee every spawned task stays reachable.
     JoinDeadlock,
+    /// An opcode is encoded in the module but the VM does not implement it
+    /// yet (e.g. pointer opcodes `AddrOf`/`LoadPtr`/`StorePtr` land with
+    /// 0.0.5 T06). Defensive: verify accepts them; reaching this needs
+    /// hand-written or ahead-of-its-time bytecode.
+    Unimplemented(&'static str),
 }
 
 impl std::fmt::Display for RuntimeErrorKind {
@@ -207,6 +212,7 @@ impl std::fmt::Display for RuntimeErrorKind {
                      tasks that can no longer run"
                 )
             }
+            RuntimeErrorKind::Unimplemented(what) => write!(f, "unimplemented opcode: {what}"),
         }
     }
 }

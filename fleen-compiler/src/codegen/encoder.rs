@@ -143,6 +143,7 @@ impl Encoder {
             MirInstrKind::CloneLocal(slot) => self.emit_u16(*slot),
             MirInstrKind::CloneGlobal(gid) => self.emit_u16(*gid),
             MirInstrKind::MakeRefLocal(slot) => self.emit_u16(*slot),
+            MirInstrKind::AddrOf(place) => self.emit_u16(*place),
             _ => {}
         }
         let written = self.code.len() - before;
@@ -263,6 +264,10 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::ChannelSend(_) => Opcode::ChannelSend,
         MirInstrKind::ChannelRecv(_) => Opcode::ChannelRecv,
         MirInstrKind::ChannelSplit => Opcode::ChannelSplit,
+        // 0.0.5 T05: pointer / unsafe (bytecode v5, 0xC8–0xCA).
+        MirInstrKind::AddrOf(_) => Opcode::AddrOf,
+        MirInstrKind::LoadPtr => Opcode::LoadPtr,
+        MirInstrKind::StorePtr => Opcode::StorePtr,
     })
 }
 

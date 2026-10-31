@@ -1087,29 +1087,58 @@ impl<'a> FnBodyCx<'a> {
             // `StorePtr` 0xCA, `.flnc` version 5) lands with T05 — a
             // ptr program is rejected here at the correct phase, never
             // mis-lowered.
-            TypedExprHir::Addr { span, .. } => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
-                    },
-                    *span,
-                ));
+            // 0.0.5 T05: `addr <place>` — take the address of a place.
+            // Only `Ident` places (local/global bindings) are encodable now;
+            // struct fields, array elements and box interiors need the VM's
+            // pointer table representation, which lands with T06 — reject
+            // them here so no mis-lowered ptr program escapes this phase.
+            TypedExprHir::Addr { place, span, .. } => match &**place {
+                TypedExprHir::Ident {
+                    name, binding_id, ..
+                } => {
+                    let place_id = match self.loc(*binding_id, name, *span)? {
+                        Location::Local(slot) => slot,
+                        Location::Global(gid) => gid.0 as u16 | 0x8000,
+                    };
+                    fb.emit(MirInstr::new(MirInstrKind::AddrOf(place_id), *span));
+                }
+                _other => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "unsupported addr place kind",
+                        },
+                        *span,
+                    ));
+                }
+            },
+            // `deref_ptr <p>`: push the pointer, then read through it.
+            // `LoadPtr` is `ptr → v` (Δ0, min 1): pops the pointer and pushes
+            // a copy of the pointee; the pointer itself is untouched.
+            TypedExprHir::DerefPtr(inner, span) => {
+                self.lower_expr_into(fb, inner)?;
+                fb.emit(MirInstr::new(MirInstrKind::LoadPtr, *span));
             }
-            TypedExprHir::DerefPtr(_, span) => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
-                    },
-                    *span,
-                ));
-            }
-            TypedExprHir::AssignDerefPtr { span, .. } => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "ptr operations (bytecode encoding lands in 0.0.5 T05)",
-                    },
-                    *span,
-                ));
+            // `deref_ptr <p> = <rhs>`: push the value, then the pointer,
+            // then overwrite the pointee. `StorePtr` is `v ptr →` (Δ−1, min 2);
+            // the assignment expression yields `unit`.
+            TypedExprHir::AssignDerefPtr {
+                binding_id,
+                rhs,
+                span,
+                ..
+            } => {
+                self.lower_expr_into(fb, rhs)?;
+                let Location::Local(slot) = self.loc(*binding_id, "?", *span)? else {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "addr of global assigned through pointer",
+                        },
+                        *span,
+                    ));
+                };
+                fb.emit(MirInstr::new(MirInstrKind::LoadLocal(slot), *span));
+                fb.emit(MirInstr::new(MirInstrKind::StorePtr, *span));
+                fb.emit(MirInstr::new(MirInstrKind::Unit, *span));
             }
             // 0.0.2 U06: deref assignment.
             TypedExprHir::AssignDeref {

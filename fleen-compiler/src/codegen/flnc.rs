@@ -13,7 +13,10 @@ const MAGIC: &[u8; 4] = b"FLNC";
 /// 0xC0–0xC7 (0xC0–0xC3 in T05, 0xC4–0xC7 in T07).
 /// The field order and widths of every existing table are
 /// unchanged (BYTECODE.md §9), so a v1 file reads unmodified.
-const READ_VERSIONS: [u16; 4] = [1, 2, 3, 4];
+/// Versions this reader accepts: 0.0.1 (v1) through 0.0.5 (v5).
+/// v5 (0.0.5 T05) adds the pointer / unsafe instructions 0xC8–0xCA;
+/// its field order and widths are unchanged from v4 (BYTECODE.md §9).
+const READ_VERSIONS: [u16; 5] = [1, 2, 3, 4, 5];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]

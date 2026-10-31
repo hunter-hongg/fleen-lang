@@ -357,6 +357,17 @@ pub enum Opcode {
     ChannelRecv = 0xC6,
     /// Split a channel handle: ch → ch2 (Δ0, min 1).
     ChannelSplit = 0xC7,
+    // 0xC8–0xCA pointer / unsafe instructions (0.0.5 T05, bytecode v5).
+    /// Take the address of a place: → `ptr<T>`. Operand u16 encodes place id
+    /// (bit 15 clear = local slot; bit 15 set = global id).
+    /// Stack effect: → ptr (Δ+1, min 0).
+    AddrOf = 0xC8,
+    /// Read through a pointer: ptr → v. Operand-less.
+    /// Stack effect: ptr → v (Δ0, min 1).
+    LoadPtr = 0xC9,
+    /// Write through a pointer: v ptr →. Operand-less.
+    /// Stack effect: v ptr → (Δ−1, min 2).
+    StorePtr = 0xCA,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -373,6 +384,10 @@ pub const V3_OPCODE_BASE: u8 = 0xB0;
 /// Lowest opcode number reserved for the 0.0.4 (v4) instruction set
 /// (async / channel 0xC0–0xC7). v4 opcodes are at or above this.
 pub const V4_OPCODE_BASE: u8 = 0xC0;
+
+/// Lowest opcode number reserved for the 0.0.5 (v5) instruction set
+/// (pointers 0xC8–0xCA). v5 opcodes are at or above this.
+pub const V5_OPCODE_BASE: u8 = 0xC8;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -405,6 +420,8 @@ impl Opcode {
             | Opcode::ArrSetGlobal => 2,
             // `SetFieldLocal` / `SetFieldGlobal`: slot (or gid) + offset.
             Opcode::SetFieldLocal | Opcode::SetFieldGlobal => 4,
+            // `AddrOf`: u16 place id (slot or global id).
+            Opcode::AddrOf => 2,
             Opcode::CallValue => 1,
             _ => 0,
         }
@@ -490,6 +507,10 @@ impl Opcode {
             0xC5 => Opcode::ChannelSend,
             0xC6 => Opcode::ChannelRecv,
             0xC7 => Opcode::ChannelSplit,
+            // 0.0.5 (v5): pointer opcodes (T05).
+            0xC8 => Opcode::AddrOf,
+            0xC9 => Opcode::LoadPtr,
+            0xCA => Opcode::StorePtr,
             _ => return None,
         })
     }

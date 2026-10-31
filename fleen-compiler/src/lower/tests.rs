@@ -740,6 +740,11 @@ fn stack_delta(
         // `StoreDerefBox` pops BOTH the box and the value (BYTECODE.md §8:
         // Δ−2, min 2) — it is not a plain store.
         MirInstrKind::StoreDerefBox => -2,
+        // 0.0.5 T05: `AddrOf` pushes a pointer (delta +1); `LoadPtr` reads
+        // through (delta 0); `StorePtr` overwrites (delta -1).
+        MirInstrKind::AddrOf(_) => 1,
+        MirInstrKind::LoadPtr => 0,
+        MirInstrKind::StorePtr => -1,
         MirInstrKind::IAdd
         | MirInstrKind::ISub
         | MirInstrKind::IMul
@@ -2560,4 +2565,96 @@ fn lower_inline_iter_args_evaluated_once() {
         literal_count, 1,
         "the array literal must be built exactly once (not per iteration)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.5 T05: pointer lowering (`addr` / `deref_ptr` / `deref_ptr =`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lower_addr_of_local_emits_addr_of() {
+    let src = "trusted func make_ptr(): ptr<int> { x = 42; addr x }\nfunc main(): int = 0";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "make_ptr");
+    // Exactly one `AddrOf`, and its place id is a plain local slot (bit 15
+    // clear — the local-slot encoding, not the global-flag form).
+    let addrof: Vec<u16> = flat(f)
+        .iter()
+        .filter_map(|i| match i.kind {
+            MirInstrKind::AddrOf(place) => Some(place),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(addrof.len(), 1);
+    assert_eq!(addrof[0] & 0x8000, 0, "place id must be a local slot");
+}
+
+#[test]
+fn lower_addr_of_global_sets_flag_bit() {
+    let src = "g_counter = 0\ntrusted func addr_of_global(): ptr<int> { addr g_counter }\nfunc main(): int = 0";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "addr_of_global");
+    let addrof: Vec<u16> = flat(f)
+        .iter()
+        .filter_map(|i| match i.kind {
+            MirInstrKind::AddrOf(place) => Some(place),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(addrof.len(), 1);
+    assert_eq!(
+        addrof[0] & 0x8000,
+        0x8000,
+        "place id must carry the global flag bit"
+    );
+}
+
+#[test]
+fn lower_deref_ptr_read_emits_load_ptr() {
+    let src = "trusted func read_ptr(p: ptr<int>): int { deref_ptr p }\nfunc main(): int = 0";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "read_ptr");
+    let ins = flat(f);
+    assert!(
+        ins.iter().any(|i| matches!(i.kind, MirInstrKind::LoadPtr)),
+        "deref_ptr read must lower to LoadPtr"
+    );
+    // The pointer operand is the parameter binding, loaded from its slot.
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::LoadLocal(_)))
+    );
+}
+
+#[test]
+fn lower_deref_ptr_assign_emits_store_ptr_then_unit() {
+    let src = "trusted func write_ptr(p: ptr<int>) { deref_ptr p = 7 }\nfunc main(): int = 0";
+    let mir = lower_src(src);
+    let f = find_func(&mir, "write_ptr");
+    let ins = flat(f);
+    assert!(
+        ins.iter().any(|i| matches!(i.kind, MirInstrKind::StorePtr)),
+        "deref_ptr write must lower to StorePtr"
+    );
+    // The write yields unit (the same shape as `AssignDeref` for boxes), so a
+    // `Unit` must follow the store.
+    let store_pos = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::StorePtr))
+        .expect("StorePtr present");
+    assert!(ins.len() > store_pos + 1);
+    assert!(matches!(ins[store_pos + 1].kind, MirInstrKind::Unit));
+}
+
+#[test]
+fn lower_addr_of_field_is_unsupported_for_now() {
+    // Typeck accepts `addr s.x` on a mutable local (T03), but the VM pointer
+    // representation for field places lands with T06 — lowering must reject
+    // it, not mis-lower it.
+    let src = "struct S { x: int }\ntrusted func make(): ptr<int> { s = S { x: 1 }; addr s.x }\nfunc main(): int = 0";
+    let err = lower_err(src);
+    assert!(matches!(
+        err.kind,
+        super::LowerErrorKind::UnsupportedFeature { .. }
+    ));
 }
