@@ -104,6 +104,10 @@ pub struct TypeChecker {
     /// Ref bindings already diagnosed by `RefInAsync`; a ref parameter is
     /// reported once at its declaration, so later uses do not repeat it.
     reported_ref_ids: HashSet<BindingId>,
+    /// Pointer bindings already diagnosed by `PtrAcrossBoundary` (0.0.5 T04,
+    /// D4): a pointer parameter is reported once at its declaration, so later
+    /// uses do not repeat it. Mirrors `reported_ref_ids`.
+    reported_ptr_ids: HashSet<BindingId>,
     /// Binding ID to type mapping.
     binding_types: HashMap<BindingId, Type>,
     /// Fully qualified name → type for top-level var/const declarations,
@@ -135,6 +139,7 @@ impl TypeChecker {
             fn_unsafe_stack: Vec::new(),
             fn_trusted_stack: Vec::new(),
             reported_ref_ids: HashSet::new(),
+            reported_ptr_ids: HashSet::new(),
             binding_types: HashMap::new(),
             global_types: HashMap::new(),
             global_ids: HashSet::new(),
@@ -183,6 +188,24 @@ impl TypeChecker {
             && self.reported_ref_ids.insert(binding_id)
         {
             self.add_error(TypeckErrorKind::RefInAsync, span);
+        }
+    }
+
+    /// Report a `ptr<T>` use that crosses an async / task / channel boundary
+    /// (0.0.5 T04, D4). A pointer's referent lives in (or is promoted from) a
+    /// coroutine frame that the scheduler may relocate, so no pointer may be
+    /// captured inside the async world — mirroring `check_ref_in_async`'s
+    /// lexical rule shape. `binding_id` is `None` for shapes with no
+    /// binding (an async function's return type), which are reported as-is.
+    fn check_ptr_in_async(&mut self, ty: &Type, binding_id: Option<BindingId>, span: Span) {
+        if self.in_async_context() && ty.contains_ptr() {
+            if let Some(id) = binding_id
+                && !self.reported_ptr_ids.insert(id)
+            {
+                // Already reported for this binding.
+                return;
+            }
+            self.add_error(TypeckErrorKind::PtrAcrossBoundary, span);
         }
     }
 
@@ -689,6 +712,10 @@ impl TypeChecker {
                 self.reported_ref_ids.insert(binding_id);
                 self.add_error(TypeckErrorKind::RefInAsync, param.span);
             }
+            // 0.0.5 T04 (D4): a pointer parameter of an async fn would be
+            // captured into the task's frame; the referent may not survive
+            // the scheduler's frame relocation.
+            self.check_ptr_in_async(&param_type, Some(binding_id), param.span);
             // 0.0.4 T07: a channel handle cannot sit behind a `ref` — its
             // `send`/`recv` park the running task and resume it later, which
             // would carry the borrowed handle across a suspension. Without
@@ -717,6 +744,12 @@ impl TypeChecker {
         // The declared return type drives both the `expected` thread into the
         // body (Ok/Err constructors) and the `?` legality check, which needs
         // it even in positions `expected` cannot reach.
+        // 0.0.5 T04 (D4): an async fn whose result carries a pointer crosses
+        // the await boundary — the caller receives a ptr whose referent lived
+        // in (or was promoted from) the coroutine frame.
+        if let Some(ret) = &ret_ty {
+            self.check_ptr_in_async(ret, None, func.span);
+        }
         self.fn_ret_stack.push(ret_ty.clone());
         let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
         self.fn_ret_stack.pop();
@@ -976,6 +1009,7 @@ impl TypeChecker {
             } => {
                 let ty = self.lookup_type(&name, span)?;
                 self.check_ref_in_async(&ty, binding_id, span);
+                self.check_ptr_in_async(&ty, Some(binding_id), span);
                 // `Access::Copy` is the default; the ownership pass (U05)
                 // upgrades bare owned reads to `Clone` and implicit
                 // tail-position transfers to `Move`.
@@ -1812,6 +1846,15 @@ impl TypeChecker {
                             );
                             return Err(());
                         }
+                        // 0.0.5 T04 (D4): a pointer payload never crosses a
+                        // channel — the referent lives in (or is promoted from)
+                        // a frame that the receiving task may relocate. Mirrors
+                        // the borrow rule above and sees through value-carrying
+                        // containers (`Result<ptr, _>`).
+                        if typed_val.ty().contains_ptr() {
+                            self.add_error(TypeckErrorKind::PtrAcrossBoundary, typed_val.span());
+                            return Err(());
+                        }
                         // D6: the payload is consumed by the send — a bare
                         // owned local read would silently deep-copy the
                         // value; the transfer must be explicit (`move`/`clone`
@@ -2524,6 +2567,7 @@ impl TypeChecker {
             } => {
                 let ty = self.lookup_type(&name, ident_span)?;
                 self.check_ref_in_async(&ty, binding_id, ident_span);
+                self.check_ptr_in_async(&ty, Some(binding_id), ident_span);
                 // `ref T` clones to an owned `T` (the value leaves the
                 // borrow); every other type keeps its declared type.
                 let value_ty = match ty {

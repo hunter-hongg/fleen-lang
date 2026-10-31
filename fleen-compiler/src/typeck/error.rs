@@ -203,6 +203,12 @@ pub enum TypeckErrorKind {
     UnsafeOpOutsideUnsafe,
     /// An `unsafe` function call from a plain (non-unsafe) function; unsafe functions must be called from within `unsafe` or `trusted` contexts.
     UnsafeCallOutsideUnsafe { func_name: String },
+    // ---- 0.0.5 T04: pointer boundary family (D4) ----
+    /// A `ptr<T>` value captured across an `await`, moved into a task, or sent
+    /// through a channel. A pointer's referent lives in (or is promoted from) a
+    /// coroutine frame that the scheduler may relocate, so a pointer must never
+    /// enter the async world (D4 — the borrow-free boundary's pointer sibling).
+    PtrAcrossBoundary,
     // ---- 0.0.4 T08: Future boundary family (D4 wiring) ----
     /// `clone f` where `f` is a `Future<T>`: any Value-level copy of a
     /// Future deep-copies the whole suspended coroutine frame, forking the
@@ -696,6 +702,16 @@ impl fmt::Display for TypeckErrorKind {
                     "call to `unsafe` function `{func_name}` from a safe function — \
                      help: wrap the call in `unsafe func` / `trusted func` or change \
                      the function to `unsafe` / `trusted`"
+                )
+            }
+            TypeckErrorKind::PtrAcrossBoundary => {
+                write!(
+                    f,
+                    "a pointer may not cross an async / task / channel boundary — \
+                     a `ptr<T>` referent lives in (or is promoted from) a coroutine \
+                     frame that the scheduler may relocate; help: keep the pointer in \
+                     the synchronous world and send the value it points to, not the \
+                     pointer itself"
                 )
             }
             TypeckErrorKind::ChannelNotBorrowable => {

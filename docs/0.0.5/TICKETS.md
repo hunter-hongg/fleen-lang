@@ -4,8 +4,8 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01, T02 implemented and green (2026-10-25, uncommitted at
-> implementation time); T03+ PLANNED.**
+> **Status: T01–T04 implemented and green (T01–T03 uncommitted at
+> implementation time; T04 implemented 2026-10-25). T05+ PLANNED.**
 
 ---
 
@@ -88,14 +88,14 @@ discovered by a user.
 
 ## T04 — Boundary rules + `unsafe async` (F4; D4)
 
-- [ ] typeck: a `ptr<T>` value captured across an `await`, moved into a task,
+- [x] typeck: a `ptr<T>` value captured across an `await`, moved into a task,
       or sent through a channel → `PtrAcrossBoundary` (sibling of
       `RefInAsync`; same lexical rule shape)
-- [ ] `async unsafe func` / `unsafe async func` parse accepted (modifier
+- [x] `async unsafe func` / `unsafe async func` parse accepted (modifier
       order: settle at implementation, both spellings → one AST state)
-- [ ] Calling (and awaiting) an unsafe async fn requires an unsafe/trusted
+- [x] Calling (and awaiting) an unsafe async fn requires an unsafe/trusted
       context, same as sync unsafe fns
-- [ ] Tests: `tests/typeck/invalid/ptr_across_await.fln`,
+- [x] Tests: `tests/typeck/invalid/ptr_across_await.fln`,
       `ptr_channel.fln`, `ptr_task.fln`; valid: `unsafe_async.fln`
 
 **Depends on**: T03 (context tracking), 0.0.4 T03 (the `RefInAsync` walk it
@@ -107,6 +107,14 @@ whose referent was promoted from frame storage must not outlive the frame's
 locality.  The alternative (allow ptr in unsafe code across boundaries) would
 require the promote-on-addr cells to be globally reachable — a VM-layer
 rewrite deferred to 0.1.0's cross-task heap, not a smooth swap.
+
+**Boundary-walk note**: the pointer boundary walk uses `Type::contains_ptr`,
+which recurses into `Array`/`Result` but stops at opaque handles
+(`Channel`/`Future`) — mirroring `contains_future`/`contains_channel`. A
+`channel<ptr<_>>` handle is therefore not flagged at a parameter site; a `ptr`
+that would cross a channel is rejected at the `send` site
+(`PtrAcrossBoundary`), and since no `send` is legal, no such channel can ever
+carry a pointer into the async world.
 
 ---
 

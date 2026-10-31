@@ -1,0 +1,12 @@
+// expect-typeck: PtrAcrossBoundary
+// 0.0.5 T04 (D4): a pointer may not be captured across an await. The referent
+// lives in (or is promoted from) the coroutine frame that the scheduler may
+// relocate, so a pointer must not outlive a suspension point.
+async func helper(): int = 1
+
+async unsafe func f(): int {
+    x = 1;
+    p = addr x;
+    h = helper() await;
+    deref_ptr p
+}

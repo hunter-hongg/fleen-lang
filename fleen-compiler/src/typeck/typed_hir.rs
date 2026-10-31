@@ -153,6 +153,13 @@ impl Type {
     /// (`PtrNotStorable`); `clone` of anything containing a pointer is
     /// rejected (`CloneOfPointer`), and `Result<ptr, _>` payloads ride the
     /// same rejection through this walk.
+    ///
+    /// The walk deliberately stops at opaque handles (`Channel` / `Future`),
+    /// matching `contains_future` / `contains_channel`: a handle does not hold
+    /// its payload by value for copy purposes. A `ptr` that would cross a
+    /// channel is rejected at the `send` site instead (`PtrAcrossBoundary`,
+    /// 0.0.5 T04/D4) — a `channel<ptr<_>>` handle itself never carries a
+    /// pointer into the async world, so it is not flagged by this walk.
     pub fn contains_ptr(&self) -> bool {
         match self {
             Type::Ptr(_) => true,

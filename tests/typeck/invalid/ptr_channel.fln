@@ -1,0 +1,6 @@
+// expect-typeck: PtrAcrossBoundary
+// 0.0.5 T04 (D4): a pointer may not be sent through a channel — the referent
+// lives in (or is promoted from) a frame that the receiving task may relocate.
+func relay(ch: channel<ptr<int>>, p: ptr<int>) {
+    ch.send(p);
+}

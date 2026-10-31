@@ -1,0 +1,6 @@
+// expect-typeck: PtrAcrossBoundary
+// 0.0.5 T04 (D4): a pointer may not be moved into a task — an async fn's
+// parameter would be captured into the task's coroutine frame.
+async unsafe func task(p: ptr<int>) {
+    q = deref_ptr p;
+}

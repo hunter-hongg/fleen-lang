@@ -1,0 +1,17 @@
+// 0.0.5 T04 (D4): `unsafe async func` is legal; calling and awaiting it
+// requires an unsafe/trusted context, same as a sync unsafe fn (T03).
+async unsafe func gen(x: int): int {
+    x + 1
+}
+
+unsafe func use(): int {
+    gen(1) await
+}
+
+trusted func safe_use(): int {
+    gen(2) await
+}
+
+func main(): int {
+    0
+}

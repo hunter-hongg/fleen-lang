@@ -2566,3 +2566,83 @@ fn typeck_ptr_is_not_copy_and_moves_explicitly() {
             .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. }))
     );
 }
+
+// ========== 0.0.5 T04: pointer boundary rules (D4) ==========
+
+#[test]
+fn ptr_param_in_async_is_error() {
+    // D4: a pointer parameter of an async fn is captured into the task's
+    // coroutine frame; the referent may not survive the scheduler's frame
+    // relocation. Reported once at the declaration, like a ref param.
+    let errs = compile_err("async unsafe func task(p: ptr<int>) {\n    q = deref_ptr p;\n}\n");
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::PtrAcrossBoundary]);
+}
+
+#[test]
+fn ptr_use_in_async_is_error() {
+    // A pointer created inside an async body and read after an await is the
+    // "captured across await" shape. The lexical rule fires at the use, even
+    // though the pointer never leaves the function.
+    let errs = compile_err(
+        "async func helper(): int = 1\n\n\
+         async unsafe func f(): int {\n    x = 1;\n    p = addr x;\n    \
+         h = helper() await;\n    deref_ptr p\n}\n",
+    );
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::PtrAcrossBoundary]);
+}
+
+#[test]
+fn ptr_return_in_async_is_error() {
+    // The future's result carries a pointer across the await boundary; the
+    // referent lived in (or was promoted from) the coroutine frame.
+    let errs = compile_err("async unsafe func make(): ptr<int> {\n    x = 1;\n    addr x\n}\n");
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::PtrAcrossBoundary]);
+}
+
+#[test]
+fn ptr_channel_send_is_error() {
+    // A pointer payload never crosses a channel (D4).
+    let errs =
+        compile_err("func relay(ch: channel<ptr<int>>, p: ptr<int>) {\n    ch.send(p);\n}\n");
+    assert_eq!(err_kinds(&errs), vec![&TypeckErrorKind::PtrAcrossBoundary]);
+}
+
+#[test]
+fn ptr_through_result_container_is_boundary_error() {
+    // The rule sees through value-carrying containers, like RefInAsync.
+    let errs = compile_err(
+        "func relay(ch: channel<Result<ptr<int>, string>>, p: ptr<int>) {\n    \
+         r: Result<ptr<int>, string> = Ok(move p);\n    ch.send(move r);\n}\n",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrAcrossBoundary))
+    );
+}
+
+#[test]
+fn unsafe_async_call_from_unsafe_is_ok() {
+    // D4: `unsafe async func` is legal and may be called/awaited from an
+    // unsafe (or trusted) context.
+    compile_ok(
+        "async unsafe func gen(x: int): int = x + 1\nunsafe func use(): int {\n    \
+         gen(1) await\n}\n",
+    );
+}
+
+#[test]
+fn unsafe_async_call_from_safe_is_error() {
+    // Calling an unsafe async fn from a plain fn is the same static gate as a
+    // sync unsafe fn (T03).
+    let errs = compile_err(
+        "async unsafe func gen(x: int): int = x + 1\nfunc use(): int {\n    \
+         gen(1) await\n}\n",
+    );
+    assert_eq!(
+        err_kinds(&errs),
+        vec![&TypeckErrorKind::UnsafeCallOutsideUnsafe {
+            func_name: "gen".to_string()
+        }]
+    );
+}
