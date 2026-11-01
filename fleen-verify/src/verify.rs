@@ -482,8 +482,8 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         Opcode::AddrOf => (1, 0),
         // `LoadPtr`: ptr → v (Δ0, min 1).
         Opcode::LoadPtr => (0, 1),
-        // `StorePtr`: v ptr → (Δ−1, min 2).
-        Opcode::StorePtr => (-1, 2),
+        // `StorePtr`: v ptr → (Δ−2, min 2) — pops the value and the pointer.
+        Opcode::StorePtr => (-2, 2),
     })
 }
 

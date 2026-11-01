@@ -595,13 +595,13 @@ Rules:
 | Mnemonic | Operands | Bytes | Stack effect | Description |
 |--------|--------|------|--------|------|
 | `AddrOf` | u16 place id | 3 | `→ ptr` (delta +1, min 0) | Take the address of a place: bit 15 of the operand clear → local slot (bits 0-14); bit 15 set → global id (bits 0-14). Pushes a `ptr<T>` to the place without reading it. A pointer is move-only — `clone` on a pointer is a typeck error |
-| `LoadPtr` | — | 1 | `ptr → v` (delta 0, min 1) | Read through a pointer: pop the pointer, push a copy of the pointee. The pointer value itself is untouched (it was already consumed on the stack); a second read requires re-taking the address |
-| `StorePtr` | — | 1 | `v ptr →` (delta -1, min 2) | Write through a pointer: pop the pointee value `v`, then the pointer `p`, overwrite `*p` with `v` (the old pointee is released). Stack effect net delta -1 |
+| `LoadPtr` | — | 1 | `ptr → v` (delta 0, min 1) | Read through a pointer: pop the pointer handle, push a copy of the pointee. The pointer *binding* is untouched — a bare read of a `ptr` local is a plain handle load (T02 D1), so the same pointer can be read again; only an explicit `move` or a producing tail transfers it |
+| `StorePtr` | — | 1 | `v ptr →` (delta -2, min 2) | Write through a pointer: pop the pointer `p` (stack top), then the pointee value `v`, and overwrite `*p` with `v` (the old pointee is released; the pointer binding is untouched, as with `LoadPtr`). Stack effect net delta -2 |
 
 Rules:
 - All three sit inside the **reserved `0xBC–0xFF` region** (§4.2); no v1/v2/v3/v4 encoding change (§10 compatibility promise)
 - `AddrOf` of a local slot / global id is a *source-level* unsafe op — typeck gates it behind `unsafe` / `trusted` functions (PLAN §3.3); the verifier only checks index ranges (§8)
-- Pointers are **move-only**: `clone_ptr` / `move` on pointers is rejected by typeck (PLAN D1), and pointers — like `Future`/`channel` — never cross an `await` / task / channel boundary
+- Pointers are **move-only**: `clone p` is a typeck error (`CloneOfPointer`, PLAN D1), while `move p` is the one transfer spelling; pointers — like `Future`/`channel` — never cross an `await` / task / channel boundary
 
 ---
 

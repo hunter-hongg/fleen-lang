@@ -6,14 +6,46 @@
 //! Exit codes: 0 success, 1 compile/decode/verify/runtime failure,
 //! 2 usage / IO error.
 
-use std::{env, fs, path::Path, process};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process,
+};
 
+use clap::Parser;
 use fleen_compiler::Session;
 use fleen_compiler::codegen::Module;
+use fleen_compiler::diag;
 
-use fleen_vm::diag::render_runtime_error;
+use fleen_vm::diag::render_runtime_error_colored;
 use fleen_vm::value::Value;
 use fleen_vm::vm::Vm;
+
+/// Command-line arguments for the fleen-vm driver.
+#[derive(clap::Parser)]
+#[command(
+    name = "fleen-vm",
+    version,
+    about = "Compile, verify and execute a Fleen program",
+    after_help = "Exit codes: 0 success, 1 compile/decode/verify/runtime failure, 2 usage/IO error."
+)]
+struct Cli {
+    /// Input `.fln` source or `.flnc` bytecode file.
+    #[arg(required_unless_present = "project")]
+    file: Option<PathBuf>,
+    /// Compile a whole project directory.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Suppress program stdout.
+    #[arg(long)]
+    quiet: bool,
+    /// Disable ANSI color in diagnostics.
+    #[arg(long)]
+    no_color: bool,
+    /// Arguments passed through to the Fleen program (after `--`).
+    #[arg(last = true)]
+    program_args: Vec<String>,
+}
 
 /// How loading the input module failed; each variant maps to an exit code.
 enum LoadError {
@@ -28,60 +60,74 @@ enum LoadError {
 }
 
 fn main() {
-    // Trailing arguments after the input path (0.0.3 V06) are the Fleen
-    // program's own arguments, served by `std.os.args` (without argv[0]).
-    let args: Vec<String> = env::args().collect();
-    let (path, project, program_args) = if args.len() >= 3 && args[1] == "--project" {
-        (Path::new(&args[2]).to_path_buf(), true, args[3..].to_vec())
-    } else if args.len() >= 2 {
-        (Path::new(&args[1]).to_path_buf(), false, args[2..].to_vec())
-    } else {
-        eprintln!(
-            "Usage: {} [--project <dir>] <file.fln | file.flnc> [program args...]",
-            args[0]
-        );
+    let Cli {
+        file,
+        project,
+        quiet,
+        no_color,
+        program_args,
+    } = Cli::parse();
+
+    if project.is_some() && file.is_some() {
+        eprintln!("error: --project and <FILE> are mutually exclusive");
         process::exit(2);
+    }
+
+    let color = diag::color_enabled(no_color);
+    let (path, is_project) = if let Some(project_dir) = project {
+        (project_dir, true)
+    } else {
+        (file.unwrap_or_default(), false)
     };
 
-    let (module, source) = match if project {
+    let (module, source) = match if is_project {
         load_project(&path)
     } else {
         load_module(&path)
     } {
         Ok(m) => m,
         Err(LoadError::Io(e)) => {
-            eprintln!("Error reading {}: {}", path.display(), e);
+            eprintln!(
+                "{}",
+                diag::colorize(&format!("Error reading {}: {}", path.display(), e), color)
+            );
             process::exit(2);
         }
         Err(LoadError::Usage) => {
             eprintln!(
-                "Unsupported input: {} (expected .fln or .flnc)",
-                path.display()
+                "{}",
+                diag::colorize(
+                    &format!(
+                        "Unsupported input: {} (expected .fln or .flnc)",
+                        path.display()
+                    ),
+                    color
+                )
             );
             process::exit(2);
         }
         Err(LoadError::Compile(e)) => {
-            eprintln!("Compile error: {e}");
+            eprintln!("{}", diag::colorize(&format!("Compile error: {e}"), color));
             process::exit(1);
         }
         Err(LoadError::Decode(e)) => {
-            eprintln!("Decode error: {e}");
+            eprintln!("{}", diag::colorize(&format!("Decode error: {e}"), color));
             process::exit(1);
         }
     };
 
     // Bytecode is never executed without passing static verification.
     if let Err(e) = fleen_verify::verify(&module) {
-        eprintln!("verify: FAIL: {e}");
+        eprintln!("{}", diag::colorize(&format!("verify: FAIL: {e}"), color));
         process::exit(1);
     }
-    match Vm::with_args(module, program_args).run() {
+    match Vm::with_args(module, program_args).with_quiet(quiet).run() {
         // 0.0.2 U09 (D8): an entry function returning `Result` propagates a
         // trailing `Err` (via `?` or an explicit return) out of execution.
         // Print the payload to stderr and exit 1; the exit-code contract
         // (0 success / 1 error / 2 usage·IO) is unchanged.
         Ok(Value::Err(e)) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", diag::colorize(&format!("error: {e}"), color));
             process::exit(1);
         }
         // Any other module result keeps the 0.0.1 behavior (silently
@@ -94,7 +140,10 @@ fn main() {
             if let fleen_vm::error::RuntimeErrorKind::Exit(code) = e.kind {
                 process::exit(code as i32);
             }
-            eprintln!("{}", render_runtime_error(&path, source.as_deref(), &e));
+            eprintln!(
+                "{}",
+                render_runtime_error_colored(&path, source.as_deref(), &e, color)
+            );
             process::exit(1);
         }
     }

@@ -12,8 +12,9 @@
 //! - `flint test`        — run `tests/*.fln` e2e cases (`.expected` contract)
 //! - `flint check`       — resolve + compile + verify, no execution
 //!
-//! Exit codes mirror `fleen-vm`: 0 success, 1 compile/resolve/runtime failure,
-//! 2 usage / IO error.
+//! The CLI is clap-derive (0.0.5 D6) with the uniform `--quiet` / `--no-color`
+//! flag set. Exit codes mirror `fleen-vm`: 0 success, 1 compile/resolve/
+//! runtime failure, 2 usage / IO error.
 
 mod build;
 mod lock;
@@ -24,7 +25,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use clap::Parser;
 use fleen_compiler::codegen::Module;
+use fleen_vm::error::RuntimeErrorKind;
 use fleen_vm::value::Value;
 use fleen_vm::vm::Vm;
 
@@ -33,19 +36,73 @@ use crate::lock::{read_lock, write_lock};
 use crate::manifest::Manifest;
 use crate::resolve::{FlintHome, ResolveError, resolve};
 
-const USAGE: &str = "Usage: flint <new <name> | build | run | test | check>";
+#[derive(Parser)]
+#[command(
+    name = "flint",
+    version,
+    about = "Fleen package manager",
+    arg_required_else_help = true,
+    after_help = "Exit codes: 0 success, 1 build/resolve/runtime failure, 2 usage/IO error."
+)]
+struct Cli {
+    /// Suppress informational output and program stdout.
+    #[arg(long, global = true)]
+    quiet: bool,
+    /// Disable ANSI color in diagnostics.
+    #[arg(long, global = true)]
+    no_color: bool,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+/// The flint subcommands.
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Create a new project.
+    #[command(about = "Create a new project")]
+    New {
+        /// Project name (or path); the final component becomes the package name.
+        name: String,
+    },
+    /// Resolve, compile, and write the project bytecode.
+    #[command(about = "Resolve, compile, and write the project bytecode")]
+    Build,
+    /// Build and execute the project.
+    #[command(about = "Build and execute the project")]
+    Run {
+        /// Program arguments passed after `--`.
+        #[arg(last = true, value_name = "program")]
+        program_args: Vec<String>,
+    },
+    /// Run the project tests.
+    #[command(about = "Run the project tests")]
+    Test,
+    /// Resolve, compile, and verify without executing.
+    #[command(about = "Resolve, compile, and verify without executing")]
+    Check {
+        /// Report which std copy is in effect and its version.
+        #[arg(long)]
+        std: bool,
+    },
+    /// Internal: execute a compiled `.flnc` (used by `flint test`).
+    #[command(hide = true)]
+    Exec {
+        /// The compiled module to execute.
+        file: PathBuf,
+    },
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let code = match dispatch(&args[1..]) {
+    let cli = Cli::parse();
+    let color = fleen_compiler::diag::color_enabled(cli.no_color);
+    let code = match dispatch(cli, color) {
         Ok(code) => code,
         Err(AppError::Usage(msg)) => {
-            eprintln!("{msg}");
-            eprintln!("{USAGE}");
+            eprintln!("{}", fleen_compiler::diag::colorize(&msg, color));
             2
         }
         Err(AppError::Fatal(msg)) => {
-            eprintln!("error: {msg}");
+            eprintln!("error: {}", fleen_compiler::diag::colorize(&msg, color));
             1
         }
     };
@@ -69,40 +126,25 @@ impl From<ResolveError> for AppError {
     }
 }
 
-fn dispatch(args: &[String]) -> Result<i32, AppError> {
-    let Some(cmd) = args.first() else {
-        return Err(AppError::Usage("no command given".into()));
-    };
-    match cmd.as_str() {
-        "new" => cmd_new(&args[1..]),
-        "build" => {
+/// Route a parsed [`Cli`] to the matching command handler.
+fn dispatch(cli: Cli, color: bool) -> Result<i32, AppError> {
+    let quiet = cli.quiet;
+    match cli.command {
+        Commands::New { name } => cmd_new(&name, quiet, color),
+        Commands::Build => cmd_build(quiet),
+        Commands::Run { program_args } => {
             let (module, _) = cmd_toolchain()?;
-            write_flnc(&module)?;
-            Ok(0)
+            cmd_run(module, &program_args, quiet, color)
         }
-        "check" => {
-            // Build + verify, no execution (write_flnc is skipped).
-            cmd_toolchain()?;
-            Ok(0)
-        }
-        "run" => {
-            let (module, _) = cmd_toolchain()?;
-            cmd_run(module, &args[1..])
-        }
-        "test" => cmd_test(&args[1..]),
-        // Hidden: execute a single `.flnc` (used by `flint test` to capture
-        // a test's stdout out-of-process).
-        "--exec" => {
-            let flnc = args
-                .get(1)
-                .ok_or_else(|| AppError::Usage("`--exec` needs a file".into()))?;
-            let bytes =
-                std::fs::read(flnc).map_err(|e| AppError::Fatal(format!("reading {flnc}: {e}")))?;
+        Commands::Test => cmd_test(quiet, color),
+        Commands::Check { std } => cmd_check(std),
+        Commands::Exec { file } => {
+            let bytes = std::fs::read(&file)
+                .map_err(|e| AppError::Fatal(format!("reading {}: {e}", file.display())))?;
             let module = fleen_compiler::codegen::from_bytes(&bytes)
-                .map_err(|e| AppError::Fatal(format!("decode {flnc}: {e}")))?;
-            cmd_run(module, &[])
+                .map_err(|e| AppError::Fatal(format!("decode {}: {e}", file.display())))?;
+            cmd_run(module, &[], quiet, color)
         }
-        other => Err(AppError::Usage(format!("unknown command `{other}`"))),
     }
 }
 
@@ -125,8 +167,43 @@ fn cmd_toolchain() -> Result<(Module, PathBuf), AppError> {
     Ok((module, project))
 }
 
+/// `flint build` — resolve → compile → write `<name>.flnc`.
+fn cmd_build(quiet: bool) -> Result<i32, AppError> {
+    let (module, _) = cmd_toolchain()?;
+    write_flnc(&module, quiet)?;
+    Ok(0)
+}
+
+/// `flint check` — resolve → compile → verify, no execution.
+fn cmd_check(std_flag: bool) -> Result<i32, AppError> {
+    if std_flag {
+        return cmd_check_std();
+    }
+    cmd_toolchain()?;
+    Ok(0)
+}
+
+/// `flint check --std` — report which std copy is in effect.
+fn cmd_check_std() -> Result<i32, AppError> {
+    let resolver = fleen_compiler::std_resolver::StdResolver::from_compiler_version();
+    match resolver.diagnose() {
+        Ok(diag) => {
+            println!("Std source: {}", diag.source.description());
+            if let Some(path) = diag.path {
+                println!("Std path: {}", path.display());
+            }
+            println!("Std version: {}", diag.version);
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            Ok(1)
+        }
+    }
+}
+
 /// Write the compiled module to `<project>/<name>.flnc`.
-fn write_flnc(module: &Module) -> Result<(), AppError> {
+fn write_flnc(module: &Module, quiet: bool) -> Result<(), AppError> {
     // The caller knows the project dir, but the module itself carries no
     // name — reconstruct from the current dir's basename.
     let cwd = env::current_dir().map_err(|e| AppError::Fatal(e.to_string()))?;
@@ -138,59 +215,56 @@ fn write_flnc(module: &Module) -> Result<(), AppError> {
     let bytes = fleen_compiler::codegen::to_bytes(module);
     std::fs::write(&path, bytes)
         .map_err(|e| AppError::Fatal(format!("writing {}: {e}", path.display())))?;
-    println!("built {}", path.display());
+    if !quiet {
+        println!("built {}", path.display());
+    }
     Ok(())
 }
 
 /// Execute a compiled module, passing trailing program args.
-fn cmd_run(module: Module, args: &[String]) -> Result<i32, AppError> {
-    // args[0] == "run", args[1..] are the Fleen program's own args.
-    let program_args = args.get(1..).unwrap_or(&[]).to_vec();
-    let cwd = env::current_dir().map_err(|e| AppError::Fatal(e.to_string()))?;
-    match Vm::with_args(module, program_args).run() {
+fn cmd_run(
+    module: Module,
+    program_args: &[String],
+    quiet: bool,
+    color: bool,
+) -> Result<i32, AppError> {
+    let mut vm = Vm::with_args(module, program_args.to_vec()).with_quiet(quiet);
+    match vm.run() {
         Ok(Value::Err(e)) => {
-            eprintln!("error: {e}");
+            eprintln!(
+                "error: {}",
+                fleen_compiler::diag::colorize(&e.to_string(), color)
+            );
             Ok(1)
         }
         Ok(_) => Ok(0),
         Err(e) => {
-            if let fleen_vm::error::RuntimeErrorKind::Exit(code) = e.kind {
-                return Ok(code as i32);
+            if let RuntimeErrorKind::Exit(code) = &e.kind {
+                return Ok(*code as i32);
             }
-            let (rendered, _) = render_runtime(&cwd, &e);
-            eprintln!("{}", rendered);
+            let rendered = fleen_vm::diag::render_runtime_error_colored(
+                Path::new("<project>"),
+                None,
+                &e,
+                color,
+            );
+            eprintln!("{rendered}");
             Ok(1)
         }
     }
 }
 
-/// Render a runtime error. Multi-file programs embed the file in the span's
-/// source map indirectly; we look the source up from the module's globals —
-/// simplest is to render without source (the error carries func/pc).
-fn render_runtime(_cwd: &Path, e: &fleen_vm::error::RuntimeError) -> (String, Option<String>) {
-    // `render_runtime_error` needs a single source string; for a project the
-    // runtime error's span_map points at the instruction, and we do not have
-    // per-file sources here. Degrade to the message + function/pc form, which
-    // is what `.flnc` execution always does.
-    let s = fleen_vm::diag::render_runtime_error(Path::new("<project>"), None, e);
-    (s, None)
-}
-
 /// `flint new <name>` — scaffold a project and (best-effort) git init.
-/// `flint new <name-or-path>` — scaffold a project and (best-effort) git
-/// init. `name` may be a bare identifier (created in the current directory)
-/// or a path (`new /tmp/flint_smoke`); the final path component becomes the
+/// `name` may be a bare identifier (created in the current directory) or a
+/// path (`new /tmp/flint_smoke`); the final path component becomes the
 /// package name and must be a valid identifier (a project name is its crate's
 /// module root, so hyphens are rejected).
-fn cmd_new(args: &[String]) -> Result<i32, AppError> {
-    let arg = args
-        .first()
-        .ok_or_else(|| AppError::Usage("`new` needs a name".into()))?;
-    let dir = PathBuf::from(arg);
+fn cmd_new(name: &str, quiet: bool, _color: bool) -> Result<i32, AppError> {
+    let dir = PathBuf::from(name);
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| AppError::Usage(format!("invalid project path `{arg}`")))?;
+        .ok_or_else(|| AppError::Usage(format!("invalid project path `{name}`")))?;
     if !manifest::is_valid_package_name(name) {
         return Err(AppError::Usage(format!(
             "invalid project name `{name}` (a project name is its crate's module \
@@ -213,17 +287,21 @@ fn cmd_new(args: &[String]) -> Result<i32, AppError> {
     let _ = process::Command::new("git")
         .args(["init"])
         .current_dir(&dir)
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null())
         .status();
-    println!(
-        "Created `{}` (cd {} && cargo run -q -p flint-cli -- run)",
-        dir.display(),
-        name
-    );
+    if !quiet {
+        println!(
+            "Created `{}` (cd {} && cargo run -q -p flint-cli -- run)",
+            dir.display(),
+            name
+        );
+    }
     Ok(0)
 }
 
 /// `flint test` — run the project's `tests/*.fln` e2e cases.
-fn cmd_test(_args: &[String]) -> Result<i32, AppError> {
+fn cmd_test(quiet: bool, _color: bool) -> Result<i32, AppError> {
     let project = env::current_dir().map_err(|e| AppError::Fatal(e.to_string()))?;
     let manifest = build::load_manifest(&project)?;
     let mut home = FlintHome::from_env();
@@ -241,13 +319,23 @@ fn cmd_test(_args: &[String]) -> Result<i32, AppError> {
                 continue;
             }
             total += 1;
-            run_one_test(&project, &manifest, &crates, &path, &mut ran, &mut failed)?;
+            run_one_test(
+                &project,
+                &manifest,
+                &crates,
+                &path,
+                &mut ran,
+                &mut failed,
+                quiet,
+            )?;
         }
     }
     if total == 0 {
         return Err(AppError::Fatal("no `tests/*.fln` cases found".into()));
     }
-    println!("test result: {ran} passed, {failed} failed");
+    if !quiet {
+        println!("test result: {ran} passed, {failed} failed");
+    }
     if failed == 0 { Ok(0) } else { Ok(1) }
 }
 
@@ -258,6 +346,7 @@ fn run_one_test(
     test: &Path,
     ran: &mut i32,
     failed: &mut i32,
+    quiet: bool,
 ) -> Result<(), AppError> {
     // For 0.0.3, a test case is a standalone `.fln` file (dependency crates in
     // `flint test` are a follow-up; the harness contract — `.fln`/`.expected`
@@ -283,7 +372,7 @@ fn run_one_test(
         println!("test {test_disp} ... FAILED (verify: {e})");
         return Ok(());
     }
-    // Execute a copy of the .flnc through this same binary's `--exec` path,
+    // Execute a copy of the .flnc through this same binary's `exec` subcommand,
     // capturing stdout so it can be compared against `.expected` without
     // leaking into flint's own logs.
     let flnc = std::env::temp_dir().join(format!("flint-test-{}.flnc", std::process::id()));
@@ -293,10 +382,7 @@ fn run_one_test(
         return Ok(());
     }
     let exe = std::env::current_exe().unwrap_or_default();
-    let output = std::process::Command::new(&exe)
-        .arg("--exec")
-        .arg(&flnc)
-        .output();
+    let output = process::Command::new(&exe).arg("exec").arg(&flnc).output();
     let _ = std::fs::remove_file(&flnc);
 
     let (ok, got, details) = match output {
@@ -311,7 +397,9 @@ fn run_one_test(
     match (ok, expected_text) {
         (true, Some(expected_text)) if got == expected_text => {
             *ran += 1;
-            println!("test {test_disp} ... ok");
+            if !quiet {
+                println!("test {test_disp} ... ok");
+            }
         }
         (true, Some(expected_text)) => {
             *failed += 1;
@@ -322,7 +410,9 @@ fn run_one_test(
         }
         (true, None) => {
             *ran += 1;
-            println!("test {test_disp} ... ok");
+            if !quiet {
+                println!("test {test_disp} ... ok");
+            }
         }
         (false, _) => {
             *failed += 1;

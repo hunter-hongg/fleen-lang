@@ -10,3 +10,4 @@ description = "Fleen package manager: manifest, git dependencies, and new/build/
 fleen-compiler = { path = "../fleen-compiler" }
 fleen-verify = { path = "../fleen-verify" }
 fleen-vm = { path = "../fleen-vm" }
+clap = { version = "4.6", features = ["derive"] }

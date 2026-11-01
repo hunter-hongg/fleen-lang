@@ -102,6 +102,12 @@ pub enum RuntimeErrorKind {
     /// (0.0.4 T08). Defensive: `std.concurrent.split` is the one fork point —
     /// typeck rejects `clone ch` and channel globals/fields.
     ChannelNotClonable,
+    /// A copy opcode found a `Value::Ptr` (0.0.5 T06). Defensive: typeck makes
+    /// `ptr<T>` non-Copy and move-only (`CloneOfPointer`), so a bare ptr never
+    /// reaches `CloneLocal`/`CloneGlobal`; a ptr *buried* in an `Ok`/`Err`/
+    /// array container would alias the cell on copy, and typeck rejects those
+    /// too — reaching this needs hand-written or ahead-of-its-time bytecode.
+    PtrNotClonable,
     /// A `send` pushed a `Value::Ref` payload (0.0.4 review fix). Defensive:
     /// a borrow handle stores an absolute operand-stack index that cannot
     /// survive a suspension snapshot — typeck rejects `ch.send(s)` with
@@ -112,10 +118,13 @@ pub enum RuntimeErrorKind {
     /// still waits for spawned task ids (0.0.4 review fix). Defensive — the
     /// static rules guarantee every spawned task stays reachable.
     JoinDeadlock,
+    /// `LoadPtr`/`StorePtr` found a non-pointer value on the operand stack
+    /// (0.0.5 T06). Defensive: typeck restricts those opcodes to `ptr<T>`;
+    /// reaching this needs hand-written or ahead-of-its-time bytecode.
+    PtrExpected,
     /// An opcode is encoded in the module but the VM does not implement it
-    /// yet (e.g. pointer opcodes `AddrOf`/`LoadPtr`/`StorePtr` land with
-    /// 0.0.5 T06). Defensive: verify accepts them; reaching this needs
-    /// hand-written or ahead-of-its-time bytecode.
+    /// yet (e.g. an opcode from a future version). Defensive: verify accepts
+    /// them; reaching this needs hand-written or ahead-of-its-time bytecode.
     Unimplemented(&'static str),
 }
 
@@ -205,12 +214,22 @@ impl std::fmt::Display for RuntimeErrorKind {
                      handle cannot cross a task boundary"
                 )
             }
+            RuntimeErrorKind::PtrNotClonable => {
+                write!(
+                    f,
+                    "a pointer cannot be copied — `addr` cells are aliased, not \
+                     deep-copied; move it instead"
+                )
+            }
             RuntimeErrorKind::JoinDeadlock => {
                 write!(
                     f,
                     "join deadlock: a `std.async.run` join waits for spawned \
                      tasks that can no longer run"
                 )
+            }
+            RuntimeErrorKind::PtrExpected => {
+                write!(f, "pointer opcode expected a `ptr<T>` value on the stack")
             }
             RuntimeErrorKind::Unimplemented(what) => write!(f, "unimplemented opcode: {what}"),
         }

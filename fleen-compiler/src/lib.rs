@@ -3,11 +3,13 @@
 //! Pipeline: Lex → Parse → Resolve → Typeck → Lower → Codegen → Bytecode
 
 pub mod codegen;
+pub mod diag;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod resolver;
 pub mod source_map;
+pub mod std_resolver;
 pub mod std_src;
 pub mod typeck;
 
@@ -35,6 +37,8 @@ pub enum CompileError {
     Lower(lower::LowerError),
     /// MIR → bytecode generation failed.
     Codegen(codegen::CodegenError),
+    /// Std resolution failed (version mismatch, missing VERSION file, etc.).
+    StdResolve(std_resolver::ResolveError),
 }
 
 impl fmt::Display for CompileError {
@@ -47,6 +51,7 @@ impl fmt::Display for CompileError {
             CompileError::Typeck(errors) => write_error_list(f, "typeck", errors),
             CompileError::Lower(err) => write!(f, "lower: {err}"),
             CompileError::Codegen(err) => write!(f, "codegen: {err}"),
+            CompileError::StdResolve(err) => write!(f, "std resolve: {err}"),
         }
     }
 }
@@ -197,7 +202,7 @@ impl Session {
             return codegen::codegen(mir).map_err(CompileError::Codegen);
         }
 
-        let sources = with_std_sources(&self.sources);
+        let sources = with_std_sources(&self.sources)?;
         let asts = parse_all(&sources)?;
         let crates = self.crate_list(root, &sources);
         compile_pre_parsed(&sources, root, &crates, asts)
@@ -218,7 +223,7 @@ impl Session {
             // A project importing `std.*` compiles against the shipped std
             // sources too: append them, re-parse, and rebuild the table so
             // they are ordinary modules (0.0.3 V06, D8).
-            let sources = with_std_sources(&self.sources);
+            let sources = with_std_sources(&self.sources)?;
             asts = parse_all(&sources)?;
             sources
         } else {
@@ -274,12 +279,47 @@ fn uses_std(asts: &[parser::ast::Ast]) -> bool {
 /// Clone `sources` and append the shipped std modules. The user files keep
 /// their existing `FileId`s and std files follow them, so the root `FileId`
 /// is unchanged and the source map stays contiguous.
-fn with_std_sources(sources: &source_map::SourceMap) -> source_map::SourceMap {
+///
+/// Std resolution errors (version mismatch, missing VERSION file, ...) are
+/// hard errors per D8: they are propagated as [`CompileError::StdResolve`]
+/// and never silently downgraded to the embedded copy.
+fn with_std_sources(
+    sources: &source_map::SourceMap,
+) -> Result<source_map::SourceMap, CompileError> {
     let mut out = sources.clone();
-    for (name, source) in std_src::files() {
-        out.add_file(name, source);
+    let resolver = std_resolver::StdResolver::from_compiler_version();
+    match resolver.resolve() {
+        Ok(std_resolver::StdSource::Embedded) => {
+            // Use embedded std
+            for (name, source) in std_src::files() {
+                out.add_file(name, source);
+            }
+        }
+        Ok(std_resolver::StdSource::EnvVar(path) | std_resolver::StdSource::FlintHome(path)) => {
+            // Use external std
+            match std_src::files_from_dir(&path) {
+                Ok(files) => {
+                    for (name, source) in files {
+                        out.add_file(&name, &source);
+                    }
+                }
+                Err(e) => {
+                    // IO error reading the external std tree: warn and fall
+                    // back to embedded so a transient read problem is not fatal.
+                    eprintln!(
+                        "warning: failed to load std from {}: {}, using embedded copy",
+                        path.display(),
+                        e
+                    );
+                    for (name, source) in std_src::files() {
+                        out.add_file(name, source);
+                    }
+                }
+            }
+        }
+        Err(e) => return Err(CompileError::StdResolve(e)),
     }
-    out
+    Ok(out)
 }
 
 /// Lex + parse every file in the source map into `Ast`s indexed by `FileId`.

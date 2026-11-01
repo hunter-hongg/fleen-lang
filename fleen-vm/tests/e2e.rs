@@ -206,6 +206,7 @@ fn project_cycle_reports_error() {
 fn run_vm_with_program_args(file: &Path, program_args: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::new(VM);
     cmd.arg(file);
+    cmd.arg("--");
     for a in program_args {
         cmd.arg(a);
     }

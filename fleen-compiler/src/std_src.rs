@@ -32,3 +32,45 @@ pub fn files() -> Vec<(&'static str, &'static str)> {
         ("std/time.fln", include_str!("../../std/time.fln")),
     ]
 }
+
+/// Load std files from an external directory.
+///
+/// Returns a vector of (path, source) pairs, where path is the std-relative
+/// path (e.g., "std/mod.fln"). The directory structure is expected to match
+/// the embedded std structure.
+pub fn files_from_dir(dir: &std::path::Path) -> Result<Vec<(String, String)>, std::io::Error> {
+    let mut out = Vec::new();
+    collect_std_files(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+/// Recursively collect .fln files from a directory, preserving paths relative
+/// to `root` (the std tree root). `dir` is the directory currently being
+/// scanned; `root` stays fixed at the std tree root so every file gets a
+/// stable `std/<relative>` name, avoiding collisions between e.g.
+/// `std/mod.fln` and `std/collection/mod.fln`.
+fn collect_std_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<(String, String)>,
+) -> std::io::Result<()> {
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+
+    for entry in entries {
+        if entry.is_dir() {
+            collect_std_files(root, &entry, out)?;
+        } else if entry.extension().and_then(|e| e.to_str()) == Some("fln") {
+            let rel = entry.strip_prefix(root).map_err(|_| {
+                std::io::Error::other(format!("failed to strip prefix: {}", entry.display()))
+            })?;
+            let rel_name = format!("std/{}", rel.to_string_lossy().replace('\\', "/"));
+            let source = std::fs::read_to_string(&entry)?;
+            out.push((rel_name, source));
+        }
+    }
+    Ok(())
+}

@@ -2658,3 +2658,28 @@ fn lower_addr_of_field_is_unsupported_for_now() {
         super::LowerErrorKind::UnsupportedFeature { .. }
     ));
 }
+
+#[test]
+fn lower_addr_of_array_element_is_unsupported_for_now() {
+    // Typeck accepts `addr a[1]` (T02), but element places need the VM
+    // pointer representation that lands with T06 — lowering must reject
+    // them, not mis-lower them.
+    let src = "unsafe func make(): ptr<int> { a = [1, 2]; addr a[1] }\nfunc main(): int = 0";
+    let err = lower_err(src);
+    assert!(matches!(
+        err.kind,
+        super::LowerErrorKind::UnsupportedFeature { .. }
+    ));
+}
+
+#[test]
+fn lower_addr_of_box_interior_is_unsupported_for_now() {
+    // Same for `addr deref b`: the box-interior place is typeck-legal (T02),
+    // but its pointer representation is T06's decision.
+    let src = "unsafe func make(b: box<int>): ptr<int> { addr deref b }\nfunc main(): int = 0";
+    let err = lower_err(src);
+    assert!(matches!(
+        err.kind,
+        super::LowerErrorKind::UnsupportedFeature { .. }
+    ));
+}

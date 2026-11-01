@@ -1,67 +1,54 @@
-//! Runtime diagnostics: source byte offset → line/column (0.0.2 U10).
+//! Runtime diagnostics: source byte offset -> line/column (0.0.2 U10).
 //!
-//! Error-path only; every scan is a single O(n) pass over the source.
+//! The line/column and span-block logic lives in the shared
+//! fleen_compiler::diag module; this module keeps the runtime public API
+//! and renders runtime errors in the VM's single-file path.
 
 use std::path::Path;
 
 use crate::error::RuntimeError;
+use fleen_compiler::diag;
 
-/// Convert a source byte offset to a 1-based `(line, column)` pair.
+/// Convert a source byte offset to a 1-based (line, column) pair.
 ///
-/// Columns count `char`s, not bytes (the source is UTF-8). `\r` occupies no
-/// column: the lexer treats it as whitespace and folds `\r\n` into a single
-/// newline (ASI.md §2), so it can never sit inside a token span. An `offset`
-/// past the end of `source` (or inside a multi-byte char) clamps to the
-/// position after the last `char`.
+/// Delegates to the shared fleen_compiler::diag::line_col.
 pub fn line_col(source: &str, offset: u32) -> (u32, u32) {
-    let (line, col, _) = locate(source, offset);
-    (line, col)
+    diag::line_col(source, offset)
 }
 
-/// The line containing `offset`, as `(1-based line, 1-based column, line
-/// text)` — the text form [`line_col`] is usually paired with when rendering
-/// a diagnostic. Clamping follows [`line_col`].
+/// The line containing offset, as (1-based line, 1-based column, line text).
+///
+/// Delegates to the shared fleen_compiler::diag::locate.
 pub fn locate(source: &str, offset: u32) -> (u32, u32, &str) {
-    // Floor a mid-char (never produced by the lexer) or out-of-range offset
-    // to a char boundary so the slicing below cannot panic.
-    let mut offset = (offset as usize).min(source.len());
-    while offset > 0 && !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let line_end = source[line_start..]
-        .find('\n')
-        .map_or(source.len(), |i| line_start + i);
-    let text = &source[line_start..line_end];
-    let line = source[..line_start].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
-    let col = source[line_start..offset]
-        .chars()
-        .filter(|&c| c != '\r')
-        .count() as u32
-        + 1;
-    (line, col, text)
+    diag::locate(source, offset)
 }
 
 /// Render a runtime error as the CLI prints it on stderr (0.0.2 U10).
 ///
-/// With the source text and a span (the `.fln` one-command path) the error
-/// renders rustc-style, e.g.:
+/// With the source text and a span (the .fln one-command path) the error
+/// renders rustc-style: a --> file:line:col header, the source line, and a
+/// caret underline.
 ///
-/// ```text
-/// runtime error: division by zero
-///   --> crash.fln:5:9
-///    |
-///  5 |     q = a / b;
-///    |         ^^^^^
-/// ```
-///
-/// Without a usable location — `.flnc` execution (no source), a module with
-/// no `span_map` entries (v1 bytecode), or a span outside the source — the
+/// Without a usable location — .flnc execution (no source), a module with
+/// no span_map entries (v1 bytecode), or a span outside the source — the
 /// report degenerates to the message plus, when known, the function and
-/// instruction offset: `runtime error: … (in `div`, pc 0x12)`.
+/// instruction offset: runtime error: ... (in div, pc 0x12).
 ///
 /// The returned string has no trailing newline; callers add one.
 pub fn render_runtime_error(path: &Path, source: Option<&str>, e: &RuntimeError) -> String {
+    render_runtime_error_colored(path, source, e, false)
+}
+
+/// render_runtime_error with optional ANSI bold wrapping (0.0.5 D6).
+///
+/// The color-free output is byte-identical to render_runtime_error; when
+/// color is true the whole rendered string is wrapped in bold escapes.
+pub fn render_runtime_error_colored(
+    path: &Path,
+    source: Option<&str>,
+    e: &RuntimeError,
+    color: bool,
+) -> String {
     if let (Some(src), Some((start, end))) = (source, e.span)
         && (start as usize) < src.len()
         && end <= src.len() as u32
@@ -70,49 +57,31 @@ pub fn render_runtime_error(path: &Path, source: Option<&str>, e: &RuntimeError)
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        return format!(
-            "runtime error: {e}\n{}",
-            render_location(&file, src, (start, end))
+        return diag::render_diagnostic(
+            &format!("runtime error: {e}"),
+            &file,
+            Some(src),
+            Some((start, end)),
+            &[],
+            &[],
+            color,
         );
     }
     let suffix = match (&e.func, e.pc) {
         (Some(f), Some(pc)) => format!(" (in `{f}`, pc 0x{pc:x})"),
         _ => String::new(),
     };
-    format!("runtime error: {e}{suffix}")
+    let message = format!("runtime error: {e}{suffix}");
+    diag::colorize(&message, color)
 }
 
-/// Render the `-->`/source-line/caret block for a span inside `source`.
+/// Render the -->/source-line/caret block for a span inside source.
+///
+/// Private wrapper kept so the agreement test still exercises the shared
+/// renderer through the VM module.
+#[cfg(test)]
 fn render_location(file: &str, source: &str, span: (u32, u32)) -> String {
-    let (line, col, text) = locate(source, span.0);
-    // A span may cross a newline (multi-line expression); only the first
-    // line is shown, so the caret run stops at its end. `\r` never renders.
-    let text = text.trim_end_matches('\r');
-    let num = line.to_string();
-    let bar = " ".repeat(num.len() + 2);
-    // Caret run: clamp/floor the span ends exactly like `locate` floors its
-    // offset, so an out-of-range or mid-char span renders (worst case one
-    // caret) instead of panicking — diagnostics render best-effort. Must
-    // stay in lockstep with `fleen_compiler`'s `SourceMap::render_location`
-    // (pinned by `compiler_source_map_and_vm_diag_agree` below).
-    let mut start = (span.0 as usize).min(source.len());
-    while start > 0 && !source.is_char_boundary(start) {
-        start -= 1;
-    }
-    let end = (span.1 as usize).min(source.len()).max(start);
-    let carets = source[start..end]
-        .lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .filter(|&c| c != '\r')
-        .count()
-        .max(1);
-    format!(
-        "  --> {file}:{line}:{col}\n{bar}|\n {num} | {text}\n{bar}| {}{}",
-        " ".repeat(col as usize - 1),
-        "^".repeat(carets),
-    )
+    diag::render_location(file, source, span)
 }
 
 #[cfg(test)]

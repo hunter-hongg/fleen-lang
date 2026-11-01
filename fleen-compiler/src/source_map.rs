@@ -82,11 +82,9 @@ impl SourceMap {
 
     /// Convert a byte offset in file `id` to a 1-based `(line, column)` pair.
     ///
-    /// Columns count `char`s, not bytes; `\r` occupies no column. The
-    /// algorithm matches `fleen-vm`'s `diag::locate` (the runtime `-->`
-    /// renderer) so compile-time and runtime diagnostics agree; the
-    /// duplication is deliberate — the VM's single-file path must keep
-    /// working without a source map.
+    /// Columns count `char`s, not bytes; `\r` occupies no column. Delegates
+    /// to [`crate::diag::line_col`] so compile-time and runtime diagnostics
+    /// agree.
     ///
     /// # Panics
     /// If `id` was never registered.
@@ -103,25 +101,7 @@ impl SourceMap {
     /// # Panics
     /// If `id` was never registered.
     pub fn locate(&self, id: FileId, offset: u32) -> (u32, u32, &str) {
-        let source = &self.get(id).source;
-        // Floor a mid-char (never produced by the lexer) or out-of-range
-        // offset to a char boundary so the slicing below cannot panic.
-        let mut offset = (offset as usize).min(source.len());
-        while offset > 0 && !source.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = source[line_start..]
-            .find('\n')
-            .map_or(source.len(), |i| line_start + i);
-        let text = &source[line_start..line_end];
-        let line = source[..line_start].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
-        let col = source[line_start..offset]
-            .chars()
-            .filter(|&c| c != '\r')
-            .count() as u32
-            + 1;
-        (line, col, text)
+        crate::diag::locate(&self.get(id).source, offset)
     }
 
     /// Render the rustc-style `-->`/source-line/caret block for `span`.
@@ -140,9 +120,9 @@ impl SourceMap {
     /// can degrade more gracefully — e.g. to function name + instruction
     /// offset, as the runtime path does — should skip calling this instead.
     /// Out-of-range or mid-char span ends clamp exactly like `locate`, so
-    /// rendering never panics on offsets. The format matches `fleen-vm`'s
-    /// `diag::render_location` so the two diagnostic paths are visually
-    /// identical.
+    /// rendering never panics on offsets. Delegates to
+    /// [`crate::diag::render_location`], the shared renderer used by both the
+    /// compile-time and runtime diagnostic paths.
     ///
     /// # Panics
     /// If `span.file` was never registered (synthetic spans never reach the
@@ -151,35 +131,9 @@ impl SourceMap {
         if span.is_synthetic() {
             return String::from("  --> <synthetic>");
         }
-        let (line, col, text) = self.locate(span.file, span.start);
         let file = &self.get(span.file).name;
-        // A span may cross a newline (multi-line expression); only the first
-        // line is shown, so the caret run stops at its end. `\r` never renders.
-        let text = text.trim_end_matches('\r');
-        let num = line.to_string();
-        let bar = " ".repeat(num.len() + 2);
         let source = &self.get(span.file).source;
-        // Caret run: clamp/floor the span ends exactly like `locate` floors
-        // its offset, so an out-of-range or mid-char span renders (worst case
-        // one caret) instead of panicking — diagnostics render best-effort.
-        let mut start = (span.start as usize).min(source.len());
-        while start > 0 && !source.is_char_boundary(start) {
-            start -= 1;
-        }
-        let end = (span.end as usize).min(source.len()).max(start);
-        let carets = source[start..end]
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .filter(|&c| c != '\r')
-            .count()
-            .max(1);
-        format!(
-            "  --> {file}:{line}:{col}\n{bar}|\n {num} | {text}\n{bar}| {}{}",
-            " ".repeat(col as usize - 1),
-            "^".repeat(carets),
-        )
+        crate::diag::render_location(file, source, (span.start, span.end))
     }
 }
 

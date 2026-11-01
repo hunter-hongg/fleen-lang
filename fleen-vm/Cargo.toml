@@ -9,3 +9,4 @@ description = "Fleen virtual machine: verify and execute .fln source or .flnc by
 [dependencies]
 fleen-compiler = { path = "../fleen-compiler" }
 fleen-verify = { path = "../fleen-verify" }
+clap = { version = "4.6", features = ["derive"] }

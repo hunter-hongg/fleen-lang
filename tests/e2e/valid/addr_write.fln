@@ -1,0 +1,20 @@
+// 0.0.5 T06 e2e: pointer representation — promote-on-addr keeps a local
+// readable/writable through both its plain name and a pointer to it, because
+// AddrOf promotes the slot to a stable heap cell and every access path
+// (LoadLocal/StoreLocal/LoadPtr/StorePtr) dereferences the same cell.
+trusted func bump(p: ptr<int>) {
+    deref_ptr p = deref_ptr p + 1;
+}
+
+trusted func main(): int {
+    x = 42
+    p = addr x
+    print(deref_ptr p as string)     // 42, read through the pointer
+    deref_ptr p = deref_ptr p + 1    // 43, write through the pointer
+    print(x as string)               // 43, plain local read sees the cell
+    x = 100                          // plain local write goes through the cell
+    print(deref_ptr p as string)     // 100, pointer sees the local write
+    bump(move p)                     // 101, through a callee's pointer param
+    print(x as string)               // 101
+    0
+}

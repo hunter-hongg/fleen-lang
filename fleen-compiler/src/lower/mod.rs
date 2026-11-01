@@ -1119,19 +1119,24 @@ impl<'a> FnBodyCx<'a> {
                 fb.emit(MirInstr::new(MirInstrKind::LoadPtr, *span));
             }
             // `deref_ptr <p> = <rhs>`: push the value, then the pointer,
-            // then overwrite the pointee. `StorePtr` is `v ptr →` (Δ−1, min 2);
+            // then overwrite the pointee. `StorePtr` is `v ptr →` (Δ−2, min 2);
             // the assignment expression yields `unit`.
             TypedExprHir::AssignDerefPtr {
+                name,
                 binding_id,
                 rhs,
                 span,
                 ..
             } => {
                 self.lower_expr_into(fb, rhs)?;
-                let Location::Local(slot) = self.loc(*binding_id, "?", *span)? else {
+                // Defensive only: typeck's `PtrNotStorable` seals global ptr
+                // declarations (`typeck_assign_deref_ptr`), so the pointer
+                // binding is always a local — the guard exists so a future
+                // typeck change cannot let a mis-lowered store escape here.
+                let Location::Local(slot) = self.loc(*binding_id, name, *span)? else {
                     return Err(LowerError::new(
                         LowerErrorKind::UnsupportedFeature {
-                            feature: "addr of global assigned through pointer",
+                            feature: "write through a pointer bound in a global (not storable)",
                         },
                         *span,
                     ));

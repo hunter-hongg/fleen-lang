@@ -180,6 +180,10 @@ fn stage_errors(out: &mut String, sources: &SourceMap, e: &CompileError) {
             // Codegen errors carry no span (invariant violations from Lower).
             push_plain(out, &err.to_string());
         }
+        StdResolve(err) => {
+            // Std resolution errors carry no source span.
+            push_plain(out, &err.to_string());
+        }
     }
 }
 

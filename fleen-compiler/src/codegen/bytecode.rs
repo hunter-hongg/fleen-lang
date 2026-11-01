@@ -366,7 +366,7 @@ pub enum Opcode {
     /// Stack effect: ptr → v (Δ0, min 1).
     LoadPtr = 0xC9,
     /// Write through a pointer: v ptr →. Operand-less.
-    /// Stack effect: v ptr → (Δ−1, min 2).
+    /// Stack effect: v ptr → (Δ−2, min 2).
     StorePtr = 0xCA,
 }
 

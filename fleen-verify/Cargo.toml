@@ -8,3 +8,4 @@ description = "Static verification of Fleen bytecode modules"
 
 [dependencies]
 fleen-compiler = { path = "../fleen-compiler" }
+clap = { version = "4.6", features = ["derive"] }

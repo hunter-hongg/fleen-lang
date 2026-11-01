@@ -41,6 +41,7 @@ fn v001_fib_fixture_verifies_and_executes() {
         .unwrap_or_else(|e| panic!("read {expected_path:?}: {e}"));
     let output = Command::new(VM)
         .arg(&path)
+        .env_remove("NO_COLOR")
         .output()
         .unwrap_or_else(|e| panic!("spawn {VM}: {e}"));
     assert_eq!(
@@ -95,6 +96,8 @@ fn v001_runtime_error_degrades_to_func_and_pc() {
 
     let output = Command::new(VM)
         .arg(&path)
+        .arg("--no-color")
+        .env_remove("NO_COLOR")
         .output()
         .unwrap_or_else(|e| panic!("spawn {VM}: {e}"));
     assert_eq!(output.status.code(), Some(1), "exit code must stay 1");

@@ -1583,8 +1583,8 @@ fn addr_of_global_verifies() {
 
 #[test]
 fn store_ptr_depth_balanced_verifies() {
-    // `Const` (+1), `AddrOf` (+1), `StorePtr` (delta -1, min 2) leaves one
-    // value on the stack — exactly what `Return` needs.
+    // `Const` (+1), `AddrOf` (+1), `StorePtr` (delta -2, min 2), then a
+    // second `Const` (+1) leaves one value — exactly what `Return` needs.
     let mut m = v5_ptr_module();
     m.constants = vec![Const::Str("main".into()), Const::Int(7)];
     m.functions[0].code = Box::new([
@@ -1597,6 +1597,11 @@ fn store_ptr_depth_balanced_verifies() {
         0,
         0, // local slot 0
         Opcode::StorePtr as u8,
+        Opcode::Const as u8,
+        0,
+        0,
+        0,
+        0, // const idx 0 (Int(0))
         Opcode::Return as u8,
     ]);
     assert_eq!(verify::verify(&m), Ok(()));

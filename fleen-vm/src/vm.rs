@@ -34,12 +34,19 @@ pub(crate) fn mono_ms() -> i64 {
 enum DeepFork {
     Future,
     Channel,
+    /// A `ptr` whose cell would be aliased (Rc-bumped) by a copy. Mirrors
+    /// `Channel`: a **top-level** ptr handle load is legal (it is the
+    /// `LoadPtr`/`StorePtr` source — typeck seals `clone p` with
+    /// `CloneOfPointer`), so callers guard the bare form; a ptr *buried* in a
+    /// container is the silent alias, and typeck rejects it too (non-Copy).
+    Ptr,
 }
 
 fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
     match v {
         Value::Future(_) => Some(DeepFork::Future),
         Value::Channel(_) => Some(DeepFork::Channel),
+        Value::Ptr(_) => Some(DeepFork::Ptr),
         Value::Ok(inner) | Value::Err(inner) => deep_fork_kind(inner),
         Value::Arr(elems) => elems.iter().find_map(deep_fork_kind),
         _ => None,
@@ -64,6 +71,8 @@ pub struct Vm {
     /// The host program's command-line arguments (0.0.3 V06), served to
     /// Fleen by `std.os.args` — without `argv[0]`.
     program_args: Vec<String>,
+    /// Suppress `print` / `std.io.println` output (0.0.5 --quiet).
+    quiet: bool,
     /// Cooperative task scheduler (0.0.4 T06). Non-empty while `std.async.run`
     /// has spawned tasks that have not all completed; `run_inner` drives it
     /// to empty before returning.
@@ -150,6 +159,7 @@ impl Vm {
             frames: Vec::new(),
             globals: vec![Value::Unit; n_globals],
             program_args,
+            quiet: false,
             scheduler: Scheduler::new(),
             pending: None,
             need_join: false,
@@ -159,6 +169,19 @@ impl Vm {
             suspended_on_channel: false,
             channel_waiters: Vec::new(),
             next_task_id: 0,
+        }
+    }
+
+    /// Set whether `print` / `std.io.println` output is suppressed.
+    pub fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
+        self
+    }
+
+    /// Emit one output line unless the VM was built with [`Vm::with_quiet`].
+    fn emit_line(&self, line: &str) {
+        if !self.quiet {
+            println!("{line}");
         }
     }
 
@@ -844,14 +867,14 @@ impl Vm {
                         // arrives as a handle — dereference before formatting
                         // or it would print the opaque `<ref>`.
                         let v = self.read_ref(a)?;
-                        Ok(match v {
+                        Ok(match v.as_value() {
                             Value::Str(s) => s.to_string(),
                             other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
                         })
                     })
                     .collect::<Result<Vec<_>, RuntimeErrorKind>>()?
                     .join("");
-                println!("{line}");
+                self.emit_line(&line);
                 Ok(Value::Unit)
             }
             // 0.0.3 V06 intrinsics (D8): only what Fleen cannot express is
@@ -863,14 +886,14 @@ impl Vm {
                     .iter()
                     .map(|a| {
                         let v = self.read_ref(a)?;
-                        Ok(match v {
+                        Ok(match v.as_value() {
                             Value::Str(s) => s.to_string(),
                             other => fmt_scalar(other).unwrap_or_else(|| other.to_string()),
                         })
                     })
                     .collect::<Result<Vec<_>, RuntimeErrorKind>>()?
                     .join("");
-                println!("{line}");
+                self.emit_line(&line);
                 Ok(Value::Unit)
             }
             "std.io.read_line" => {
@@ -885,11 +908,14 @@ impl Vm {
                     Err(_) => Ok(Value::Str("".into())),
                 }
             }
-            "std.str.len" => match self.read_ref(&args[0])? {
+            "std.str.len" => match self.read_ref(&args[0])?.as_value() {
                 Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.str.concat" => match (self.read_ref(&args[0])?, self.read_ref(&args[1])?) {
+            "std.str.concat" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
                 (Value::Str(a), Value::Str(b)) => {
                     let mut joined = String::with_capacity(a.len() + b.len());
                     joined.push_str(a);
@@ -898,7 +924,10 @@ impl Vm {
                 }
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.str.split" => match (self.read_ref(&args[0])?, self.read_ref(&args[1])?) {
+            "std.str.split" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
                 (Value::Str(s), Value::Str(sep)) => {
                     let parts: Vec<Value> = s
                         .split(sep.as_ref())
@@ -908,11 +937,11 @@ impl Vm {
                 }
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.num.sqrt" => match self.read_ref(&args[0])? {
+            "std.num.sqrt" => match self.read_ref(&args[0])?.as_value() {
                 Value::Float(x) => Ok(Value::Float(x.sqrt())),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.num.floor" => match self.read_ref(&args[0])? {
+            "std.num.floor" => match self.read_ref(&args[0])?.as_value() {
                 Value::Float(x) => Ok(Value::Int(x.floor() as i64)),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
@@ -1039,7 +1068,7 @@ impl Vm {
                 // before coming back. Runs inside an async body.
                 Ok(Value::Unit)
             }
-            "std.arr.len" => match self.read_ref(&args[0])? {
+            "std.arr.len" => match self.read_ref(&args[0])?.as_value() {
                 Value::Arr(elems) => Ok(Value::Int(elems.len() as i64)),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
@@ -1055,6 +1084,7 @@ impl Vm {
                         return Err(match kind {
                             DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
                             DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                            DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
                         });
                     }
                 }
@@ -1072,7 +1102,7 @@ impl Vm {
     /// is a value, not a crash). The deep-fork guard on the arguments runs
     /// in the dispatch arm above.
     fn builtin_arr_get(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        match (self.read_ref(&args[0])?, &args[1]) {
+        match (self.read_ref(&args[0])?.as_value(), &args[1]) {
             (Value::Arr(elems), Value::Int(i)) => {
                 match elems.get(*i as usize).filter(|_| *i >= 0) {
                     // The element result is a copy (the array is untouched);
@@ -1091,7 +1121,7 @@ impl Vm {
     /// `std.arr.set` — arrays are owned (D3): a fresh array with the slot
     /// replaced.
     fn builtin_arr_set(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let elems: Vec<Value> = match self.read_ref(&args[0])? {
+        let elems: Vec<Value> = match self.read_ref(&args[0])?.as_value() {
             Value::Arr(elems) => elems.to_vec(),
             _ => return Err(RuntimeErrorKind::StackShape),
         };
@@ -1112,7 +1142,7 @@ impl Vm {
     /// `std.arr.push` — arrays are owned (D3): a fresh array with the
     /// element appended.
     fn builtin_arr_push(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let mut elems: Vec<Value> = match self.read_ref(&args[0])? {
+        let mut elems: Vec<Value> = match self.read_ref(&args[0])?.as_value() {
             Value::Arr(elems) => elems.to_vec(),
             _ => return Err(RuntimeErrorKind::StackShape),
         };
@@ -1193,7 +1223,10 @@ impl Vm {
                 let s = take!(2);
                 let slot = u16::from_le_bytes([s[0], s[1]]) as usize;
                 let idx = frame.stack_base + slot;
-                let v = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
+                // 0.0.5 T06: `AddrOf` may have promoted this slot to a stable
+                // heap cell (`Value::Cell`); the load dereferences it so
+                // reads before and after promotion are unchanged.
+                let v = self.read_slot(idx)?;
                 // 0.0.4 T08 defensive backstop: a plain load clones the
                 // `Value`, which for a Future deep-copies the whole suspended
                 // frame — a fork. Typeck/ownership reject every bare read of
@@ -1203,16 +1236,22 @@ impl Vm {
                 // *buried* in a container (`Ok(...)`, an array) is a silent
                 // alias; typeck rejects the bare read of such a local, and
                 // the deep walk mirrors it (0.0.4 review fix).
-                match deep_fork_kind(v) {
+                match deep_fork_kind(&v) {
                     Some(DeepFork::Future) => {
                         return Err(RuntimeErrorKind::FutureNotClonable);
                     }
                     Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
                         return Err(RuntimeErrorKind::ChannelNotClonable);
                     }
+                    // A top-level ptr handle load is the `LoadPtr`/`StorePtr`
+                    // source, so it stays legal; a ptr buried in a container
+                    // is the silent cell alias, rejected (0.0.5 T06).
+                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
+                        return Err(RuntimeErrorKind::PtrNotClonable);
+                    }
                     _ => {}
                 }
-                self.stack.push(v.clone());
+                self.stack.push(v);
             }
             Opcode::StoreLocal => {
                 let s = take!(2);
@@ -1222,18 +1261,14 @@ impl Vm {
                 if idx >= self.stack.len() {
                     return Err(RuntimeErrorKind::StackShape);
                 }
-                self.stack[idx] = v;
+                // 0.0.5 T06: write through a promoted slot's stable cell.
+                write_slot(&mut self.stack[idx], v);
             }
             Opcode::LoadGlobal => {
                 let s = take!(2);
                 let id = u16::from_le_bytes([s[0], s[1]]) as usize;
-                let v = self
-                    .globals
-                    .get(id)
-                    .cloned()
-                    .ok_or(RuntimeErrorKind::GlobalOutOfRange(
-                        fleen_compiler::codegen::GlobalId(id as u32),
-                    ))?;
+                // 0.0.5 T06: dereference a promoted global's stable cell.
+                let v = self.read_global(id)?;
                 // 0.0.4 review-fix backstop, matching `LoadLocal`: a global
                 // load clones the `Value`, which for a Future deep-copies the
                 // suspended frame. Typeck rejects Future globals outright
@@ -1245,6 +1280,12 @@ impl Vm {
                     }
                     Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
                         return Err(RuntimeErrorKind::ChannelNotClonable);
+                    }
+                    // Mirrors `LoadLocal`: a bare ptr global handle load is the
+                    // pointer-opcode source; a container-held ptr aliases the
+                    // cell on copy and is rejected (0.0.5 T06).
+                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
+                        return Err(RuntimeErrorKind::PtrNotClonable);
                     }
                     _ => {}
                 }
@@ -1266,7 +1307,8 @@ impl Vm {
                     ));
                 }
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                self.globals[id] = v;
+                // 0.0.5 T06: write through a promoted global's stable cell.
+                write_slot(&mut self.globals[id], v);
             }
             Opcode::IAdd => self.int_binop(|a, b| a.checked_add(*b))?,
             Opcode::ISub => self.int_binop(|a, b| a.checked_sub(*b))?,
@@ -1438,7 +1480,8 @@ impl Vm {
                 if idx >= self.stack.len() {
                     return Err(RuntimeErrorKind::StackShape);
                 }
-                self.stack[idx] = v;
+                // 0.0.5 T06: a matched local may be a promoted slot.
+                write_slot(&mut self.stack[idx], v);
             }
             // 0.0.2 U13: scalar → string. Typeck guarantees the operand is a
             // scalar; a non-scalar reaching here is a compiler bug, so this is
@@ -1473,7 +1516,7 @@ impl Vm {
                 // handle (`ref box<T>` read path) — resolve it first.
                 let copy = {
                     let b = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                    match self.read_ref(b)? {
+                    match self.read_ref(b)?.as_value() {
                         Value::Boxed(inner) => inner.as_ref().clone(),
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
@@ -1535,7 +1578,7 @@ impl Vm {
                 // the value it points at, never the handle.
                 let copy = {
                     let top = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                    self.read_ref(top)?.clone()
+                    self.read_ref(top)?.as_value().clone()
                 };
                 self.stack.push(copy);
             }
@@ -1550,7 +1593,15 @@ impl Vm {
                         .stack
                         .get_mut(idx)
                         .ok_or(RuntimeErrorKind::StackShape)?;
-                    std::mem::replace(slot_v, Value::Unit)
+                    // 0.0.5 T06: a promoted slot moves its pointee out (the
+                    // cell stays as the slot marker, now holding Unit — the
+                    // unsafe author's referent-validity contract is theirs).
+                    match slot_v {
+                        Value::Cell(cell) => {
+                            std::mem::replace(&mut *cell.borrow_mut(), Value::Unit)
+                        }
+                        other => std::mem::replace(other, Value::Unit),
+                    }
                 };
                 self.stack.push(v);
             }
@@ -1564,19 +1615,20 @@ impl Vm {
                 // fires for malformed bytecode; the deep walk covers the
                 // same kinds inside `Ok`/`Err`/array containers (0.0.4
                 // review fix).
-                let cloned = self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)?;
-                if let Some(kind) = deep_fork_kind(cloned) {
+                let resolved = self.read_slot(idx)?;
+                if let Some(kind) = deep_fork_kind(&resolved) {
                     return Err(match kind {
                         DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
                         DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
                     });
                 }
-                match cloned {
+                match resolved {
                     v @ Value::Ref { .. } => {
-                        let copy = self.read_ref(v)?.clone();
+                        let copy = self.read_ref(&v)?.as_value().clone();
                         self.stack.push(copy);
                     }
-                    other => self.stack.push(other.clone()),
+                    other => self.stack.push(other),
                 }
             }
             Opcode::CloneGlobal => {
@@ -1588,23 +1640,20 @@ impl Vm {
                 // both global types, so this only fires for malformed
                 // bytecode; the deep walk covers the same kinds inside
                 // `Ok`/`Err`/array containers (0.0.4 review fix).
-                let g = self
-                    .globals
-                    .get(id)
-                    .ok_or(RuntimeErrorKind::GlobalOutOfRange(
-                        fleen_compiler::codegen::GlobalId(id as u32),
-                    ))?;
-                if let Some(kind) = deep_fork_kind(g) {
+                // 0.0.5 T06: dereference a promoted global's stable cell.
+                let g = self.read_global(id)?;
+                if let Some(kind) = deep_fork_kind(&g) {
                     return Err(match kind {
                         DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
                         DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
                     });
                 }
                 // Globals never hold borrow handles in compiled code (typeck
                 // forbids storing a `Ref`); the defensive backstop for
                 // hand-written modules is the dereference at the consumption
                 // point, not the copy here.
-                self.stack.push(g.clone());
+                self.stack.push(g);
             }
             Opcode::PackOk => {
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
@@ -1679,8 +1728,8 @@ impl Vm {
                 // path) — dereference first; the copy-out semantics make the
                 // read trivially safe (D2).
                 let copy = {
-                    let obj = self.read_ref(&v)?;
-                    match obj {
+                    let resolved = self.read_ref(&v)?;
+                    match resolved.as_value() {
                         Value::Struct(fields) => {
                             if offset >= fields.len() {
                                 return Err(RuntimeErrorKind::FieldOutOfRange {
@@ -1707,8 +1756,9 @@ impl Vm {
                     .ok_or(RuntimeErrorKind::StackShape)?;
                 // Field writes go through local/global struct bindings only
                 // (typeck rejects writes through borrow handles), so a `Ref`
-                // in the slot is malformed bytecode.
-                match slot_v {
+                // in the slot is malformed bytecode. 0.0.5 T06: a promoted
+                // slot is dereferenced so the write lands in the cell.
+                with_slot_mut(slot_v, |inner| match inner {
                     Value::Struct(fields) => {
                         if offset >= fields.len() {
                             return Err(RuntimeErrorKind::FieldOutOfRange {
@@ -1718,9 +1768,10 @@ impl Vm {
                         }
                         // The overwrite drops the old field value.
                         fields[offset] = v;
+                        Ok(())
                     }
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                }
+                    _ => Err(RuntimeErrorKind::StackShape),
+                })?;
             }
             Opcode::SetFieldGlobal => {
                 let s = take!(4);
@@ -1735,7 +1786,7 @@ impl Vm {
                 // Writing a field does not rebind the global, so the
                 // `mutable` gate of `StoreGlobal` does not apply here (same
                 // rule as `deref b = v` on a const box binding).
-                match &mut self.globals[gid] {
+                with_slot_mut(&mut self.globals[gid], |inner| match inner {
                     Value::Struct(fields) => {
                         if offset >= fields.len() {
                             return Err(RuntimeErrorKind::FieldOutOfRange {
@@ -1744,9 +1795,10 @@ impl Vm {
                             });
                         }
                         fields[offset] = v;
+                        Ok(())
                     }
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                }
+                    _ => Err(RuntimeErrorKind::StackShape),
+                })?;
             }
             // ----------------------------------------------------------------
             // 0.0.3 V03: array instructions (bytecode v3, 0xB4–0xB8).
@@ -1770,7 +1822,7 @@ impl Vm {
                 // is read.
                 let len = {
                     let a = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                    match self.read_ref(a)? {
+                    match self.read_ref(a)?.as_value() {
                         Value::Arr(elems) => elems.len(),
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
@@ -1789,8 +1841,8 @@ impl Vm {
                 };
                 let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let copy = {
-                    let arr = self.read_ref(&a)?;
-                    match arr {
+                    let resolved = self.read_ref(&a)?;
+                    match resolved.as_value() {
                         Value::Arr(elems) => {
                             if i < 0 || i as usize >= elems.len() {
                                 return Err(RuntimeErrorKind::IndexOutOfRange {
@@ -1810,6 +1862,7 @@ impl Vm {
                                     return Err(match kind {
                                         DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
                                         DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
                                     });
                                 }
                                 None => elems[i as usize].clone(),
@@ -1835,8 +1888,10 @@ impl Vm {
                     .ok_or(RuntimeErrorKind::StackShape)?;
                 // Element writes go through local/global array bindings
                 // only (typeck rejects writes through borrow handles), so a
-                // `Ref` in the slot is malformed bytecode.
-                match slot_v {
+                // `Ref` in the slot is malformed bytecode. 0.0.5 T06: a
+                // promoted slot is dereferenced so the write lands in the
+                // cell.
+                with_slot_mut(slot_v, |inner| match inner {
                     Value::Arr(elems) => {
                         if i < 0 || i as usize >= elems.len() {
                             return Err(RuntimeErrorKind::IndexOutOfRange {
@@ -1846,9 +1901,10 @@ impl Vm {
                         }
                         // The overwrite drops the old element value.
                         elems[i as usize] = v;
+                        Ok(())
                     }
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                }
+                    _ => Err(RuntimeErrorKind::StackShape),
+                })?;
             }
             Opcode::ArrSetGlobal => {
                 let s = take!(2);
@@ -1866,7 +1922,7 @@ impl Vm {
                 // Writing an element does not rebind the global, so the
                 // `mutable` gate of `StoreGlobal` does not apply here (same
                 // rule as `SetFieldGlobal` on a const struct binding).
-                match &mut self.globals[gid] {
+                with_slot_mut(&mut self.globals[gid], |inner| match inner {
                     Value::Arr(elems) => {
                         if i < 0 || i as usize >= elems.len() {
                             return Err(RuntimeErrorKind::IndexOutOfRange {
@@ -1875,9 +1931,10 @@ impl Vm {
                             });
                         }
                         elems[i as usize] = v;
+                        Ok(())
                     }
-                    _ => return Err(RuntimeErrorKind::StackShape),
-                }
+                    _ => Err(RuntimeErrorKind::StackShape),
+                })?;
             }
             // ----------------------------------------------------------------
             // 0.0.3 V04: range instructions (bytecode v3, 0xB9–0xBB).
@@ -2071,12 +2128,54 @@ impl Vm {
                 // Split returns a second handle to the same inner buffer.
                 self.stack.push(Value::Channel(inner));
             }
-            // 0.0.5 T05: pointer / unsafe opcodes are encoded and verified,
-            // but their VM execution lands with T06 — hitting one here means
-            // hand-written or ahead-of-its-time bytecode.
-            Opcode::AddrOf => return Err(RuntimeErrorKind::Unimplemented("AddrOf")),
-            Opcode::LoadPtr => return Err(RuntimeErrorKind::Unimplemented("LoadPtr")),
-            Opcode::StorePtr => return Err(RuntimeErrorKind::Unimplemented("StorePtr")),
+            // 0.0.5 T05/T06: pointer opcodes. `AddrOf` promotes the referent
+            // slot to a stable heap cell (promote-on-addr, PLAN §4); the
+            // local/global access paths dereference the cell transparently.
+            Opcode::AddrOf => {
+                let s = take!(2);
+                let place = u16::from_le_bytes([s[0], s[1]]);
+                // Bit 15 of the place operand: clear = local slot, set =
+                // global id (T05 encoding).
+                let cell = if place & 0x8000 != 0 {
+                    let gid = (place & 0x7FFF) as usize;
+                    if gid >= self.globals.len() {
+                        return Err(RuntimeErrorKind::GlobalOutOfRange(
+                            fleen_compiler::codegen::GlobalId(gid as u32),
+                        ));
+                    }
+                    promote_slot(&mut self.globals[gid])
+                } else {
+                    let slot = (place & 0x7FFF) as usize;
+                    let idx = frame.stack_base + slot;
+                    let slot_v = self
+                        .stack
+                        .get_mut(idx)
+                        .ok_or(RuntimeErrorKind::StackShape)?;
+                    promote_slot(slot_v)
+                };
+                self.stack.push(Value::Ptr(cell));
+            }
+            Opcode::LoadPtr => {
+                // `ptr → v`: pop the handle, push a copy of the pointee.
+                let p = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let cell = match p {
+                    Value::Ptr(cell) => cell,
+                    _ => return Err(RuntimeErrorKind::PtrExpected),
+                };
+                let v = cell.borrow().clone();
+                self.stack.push(v);
+            }
+            Opcode::StorePtr => {
+                // `v ptr →`: pop the handle (top), then the pointee value,
+                // and write it through the cell.
+                let p = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let cell = match p {
+                    Value::Ptr(cell) => cell,
+                    _ => return Err(RuntimeErrorKind::PtrExpected),
+                };
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                *cell.borrow_mut() = v;
+            }
         }
         self.frames
             .last_mut()
@@ -2307,6 +2406,30 @@ impl Vm {
         }
     }
 
+    /// Clone a local slot's current value, transparently through a promoted
+    /// stable cell (0.0.5 T06). The cell's pointee is the value `AddrOf`
+    /// took a pointer to; reads before and after promotion are unchanged.
+    fn read_slot(&self, idx: usize) -> Result<Value, RuntimeErrorKind> {
+        match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
+            Value::Cell(cell) => Ok(cell.borrow().clone()),
+            v => Ok(v.clone()),
+        }
+    }
+
+    /// Clone a global's current value, transparently through a promoted
+    /// stable cell (0.0.5 T06) — same rule as `Self::read_slot`.
+    fn read_global(&self, id: usize) -> Result<Value, RuntimeErrorKind> {
+        match self
+            .globals
+            .get(id)
+            .ok_or(RuntimeErrorKind::GlobalOutOfRange(
+                fleen_compiler::codegen::GlobalId(id as u32),
+            ))? {
+            Value::Cell(cell) => Ok(cell.borrow().clone()),
+            v => Ok(v.clone()),
+        }
+    }
+
     /// Absolute operand-stack index a borrow handle points at, or `None`
     /// for any other value (0.0.2 U09).
     fn ref_index(&self, v: &Value) -> Option<usize> {
@@ -2327,7 +2450,7 @@ impl Vm {
     /// a frame below the current call chain (which therefore outlives it);
     /// the range check here is the defensive backstop for hand-written
     /// bytecode, firing [`RuntimeErrorKind::BorrowOutOfRange`].
-    fn read_ref<'s>(&'s self, v: &'s Value) -> Result<&'s Value, RuntimeErrorKind> {
+    fn read_ref<'s>(&'s self, v: &'s Value) -> Result<Resolved<'s>, RuntimeErrorKind> {
         match self.ref_index(v) {
             Some(idx) => {
                 let target = &self.stack[idx];
@@ -2338,10 +2461,18 @@ impl Vm {
                     !matches!(target, Value::Ref { .. }),
                     "handle-to-handle: MakeRefLocal forwarding must prevent re-wrapping"
                 );
-                Ok(target)
+                // 0.0.5 T06: a `ref` handle may point at an addr-promoted
+                // slot (`Value::Cell`). `RefCell` cannot hand out a borrowed
+                // reference to its inner value, so the pointee is cloned into
+                // an owned `Resolved` in that (rare) case; the common slot
+                // stays a zero-copy borrow.
+                Ok(match target {
+                    Value::Cell(cell) => Resolved::Owned(cell.borrow().clone()),
+                    other => Resolved::Borrowed(other),
+                })
             }
             None if matches!(v, Value::Ref { .. }) => Err(RuntimeErrorKind::BorrowOutOfRange),
-            None => Ok(v),
+            None => Ok(Resolved::Borrowed(v)),
         }
     }
 
@@ -2352,7 +2483,7 @@ impl Vm {
         // the derived structural `PartialEq` on `Ref` is for tests only.
         let a = self.read_ref(&a)?;
         let b = self.read_ref(&b)?;
-        let eq = match (a, b) {
+        let eq = match (a.as_value(), b.as_value()) {
             (Value::Int(x), Value::Int(y)) => x == y,
             (Value::Float(x), Value::Float(y)) => x == y,
             (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -2378,7 +2509,7 @@ impl Vm {
         // reach `<`/`<=`/... through ordinary comparison expressions).
         let a = self.read_ref(&a)?;
         let b = self.read_ref(&b)?;
-        let r = match (a, b) {
+        let r = match (a.as_value(), b.as_value()) {
             (Value::Int(x), Value::Int(y)) => x.cmp(y),
             (Value::Float(x), Value::Float(y)) => x
                 .partial_cmp(y)
@@ -2389,5 +2520,59 @@ impl Vm {
         };
         self.stack.push(Value::Bool(f(r)));
         Ok(())
+    }
+}
+
+/// The result of `Vm::read_ref`: either a zero-copy borrow of a value on
+/// the operand stack, or an owned clone of a promoted cell's pointee (which
+/// `RefCell` cannot lend a reference to). Consumers read through
+/// `Resolved::as_value`.
+enum Resolved<'s> {
+    Borrowed(&'s Value),
+    Owned(Value),
+}
+
+impl<'s> Resolved<'s> {
+    fn as_value(&self) -> &Value {
+        match self {
+            Resolved::Borrowed(v) => v,
+            Resolved::Owned(v) => v,
+        }
+    }
+}
+
+/// Promote `slot` to a stable heap cell (0.0.5 T06, promote-on-addr) and
+/// return a handle to it. Already-promoted slots reuse the existing cell
+/// (`AddrOf` is idempotent); the slot's current value moves into the cell.
+fn promote_slot(slot: &mut Value) -> Rc<RefCell<Value>> {
+    if let Value::Cell(cell) = slot {
+        return Rc::clone(cell);
+    }
+    let old = std::mem::replace(slot, Value::Unit);
+    let cell = Rc::new(RefCell::new(old));
+    *slot = Value::Cell(Rc::clone(&cell));
+    cell
+}
+
+/// Run `f` against a local/global slot's underlying value, transparently
+/// through a promoted cell (0.0.5 T06). `RefCell` cannot lend `&mut Value`
+/// out of a borrow, so the promoted case borrows the cell for the closure's
+/// duration instead.
+fn with_slot_mut<T>(
+    slot: &mut Value,
+    f: impl FnOnce(&mut Value) -> Result<T, RuntimeErrorKind>,
+) -> Result<T, RuntimeErrorKind> {
+    match slot {
+        Value::Cell(cell) => f(&mut cell.borrow_mut()),
+        _ => f(slot),
+    }
+}
+
+/// Write `v` into a local/global slot, transparently through a promoted cell
+/// (0.0.5 T06). A non-promoted slot stores the value directly.
+fn write_slot(slot: &mut Value, v: Value) {
+    match slot {
+        Value::Cell(cell) => *cell.borrow_mut() = v,
+        other => *other = v,
     }
 }

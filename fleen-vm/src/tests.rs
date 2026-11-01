@@ -224,6 +224,425 @@ fn immutable_global_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// 0.0.5 T05: pointer opcodes pass the version-5 gate, but their VM execution
+// lands with T06 — each dispatch arm must report `Unimplemented` rather than
+// silently mis-executing or ignoring the instruction.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v5_module_runs_pre_v5_instruction_streams() {
+    // The version-5 gate accepts a module whose body uses no v5 opcode.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        ..v2_module(enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]))
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Unit));
+}
+
+#[test]
+fn v6_addr_of_local_load_store_roundtrip() {
+    // T06: `AddrOf` promotes local slot 0 to a stable heap cell; a pointer
+    // handle loads/stores through it. The function stores 42, writes 43
+    // through the pointer, and returns the value read back.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(1)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 42
+                (Opcode::StoreLocal, u16b(0)), // slot0 = 42
+                (Opcode::AddrOf, u16b(0)),     // promote slot0, push ptr
+                (Opcode::StoreLocal, u16b(1)), // slot1 = ptr
+                (Opcode::LoadLocal, u16b(1)),  // push ptr
+                (Opcode::LoadPtr, vec![]),     // push 42
+                (Opcode::Const, u32b(2)),      // push 1
+                (Opcode::IAdd, vec![]),        // 43
+                (Opcode::LoadLocal, u16b(1)),  // push ptr
+                (Opcode::StorePtr, vec![]),    // *ptr = 43
+                (Opcode::LoadLocal, u16b(1)),  // push ptr
+                (Opcode::LoadPtr, vec![]),     // push 43
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            2,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(43)));
+}
+
+#[test]
+fn v6_promotion_is_transparent_to_local_access() {
+    // A normal local write after `AddrOf` must land in the cell (a pointer
+    // sees it) and a normal local read must read the cell, so the value
+    // before and after promotion is unchanged.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(43)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 42
+                (Opcode::StoreLocal, u16b(0)), // slot0 = 42
+                (Opcode::AddrOf, u16b(0)),     // promote slot0
+                (Opcode::Pop, vec![]),         // drop the ptr handle
+                (Opcode::Const, u32b(2)),      // 43
+                (Opcode::StoreLocal, u16b(0)), // write through the cell
+                (Opcode::LoadLocal, u16b(0)),  // read through the cell
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(43)));
+}
+
+#[test]
+fn v6_pointer_backstop_on_corrupted_handle() {
+    // `LoadPtr` on a non-pointer value is a malformed-bytecode backstop.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(7)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::LoadPtr, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::PtrExpected);
+
+    // `StorePtr`: the top value is an int, not a pointer handle.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(7), Const::Int(9)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),
+                (Opcode::Const, u32b(2)),
+                (Opcode::StorePtr, vec![]),
+                (Opcode::Unit, vec![]),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::PtrExpected);
+}
+
+#[test]
+fn v6_addr_promoted_local_survives_suspend_resume() {
+    // T06 note: `Value::Cell` must keep frames movable — the promoted cell is
+    // an `Rc` heap cell, not a stack index, so it survives a suspend snapshot.
+    // The worker takes `addr` of a local, suspends, resumes at a different
+    // depth, and reads through the pointer.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(40), Const::Int(1)],
+        functions: vec![
+            func(
+                enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]),
+                0,
+                0,
+            ),
+            func(
+                enc(&[
+                    (Opcode::Const, u32b(1)),      // 40
+                    (Opcode::StoreLocal, u16b(0)), // slot0 = 40
+                    (Opcode::AddrOf, u16b(0)),     // promote slot0
+                    (Opcode::StoreLocal, u16b(1)), // slot1 = ptr
+                    (Opcode::LoadLocal, u16b(1)),  // push ptr
+                    (Opcode::LoadPtr, vec![]),     // push 40
+                    (Opcode::Const, u32b(2)),      // push 1
+                    (Opcode::IAdd, vec![]),        // 41
+                    (Opcode::Return, vec![]),
+                ]),
+                0,
+                2,
+            ),
+        ],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let mut vm = Vm::new(m);
+    vm.call(FuncId(1), 0).unwrap();
+    // Const, StoreLocal(0), AddrOf(0), StoreLocal(1) — suspend after the ptr
+    // is stored, before the load-through-pointer reads it.
+    for _ in 0..4 {
+        vm.step().unwrap();
+    }
+    let frame = vm.suspend_top_frame(14).unwrap();
+    match &frame.locals[0] {
+        Value::Cell(cell) => assert_eq!(*cell.borrow(), Value::Int(40)),
+        other => panic!("slot0 must be a promoted Cell, got {other:?}"),
+    }
+    assert!(matches!(&frame.locals[1], Value::Ptr(_)));
+    // Pollute the stack depth so the resume cannot reuse the old base; the
+    // cell handle travels with the snapshot rather than as a stack index.
+    vm.stack.push(Value::Int(-1));
+    vm.resume_frame(frame).unwrap();
+    drive_frames(&mut vm).unwrap();
+    assert_eq!(vm.stack.pop().unwrap(), Value::Int(41));
+}
+
+#[test]
+fn v6_addr_of_global_roundtrip_and_transparency() {
+    // T06 bit-15 path: `AddrOf` on a global id promotes the global's slot to
+    // a stable cell; plain global loads/stores dereference it and the pointer
+    // opcodes write/read through it, so the value is consistent across the
+    // plain name and the pointer.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(42),
+            Const::Int(1),
+            Const::Int(43),
+        ],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),       // 42
+                (Opcode::StoreGlobal, u16b(0)), // g = 42
+                (Opcode::AddrOf, u16b(0x8000)), // promote global 0 (bit 15), push ptr
+                (Opcode::StoreLocal, u16b(0)),  // slot0 = &g
+                (Opcode::LoadGlobal, u16b(0)),  // plain global read sees the cell
+                (Opcode::Const, u32b(3)),       // 43
+                (Opcode::StoreGlobal, u16b(0)), // plain global write lands in the cell
+                (Opcode::LoadLocal, u16b(0)),   // push &g
+                (Opcode::LoadPtr, vec![]),      // ptr sees 43
+                (Opcode::Const, u32b(2)),       // 1
+                (Opcode::IAdd, vec![]),         // 44
+                (Opcode::LoadLocal, u16b(0)),   // push &g
+                (Opcode::StorePtr, vec![]),     // *&g = 44
+                (Opcode::LoadGlobal, u16b(0)),  // plain global read -> 44
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![fleen_compiler::codegen::Global {
+            name: ConstId(0),
+            mutable: true,
+        }],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(44)));
+}
+
+#[test]
+fn v6_field_write_through_promoted_struct() {
+    // `addr s` promotes a struct local's slot; a plain field write
+    // (`SetFieldLocal`) must dereference the cell and mutate the struct
+    // inside it (the with_slot_mut path), so the promoted slot and the
+    // pointer stay consistent.
+    let code: Vec<u8> = [
+        vec![Opcode::Const as u8],
+        u32b(1).to_vec(), // 1
+        vec![Opcode::Const as u8],
+        u32b(2).to_vec(),                    // 2
+        vec![Opcode::StructNew as u8, 0, 0], // struct {1, 2}
+        vec![Opcode::StoreLocal as u8, 0, 0],
+        vec![Opcode::AddrOf as u8, 0, 0], // promote slot 0
+        vec![Opcode::Pop as u8],          // drop the ptr handle
+        vec![Opcode::Const as u8],
+        u32b(3).to_vec(),                              // 9
+        vec![Opcode::SetFieldLocal as u8, 0, 0, 0, 0], // s.a = 9 (through the cell)
+        vec![Opcode::LoadLocal as u8, 0, 0],
+        vec![Opcode::GetField as u8, 0, 0],
+        vec![Opcode::Return as u8],
+    ]
+    .concat();
+    let m = Module {
+        version: 5,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(1),
+            Const::Int(2),
+            Const::Int(9),
+        ],
+        functions: vec![func(code.into_boxed_slice(), 0, 1)],
+        globals: vec![],
+        entry: FuncId(0),
+        struct_defs: vec![fleenc_struct_def(2)],
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(9)));
+}
+
+#[test]
+fn v6_element_write_through_promoted_array() {
+    // `addr a` promotes an array local's slot; a plain element write
+    // (`ArrSetLocal`) dereferences the cell (the with_slot_mut path), so the
+    // element write lands in the cell and a subsequent read sees it.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(99),
+            Const::Int(0),
+        ],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),       // 10
+                (Opcode::Const, u32b(2)),       // 20
+                (Opcode::ArrNew, u16b(2)),      // a = [10, 20]
+                (Opcode::StoreLocal, u16b(0)),  // slot0 = a
+                (Opcode::AddrOf, u16b(0)),      // promote slot 0
+                (Opcode::Pop, vec![]),          // drop the ptr handle
+                (Opcode::Const, u32b(3)),       // 99
+                (Opcode::Const, u32b(4)),       // 0 (index)
+                (Opcode::ArrSetLocal, u16b(0)), // a[0] = 99 (through the cell)
+                (Opcode::LoadLocal, u16b(0)),   // push a (through the cell)
+                (Opcode::Const, u32b(4)),       // 0
+                (Opcode::ArrGet, vec![]),       // a[0] -> 99
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(99)));
+}
+
+#[test]
+fn v6_move_local_on_promoted_slot() {
+    // `move x` on an addr-promoted slot moves the pointee out of the cell
+    // (the cell stays as the slot marker, now holding Unit) and pushes it —
+    // the MoveLocal Cell arm.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(42)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 42
+                (Opcode::StoreLocal, u16b(0)), // x = 42
+                (Opcode::AddrOf, u16b(0)),     // promote slot 0
+                (Opcode::StoreLocal, u16b(1)), // slot1 = &x
+                (Opcode::MoveLocal, u16b(0)),  // move x (42) out of the cell
+                (Opcode::Return, vec![]),      // 42
+            ]),
+            0,
+            2,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(42)));
+}
+
+#[test]
+fn v6_clone_local_on_promoted_slot() {
+    // `clone x` on an addr-promoted slot reads through the cell (CloneLocal
+    // dereferences it) and pushes the value — same as LoadLocal.
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(42)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 42
+                (Opcode::StoreLocal, u16b(0)), // x = 42
+                (Opcode::AddrOf, u16b(0)),     // promote slot 0
+                (Opcode::Pop, vec![]),         // drop the ptr handle
+                (Opcode::CloneLocal, u16b(0)), // clone x -> 42
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(42)));
+}
+
+#[test]
+fn v6_addr_idempotent_same_cell() {
+    // `addr x` twice reuses the same promoted cell: a write through the first
+    // pointer is visible through the second (promote_slot's already-Cell arm).
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(99)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 42
+                (Opcode::StoreLocal, u16b(0)), // x = 42
+                (Opcode::AddrOf, u16b(0)),     // promote slot 0 -> p1
+                (Opcode::StoreLocal, u16b(1)), // slot1 = p1
+                (Opcode::AddrOf, u16b(0)),     // promote again -> p2 (same cell)
+                (Opcode::StoreLocal, u16b(2)), // slot2 = p2
+                (Opcode::Const, u32b(2)),      // 99
+                (Opcode::LoadLocal, u16b(1)),  // push p1
+                (Opcode::StorePtr, vec![]),    // *p1 = 99
+                (Opcode::LoadLocal, u16b(2)),  // push p2
+                (Opcode::LoadPtr, vec![]),     // read *p2 -> 99
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            3,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(99)));
+}
+
+#[test]
+fn v6_clone_container_with_ptr_rejected() {
+    // A `ptr` buried in an array would alias the cell on copy; `CloneLocal`
+    // must reject it (`PtrNotClonable`) rather than silently Rc-bump the
+    // handle (the deep_fork backstop, mirroring Future/Channel).
+    let m = Module {
+        struct_defs: Vec::new(),
+        version: 5,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)),      // 1
+                (Opcode::StoreLocal, u16b(0)), // x = 1
+                (Opcode::AddrOf, u16b(0)),     // promote slot 0, push p
+                (Opcode::ArrNew, u16b(1)),     // [p]
+                (Opcode::StoreLocal, u16b(1)), // slot1 = [p]
+                (Opcode::CloneLocal, u16b(1)), // clone [p] -> PtrNotClonable
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            2,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let err = Vm::new(m).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::PtrNotClonable);
+}
+
+// ---------------------------------------------------------------------------
 // 0.0.2 U07/U09: v2 opcodes. U07 locked their loud failure while only encoded;
 // U09 replaces that with real dispatch — the per-opcode behavior now lives in
 // the dedicated execution tests below. What remains here is the module-level

@@ -4,9 +4,10 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T05 implemented and green (T01–T03 uncommitted at
+> **Status: T01–T08 implemented and green (T01–T03 uncommitted at
 > implementation time; T04 implemented 2026-10-25; T05 implemented
-> 2026-10-31). T06+ PLANNED.**
+> 2026-10-31; T06 implemented 2026-11-01; T07 implemented 2026-11-01;
+> T08 implemented 2026-11-0X). T09+ PLANNED.**
 
 ---
 
@@ -152,18 +153,45 @@ reach the opcodes).
 
 ## T06 — VM: pointer representation (F6)
 
-- [ ] `Value::Ptr` variant holding a stable-cell handle — **not serialized**
+- [x] `Value::Ptr` variant holding a stable-cell handle — **not serialized**
       (same rule as `Future`/`Channel`; keep the `size_of::<Value>()` test
       passing)
-- [ ] `AddrOf` promotes the referent slot to a stable heap cell
+- [x] `AddrOf` promotes the referent slot to a stable heap cell
       (promote-on-addr sketch, PLAN §4); local reads/writes before and after
       promotion are semantically unchanged
-- [ ] `LoadPtr` / `StorePtr` execute through the cell; malformed handle →
+- [x] `LoadPtr` / `StorePtr` execute through the cell; malformed handle →
       defensive `RuntimeError` backstop
-- [ ] Settle the representation among: promote-on-addr (default) vs. global
+- [x] Settle the representation among: promote-on-addr (default) vs. global
       arena vs. eager boxing — record the choice + rejected alternatives here
-- [ ] Tests: `fleen-vm/src/tests.rs` — addr/load/store round-trip, promotion
+- [x] Tests: `fleen-vm/src/tests.rs` — addr/load/store round-trip, promotion
       transparency, backstop on a corrupted handle; e2e `addr_write.fln`
+
+**Representation (settled)**: promote-on-addr (default) — `AddrOf` promotes
+ the referent slot to a `Value::Cell(Rc<RefCell<Value>>)` stable heap cell
+ and the slot itself becomes `Value::Cell`; every local/global load/store and
+ the pointer opcodes dereference the cell, so reads/writes before and after
+ promotion are unchanged. Rejected: (1) a global arena indexed by handle id —
+ would touch every load/store path, not just pointer code; (2) eager boxing at
+ declaration — allocates for every slot, not just address-taken ones. The
+ `Value::Ptr` handle is the user-visible `ptr<T>`; `Value::Cell` is internal
+ (a promoted `T` local and a `ptr<T>` local must stay distinguishable).
+ `size_of::<Value>()` stays one pointer; frames stay movable because the cell
+ is an `Rc`, not a stack index (suspend/resume test mandatory and present).
+
+**Known lower quirk (T05, not T06)**: a `deref_ptr p = …` (or `deref b = …`)
+ as the last no-semicolon statement of a unit-returning function lowers to
+ `StorePtr; Unit; Unit` (the assignment's Unit is not popped before the block's
+ Unit), which the verifier correctly rejects. Use a trailing `;` to make the
+ statement a mid-block statement (`StorePtr; Unit; Pop`) — the e2e does. Fixing
+ the block-tail contract belongs with a T05 lowering follow-up, not T06.
+
+**Scope note (T06, correcting a T05 leftover)**: T05's verify and bytecode.rs
+ recorded `StorePtr` as `v ptr →` (Δ−1, min 2), but the opcode pops *both* the
+ value and the pointer (Δ−2) — BYTECODE.md §5.16 always described the two-pop
+ form. T06 corrected the Δdepth to **−2** in `verify.rs`, `bytecode.rs` and
+ BYTECODE.md to match the lowering order and the VM dispatch; the verifier's
+ `store_ptr_depth_balanced_verifies` test was updated accordingly. This is the
+ only T05-committed opcode encoding T06 touched.
 
 **Depends on**: T05.
 **Refs**: PLAN §4, D2, D5.
@@ -177,16 +205,16 @@ test asserting suspend/resume across an addr-promoted local is mandatory.
 
 ## T07 — CLI overhaul (F7; D6)
 
-- [ ] `clap` (derive) adopted for `fleen-vm`, `flint`, `fleen-verify`
-- [ ] Uniform flags: `--project <dir>`, `-h/--help`, `-V/--version`,
+- [x] `clap` (derive) adopted for `fleen-vm`, `flint`, `fleen-verify`
+- [x] Uniform flags: `--project <dir>`, `-h/--help`, `-V/--version`,
       `--quiet`, `--no-color`; program args after `--` for `fleen-vm`/`flint run`
-- [ ] `flint` subcommands get per-command help text; exit codes 0/1/2
+- [x] `flint` subcommands get per-command help text; exit codes 0/1/2
       documented in help and covered by tests
-- [ ] Shared span-diagnostic pretty-printer module: `file:line:col` header,
+- [x] Shared span-diagnostic pretty-printer module: `file:line:col` header,
       source line, `^^^^` underline, indented `note:`/`suggestion:` lines
-- [ ] Color via plain ANSI; disabled by `--no-color` or set `NO_COLOR`;
+- [x] Color via plain ANSI; disabled by `--no-color` or set `NO_COLOR`;
       `--quiet` suppresses non-error output
-- [ ] Tests: CLI-level (exit codes, help/version text, NO_COLOR) — not `.fln`
+- [x] Tests: CLI-level (exit codes, help/version text, NO_COLOR) — not `.fln`
       fixtures
 
 **Depends on**: nothing (parallel-safe with T01–T06).
@@ -200,21 +228,39 @@ alternative to reject is *this ticket*, not to silently hand-roll.
 
 ## T08 — std distribution + flint addressing (F10; D8)
 
-- [ ] One shared std-resolution module: `FLINT_STD_PATH` →
+- [x] One shared std-resolution module: `FLINT_STD_PATH` →
       `$FLINT_HOME/std/<compiler-version>/` → embedded copy (order per D8)
-- [ ] Strict version check on an external std: mismatch = hard error naming
+- [x] Strict version check on an external std: mismatch = hard error naming
       both versions (never silent fallback)
-- [ ] `flint check --std`: reports which copy is in effect + its version
-- [ ] Release-package layout fixed: archives carry `std/` at a documented
+- [x] `flint check --std`: reports which copy is in effect + its version
+- [x] Release-package layout fixed: archives carry `std/` at a documented
       path; install step copies it to `$FLINT_HOME/std/<version>/` (the copy
       step itself lands with T09's packaging)
-- [ ] Embedded copy stays the default and the `cargo test` surface (0.0.3 D8
+- [x] Embedded copy stays the default and the `cargo test` surface (0.0.3 D8
       unchanged)
-- [ ] Tests: `tests/projects/` fixtures — resolution order, env override,
-      version-mismatch error, embedded fallback
+- [x] Tests: 11 `std_resolver` unit tests (order, env override,
+      version-mismatch error, missing-path/file fallback, embedded fallback)
+      + `flint check --std` smoke (see Implementation note; the resolution
+      order and error cases are covered at the unit layer, not via
+      `tests/projects/` fixtures)
 
 **Depends on**: nothing for the resolution module; archive layout contract
 shared with T09.
+**Implementation (2026-11-0X)**:
+- `std_resolver.rs` in `fleen-compiler` (shared by both `flint-cli` and the
+  `cargo fln` driver via the compiler crate) implements D8's three-tier order:
+  `FLINT_STD_PATH` → `$FLINT_HOME/std/<compiler-version>/` → embedded.
+- External std is validated via a `VERSION` file at the std tree root; a
+  mismatch or missing file is a hard error (`VersionMismatch` /
+  `NoVersionFile`), never a silent fallback to embedded.
+- `flint check --std` reports the effective source, path, and version.
+- `std_src::files_from_dir` loads an external std tree for the compiler;
+  the embedded `std_src::files` remains the default and the `cargo test`
+  surface (0.0.3 D8 unchanged).
+- Tests: 11 `std_resolver` unit tests (order, env override, version mismatch,
+  missing path/file fallback, embedded fallback); `flint check --std` smoke
+  verified.
+
 **Refs**: PLAN §6, D8.
 
 ---

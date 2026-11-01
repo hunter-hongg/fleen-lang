@@ -64,6 +64,8 @@ pub enum PayloadKind {
     Func,
     Future,
     Channel,
+    Ptr,
+    Cell,
 }
 
 impl PayloadKind {
@@ -84,6 +86,8 @@ impl PayloadKind {
             PayloadKind::Func => "function",
             PayloadKind::Future => "Future",
             PayloadKind::Channel => "channel",
+            PayloadKind::Ptr => "ptr",
+            PayloadKind::Cell => "cell",
         }
     }
 }
@@ -107,6 +111,8 @@ impl Value {
             Value::Func(_) => PayloadKind::Func,
             Value::Future(_) => PayloadKind::Future,
             Value::Channel(_) => PayloadKind::Channel,
+            Value::Ptr(_) => PayloadKind::Ptr,
+            Value::Cell(_) => PayloadKind::Cell,
         }
     }
 }
@@ -188,6 +194,20 @@ pub enum Value {
     /// Channel handle (0.0.4 T07).  Shared buffer via `Rc<RefCell<ChannelInner>>`
     /// — aliasing is the language semantics (SPEC §11 exception, like Future).
     Channel(Rc<RefCell<ChannelInner>>),
+    /// Pointer value (0.0.5 T06): a stable heap cell handle.  `addr x`
+    /// promotes `x`'s slot to a `Rc<RefCell<Value>>` cell (promote-on-addr,
+    /// PLAN §4) and this variant holds a handle to that cell.  Not serialized
+    /// (no `.flnc` tag), same rule as Future/Channel.  Typeck makes `ptr<T>`
+    /// non-Copy and move-only (D1), so a bare *handle load* clones the `Rc`
+    /// (BYTECODE.md §5.16) while `clone p` is a typeck error.
+    Ptr(Rc<RefCell<Value>>),
+    /// Internal marker stored in a local/global slot that `AddrOf` promoted
+    /// to a stable heap cell (0.0.5 T06).  Never appears on the operand stack
+    /// from compiled code: local/global access paths dereference it
+    /// transparently so reads/writes before and after promotion are
+    /// semantically unchanged.  Holding the `Rc` here — not a bare stack index
+    /// — is what keeps frames movable across suspend/resume.
+    Cell(Rc<RefCell<Value>>),
 }
 
 impl fmt::Display for Value {
@@ -234,6 +254,8 @@ impl fmt::Display for Value {
             Value::Future(_) => write!(f, "<future>"),
             // A channel handle — renders as <channel cap=N>.
             Value::Channel(inner) => write!(f, "<channel cap={}>", inner.borrow().cap),
+            Value::Ptr(_) => write!(f, "<ptr>"),
+            Value::Cell(_) => write!(f, "<cell>"),
         }
     }
 }
