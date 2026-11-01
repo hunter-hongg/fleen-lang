@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run full native test suite
+        run: cargo test --workspace
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            shortname: x86_64-linux-gnu
+          - target: x86_64-unknown-linux-musl
+            shortname: x86_64-linux-musl
+          - target: aarch64-unknown-linux-gnu
+            shortname: aarch64-linux
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross-compilation targets
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+      - name: Set VERSION from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+      - name: Package archive
+        run: bash scripts/package-release.sh "${{ matrix.target }}" "$VERSION" "fleen-$VERSION-${{ matrix.shortname }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleen-${{ matrix.shortname }}
+          path: target/release-artifacts/*.tar.gz
+
+  build-macos-x86:
+    needs: test
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add target
+        run: rustup target add x86_64-apple-darwin
+      - name: Set VERSION from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --release --workspace --target x86_64-apple-darwin
+      - name: Package archive
+        run: bash scripts/package-release.sh x86_64-apple-darwin "$VERSION" "fleen-$VERSION-x86_64-macos"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleen-x86_64-macos
+          path: target/release-artifacts/*.tar.gz
+
+  build-macos-arm:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add target
+        run: rustup target add aarch64-apple-darwin
+      - name: Set VERSION from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --release --workspace --target aarch64-apple-darwin
+      - name: Package archive
+        run: bash scripts/package-release.sh aarch64-apple-darwin "$VERSION" "fleen-$VERSION-aarch64-macos"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleen-aarch64-macos
+          path: target/release-artifacts/*.tar.gz
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Set VERSION from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --release --workspace --target x86_64-pc-windows-msvc
+      - name: Smoke test std.io.read_line
+        shell: pwsh
+        run: |
+          $smoke = @'
+          import std.io;
+          func main() {
+              line = std.io.read_line();
+              std.io.println("[", line, "]");
+          }
+          '@
+          Set-Content -Path "target\smoke.fln" -Value $smoke -Encoding UTF8
+          $output = ("hello" | & "target\x86_64-pc-windows-msvc\release\fleen-vm.exe" "target\smoke.fln" 2>&1) -join "`n"
+          if ($output -notmatch '\[hello\]') {
+              Write-Error "read_line smoke failed: output was '$output'"
+              exit 1
+          }
+      - name: Package archive
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 -TargetTriple x86_64-pc-windows-msvc -Version "$env:VERSION" -ArchiveBase "fleen-$env:VERSION-x86_64-windows"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleen-x86_64-windows
+          path: target/release-artifacts/*.zip
+
+  publish:
+    needs: [test, build-linux, build-macos-x86, build-macos-arm, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --title "Fleen $VERSION" --notes "Fleen $VERSION release" || true
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber

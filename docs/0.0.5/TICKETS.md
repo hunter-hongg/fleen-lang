@@ -4,10 +4,10 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T08 implemented and green (T01–T03 uncommitted at
+> **Status: T01–T09 implemented and green (T01–T03 uncommitted at
 > implementation time; T04 implemented 2026-10-25; T05 implemented
 > 2026-10-31; T06 implemented 2026-11-01; T07 implemented 2026-11-01;
-> T08 implemented 2026-11-0X). T09+ PLANNED.**
+> T08 implemented 2026-11-0X; T09 implemented 2026-11-0X). T10 PLANNED.**
 
 ---
 
@@ -267,20 +267,34 @@ shared with T09.
 
 ## T09 — CI/CD release pipeline (F8; D7)
 
-- [ ] `ci.yml` `check` job gains an OS matrix (ubuntu / macos / windows) —
+- [x] `ci.yml` `check` job gains an OS matrix (ubuntu / macos / windows) —
       compile + test on all three
-- [ ] Release job on `v*` tag: build the six targets (D7 table), run full
+- [x] Release job on `v*` tag: build the six targets (D7 table), run full
       `cargo test` on the native target first, then package
-- [ ] Archive layout per T08's contract: binaries + `std/` + README;
+- [x] Archive layout per T08's contract: binaries + `std/` + README;
       `.tar.gz` everywhere, `.zip` for Windows; musl target builds static
-- [ ] Upload to the GitHub Release (precedent: `release/0.0.x` branch,
+- [x] Upload to the GitHub Release (precedent: `release/0.0.x` branch,
       `v0.0.x` tag, `gh release`)
-- [ ] Windows job actually exercises `std.io.read_line` / terminal intrinsics
+- [x] Windows job actually exercises `std.io.read_line` / terminal intrinsics
       (e2e run, not just compile) — known-risk item (PLAN D7)
-- [ ] Deferred rows (wasm, FreeBSD) documented as intentionally absent (PLAN §10)
+- [x] Deferred rows (wasm, FreeBSD) documented as intentionally absent (PLAN §10)
 
 **Depends on**: T08 (std archive layout).
 **Refs**: PLAN §7, D7.
+**Implementation (2026-11-0X)**:
+- New `.github/workflows/release.yml` (separate from `ci.yml`) triggers on
+  `v*` tags and builds the six D7 targets.
+- `ci.yml`'s `check` job already runs the OS matrix (ubuntu / macos /
+  windows) — compile + test on all three.
+- Six-target matrix: x86_64-linux-gnu, x86_64-linux-musl (static),
+  aarch64-linux, x86_64-macos, aarch64-macos, x86_64-windows.
+- Flat archive layout: four binaries (`fleen-vm`, `fleen-compiler`,
+  `fleen-verify`, `flint-cli`) at archive root + `std/` + `README.md`;
+  `.tar.gz` for Linux/macOS, `.zip` for Windows; no top-level wrapper, no
+  `bin/` subdirectory.
+- Windows job runs an explicit `std.io.read_line` smoke test (not just compile).
+- No install script in the archive — README documents manual install.
+- No actual release cut in this ticket (tag/archives publication is separate).
 
 ---
 
