@@ -864,13 +864,15 @@ b = true as string;  // "true"
 
 > **Version note**: not in 0.0.1; `box<T>` / `deref` / `ref` / `move` / `clone` were officially
 > adopted in **0.0.2** (see `docs/0.0.2/PLAN.md` §3.1–3.3 for decisions and details).
-> `ptr` / `addr` / `unsafe` remain unimplemented (0.0.5).
+> `ptr` / `addr` / `deref_ptr` and the `unsafe` / `trusted` func modifiers landed in
+> **0.0.5** (§10.7 and §12).
 
 ```fleen
 box<T>    // heap pointer, safe, single ownership (0.0.2)
 ref T     // read-only borrow, function parameters only (0.0.2)
-ptr<T>    // raw pointer, unsafe (0.0.5)
-addr x    // take the address (0.0.5)
+ptr<T>    // raw pointer: non-Copy, move-only, never storable (0.0.5, §10.7)
+addr x    // take the address of a place — an unsafe op (0.0.5, §10.7)
+deref_ptr p  // read / write through a ptr — an unsafe op (0.0.5, §10.7)
 ```
 
 ### 10.1 Ownership Model
@@ -1018,6 +1020,49 @@ concurrent code**.
   borrowing world are cleanly separated; `Mutex`/`Atomic`-style shared-memory containers are
   not introduced in 0.0.4 (D3)
 
+### 10.7 Pointers: `ptr<T>` / `addr` / `deref_ptr` (0.0.5, D1–D5)
+
+0.0.5 adds the raw-pointer layer sketched in §10's version note.  Because Fleen has **no
+borrow checker**, the rule is deliberately coarser than Rust's: **every pointer use is an
+unsafe operation** — creating one (`addr`) as well as reading and writing through one (D2).
+
+```fleen
+unsafe func raw_op(x: int): int {
+    p = addr x;           // p: ptr<int> — the address of a place (an unsafe op)
+    n = deref_ptr p;      // read through p: a copy out of the referent
+    deref_ptr p = n + 1;  // write through p; read and write share the spelling
+    n
+}
+
+trusted func safe_wrapper(x: int): int = raw_op(x)   // attested wrapper, callable anywhere
+```
+
+- **`ptr<T>`** (D1): recognized in type position like `Future<T>` / `channel<T>` (a bare
+  `ptr` is not a type); **non-Copy, move-only** — `move p` works, `clone p` is
+  `CloneOfPointer`.  Pointers are **non-storable** (`PtrNotStorable`): no struct fields,
+  array elements, box cells, or globals — a pointer lives in a local, a parameter, or a
+  return value, because every one of those storage sites would hand out a pointer from
+  safe code, breaking D2's "the pointer-exists state sits behind `unsafe`".
+- **`addr x`** (D2): takes the address of a place (local, global, struct field, array
+  element, or box interior — one level deep).  It **rejects immutable bases**
+  (`AddrOfImmutable` — a `const`, or a parameter: parameters are immutable bindings) and
+  **`ref`-parameter bases** (`AddrOfRefParam` — a pointer would outlive the borrow's
+  write protection).  Unlike Rust's safe `&`, `addr` is itself unsafe: without a borrow
+  checker, safe code could move the referent out from under the pointer (`y = move x`),
+  and no diagnostic can catch that half — so the entire "pointer exists at all" state
+  sits behind `unsafe` (D2's cost-accepted note).
+- **`deref_ptr p`**: the settled read/write spelling through a pointer (the T02 decision
+  on PLAN §3.2's one open syntax question).  `deref` itself stays **box-only**: overloading
+  it for `ptr` in 0.0.5 would silently re-type existing safe call sites.  `deref_ptr` and
+  `addr` are reserved words, extending T01's four-word set to five.
+- **VM representation** (T06): `AddrOf` promotes the referent slot to a stable heap cell
+  (promote-on-addr; `Value::Ptr` holds the cell handle and is **not serialized**); `LoadPtr`
+  / `StorePtr` execute through the cell, and a malformed handle is a defensive
+  `RuntimeError` backstop — the last line, see §12's known limit.
+- **Boundary rule** (D4): a `ptr<T>` may not be captured across an `await`, moved into a
+  task, or sent through a channel — `PtrAcrossBoundary`, the sibling of `RefInAsync`;
+  `async unsafe func` / `unsafe async func` are accepted and gated the same way (§12, D4).
+
 ---
 
 ## 11. Modules and Imports (0.0.3 V05)
@@ -1091,22 +1136,55 @@ is empty).
 
 ## 12. unsafe / trusted
 
-```fleen
-unsafe raw_op = () => {
+> **Superseded draft**: the original sketch (below) spelled these as **lambdas** —
+> `unsafe raw_op = () => { … }`.  Fleen has no closures until 0.1.0, so 0.0.5 settled
+> the **func-modifier form** instead (D3, `docs/0.0.5/PLAN.md`); the lambda sketch is
+> retained only as history.
+
+~~~text
+unsafe raw_op = () => {        // 0.0.1 draft — superseded by the D3 modifier form
     // unsafe operation
 }
 
 trusted safe_wrapper = () => {
     // the author has verified this is safe
 }
+~~~
 
-func normal() {
-    safe_wrapper()      // calling trusted is allowed
-    // raw_op()         // error: cannot call unsafe
+**Implemented in 0.0.5 (T03/T04, D3/D4)** — as function modifiers, exactly mirroring
+`async func` (0.0.4):
+
+```fleen
+unsafe func raw_op(x: int): int {
+    p = addr x;          // an unsafe op, legal only here or in a trusted body
+    n = deref_ptr p;     // pointer ops need the same context (§10.7, D2)
+    n
+}
+
+trusted func safe_wrapper(x: int): int = raw_op(x)   // attested; callable anywhere
+
+func normal(x: int) {
+    safe_wrapper(x)     // calling trusted is allowed
+    // raw_op(x)        // error: UnsafeCallOutsideUnsafe
 }
 ```
 
-**Not implemented in 0.0.1 (0.0.5).**
+Rules (0.0.5, D3 — lexical, no call-graph analysis):
+
+| Construct | Body may contain unsafe ops | Callable from |
+|-----------|------------------------------|----------------|
+| `unsafe func` | yes | `unsafe` / `trusted` bodies only |
+| `trusted func` | yes | anywhere (the author attests its safety) |
+| plain `func` | no | anywhere |
+
+- `unsafe` / `trusted` compose with `async` in either order (`async unsafe func` /
+  `unsafe async func` → one AST state, T02/D4); calling or awaiting an unsafe async
+  function needs an unsafe/trusted context, same as the sync form.
+- **Known limit (T03)**: an `unsafe func` called **through a function value** escapes the
+  static call check (first-class functions, the same known limit as 0.0.4's channel
+  boundary); the VM's `LoadPtr` / `StorePtr` backstop (T06) is the last line of defense.
+- **Rejected** (D3): the lambda form (needs closures — 0.1.0) and an `unsafe { }` block
+  form (function-level gating keeps 0.0.5 to one context-tracking rule).
 
 ---
 
@@ -1258,6 +1336,12 @@ the single-threaded cooperative executor, and message-passing `channel<T>` with 
 borrow-free boundary (T01–T09 implemented; see `docs/0.0.4/PLAN.md` decisions D1–D6 and
 `docs/0.0.4/TICKETS.md`).**
 
+**0.0.5 goal: the pointer/unsafe layer — `unsafe` / `trusted` func modifiers, `ptr<T>` /
+`addr` / `deref_ptr` gated behind unsafe contexts, pointers never crossing the async world
+— plus toolchain maturity: the clap CLI standard, the six-target release pipeline, and std
+distribution (T01–T10 implemented; see `docs/0.0.5/PLAN.md` decisions D1–D8 and
+`docs/0.0.5/TICKETS.md`).**
+
 ---
 
 ## 18. Roadmap
@@ -1267,7 +1351,7 @@ borrow-free boundary (T01–T09 implemented; see `docs/0.0.4/PLAN.md` decisions 
 | 0.0.2 | `move` / `clone` / `box<T>` / `ref` / `?` / ASI / `as` — **implemented; see `docs/0.0.2/PLAN.md` for planning and implementation records** |
 | 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; iterator helpers — **implemented (V07)**; flint — **implemented (V08)**; integrated & gated (V09); docs & version synced (V10). 0.0.3 is **complete** |
 | 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
-| 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` |
+| 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` / `deref_ptr` (T01–T06) + toolchain maturity: clap CLI (T07), six-target tag-triggered release pipeline (T09), std distribution with strict version pinning (T08) — **implemented (T01–T10)**; see `docs/0.0.5/PLAN.md` (D1–D8) and `docs/0.0.5/TICKETS.md` |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks

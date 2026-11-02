@@ -3,6 +3,70 @@
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and version semantics follow [SPEC.md](SPEC.md) §13 (`0.0.x` = early development, unstable API).
 
+## 0.0.5 — Careful Hedgehog (2026-11-02) 🦔
+
+The release that makes raw pointers explicit and matures the toolchain: `unsafe` / `trusted`
+function modifiers gate a new raw-pointer layer (`ptr<T>` / `addr` / `deref_ptr`), pointers
+never cross the async world, and the toolchain gets a standardized CLI, a six-target
+release pipeline, and a version-pinned std distribution. Planning and design decisions:
+[docs/0.0.5/PLAN.md](docs/0.0.5/PLAN.md) (D1–D8); implementation tickets:
+[docs/0.0.5/TICKETS.md](docs/0.0.5/TICKETS.md) (T01–T10 all landed).
+
+### Language Features
+
+- **Raw pointers** (T01/T02/T05/T06, D1/D2): `ptr<T>` is a type in constructor position,
+  **non-Copy and move-only** (`clone p` → `CloneOfPointer`) and **non-storable**
+  (`PtrNotStorable` — no struct fields, array elements, box cells, or globals); `addr x`
+  takes the address of a place (local, global, struct field, array element, box interior;
+  immutable bases and `ref`-parameter bases are rejected); `deref_ptr p` reads/writes
+  through the pointer (the settled T02 spelling — `deref` itself stays box-only). Every
+  pointer use is an **unsafe operation** (D2): creating one and using one both require an
+  `unsafe`/`trusted` body, because Fleen has no borrow checker and safe code could move the
+  referent out from under a pointer.
+- **`unsafe` / `trusted` function modifiers** (T03, D3): `unsafe func` bodies may contain
+  unsafe ops and are callable only from unsafe/trusted bodies (`UnsafeCallOutsideUnsafe`);
+  `trusted func` bodies may also contain them but are callable from anywhere (the author
+  attests). They compose with `async` in either order (D4). The rule is lexical, mirroring
+  0.0.4's `RefInAsync` — no call-graph analysis.
+- **Pointer boundary rule** (T04, D4): a `ptr<T>` may not be captured across an `await`,
+  moved into a task, or sent through a channel — `PtrAcrossBoundary`, the sibling of
+  `RefInAsync`; `async unsafe func` / `unsafe async func` parse and gate the same way.
+
+### Toolchain
+
+- **Bytecode v5** (T05/T06): `AddrOf` / `LoadPtr` / `StorePtr` (0xC8–0xCA) in the reserved
+  expansion band; `Value::Ptr` holds a stable-cell handle (promote-on-addr) and is **not
+  serialized** — v1–v4 `.flnc` fixtures still decode, verify and execute unchanged, and a
+  v5 opcode in a v1–v4 module is rejected (`V5OpcodeInV1V2V3V4Module`). `.flnc` version
+  writes `5`, readers accept `{1, 2, 3, 4, 5}`. Specification: [docs/BYTECODE.md](docs/BYTECODE.md)
+  §5.16
+- **CLI standard** (T07, D6): `clap` (derive) for `fleen-vm`, `flint`, and `fleen-verify`;
+  uniform `--project` / `-h/--help` / `-V/--version` / `--quiet` / `--no-color`; formal
+  exit codes (0 success, 1 compile/resolve/verify/runtime failure, 2 usage/IO);
+  rustc-style colored span diagnostics (plain ANSI, `NO_COLOR` honored)
+- **Release pipeline** (T09, D7): `.github/workflows/release.yml` triggers on `v*` tags and
+  builds six targets — x86_64/aarch64 Linux (musl static included), x86_64/aarch64 macOS,
+  x86_64 Windows — into flat archives (four binaries + `std/` + README; `.tar.gz` for
+  Linux/macOS, `.zip` for Windows); the Windows job runs an explicit `std.io.read_line`
+  smoke test. No install script — README documents manual install
+- **std distribution** (T08, D8): one shared std-resolution order — `FLINT_STD_PATH` →
+  `$FLINT_HOME/std/<compiler-version>/` → embedded — with a strict version check (a mismatch
+  is a hard error naming both versions, never a silent fallback); `flint check --std`
+  reports the effective source
+- **Docs/status**: T10 synced the design spec (DESIGN §10.7/§12/§17/§18), the EBNF grammar,
+  the SPEC quick reference and feature table, and the README; workspace and `std/VERSION`
+  bump to 0.0.5. Release publication (tag/archives) is the separate step.
+
+### ⚠️ Breaking
+
+- **`ptr`, `addr`, `deref_ptr`, `unsafe`, and `trusted` become reserved words**: 0.0.4
+  programs using them as identifiers must rename them. Nothing else breaks — `deref`
+  remains box-only (the pointer spelling is additive, so existing safe call sites are
+  untouched), and every prior `.flnc` fixture still verifies and executes.
+- **Known limit (documented, T03)**: an `unsafe func` called *through a function value*
+  escapes the static call check (first-class functions); the VM's `LoadPtr` / `StorePtr`
+  backstop is the last line of defense.
+
 ## 0.0.4 — Patient Ants (2026-10-25) 🐜
 
 The release that lets tasks talk: cooperative `async` / `await` over `Future<T>` coroutine

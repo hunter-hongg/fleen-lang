@@ -14,10 +14,11 @@
 > functions, and pointers — like borrows before them — never cross an async /
 > task / channel boundary.
 >
-> **Status**: PLANNED — no ticket started.  Decisions D1–D8 below are settled
-> at planning level (2026-10-25); each names the alternative it rejected and
-> what the choice locks.  They may be revised only by a new entry here, not
-> silently in a ticket card.
+> **Status**: T01–T10 implemented and green (T10: 2026-11-02 — the release
+> cut itself, tag and archives, is the separate publication step).  Decisions
+> D1–D8 below are settled at planning level (2026-10-25); each names the
+> alternative it rejected and what the choice locks.  They may be revised
+> only by a new entry here, not silently in a ticket card.
 
 ---
 

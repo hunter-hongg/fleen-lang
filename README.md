@@ -5,9 +5,10 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.4 · Patient Ants 🐜 · cooperative concurrency** — the `async` /
-> `await` / `channel<T>` release, complete (T01–T10; built on **0.0.3 · Busy Beaver 🦫**,
-> **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
+> Current version **0.0.5 · Careful Hedgehog 🦔 · the pointer/unsafe layer** — the
+> `unsafe` / `trusted` / `ptr<T>` / `addr` / `deref_ptr` release plus the first
+> toolchain-maturity pass, complete (T01–T10; built on **0.0.4 · Patient Ants 🐜**,
+> **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
 
 ## Language at a Glance
 
@@ -63,6 +64,21 @@ point. The async world is borrow-free: no `ref` crosses an await/task/channel bo
 async bodies cannot write globals, so no borrow checker and no shared memory.
 `async` / `await` / `channel` are now reserved words (the only source breaking change of 0.0.4).
 See [docs/0.0.4/PLAN.md](docs/0.0.4/PLAN.md) and [docs/0.0.4/TICKETS.md](docs/0.0.4/TICKETS.md).
+
+**0.0.5 · The pointer/unsafe layer + toolchain maturity**: with no borrow checker, Fleen makes
+pointers explicit — `unsafe func` / `trusted func` modifiers gate every pointer use
+(`unsafe`/`trusted` are author-attestations, `trusted` is callable anywhere); `ptr<T>`
+(non-Copy, move-only, never storable), `addr x`, and `deref_ptr p` (read/write share the
+spelling) are all unsafe operations (D2); a pointer never crosses an await/task/channel
+boundary (`PtrAcrossBoundary`, D4); bytecode v5 adds `AddrOf` / `LoadPtr` / `StorePtr`
+(0xC8–0xCA). The toolchain side: a clap-based CLI standard across `fleen-vm` / `flint` /
+`fleen-verify` (uniform flags, formal exit codes, rustc-style colored span diagnostics),
+a six-target tag-triggered release pipeline (flat archives carrying the binaries, `std/`,
+and a README; musl static build included), and std distribution with strict version
+pinning (`FLINT_STD_PATH` → `$FLINT_HOME/std/<version>/` → embedded, a mismatch is a hard
+error, D8). `ptr` / `addr` / `deref_ptr` / `unsafe` / `trusted` are now reserved words
+(the only source breaking change of 0.0.5).
+See [docs/0.0.5/PLAN.md](docs/0.0.5/PLAN.md) and [docs/0.0.5/TICKETS.md](docs/0.0.5/TICKETS.md).
 
 ## Quick Start
 

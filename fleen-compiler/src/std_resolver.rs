@@ -2,7 +2,7 @@
 //!
 //! Provides a three-tier lookup order for std sources:
 //! 1. FLINT_STD_PATH environment variable (explicit override)
-//! 2. $FLINT_HOME/std/<compiler-version>/ (release copy)
+//! 2. `$FLINT_HOME/std/<compiler-version>/` (release copy)
 //! 3. Embedded copy (fleen-compiler/src/std_src.rs)
 //!
 //! External std copies must match the compiler version exactly; a mismatch
@@ -28,7 +28,7 @@ pub const VERSION_FILE: &str = "VERSION";
 pub enum StdSource {
     /// Explicit override via FLINT_STD_PATH.
     EnvVar(PathBuf),
-    /// Release copy at $FLINT_HOME/std/<version>/.
+    /// Release copy at `$FLINT_HOME/std/<version>/`.
     FlintHome(PathBuf),
     /// Embedded copy (std_src.rs).
     Embedded,
@@ -133,7 +133,7 @@ impl StdResolver {
     /// Resolve the std source using the three-tier lookup order.
     ///
     /// Tier 1: FLINT_STD_PATH (explicit override)
-    /// Tier 2: $FLINT_HOME/std/<version>/
+    /// Tier 2: `$FLINT_HOME/std/<version>/`
     /// Tier 3: Embedded copy (always available)
     pub fn resolve(&self) -> Result<StdSource, ResolveError> {
         // Tier 1: FLINT_STD_PATH (explicit override)

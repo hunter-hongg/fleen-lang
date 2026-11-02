@@ -4,21 +4,23 @@
 > tests.  Decisions D1–D8 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T09 implemented and green (T01–T03 uncommitted at
+> **Status: T01–T10 implemented and green (T01–T03 uncommitted at
 > implementation time; T04 implemented 2026-10-25; T05 implemented
 > 2026-10-31; T06 implemented 2026-11-01; T07 implemented 2026-11-01;
-> T08 implemented 2026-11-0X; T09 implemented 2026-11-0X). T10 PLANNED.**
+> T08 implemented 2026-11-01; T09 implemented 2026-11-01; T10 implemented
+> 2026-11-02).  All tickets landed; the release cut (tag/archives) is the
+> separate publication step.**
 
 ---
 
 ## T01 — Keywords + lexer (F9)
 
-- [ ] Reserve `ptr`, `addr`, `unsafe`, `trusted` in the lexer keyword table
-- [ ] `TokenKind::{Ptr, Addr, Unsafe, Trusted}` wired through `is_keyword` /
+- [x] Reserve `ptr`, `addr`, `unsafe`, `trusted` in the lexer keyword table
+- [x] `TokenKind::{Ptr, Addr, Unsafe, Trusted}` wired through `is_keyword` /
       `keyword_str` / `Display`
-- [ ] Reserved-word enforcement follows the 0.0.4 T01 path: misuse surfaces at
+- [x] Reserved-word enforcement follows the 0.0.4 T01 path: misuse surfaces at
       the existing statement/expr entry guards — no new `ReservedWord` kind
-- [ ] Tests: lexer unit tests (keyword tokens, metadata, prefix-safety) +
+- [x] Tests: lexer unit tests (keyword tokens, metadata, prefix-safety) +
       `tests/lexer/valid/ptr_keywords.fln` (a *valid* file only — reserving a
       word never fails tokenization)
 
@@ -52,8 +54,9 @@ respectively — `addr` joins the unary prefix group (`box deref move clone addr
       `addr`-place fixtures and parser/typeck unit tests); lowering stubs
       reject ptr programs with `UnsupportedFeature` at the correct phase
       (opcodes land in T05)
-- [ ] Update DESIGN §10 (`ptr` / `addr` lines) **deferred to T10** — record
-      here, don't edit early
+- [x] Update DESIGN §10 (`ptr` / `addr` lines) **deferred to T10** — record
+      here, don't edit early (done in the T10 doc sync: DESIGN §10 header note,
+      the §10 overview block, and the new §10.7)
 
 **Depends on**: T01.
 **Refs**: PLAN §3.2, §3.3, D1, D2.
@@ -300,18 +303,23 @@ shared with T09.
 
 ## T10 — Integration matrix + docs sync + version bump (F11)
 
-- [ ] Full §11 matrix green; `cargo fmt` / `clippy -D warnings` / `test` /
-      `doc` clean
-- [ ] Docs sync: DESIGN §10 (ptr/addr lines) and §12 (lambda draft → D3
+- [x] Full §11 matrix green; `cargo fmt` / `clippy -D warnings` / `test` /
+      `doc` clean (verified on master before the T10 commit; note: the flint
+      e2e fixtures need a writable `$FLINT_HOME` — a read-only filesystem is an
+      environment failure, not a code failure)
+- [x] Docs sync: DESIGN §10 (ptr/addr lines) and §12 (lambda draft → D3
       modifier form); §13 roadmap + §18 roadmap rows; SPEC §14 quick reference
       + §15 feature table; SYNTAX.ebnf; README version line
       (**0.0.5 · Careful Hedgehog 🦔**); CHANGELOG entry
-- [ ] CHANGELOG records the breaking change: `ptr`/`addr`/`unsafe`/`trusted`
-      now reserved words; DESIGN §12's superseded lambda sketch explicitly
-      marked as superseded by D3
-- [ ] Document the known limit from T03 (unsafe fn through a function value
-      escapes the static call check; VM backstop is the last line)
-- [ ] Workspace version → 0.0.5; `.flnc` writer version 5, readers `{1..5}`
+- [x] CHANGELOG records the breaking change: `ptr`/`addr`/`unsafe`/`trusted`
+      now reserved words (plus `deref_ptr`, T02); DESIGN §12's superseded
+      lambda sketch explicitly marked as superseded by D3
+- [x] Document the known limit from T03 (unsafe fn through a function value
+      escapes the static call check; VM backstop is the last line) — in
+      DESIGN §12 and the T03 ticket note
+- [x] Workspace version → 0.0.5; `.flnc` writer version 5, readers `{1..5}`
+      (writer/reader state landed with T05; the workspace and `std/VERSION`
+      bump is this ticket)
 - [ ] Release publication (tag/archives) is **separate** — T09 provides the
       pipeline; cutting the actual release follows the 0.0.4 precedent and is
       not part of this ticket

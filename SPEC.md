@@ -535,6 +535,17 @@ boundary rules, lowering, opcodes 0xC0–0xC7, executor, channels, hardening, in
 fixtures); T10 synced the docs and bumped the version to 0.0.4 (release publication —
 tag/archives — is separate and not yet performed).**
 
+**0.0.5 goal: the pointer/unsafe layer — `unsafe` / `trusted` func modifiers, `ptr<T>` /
+`addr` / `deref_ptr` gated behind unsafe contexts (no borrow checker: every pointer use is
+an unsafe op, D2), pointers never crossing the async world (`PtrAcrossBoundary`, D4) —
+plus toolchain maturity: a clap-based CLI standard (T07), a six-target tag-triggered
+release pipeline (T09), and std distribution with strict version pinning (T08; plan in
+`docs/0.0.5/PLAN.md`, decisions D1–D8 settled, tickets in `docs/0.0.5/TICKETS.md`).
+T01–T09 are implemented and green (keywords, ptr/addr frontend, unsafe gating, boundary
+rules, opcodes 0xC8–0xCA + bytecode v5, the VM pointer representation, the CLI overhaul,
+std distribution, the release pipeline); T10 synced the docs and bumped the version to
+0.0.5 (release publication — tag/archives — is separate and not yet performed).**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -553,6 +564,8 @@ Range    // builtin Copy type, start..end end-exclusive (0.0.3 V04)
 MyStruct // a user-defined struct name is a type (0.0.3 V02)
 Future<T>  // a suspended async coroutine, non-Copy, driven once by `e await` (0.0.4)
 channel<T> // message-passing channel, non-Copy and move-only (0.0.4)
+ptr<T>     // raw pointer, non-Copy and move-only, never storable; every use is an
+           // unsafe op inside an unsafe/trusted body (0.0.5)
 ```
 
 ### Declarations
@@ -683,6 +696,36 @@ std.async.run([producer(move ch), consumer(move peer)]);    // move a handle int
 > read but never write globals; channels are move-only (`clone ch` is an error) and payloads
 > travel by ownership `move`. See `docs/DESIGN.md` §6/§9.6/§9.7/§10.6 and `docs/0.0.4/PLAN.md` D1–D6.
 
+### Pointers and Unsafe (0.0.5)
+
+```fleen
+// creating and using a pointer is an unsafe operation (D2): it needs an
+// unsafe / trusted function body — Fleen has no borrow checker
+unsafe func raw_op(x: int): int {
+    p = addr x;            // p: ptr<int> — take the address of a place
+    n = deref_ptr p;       // read through p (a copy out)
+    deref_ptr p = n + 1;   // write through p
+    n
+}
+
+trusted func safe_wrapper(x: int): int = raw_op(x)   // attested; callable from anywhere
+result = safe_wrapper(42);    // ok — trusted is callable from safe code
+// raw_op(42)                // error: UnsafeCallOutsideUnsafe
+
+async unsafe func risky(n: int): int { n }   // D4: `unsafe async` (either order)
+```
+
+> **Pointer rules (0.0.5)**: `ptr<T>` is non-Copy and move-only (`clone p` is
+> `CloneOfPointer`) and **non-storable** (`PtrNotStorable` — no struct fields, array
+> elements, box cells, or globals: a pointer lives in a local, a parameter, or a return
+> value). `addr` rejects immutable bases (`AddrOfImmutable` — parameters are immutable)
+> and `ref`-parameter bases (`AddrOfRefParam`). A `ptr<T>` never crosses an await/task/
+> channel boundary (`PtrAcrossBoundary`, D4 — sibling of `RefInAsync`). `ptr` / `addr` /
+> `deref_ptr` / `unsafe` / `trusted` are reserved words (the source breaking change of
+> 0.0.5). Known limit: an `unsafe func` called *through a function value* escapes the
+> static call check — the VM backstop on `LoadPtr` / `StorePtr` is the last line.
+> See `docs/DESIGN.md` §10.7/§12 and `docs/0.0.5/PLAN.md` D1–D8.
+
 ### Control Flow
 
 > **Note on semicolons**: 0.0.1 requires explicit semicolons `;`; from 0.0.2 ASI (automatic semicolon insertion) is in place,
@@ -768,7 +811,7 @@ and
 * / %
 as     (type cast, 0.0.2: binds tighter than binary operators, looser than unary prefixes, same as Rust)
 ?      (postfix, 0.0.2)
-box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2)
+box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone new in 0.0.2, addr/deref_ptr in 0.0.5)
 () [i] .f await ?   (postfix suffixes: call, index, field access (0.0.3), `await` (0.0.4), and `?` — bind tightest, chain left-to-right)
 ;       (explicit semicolon: required in 0.0.1, optional from 0.0.2)
 ```
@@ -812,6 +855,14 @@ box deref move clone - !    (unary prefix; box/deref/move/clone are new in 0.0.2
 iterator helpers, and the `flint` package manager); V09 integrated the compatibility fixtures
 and the full §8 matrix; V10 synced the documentation and bumped the version to 0.0.3 (public
 release — tag and archives — is separate and not yet performed).
+
+**Status of 0.0.5**: T01–T10 complete. The pointer/unsafe layer (`ptr<T>` / `addr` /
+`deref_ptr`, the `unsafe` / `trusted` func modifiers, `PtrAcrossBoundary`) and the
+toolchain features (clap CLI standard, six-target release pipeline, std distribution with
+strict version pinning) are implemented and green; bytecode writes v5, readers accept
+`{1, 2, 3, 4, 5}`. T10 synced the documentation and bumped the version to 0.0.5 (release
+publication — tag/archives — is separate and not yet performed; see
+`docs/0.0.5/PLAN.md` and `docs/0.0.5/TICKETS.md`).
 
 ---
 
