@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual re-run path: `gh workflow run release.yml --ref v0.0.5` rebuilds and
+  # republishes without deleting and re-pushing the tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,6 +23,7 @@ jobs:
   build-linux:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +60,11 @@ jobs:
 
   build-macos-x86:
     needs: test
-    runs-on: macos-13
+    # macos-latest (Apple Silicon): the Intel macos-13 image is runner-starved and
+    # queued for hours; the x86_64 target is cross-compiled from the arm runner
+    # (the Rust toolchain ships both std targets and the Apple SDK links either).
+    runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,7 +84,8 @@ jobs:
 
   build-macos-arm:
     needs: test
-    runs-on: macos-14
+    runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -97,6 +106,7 @@ jobs:
   build-windows:
     needs: test
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

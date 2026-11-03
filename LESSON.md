@@ -235,3 +235,38 @@ of a complete instruction with an explicit stop condition. The agent's internal
 
 **Closed when**: the agent acknowledges explicit stop conditions and
 demonstrates waiting for the next user prompt before any further edits.
+
+---
+
+## L8 — Do not pin a release pipeline to a runner image you have not seen work
+
+**When**: the first 0.0.5 release attempt (2026-11-02).
+
+**What happened**: the agent wrote `release.yml` with `runs-on: macos-13` for the
+x86_64 macOS build and `macos-14` for the arm build, then pushed `v0.0.5` and
+walked away.  The release run sat for over a day: six of seven jobs succeeded in
+minutes, but `build-macos-x86` never got a runner at all — `macos-13` was
+runner-starved, and the agent had never seen that label succeed.  The user had to
+notice a day-old stall and ask for the pipeline to be fixed.
+
+**Root cause**: choosing a runner image by recollection ("macos-13 for Intel,
+macos-14 for arm") instead of by evidence, and shipping a release pipeline with
+no `timeout-minutes` — so a queued job waits forever instead of failing
+loudly.  A release pipeline that can silently wait for a day is not a pipeline,
+it is a trap.
+
+**Rule going forward**:
+- When a workflow names a runner image, prefer the label already proven to work
+  in this repo (`macos-latest` after a success; `macos-13` only with a check
+  that it actually schedules), and cross-compile targets instead of waiting for
+  a scarce architecture-specific image.
+- Every build job in a release workflow gets `timeout-minutes` — a starved
+  runner must fail the job, not stall the release.
+- Give tag-triggered release workflows a `workflow_dispatch` path, so a rebuild
+  does not require deleting and re-pushing a published tag.
+- When a run stalls, inspect **which job and which runner label** it is stuck on
+  (`gh api .../jobs` shows `runner_name` and `labels` per job) before assuming
+  the pipeline or the code is at fault.
+
+**Closed when**: no release workflow names a runner image that has not been
+observed to schedule, and every build job carries a timeout.

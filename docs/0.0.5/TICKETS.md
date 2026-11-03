@@ -298,6 +298,16 @@ shared with T09.
 - Windows job runs an explicit `std.io.read_line` smoke test (not just compile).
 - No install script in the archive — README documents manual install.
 - No actual release cut in this ticket (tag/archives publication is separate).
+- **Runner-image correction (2026-11-02, first 0.0.5 release attempt)**: the
+  `build-macos-x86` job pinned `macos-13` and never got a runner — it sat
+  `queued` for over a day while the arm job (`macos-14`) and every other job
+  finished in minutes.  The Intel `macos-13` image is runner-starved; the fix
+  is `macos-latest` on both macOS jobs, with the `x86_64-apple-darwin` target
+  cross-compiled from the arm runner (the Apple SDK links either
+  architecture; `rustup target add x86_64-apple-darwin` provides the std).  Every
+  build job also gained `timeout-minutes: 60` so a starved runner fails the
+  job instead of stalling the release forever, and the workflow gained
+  `workflow_dispatch` so a release can be rebuilt without re-pushing the tag.
 
 ---
 
