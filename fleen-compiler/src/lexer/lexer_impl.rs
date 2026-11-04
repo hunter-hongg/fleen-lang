@@ -319,6 +319,7 @@ impl<'a> Lexer<'a> {
             "deref_ptr" => TokenKind::DerefPtr,
             "unsafe" => TokenKind::Unsafe,
             "trusted" => TokenKind::Trusted,
+            "enum" => TokenKind::Enum,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -622,6 +623,34 @@ mod tests {
         assert!(matches!(tokens[5].kind, TokenKind::Ident(ref s) if s == "ADDR"));
         assert!(matches!(tokens[6].kind, TokenKind::Ident(ref s) if s == "Unsafe"));
         assert!(matches!(tokens[7].kind, TokenKind::Ident(ref s) if s == "Trusted"));
+    }
+
+    #[test]
+    fn tokenize_enum_keyword() {
+        // 0.0.6: `enum` is a reserved word; it no longer lexes as an identifier.
+        let tokens = tokenize("enum").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Enum);
+        // Metadata stays consistent with the reserved-word spelling. The
+        // to_string assertion is load-bearing: `Display` renders keywords via
+        // `keyword_str`, and a keyword variant missing there hits an
+        // `unreachable!` panic on user-error paths (the catch-all `other`
+        // arm makes the omission invisible to the compiler).
+        assert_eq!(TokenKind::Enum.keyword_str(), Some("enum"));
+        assert!(TokenKind::Enum.is_keyword());
+        assert_eq!(TokenKind::Enum.to_string(), "enum");
+    }
+
+    #[test]
+    fn tokenize_enum_keyword_prefix_identifiers() {
+        // The keyword must not swallow longer identifiers that merely start
+        // with it, and keyword spellings are case-sensitive (`Enum` stays an
+        // identifier, like `Result` vs `result`).
+        let tokens = tokenize("enums enum_id EnumX enumx Enum").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "enums"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "enum_id"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "EnumX"));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "enumx"));
+        assert!(matches!(tokens[4].kind, TokenKind::Ident(ref s) if s == "Enum"));
     }
 
     #[test]

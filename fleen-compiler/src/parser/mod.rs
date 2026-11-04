@@ -228,6 +228,11 @@ impl Parser {
             crate::lexer::TokenKind::DerefPtr => "deref_ptr",
             crate::lexer::TokenKind::Unsafe => "unsafe",
             crate::lexer::TokenKind::Trusted => "trusted",
+            // 0.0.6 T01: `enum` joins the same path. It is statement-starting
+            // from day one (unlike the 0.0.5 words before their T02), so
+            // `enum = 1` reaches this rejection instead of the ASI
+            // statement-separator error — the message names the keyword.
+            crate::lexer::TokenKind::Enum => "enum",
             _ => return Ok(()),
         };
         let next_starts_binding = matches!(

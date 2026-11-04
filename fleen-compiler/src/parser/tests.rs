@@ -1425,6 +1425,29 @@ func main() {
     }
 
     #[test]
+    fn reject_enum_as_binding_name() {
+        // 0.0.6: `enum` is reserved (T01). It is statement-starting from day
+        // one, so `enum = 1` passes the statement-entry guard and hits the
+        // `Enum` branch of `reject_keyword_binding_name` — the diagnostic
+        // names the keyword, not the ASI separator error.
+        let err = parse_err("enum = 1;");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("keyword `enum`"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn enum_decl_not_yet_parseable() {
+        // T01 reserves the word only; `enum_decl` lands in T02. The interim
+        // diagnostic is the primary-expression fallback (`enum` starts no
+        // expression), reached through the statement-entry guard.
+        let err = parse_err("enum Shape { Point, Circle(float) }");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
     fn reject_box_as_binding_name() {
         // 0.0.2: `box` is reserved in both type and expression position;
         // `box = 1` hits the BoxType branch of reject_keyword_binding_name

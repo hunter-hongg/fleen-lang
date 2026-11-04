@@ -1,0 +1,5 @@
+// 0.0.6 enum keyword test (lexer only - not a valid program)
+// This file tests that `enum` is recognized by the lexer as a reserved word.
+// It is NOT expected to parse successfully (enum_decl lands with T02);
+// reserving a word never fails tokenization.
+enum

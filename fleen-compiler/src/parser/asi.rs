@@ -32,6 +32,12 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::Import
             | TokenKind::Pub
             | TokenKind::Struct
+            // 0.0.6 T01: `enum` is a declaration introducer, so it is
+            // statement-starting immediately (unlike `ptr`/`addr`, which
+            // waited for their T02). This is what routes `enum = 1` past the
+            // statement-entry guard into `reject_keyword_binding_name`, which
+            // reports the keyword instead of a statement-separator error.
+            | TokenKind::Enum
             // 0.0.4 F1: `async` opens an `async func` declaration.
             | TokenKind::Async
             // 0.0.5 T02: `addr` / `deref_ptr` are unary prefixes (same group
@@ -337,6 +343,11 @@ mod tests {
             TokenKind::Choose,
             TokenKind::Import,
             TokenKind::Pub,
+            // 0.0.3 V02 (added late, T01 0.0.6): `struct` opens a
+            // declaration and has been in `can_start_stmt` since V02.
+            TokenKind::Struct,
+            // 0.0.6 T01: `enum` opens an `enum` declaration (same shape).
+            TokenKind::Enum,
             // 0.0.4 F1: `async` opens an `async func` declaration.
             TokenKind::Async,
             TokenKind::Ident(String::new()),
@@ -441,6 +452,8 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::DerefPtr));
         assert!(implies_stmt_end(&TokenKind::Unsafe));
         assert!(implies_stmt_end(&TokenKind::Trusted));
+        // 0.0.6 T01: `enum` starts a declaration (never a continuation).
+        assert!(implies_stmt_end(&TokenKind::Enum));
         assert!(implies_stmt_end(&TokenKind::True));
         assert!(implies_stmt_end(&TokenKind::If));
         assert!(implies_stmt_end(&TokenKind::While));

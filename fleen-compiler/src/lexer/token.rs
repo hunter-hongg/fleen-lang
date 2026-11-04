@@ -174,6 +174,22 @@ pub enum TokenKind {
     /// `trusted` keyword (0.0.5: `func` modifier, author-attested safe wrapper)
     Trusted,
 
+    // Enum keyword (0.0.6) — reserved here; the parser wires `enum_decl` and
+    // the variant patterns in T02, so until then misuse surfaces at the
+    // binding-name rejection (`enum = 1`) or as a plain "expected expression"
+    // (`enum S { A }`).
+    // Unlike `ptr`/`addr`/`unsafe`/`trusted` (which stayed out of
+    // `can_start_stmt` until 0.0.5 T02), `enum` joins the statement-start set
+    // immediately: the binding-name rejection
+    // (`Parser::reject_keyword_binding_name`) sits *behind* the
+    // statement-entry guard, so being statement-starting is what makes
+    // `enum = 1` report the keyword instead of a statement-separator error.
+    // T02 memo: `enum_decl` needs no further `can_start_stmt` change
+    // (already statement-starting); `can_start_stmt_table` and
+    // `implies_stmt_end_table` already assert it.
+    /// `enum` keyword (0.0.6: tagged-union declaration introducer)
+    Enum,
+
     // Literals
     /// Integer literal (e.g., `42`)
     IntLit(i64),
@@ -293,6 +309,7 @@ impl TokenKind {
                 | TokenKind::DerefPtr
                 | TokenKind::Unsafe
                 | TokenKind::Trusted
+                | TokenKind::Enum
         )
     }
 
@@ -338,6 +355,7 @@ impl TokenKind {
             TokenKind::DerefPtr => "deref_ptr",
             TokenKind::Unsafe => "unsafe",
             TokenKind::Trusted => "trusted",
+            TokenKind::Enum => "enum",
             _ => return None,
         })
     }
