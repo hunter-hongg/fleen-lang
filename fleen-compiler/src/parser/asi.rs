@@ -452,6 +452,9 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::DerefPtr));
         assert!(implies_stmt_end(&TokenKind::Unsafe));
         assert!(implies_stmt_end(&TokenKind::Trusted));
+        // 0.0.6 T01 (fixes a pre-existing 0.0.3 V02 gap): `struct` starts a
+        // declaration like `async`, so it implies an end too.
+        assert!(implies_stmt_end(&TokenKind::Struct));
         // 0.0.6 T01: `enum` starts a declaration (never a continuation).
         assert!(implies_stmt_end(&TokenKind::Enum));
         assert!(implies_stmt_end(&TokenKind::True));
