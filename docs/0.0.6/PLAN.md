@@ -193,7 +193,7 @@ the first free band; `FieldTypeTag` currently ends at 11):
 
 | Word | Status |
 |------|--------|
-| `enum` | **new reserved keyword** (declaration introducer; D6). Joins the 0.0.5 reservation path: misuse surfaces at the existing statement/expr entry guards, no new `ReservedWord` kind. |
+| `enum` | **new reserved keyword** (declaration introducer; D6). Joins the 0.0.5 reservation path: `enum` is statement-starting from T01, so misuse is caught by `reject_keyword_binding_name` (the 0.0.5 T02 pattern) instead of an ASI statement-separator error; no new `ReservedWord` kind. |
 
 ### 3.2 Syntax (EBNF additions, `SYNTAX.ebnf`)
 
@@ -336,5 +336,5 @@ enum_pattern    = ident , [ "(" , ident , ")" ] ;   (* binds the single payload;
   keeps matching).
 - Bytecode `MODULE_VERSION = 6`; `READ_VERSIONS` gains 6.
 - CHANGELOG gains the `0.0.6` entry with the explicit breaking set from D6.
-- SPEC §13 gains the 0.0.6 goal paragraph; DESIGN §15 feature table gains the
+- SPEC §13 gains the 0.0.6 goal paragraph; DESIGN §17 feature table gains the
   `enum` row; §18 roadmap marks 0.0.6 complete at T08.

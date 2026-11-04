@@ -33,7 +33,8 @@
 - [x] ASI bookkeeping: `TokenKind::Enum` added to the `can_start_stmt` start
       set, the `can_start_stmt_table` yes-list, and `implies_stmt_end_table`.
       Also fixed a pre-existing gap while there: `TokenKind::Struct` had been
-      missing from both `can_start_stmt_table` lists since 0.0.3 V02.
+      missing from both ASI test tables (`can_start_stmt_table` yes-list,
+      `implies_stmt_end_table`) since 0.0.3 V02; both now pin it.
 
 **Depends on**: nothing.
 **Refs**: PLAN §3.1, D6.
@@ -190,7 +191,7 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 - [ ] Docs sync:
       - `docs/SYNTAX.ebnf`: `enum_decl` / `enum_pattern`
       - `docs/BYTECODE.md`: §5.17, §9 `enum_defs`, §10 v6 row
-      - `docs/DESIGN.md`: §9 enum section, §15 feature table `enum` row,
+      - `docs/DESIGN.md`: §9 enum section, §17 feature table `enum` row,
         §18 roadmap 0.0.6 complete
       - `SPEC.md` (= AGENTS.md/CLAUDE.md symlink target): §13 0.0.6 goal
         paragraph, §14 quick-reference section, §15 table
