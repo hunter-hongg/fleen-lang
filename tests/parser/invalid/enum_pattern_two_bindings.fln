@@ -1,0 +1,3 @@
+choose s {
+    when Rect(a, b) { 1 }
+};

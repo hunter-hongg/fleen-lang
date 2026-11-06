@@ -16,19 +16,19 @@
       misuse does not stop at the statement/expr entry guards. `enum` joins
       `can_start_stmt` immediately (unlike the 0.0.5 words, which waited for
       their T02) and gets an `Enum` branch in `Parser::reject_keyword_binding_name`
-      (the 0.0.5 T02 pattern), so `enum = 1;` reports
-      `keyword \`enum\` cannot be used as identifier` instead of the ASI
-      statement-separator error (`expected \`;\`, … found enum`), which never
-      mentions reservation. `enum S { A }` still surfaces at the
-      primary-expression fallback (`expected expression, found enum`) —
-      declaration syntax itself lands in T02.
+      (the 0.0.5 T02 pattern). **Corrected in T02**: with `parse_enum_decl`
+      in place, `enum = 1;` is routed to the enum parser and reports
+      `expected identifier, found \`=\`` at the enum-name position (pinned by
+      `reject_enum_as_binding_name`), not the keyword message. `enum S { A }`
+      inside a block reports the top-level-only error (T02).
 - [x] Tests: lexer unit tests (keyword token, metadata incl. the load-bearing
       `to_string()` assertion — `Display` renders keywords via `keyword_str`, so
       a missing arm there is an `unreachable!` panic on user-error paths and the
       catch-all `other` arm makes the omission compile-invisible — and
       prefix-safety: `enums` / `EnumX` / `enum_id` / `enumx` / `Enum` stay
-      identifiers) + parser tests (`reject_enum_as_binding_name`,
-      `enum_decl_not_yet_parseable`) + `tests/lexer/valid/enum_keywords.fln`
+      identifiers) + parser tests (`reject_enum_as_binding_name`; the T01-era
+      `enum_decl_not_yet_parseable` was replaced by the T02 parse/reject tests)
+      + `tests/lexer/valid/enum_keywords.fln`
       (a *valid* file only — reserving a word never fails tokenization)
 - [x] ASI bookkeeping: `TokenKind::Enum` added to the `can_start_stmt` start
       set, the `can_start_stmt_table` yes-list, and `implies_stmt_end_table`.
@@ -51,19 +51,39 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T02 — Parser: `enum_decl` + variant patterns (F1/F3; D1/D3)
 
-- [ ] AST: `Decl::Enum(StructDecl-shaped)` — ordered variants, each with name +
-      payload types; top-level only, trailing comma allowed, no trailing
-      semicolon (mirror `parse_struct_decl`)
-- [ ] `parse_type`: bare identifiers resolve to enums via the registration
+- [x] AST: `Decl::Enum(EnumDecl { name, variants, span, is_pub })` with
+      `EnumVariant { name, payload_types, span }` — ordered variants, each with
+      name + payload types; top-level only, trailing comma allowed, no trailing
+      semicolon (mirror `parse_struct_decl`). Empty braces are an error (the
+      EBNF requires at least one variant)
+- [x] `parse_type`: bare identifiers resolve to enums via the registration
       table at typeck (parser emits `Named`, unchanged shape)
-- [ ] Pattern: `enum_pattern = ident [ "(" ident ")" ]` added to `Pattern`
-      (generalizes `ResultCtor { ctor, binding }` — the Result spellings stay
-      untouched and win for `Ok` / `Err`)
-- [ ] Constructor expressions need **no parser change**: `Circle(1.5)` parses
+- [x] Pattern: `enum_pattern = ident [ "(" ident ")" ]` added to `Pattern` as
+      `Pattern::Enum { name, binding, span }` (generalizes `ResultCtor { ctor,
+      binding }` — the Result spellings stay untouched and win for `Ok` /
+      `Err`). As-built: `binding` is a plain `String`, not `Option<String>` —
+      the zero-payload spelling `Variant` is not this pattern at all, it stays
+      a `Pattern::Ident` resolved by typeck (T04/T05)
+- [x] Constructor expressions need **no parser change**: `Circle(1.5)` parses
       as a call, `Point` as an identifier (typeck resolves, D3)
-- [ ] Tests: parser valid fixtures (zero/multi-payload decls, trailing comma,
+- [x] Tests: parser valid fixtures (zero/multi-payload decls, trailing comma,
       `when Variant(x)` pattern); invalid (enum inside a function, missing
-      variant name, payload without parens)
+      variant name, payload without parens, empty enum, two pattern bindings)
+      as `tests/parser/{valid,invalid}/enum_*.fln` + parser unit tests;
+      resolver/typeck/e2e fixtures pin the downstream "not supported yet"
+      behavior until T03–T05 land
+
+**As-built notes (review-driven additions beyond the card):**
+- Downstream stopgaps so enum syntax fails loudly instead of compiling
+  silently: resolver reports `UnsupportedEnumDeclaration` (with the enum
+  name + span) for `Decl::Enum`; typeck reports
+  `UnsupportedFeature("enum variant patterns")` for `Pattern::Enum`;
+  `lower` rejects a surviving `TypedPatternHir::Error` instead of silently
+  leaving the arm's MIR block unterminated (the P0: a `when Foo(x)` arm made
+  the enclosing function return early with no diagnostic).
+- `parser` `expect()` call sites no longer repeat the `expected ` prefix in
+  their message literals (`ParseErrorKind::Expected`'s `Display` supplies it);
+  the enum-era messages read `expected \`(\` after variant name, found …`.
 
 **Depends on**: T01.
 **Refs**: PLAN §3.2, D3.

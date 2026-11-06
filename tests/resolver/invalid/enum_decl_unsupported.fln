@@ -1,0 +1,12 @@
+// 0.0.6 T02: enum declarations parse but are not yet registered (T03/T04).
+// The resolver must report the unsupported declaration instead of silently
+// dropping it — the old placeholder returned `Err(())` without recording a
+// diagnostic, so `enum E { A } enum E { B }` compiled without any error.
+enum Color {
+    Red,
+    Green,
+}
+
+func main() {
+    print("ready");
+}

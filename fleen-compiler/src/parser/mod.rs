@@ -366,6 +366,12 @@ impl Parser {
             return Ok(ast::Item::Decl(ast::Decl::Struct(decl)));
         }
 
+        if self.check(&crate::lexer::TokenKind::Enum) {
+            let mut decl = self.parse_enum_decl()?;
+            decl.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Enum(decl)));
+        }
+
         // Check for variable binding: ident followed by : or =
         if self.check(&crate::lexer::TokenKind::Ident(String::new())) {
             let next_kind = self.peek_kind(1);
@@ -428,7 +434,7 @@ impl Parser {
     /// Parse an import declaration.
     fn parse_import(&mut self) -> Result<ast::Item, ParseError> {
         let start = self.current().span.start;
-        self.expect(&crate::lexer::TokenKind::Import, "expected `import`")?;
+        self.expect(&crate::lexer::TokenKind::Import, "`import`")?;
 
         // Parse module path: segment . segment . ... Each segment is an
         // identifier or (0.0.4) a keyword-named module member such as
@@ -444,7 +450,7 @@ impl Parser {
             }
         }
 
-        self.expect(&crate::lexer::TokenKind::Semi, "expected `;` after import")?;
+        self.expect(&crate::lexer::TokenKind::Semi, "`;` after import")?;
 
         let end = self.prev_span_end();
         Ok(ast::Item::Import(ast::ImportDecl {
@@ -459,12 +465,9 @@ impl Parser {
     /// the closing `}`, which is tolerated here).
     fn parse_struct_decl(&mut self) -> Result<ast::StructDecl, ParseError> {
         let start = self.current().span.start;
-        self.expect(&crate::lexer::TokenKind::Struct, "expected `struct`")?;
+        self.expect(&crate::lexer::TokenKind::Struct, "`struct`")?;
         let name = self.parse_ident()?;
-        self.expect(
-            &crate::lexer::TokenKind::LBrace,
-            "expected `{` after struct name",
-        )?;
+        self.expect(&crate::lexer::TokenKind::LBrace, "`{` after struct name")?;
 
         let mut fields = Vec::new();
         if !self.check(&crate::lexer::TokenKind::RBrace) {
@@ -496,10 +499,7 @@ impl Parser {
             }
         }
 
-        self.expect(
-            &crate::lexer::TokenKind::RBrace,
-            "expected `}` after struct fields",
-        )?;
+        self.expect(&crate::lexer::TokenKind::RBrace, "`}` after struct fields")?;
         let _ = self.matches(&crate::lexer::TokenKind::Semi);
 
         let end = self.prev_span_end();
@@ -511,10 +511,94 @@ impl Parser {
         })
     }
 
+    /// Parse an `enum` declaration (0.0.6 T02): `enum Name { variant, ... }`
+    /// — top-level only, no trailing semicolon (the ASI pass may insert one
+    /// after the closing `}`; tolerated here). Variants are ordered, each
+    /// with 0+ payload types.
+    fn parse_enum_decl(&mut self) -> Result<ast::EnumDecl, ParseError> {
+        let start = self.current().span.start;
+        self.expect(&crate::lexer::TokenKind::Enum, "`enum`")?;
+        let name = self.parse_ident()?;
+        self.expect(&crate::lexer::TokenKind::LBrace, "`{` after enum name")?;
+        let mut variants = Vec::new();
+        if !self.check(&crate::lexer::TokenKind::RBrace) {
+            loop {
+                // The EBNF requires at least one variant
+                // (`enum_decl = "enum" ident "{" variant { "," variant } [ "," ] "}"`).
+                let vstart = self.current().span.start;
+                let vname = self.parse_ident()?;
+                let mut payload_types = Vec::new();
+                if self.matches(&crate::lexer::TokenKind::LParen) {
+                    // `variant = ident, [ "(" , type , { "," , type } , ")" ]`.
+                    // Empty parens (`Foo()`) are a grammar violation: the
+                    // ident inside `(` `)` is mandatory.
+                    if self.check(&crate::lexer::TokenKind::RParen) {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::Expected {
+                                expected: "variant payload".to_string(),
+                                found: self.current().kind.clone(),
+                            },
+                            span: self.current().span,
+                        });
+                    }
+                    loop {
+                        let ptype = self.parse_type()?;
+                        payload_types.push(ptype);
+                        if !self.matches(&crate::lexer::TokenKind::Comma) {
+                            break;
+                        }
+                        // Trailing comma allowed (`A, B,`).
+                        if self.check(&crate::lexer::TokenKind::RParen) {
+                            break;
+                        }
+                    }
+                    self.expect(
+                        &crate::lexer::TokenKind::RParen,
+                        "`)` after enum variant payload types",
+                    )?;
+                }
+                let vend = self.prev_span_end();
+                variants.push(ast::EnumVariant {
+                    name: vname,
+                    payload_types,
+                    span: self.span(vstart, vend),
+                });
+                if !self.matches(&crate::lexer::TokenKind::Comma) {
+                    break;
+                }
+                // Trailing comma allowed (`A, B,`).
+                if self.check(&crate::lexer::TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+        if variants.is_empty() {
+            // The EBNF requires at least one variant; an empty body is not
+            // the struct rule (`struct S {}` is legal) but an enum error.
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "variant (an enum needs at least one variant)".to_string(),
+                    found: self.current().kind.clone(),
+                },
+                span: self.current().span,
+            });
+        }
+        self.expect(&crate::lexer::TokenKind::RBrace, "`}` after enum variants")?;
+        let _ = self.matches(&crate::lexer::TokenKind::Semi);
+
+        let end = self.prev_span_end();
+        Ok(ast::EnumDecl {
+            name,
+            variants,
+            span: self.span(start, end),
+            is_pub: false,
+        })
+    }
+
     /// Parse a const declaration: `const ident [: type] = expr ;`
     fn parse_const_decl(&mut self) -> Result<ast::ConstDecl, ParseError> {
         let start = self.current().span.start;
-        self.expect(&crate::lexer::TokenKind::Const, "expected `const`")?;
+        self.expect(&crate::lexer::TokenKind::Const, "`const`")?;
 
         let name = self.parse_ident()?;
         let ty = if self.matches(&crate::lexer::TokenKind::Colon) {
@@ -525,7 +609,7 @@ impl Parser {
 
         self.expect(
             &crate::lexer::TokenKind::Assign,
-            "expected `=` after const declaration",
+            "`=` after const declaration",
         )?;
 
         let init = self.parse_expr()?;
@@ -557,10 +641,7 @@ impl Parser {
             None
         };
 
-        self.expect(
-            &crate::lexer::TokenKind::Assign,
-            "expected `=` in variable binding",
-        )?;
+        self.expect(&crate::lexer::TokenKind::Assign, "`=` in variable binding")?;
 
         let init = self.parse_expr()?;
 
@@ -607,14 +688,11 @@ impl Parser {
             self.advance();
         }
 
-        self.expect(&crate::lexer::TokenKind::Func, "expected `func`")?;
+        self.expect(&crate::lexer::TokenKind::Func, "`func`")?;
 
         let name = self.parse_ident()?;
 
-        self.expect(
-            &crate::lexer::TokenKind::LParen,
-            "expected `(` after function name",
-        )?;
+        self.expect(&crate::lexer::TokenKind::LParen, "`(` after function name")?;
 
         let mut params = Vec::new();
         if !self.check(&crate::lexer::TokenKind::RParen) {
@@ -626,7 +704,7 @@ impl Parser {
                 }
             }
         }
-        self.expect(&crate::lexer::TokenKind::RParen, "expected `)`")?;
+        self.expect(&crate::lexer::TokenKind::RParen, "`)`")?;
 
         let ret_type = if self.matches(&crate::lexer::TokenKind::Colon) {
             Some(self.parse_type()?)
@@ -668,7 +746,7 @@ impl Parser {
     fn parse_param(&mut self) -> Result<ast::Param, ParseError> {
         let start = self.current().span.start;
         let name = self.parse_ident()?;
-        self.expect(&crate::lexer::TokenKind::Colon, "expected `:` in parameter")?;
+        self.expect(&crate::lexer::TokenKind::Colon, "`:` in parameter")?;
         let ty = self.parse_type()?;
         let end = self.prev_span_end();
         Ok(ast::Param {
@@ -777,9 +855,9 @@ impl Parser {
             && matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Lt))
         {
             self.advance();
-            self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in Future type")?;
+            self.expect(&crate::lexer::TokenKind::Lt, "`<` in Future type")?;
             let inner = self.parse_type()?;
-            self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in Future type")?;
+            self.expect(&crate::lexer::TokenKind::Gt, "`>` in Future type")?;
             return Ok(ast::Type::Future(Box::new(inner)));
         }
 
@@ -832,14 +910,8 @@ impl Parser {
                         }
                     }
                 }
-                self.expect(
-                    &crate::lexer::TokenKind::RParen,
-                    "expected `)` in function type",
-                )?;
-                self.expect(
-                    &crate::lexer::TokenKind::Arrow,
-                    "expected `->` in function type",
-                )?;
+                self.expect(&crate::lexer::TokenKind::RParen, "`)` in function type")?;
+                self.expect(&crate::lexer::TokenKind::Arrow, "`->` in function type")?;
                 let ret = self.parse_type()?;
                 ast::Type::Func(params, Box::new(ret))
             }
@@ -847,18 +919,15 @@ impl Parser {
                 // Array type: [T]
                 self.advance();
                 let inner = self.parse_type()?;
-                self.expect(
-                    &crate::lexer::TokenKind::RBracket,
-                    "expected `]` in array type",
-                )?;
+                self.expect(&crate::lexer::TokenKind::RBracket, "`]` in array type")?;
                 ast::Type::Array(Box::new(inner))
             }
             crate::lexer::TokenKind::BoxType => {
                 // box<T>
                 self.advance();
-                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in box type")?;
+                self.expect(&crate::lexer::TokenKind::Lt, "`<` in box type")?;
                 let inner = self.parse_type()?;
-                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in box type")?;
+                self.expect(&crate::lexer::TokenKind::Gt, "`>` in box type")?;
                 ast::Type::Box(Box::new(inner))
             }
             crate::lexer::TokenKind::RefType => {
@@ -870,23 +939,20 @@ impl Parser {
             crate::lexer::TokenKind::ResultType => {
                 // P4: Result<T, E> with angle brackets (per EBNF)
                 self.advance();
-                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in Result type")?;
+                self.expect(&crate::lexer::TokenKind::Lt, "`<` in Result type")?;
                 let ok = self.parse_type()?;
-                self.expect(
-                    &crate::lexer::TokenKind::Comma,
-                    "expected `,` in Result type",
-                )?;
+                self.expect(&crate::lexer::TokenKind::Comma, "`,` in Result type")?;
                 let err = self.parse_type()?;
-                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in Result type")?;
+                self.expect(&crate::lexer::TokenKind::Gt, "`>` in Result type")?;
                 ast::Type::Result(Box::new(ok), Box::new(err))
             }
             crate::lexer::TokenKind::Channel => {
                 // channel<T> (0.0.4 F9): a message-passing channel type.
                 // `channel` is a reserved keyword (TokenKind::Channel).
                 self.advance();
-                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in channel type")?;
+                self.expect(&crate::lexer::TokenKind::Lt, "`<` in channel type")?;
                 let inner = self.parse_type()?;
-                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in channel type")?;
+                self.expect(&crate::lexer::TokenKind::Gt, "`>` in channel type")?;
                 ast::Type::Channel(Box::new(inner))
             }
             crate::lexer::TokenKind::Ptr => {
@@ -894,9 +960,9 @@ impl Parser {
                 // reserved keyword recognized only in constructor position —
                 // there is no bare-`ptr` type (same shape as `channel<T>`).
                 self.advance();
-                self.expect(&crate::lexer::TokenKind::Lt, "expected `<` in ptr type")?;
+                self.expect(&crate::lexer::TokenKind::Lt, "`<` in ptr type")?;
                 let inner = self.parse_type()?;
-                self.expect(&crate::lexer::TokenKind::Gt, "expected `>` in ptr type")?;
+                self.expect(&crate::lexer::TokenKind::Gt, "`>` in ptr type")?;
                 ast::Type::Ptr(Box::new(inner))
             }
             _ => {
@@ -919,7 +985,7 @@ impl Parser {
     fn parse_block(&mut self) -> Result<ast::Block, ParseError> {
         let start = self.current().span.start;
 
-        self.expect(&crate::lexer::TokenKind::LBrace, "expected `{`")?;
+        self.expect(&crate::lexer::TokenKind::LBrace, "`{`")?;
 
         // Block bodies are always struct-literal-allowed contexts (V02):
         // even when a block appears inside an `if`/`while` condition
@@ -985,6 +1051,22 @@ impl Parser {
                     span: self.current().span,
                 });
             }
+            // `enum` declarations are top-level only (0.0.6 T02): inside a
+            // block they would need scoped enum tables for no benefit. The
+            // `Enum` keyword is already statement-starting (T01), so this
+            // check runs before the expression branch that would otherwise
+            // emit the temporary "expected expression, found enum" fallback.
+            if self.check(&crate::lexer::TokenKind::Enum) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "statement (enum declarations are only \
+                                   allowed at the top level)"
+                            .to_string(),
+                        found: self.current().kind.clone(),
+                    },
+                    span: self.current().span,
+                });
+            }
 
             if is_decl {
                 // Parse declaration
@@ -1028,7 +1110,7 @@ impl Parser {
             }
         }
 
-        self.expect(&crate::lexer::TokenKind::RBrace, "expected `}`")?;
+        self.expect(&crate::lexer::TokenKind::RBrace, "`}`")?;
         let end = self.prev_span_end();
 
         Ok(ast::Block {

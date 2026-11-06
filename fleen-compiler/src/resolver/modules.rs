@@ -182,6 +182,12 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                     ast::Decl::Const(c) => (c.name.clone(), c.is_pub, c.span, ExportKind::Const),
                     ast::Decl::Var(v) => (v.name.clone(), v.is_pub, v.span, ExportKind::Global),
                     ast::Decl::Struct(s) => (s.name.clone(), s.is_pub, s.span, ExportKind::Struct),
+                    // 0.0.6 T02: enum names are not exported (`ExportKind`
+                    // has no `Enum` variant). This table is built from the
+                    // raw AST before per-decl resolution, so the arm is
+                    // reachable; enum export support arrives with enum
+                    // registration (T03/T04).
+                    ast::Decl::Enum(_) => continue,
                 };
                 items.insert(
                     name.clone(),

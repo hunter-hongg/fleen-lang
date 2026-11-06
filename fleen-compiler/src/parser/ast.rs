@@ -42,10 +42,29 @@ pub enum Decl {
     Const(ConstDecl),
     /// `struct Point { x: int, y: int }` (0.0.3 V02)
     Struct(StructDecl),
+    /// `enum Shape { Point, Circle(float) }` (0.0.6 T02)
+    Enum(EnumDecl),
 }
 
-/// Struct declaration (0.0.3 V02). Like `func`, a struct declaration takes
-/// no trailing semicolon.
+/// `enum` declaration (0.0.6 T02): ordered variants, each with a name plus
+/// 0+ payload types (tuple-shaped). Mirrors `StructDecl` shape: top-level
+/// only, no trailing semicolon (the ASI pass may insert one after the
+/// closing `}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+    pub is_pub: bool,
+}
+
+/// A single `enum` variant: `name` plus 0+ payload types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub payload_types: Vec<Type>,
+    pub span: Span,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
     pub name: String,
@@ -473,6 +492,14 @@ pub enum Pattern {
         binding: String,
         span: Span,
     },
+    /// `Variant(binding)` enum-variant pattern (0.0.6 T02): the parser
+    /// records the syntactic form only; typeck resolves the variant
+    /// (T04/T05). Carries the whole pattern's span.
+    Enum {
+        name: String,
+        binding: String,
+        span: Span,
+    },
 }
 
 impl Pattern {
@@ -482,6 +509,7 @@ impl Pattern {
             Pattern::Literal(e) => e.span(),
             Pattern::Ident(_, s) => *s,
             Pattern::ResultCtor { span, .. } => *span,
+            Pattern::Enum { span, .. } => *span,
         }
     }
 }

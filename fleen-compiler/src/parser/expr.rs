@@ -244,7 +244,7 @@ impl Parser {
             } else if self.matches(&TokenKind::LBracket) {
                 // Index access
                 let index = self.parse_expr()?;
-                self.expect(&TokenKind::RBracket, "expected `]` after index")?;
+                self.expect(&TokenKind::RBracket, "`]` after index")?;
                 let span = self.span(expr.span().start, self.prev_span_end());
                 expr = Expr::Index(Box::new(expr), Box::new(index), span);
             } else if self.matches(&TokenKind::Dot) {
@@ -289,7 +289,7 @@ impl Parser {
             }
         }
 
-        self.expect(&TokenKind::RParen, "expected `)` after arguments")?;
+        self.expect(&TokenKind::RParen, "`)` after arguments")?;
 
         Ok(Expr::Call(Box::new(func), args))
     }
@@ -339,12 +339,12 @@ impl Parser {
                 // expression position. We parse the type argument and then the
                 // capacity expression.
                 self.advance();
-                self.expect(&TokenKind::Lt, "expected `<` in channel constructor")?;
+                self.expect(&TokenKind::Lt, "`<` in channel constructor")?;
                 let ty = self.parse_type()?;
-                self.expect(&TokenKind::Gt, "expected `>` in channel constructor")?;
-                self.expect(&TokenKind::LParen, "expected `(` after channel type")?;
+                self.expect(&TokenKind::Gt, "`>` in channel constructor")?;
+                self.expect(&TokenKind::LParen, "`(` after channel type")?;
                 let capacity = self.parse_expr()?;
-                self.expect(&TokenKind::RParen, "expected `)` after channel capacity")?;
+                self.expect(&TokenKind::RParen, "`)` after channel capacity")?;
                 let end = self.prev_span_end();
                 Ok(Expr::ChannelNew {
                     ty,
@@ -356,7 +356,7 @@ impl Parser {
                 // Parenthesized expression
                 self.advance();
                 let expr = self.parse_expr()?;
-                self.expect(&TokenKind::RParen, "expected `)`")?;
+                self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(expr)
             }
             TokenKind::LBracket => {
@@ -377,7 +377,7 @@ impl Parser {
                         }
                     }
                 }
-                self.expect(&TokenKind::RBracket, "expected `]` after array elements")?;
+                self.expect(&TokenKind::RBracket, "`]` after array elements")?;
                 let end = self.prev_span_end();
                 Ok(Expr::ArrayLit(crate::parser::ast::ExprArrayLit {
                     elems,
@@ -404,7 +404,7 @@ impl Parser {
     /// allowed, no field-init shorthand (`ExpectedFieldColon`), duplicate
     /// fields rejected here (typeck checks the set against the declaration).
     fn parse_struct_literal(&mut self, name: String, name_span: Span) -> Result<Expr, ParseError> {
-        self.expect(&TokenKind::LBrace, "expected `{` after struct name")?;
+        self.expect(&TokenKind::LBrace, "`{` after struct name")?;
 
         let mut inits: Vec<(String, Expr)> = Vec::new();
         if !self.check(&TokenKind::RBrace) {
@@ -437,10 +437,7 @@ impl Parser {
             }
         }
 
-        self.expect(
-            &TokenKind::RBrace,
-            "expected `}` after struct literal fields",
-        )?;
+        self.expect(&TokenKind::RBrace, "`}` after struct literal fields")?;
         let end = self.prev_span_end();
         Ok(Expr::StructLit(crate::parser::ast::ExprStructLit {
             name,
@@ -453,7 +450,7 @@ impl Parser {
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
         let start = self.current().span.start;
 
-        self.expect(&TokenKind::If, "expected `if`")?;
+        self.expect(&TokenKind::If, "`if`")?;
         let condition = Box::new(self.parse_cond()?);
         let then_branch = self.parse_block()?;
 
@@ -488,7 +485,7 @@ impl Parser {
     fn parse_while(&mut self) -> Result<Expr, ParseError> {
         let start = self.current().span.start;
 
-        self.expect(&TokenKind::While, "expected `while`")?;
+        self.expect(&TokenKind::While, "`while`")?;
         let condition = Box::new(self.parse_cond()?);
         let body = self.parse_block()?;
 
@@ -509,7 +506,7 @@ impl Parser {
     fn parse_for(&mut self) -> Result<Expr, ParseError> {
         let start = self.current().span.start;
 
-        self.expect(&TokenKind::For, "expected `for`")?;
+        self.expect(&TokenKind::For, "`for`")?;
 
         // The loop variable is a single identifier.
         let var = if let TokenKind::Ident(name) = self.current_kind().clone() {
@@ -527,7 +524,7 @@ impl Parser {
             });
         };
 
-        self.expect(&TokenKind::In, "expected `in` after loop variable")?;
+        self.expect(&TokenKind::In, "`in` after loop variable")?;
 
         // Struct literals disabled here (see above) — parse_cond does exactly
         // that.
@@ -547,10 +544,10 @@ impl Parser {
     fn parse_choose(&mut self) -> Result<Expr, ParseError> {
         let start = self.current().span.start;
 
-        self.expect(&TokenKind::Choose, "expected `choose`")?;
+        self.expect(&TokenKind::Choose, "`choose`")?;
         let scrutinee = Box::new(self.parse_cond()?);
 
-        self.expect(&TokenKind::LBrace, "expected `{` after choose expression")?;
+        self.expect(&TokenKind::LBrace, "`{` after choose expression")?;
 
         let mut arms = Vec::new();
 
@@ -586,7 +583,7 @@ impl Parser {
             });
         }
 
-        self.expect(&TokenKind::RBrace, "expected `}` after choose arms")?;
+        self.expect(&TokenKind::RBrace, "`}` after choose arms")?;
 
         let end = self.prev_span_end();
         Ok(Expr::Choose(ExprChoose {
@@ -660,6 +657,24 @@ impl Parser {
                     };
                     return self.parse_result_pattern(ctor, span);
                 }
+                // 0.0.6 T02: `Variant(binding)` enum patterns generalize the
+                // Result shape (D3). The parser records the form only; typeck
+                // resolves the variant against the registration table. `Ok` /
+                // `Err` win above, so this arm never sees them. Zero-payload
+                // variants match as a bare ident below — no new pattern.
+                if matches!(self.peek_kind(1), Some(TokenKind::LParen)) {
+                    let vname = name.clone();
+                    self.advance(); // consume the variant name
+                    self.expect(&TokenKind::LParen, "`(` after variant name")?;
+                    let binding = self.parse_ident()?;
+                    self.expect(&TokenKind::RParen, "`)` after enum pattern binding")?;
+                    let end = self.prev_span_end();
+                    return Ok(Pattern::Enum {
+                        name: vname,
+                        binding,
+                        span: self.span(span.start, end),
+                    });
+                }
                 let name = name.clone();
                 self.advance();
                 Pattern::Ident(name, self.prev_span())
@@ -686,9 +701,9 @@ impl Parser {
         ctor_span: Span,
     ) -> Result<Pattern, ParseError> {
         self.advance(); // consume `Ok` / `Err`
-        self.expect(&TokenKind::LParen, "expected `(` after `Ok`/`Err` pattern")?;
+        self.expect(&TokenKind::LParen, "`(` after `Ok`/`Err` pattern")?;
         let binding = self.parse_ident()?;
-        self.expect(&TokenKind::RParen, "expected `)` after pattern binding")?;
+        self.expect(&TokenKind::RParen, "`)` after pattern binding")?;
         let end = self.prev_span_end();
         Ok(Pattern::ResultCtor {
             ctor,

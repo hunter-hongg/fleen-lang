@@ -1,0 +1,10 @@
+// 0.0.6 T02 regression: an enum-variant pattern in `choose` must fail the
+// compile loudly. The pattern parses (T02) but its semantics — registration,
+// matching, lowering — land in T04/T05, so the whole pipeline must reject it
+// instead of silently miscompiling (the old placeholder returned from the
+// function before printing "B").
+func main() {
+    print("A");
+    r = choose 1 { when Foo(x) { 111 } otherwise { 222 } };
+    print("B");
+}

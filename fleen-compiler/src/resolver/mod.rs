@@ -503,6 +503,21 @@ impl Resolver {
             // (they feed the typeck struct table, not `items`), and the parser
             // rejects struct declarations inside blocks, so this arm cannot run.
             Decl::Struct(_) => unreachable!("struct declarations never reach resolve_decl"),
+            // 0.0.6 T02: enum declarations are parser-only. The enum name and
+            // payload types are registered by typeck (T04), and the choose
+            // exhaustiveness/lowering by T05. Record the unsupported
+            // declaration and produce no HIR item: a bare `Err(())`
+            // contributed no diagnostic, so unsupported (and duplicate)
+            // enums compiled silently.
+            Decl::Enum(e) => {
+                self.add_error(
+                    ResolveErrorKind::UnsupportedEnumDeclaration {
+                        name: e.name.clone(),
+                    },
+                    e.span,
+                );
+                Err(())
+            }
         }
     }
 
@@ -1694,6 +1709,24 @@ impl Resolver {
                 Ok(PatternHir::ResultCtor {
                     ctor,
                     name: binding,
+                    binding_id,
+                    hir_id,
+                    span,
+                })
+            }
+            Pattern::Enum {
+                name,
+                binding,
+                span,
+            } => {
+                // 0.0.6 T02: `when Variant(binding)` — the parser only saw
+                // the syntactic form; the binding registers like an
+                // identifier pattern and its type is determined by
+                // typeck (T04/T05). The variant name travels on the HIR
+                // pattern; matching against the registration table is T05.
+                let (binding_id, hir_id) = self.declare_pattern_binding(&binding, span)?;
+                Ok(PatternHir::Enum {
+                    name: name.clone(),
                     binding_id,
                     hir_id,
                     span,

@@ -1566,6 +1566,22 @@ impl TypeChecker {
                     span: *span,
                 })
             }
+            PatternHir::Enum { span, .. } => {
+                // 0.0.6 T02: enum patterns are parser-only. The enum table
+                // is not registered until typeck (T04) and the choose
+                // matching/lowering lands in T05, so the pattern cannot be
+                // checked here. Record a hard error instead of an opaque
+                // placeholder: the placeholder reached `lower`, left the
+                // arm's MIR block unterminated, and the whole function
+                // returned early with no diagnostic.
+                self.add_error(
+                    TypeckErrorKind::UnsupportedFeature {
+                        feature: "enum variant patterns".to_string(),
+                    },
+                    *span,
+                );
+                Err(())
+            }
             PatternHir::Error => Ok(TypedPatternHir::Error),
         }
     }

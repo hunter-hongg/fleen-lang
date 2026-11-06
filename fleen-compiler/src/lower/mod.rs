@@ -1987,7 +1987,20 @@ impl<'a> FnBodyCx<'a> {
                         *span,
                     ));
                 }
-                TypedPatternHir::Error => {}
+                TypedPatternHir::Error => {
+                    // 0.0.6 T02: `Error` patterns only appear in
+                    // error-recovery trees — typeck rejects enum patterns
+                    // before lowering, so this arm is defensive. A silent
+                    // fall-through here left the arm's block unterminated
+                    // (placeholder `Return`) and the function returned
+                    // early with no diagnostic; fail loudly instead.
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "error-recovery pattern in choose",
+                        },
+                        arm.body.span,
+                    ));
+                }
             }
 
             if !chain_done {

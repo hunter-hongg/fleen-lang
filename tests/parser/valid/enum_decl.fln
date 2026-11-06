@@ -1,0 +1,5 @@
+enum Shape {
+    Point,
+    Circle(float),
+    Rect(float, float, float, float),
+}

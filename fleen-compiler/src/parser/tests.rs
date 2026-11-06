@@ -1426,25 +1426,138 @@ func main() {
 
     #[test]
     fn reject_enum_as_binding_name() {
-        // 0.0.6: `enum` is reserved (T01). It is statement-starting from day
-        // one, so `enum = 1` passes the statement-entry guard and hits the
-        // `Enum` branch of `reject_keyword_binding_name` — the diagnostic
-        // names the keyword, not the ASI separator error.
+        // 0.0.6 T02: `enum` now opens a top-level declaration, so `enum = 1;`
+        // fails at the enum name (a binding can no longer shadow the
+        // introducer), not at the ASI statement-separator check.
         let err = parse_err("enum = 1;");
         if let ParseErrorKind::Expected { expected, .. } = err.kind {
-            assert!(expected.contains("keyword `enum`"), "got: {expected}");
+            assert!(expected.contains("identifier"), "got: {expected}");
         } else {
             panic!("expected Expected error, got {:?}", err.kind);
         }
     }
 
     #[test]
-    fn enum_decl_not_yet_parseable() {
-        // T01 reserves the word only; `enum_decl` lands in T02. The interim
-        // diagnostic is the primary-expression fallback (`enum` starts no
-        // expression), reached through the statement-entry guard.
-        let err = parse_err("enum Shape { Point, Circle(float) }");
+    fn parse_enum_decl_zero_and_multi_payload() {
+        let ast = parse_str("enum Shape { Point, Circle(float), Rect(float, float) }");
+        match &ast.items[0] {
+            Item::Decl(Decl::Enum(e)) => {
+                assert_eq!(e.name, "Shape");
+                assert_eq!(e.variants.len(), 3);
+                assert_eq!(e.variants[0].name, "Point");
+                assert!(e.variants[0].payload_types.is_empty());
+                assert_eq!(e.variants[1].name, "Circle");
+                assert_eq!(e.variants[1].payload_types.len(), 1);
+                assert_eq!(e.variants[2].name, "Rect");
+                assert_eq!(e.variants[2].payload_types.len(), 2);
+                assert!(!e.is_pub);
+            }
+            other => panic!("expected Enum decl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl_trailing_comma_and_asi_semi() {
+        let ast = parse_str("enum Color { Red, Green, }\nx = 1;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Enum(e)) => assert_eq!(e.variants.len(), 2),
+            other => panic!("expected Enum decl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl_pub() {
+        let ast = parse_str("pub enum E { A }");
+        match &ast.items[0] {
+            Item::Decl(Decl::Enum(e)) => assert!(e.is_pub),
+            other => panic!("expected Enum decl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_pattern() {
+        let ast = parse_str("choose s { when Circle(r) { 1 } when Point { 2 } }");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert_eq!(ch.arms.len(), 2);
+                assert!(matches!(
+                    &ch.arms[0].pattern,
+                    Pattern::Enum { name, binding, .. } if name == "Circle" && binding == "r"
+                ));
+                assert!(matches!(&ch.arms[1].pattern, Pattern::Ident(n, _) if n == "Point"));
+            }
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reject_enum_inside_block() {
+        let err = parse_err("func f() { enum E { A } }");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("top level"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn reject_empty_enum() {
+        let err = parse_err("enum E { }");
         assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn reject_enum_pattern_two_bindings() {
+        // The grammar binds exactly one payload: `Variant(binding)`.
+        let err = parse_err("choose s { when Rect(a, b) { 1 } }");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn reject_enum_variant_empty_parens() {
+        // `variant = ident [ "(" type { "," type } ")" ]` — a payload list
+        // needs at least one type, so `Foo()` is a grammar violation
+        // (a zero-payload variant is written `Foo`).
+        let err = parse_err("enum E { Foo() }");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("variant payload"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn reject_enum_missing_variant_name() {
+        // A variant starts with an identifier; a bare comma is not one.
+        let err = parse_err("enum E { , A }");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("identifier"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn reject_enum_payload_without_parens() {
+        // Payload types require parentheses: `Circle(float)`, never `Circle float`.
+        let err = parse_err("enum E { Circle float }");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "got: {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn reject_enum_variant_named_by_keyword() {
+        // A variant name goes through `parse_ident`, so a reserved word is
+        // rejected with the keyword message, not parsed as a variant.
+        let err = parse_err("enum E { while }");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("identifier"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
     }
 
     #[test]

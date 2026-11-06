@@ -1,0 +1,9 @@
+enum Shape {
+    Point,
+    Circle(float),
+}
+
+choose s {
+    when Circle(r) { 1 }
+    when Point { 2 }
+};

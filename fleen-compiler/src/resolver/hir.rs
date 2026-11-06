@@ -428,4 +428,11 @@ pub enum PatternHir {
     },
     /// Placeholder for a pattern that failed to resolve (error already recorded).
     Error,
+    /// `when Variant(binding)` (0.0.6 T02); semantics checked by typeck.
+    Enum {
+        name: String,
+        binding_id: BindingId,
+        hir_id: HirId,
+        span: Span,
+    },
 }
