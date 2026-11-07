@@ -58,9 +58,6 @@ struct EnumVariantEntry {
     name: String,
     /// Converted payload types (final after `collect_enums` phase 3).
     payload_types: Vec<Type>,
-    /// Variant declaration span (reserved for T05's payload-read errors).
-    #[allow(dead_code)]
-    span: Span,
 }
 
 /// Collect the names of every named (struct) type mentioned anywhere in
@@ -90,9 +87,9 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
 }
 
 /// Raw per-variant payload data during `collect_enums` (0.0.6 T04):
-/// (variant name, [(payload AST type, payload span)], variant span).
+/// (variant name, [(payload AST type, payload span)]).
 /// Indexed by `EnumId` until every copy verdict is final.
-type RawEnumVariants = Vec<(String, Vec<(ast::Type, Span)>, Span)>;
+type RawEnumVariants = Vec<(String, Vec<(ast::Type, Span)>)>;
 
 /// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
 /// the object binding, plus the field being written.
@@ -434,7 +431,6 @@ impl TypeChecker {
                                 .iter()
                                 .map(|ty| (ty.clone(), v.span))
                                 .collect(),
-                            v.span,
                         )
                     })
                     .collect(),
@@ -467,7 +463,7 @@ impl TypeChecker {
         for (i, variants) in raw.into_iter().enumerate() {
             let converted: Vec<EnumVariantEntry> = variants
                 .into_iter()
-                .map(|(name, payloads, span)| {
+                .map(|(name, payloads)| {
                     let payload_types: Vec<Type> = payloads
                         .into_iter()
                         .map(|(ty, sp)| {
@@ -485,7 +481,6 @@ impl TypeChecker {
                     EnumVariantEntry {
                         name,
                         payload_types,
-                        span,
                     }
                 })
                 .collect();
@@ -539,7 +534,7 @@ impl TypeChecker {
     /// are skipped — they get their own error at conversion time).
     fn enum_payload_enum_refs(&self, variants: &RawEnumVariants) -> Vec<usize> {
         let mut refs = Vec::new();
-        for (_, payloads, _) in variants {
+        for (_, payloads) in variants {
             for (ty, _) in payloads {
                 collect_named_type_refs(ty, &mut |name| {
                     if let Some(&r) = self.enum_by_name.get(name) {
@@ -558,7 +553,7 @@ impl TypeChecker {
     fn compute_enum_copy(&mut self, id: EnumId, raw: &[RawEnumVariants]) -> bool {
         let idx = id.0 as usize;
         let mut all_copy = true;
-        for (_, payloads, _) in &raw[idx] {
+        for (_, payloads) in &raw[idx] {
             for (ty, _) in payloads {
                 if !self.ast_type_is_copy_with_enums(ty) {
                     all_copy = false;
