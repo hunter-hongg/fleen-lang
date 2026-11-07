@@ -42,6 +42,10 @@ pub enum ExportKind {
     Const,
     Global,
     Struct,
+    /// 0.0.6 T03: enum names join the module export/import machinery exactly
+    /// like `pub struct` — `pub enum` is importable cross-module, and the
+    /// enum name resolves through the module-path rules (no runtime binding).
+    Enum,
 }
 
 /// One top-level item in a module, with its visibility.
@@ -51,6 +55,12 @@ pub struct ExportDef {
     pub is_pub: bool,
     pub span: Span,
     pub kind: ExportKind,
+    /// 0.0.6 T03: for an enum item, the variant names in declaration order.
+    /// The module table is built from the raw AST before per-module
+    /// resolution, so this is where a *cross-module* constructor path
+    /// (`shapes.Color.Red`) finds the variants of an imported enum.
+    /// Empty for every other item kind.
+    pub enum_variants: Vec<String>,
 }
 
 /// One crate participating in a compilation.
@@ -177,17 +187,47 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
             ast::Item::Import(_) => {}
             ast::Item::Expr(_) => {}
             ast::Item::Decl(decl) => {
-                let (name, is_pub, span, kind) = match decl {
-                    ast::Decl::Func(f) => (f.name.clone(), f.is_pub, f.span, ExportKind::Func),
-                    ast::Decl::Const(c) => (c.name.clone(), c.is_pub, c.span, ExportKind::Const),
-                    ast::Decl::Var(v) => (v.name.clone(), v.is_pub, v.span, ExportKind::Global),
-                    ast::Decl::Struct(s) => (s.name.clone(), s.is_pub, s.span, ExportKind::Struct),
-                    // 0.0.6 T02: enum names are not exported (`ExportKind`
-                    // has no `Enum` variant). This table is built from the
-                    // raw AST before per-decl resolution, so the arm is
-                    // reachable; enum export support arrives with enum
-                    // registration (T03/T04).
-                    ast::Decl::Enum(_) => continue,
+                let (name, is_pub, span, kind, enum_variants) = match decl {
+                    ast::Decl::Func(f) => (
+                        f.name.clone(),
+                        f.is_pub,
+                        f.span,
+                        ExportKind::Func,
+                        Vec::new(),
+                    ),
+                    ast::Decl::Const(c) => (
+                        c.name.clone(),
+                        c.is_pub,
+                        c.span,
+                        ExportKind::Const,
+                        Vec::new(),
+                    ),
+                    ast::Decl::Var(v) => (
+                        v.name.clone(),
+                        v.is_pub,
+                        v.span,
+                        ExportKind::Global,
+                        Vec::new(),
+                    ),
+                    ast::Decl::Struct(s) => (
+                        s.name.clone(),
+                        s.is_pub,
+                        s.span,
+                        ExportKind::Struct,
+                        Vec::new(),
+                    ),
+                    // 0.0.6 T03: enum names export/import exactly like
+                    // struct names. `pub enum` is importable cross-module;
+                    // a non-`pub` enum stays module-local. The variant names
+                    // travel with the export so a cross-module constructor
+                    // path (`shapes.Color.Red`) can resolve them.
+                    ast::Decl::Enum(e) => (
+                        e.name.clone(),
+                        e.is_pub,
+                        e.span,
+                        ExportKind::Enum,
+                        e.variants.iter().map(|v| v.name.clone()).collect(),
+                    ),
                 };
                 items.insert(
                     name.clone(),
@@ -196,6 +236,7 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                         is_pub,
                         span,
                         kind,
+                        enum_variants,
                     },
                 );
             }

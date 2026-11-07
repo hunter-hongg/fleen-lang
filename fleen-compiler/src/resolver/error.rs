@@ -86,10 +86,6 @@ pub enum ResolveErrorKind {
     /// read-only (DESIGN §10.4); a pointer would extend the write path
     /// past the borrow's lifetime and read-only guarantee.
     AddrOfRefParam { name: String },
-    /// 0.0.6 T02: an `enum` declaration. Enums parse (T02) but are not
-    /// registered until typeck (T04); the resolver reports the unsupported
-    /// declaration instead of silently dropping it.
-    UnsupportedEnumDeclaration { name: String },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -212,13 +208,6 @@ impl fmt::Display for ResolveErrorKind {
                     "cannot take the address of `ref` parameter `{name}` — \
                      a borrow is read-only and a pointer would outlive the \
                      write protection it provides"
-                )
-            }
-            ResolveErrorKind::UnsupportedEnumDeclaration { name } => {
-                write!(
-                    f,
-                    "enum declarations are not supported yet: `{name}` \
-                     (variant registration lands in 0.0.6 T04)"
                 )
             }
         }

@@ -35,6 +35,10 @@ pub struct Hir {
     /// Kept out of `items`: structs are a type-table input for typeck, not
     /// executable code.
     pub structs: Vec<StructDeclHir>,
+    /// Top-level enum declarations, in declaration order (0.0.6 T03).
+    /// Kept out of `items`: enums are a type-table input for typeck (T04),
+    /// not executable code. Variant payload types stay in AST form.
+    pub enums: Vec<EnumDeclHir>,
     pub span: Span,
 }
 
@@ -71,7 +75,6 @@ pub struct StructDeclHir {
     pub fields: Vec<StructFieldHir>,
     pub span: Span,
 }
-
 /// One struct field in HIR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructFieldHir {
@@ -135,6 +138,26 @@ pub struct ConstDeclHir {
     pub init: Box<ExprHir>,
     pub binding_id: BindingId,
     pub hir_id: HirId,
+    pub span: Span,
+}
+
+/// Enum declaration in HIR (0.0.6 T03). Like structs, enums bypass per-item
+/// resolution and are a type-table input for typeck (T04); they never become
+/// executable code. Variant payload types stay in their AST form; typeck
+/// converts them once its enum table is built.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDeclHir {
+    pub name: String,
+    pub variants: Vec<EnumVariantHir>,
+    pub span: Span,
+    pub is_pub: bool,
+}
+
+/// One enum variant in HIR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariantHir {
+    pub name: String,
+    pub payload_types: Vec<Type>,
     pub span: Span,
 }
 
@@ -300,6 +323,24 @@ pub enum ExprHir {
         hir_id: HirId,
         span: Span,
     },
+    /// Enum variant constructor (0.0.6 T03): a dotted `Color.Red` or bare
+    /// `Red` that resolved to a registered enum variant. `enum_name` is the
+    /// declaring enum; `variant_name` the variant. Both carry the enum's
+    /// module path (already joined) so typeck can look up the enum id from
+    /// its own table without re-resolving the module.
+    EnumCtor {
+        enum_name: String,
+        variant_name: String,
+        /// The variant payload types as registered (AST types, joined to the
+        /// declaring module). Typeck (T04) converts these to its own type
+        /// representation.
+        payload_types: Vec<Type>,
+        /// Number of payload fields the variant takes (for call arity).
+        /// Equal to `payload_types.len()`; kept separate for clarity.
+        arity: usize,
+        hir_id: HirId,
+        span: Span,
+    },
     /// Block expression
     Block(BlockHir),
 }
@@ -352,6 +393,7 @@ impl ExprHir {
             | ExprHir::Bool(_, s)
             | ExprHir::Str(_, s) => *s,
             ExprHir::Ident { span, .. } => *span,
+            ExprHir::EnumCtor { span, .. } => *span,
             ExprHir::Block(b) => b.span,
         }
     }

@@ -1557,3 +1557,164 @@ fn resolve_non_ref_param_rebind_ok() {
     let hir = resolve_str("func f(x: int): int { x = 2; x }").expect("should resolve");
     assert_eq!(hir.items.len(), 1);
 }
+
+// ========== 0.0.6 T03: enum declarations + constructor paths ==========
+
+use fleen_compiler::resolver::hir::ExprHir;
+
+#[test]
+fn enum_decl_collects_into_hir_table() {
+    let hir =
+        resolve_str("enum Color { Red, Green }\nfunc main(): int = 0").expect("should resolve");
+    assert_eq!(hir.enums.len(), 1);
+    assert_eq!(hir.enums[0].name, "Color");
+    assert_eq!(hir.enums[0].variants.len(), 2);
+    assert_eq!(hir.enums[0].variants[0].name, "Red");
+    assert_eq!(hir.enums[0].variants[1].name, "Green");
+    // Enums are a type-table input; every Decl in `items` is a Func/Var/Const
+    // (there is no enum decl variant in DeclHir at all).
+    assert!(hir.items.iter().all(|i| match i {
+        fleen_compiler::resolver::hir::HirItem::Decl(d) => {
+            matches!(d, DeclHir::Func(_) | DeclHir::Var(_) | DeclHir::Const(_))
+        }
+        _ => true,
+    }));
+}
+
+#[test]
+fn enum_ctor_path_resolves_same_module() {
+    let hir =
+        resolve_str("enum Color { Red, Green }\nfunc main(): int {\n    x = Color.Red;\n    0\n}")
+            .expect("should resolve");
+    let mut found = false;
+    for item in &hir.items {
+        if let fleen_compiler::resolver::hir::HirItem::Decl(decl) = item
+            && let DeclHir::Func(f) = decl
+            && let fleen_compiler::resolver::hir::FuncBodyHir::Block(b) = &f.body
+            && let Some(fleen_compiler::resolver::hir::StmtHir::Decl(d)) = b.stmts.first()
+            && let DeclHir::Var(v) = d
+            && let ExprHir::EnumCtor {
+                enum_name,
+                variant_name,
+                arity,
+                ..
+            } = &*v.init
+        {
+            assert_eq!(enum_name, "Color");
+            assert_eq!(variant_name, "Red");
+            assert_eq!(*arity, 0);
+            found = true;
+        }
+    }
+    assert!(found, "expected an EnumCtor init for Color.Red");
+}
+
+#[test]
+fn enum_ctor_call_resolves_with_payload_arity() {
+    // `Circle(1.5)` parses as a call whose callee is the constructor path.
+    let hir = resolve_str(
+        "enum Shape { Circle(float) }\nfunc main(): float {\n    c = Shape.Circle(1.5);\n    0.0\n}",
+    )
+    .expect("should resolve");
+    let mut found = false;
+    for item in &hir.items {
+        if let fleen_compiler::resolver::hir::HirItem::Decl(decl) = item
+            && let DeclHir::Func(f) = decl
+            && let fleen_compiler::resolver::hir::FuncBodyHir::Block(b) = &f.body
+            && let Some(fleen_compiler::resolver::hir::StmtHir::Decl(d)) = b.stmts.first()
+            && let DeclHir::Var(v) = d
+            && let ExprHir::Call(callee, _) = &*v.init
+            && let ExprHir::EnumCtor {
+                enum_name,
+                variant_name,
+                arity,
+                ..
+            } = &**callee
+        {
+            assert_eq!(enum_name, "Shape");
+            assert_eq!(variant_name, "Circle");
+            assert_eq!(*arity, 1);
+            found = true;
+        }
+    }
+    assert!(found, "expected Call(EnumCtor(Shape.Circle), ...)");
+}
+
+#[test]
+fn enum_unknown_variant_is_error() {
+    let errs = resolve_str("enum Color { Red }\nfunc main(): int {\n    x = Color.Nope;\n    0\n}")
+        .expect_err("unknown variant must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::UndeclaredVariable { .. })),
+        "expected UndeclaredVariable for Color.Nope, got {errs:?}"
+    );
+}
+
+#[test]
+fn enum_duplicate_name_is_error() {
+    let errs = resolve_str("enum E { A }\nenum E { B }\nfunc main(): int = 0")
+        .expect_err("duplicate enum name must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding, got {errs:?}"
+    );
+}
+
+#[test]
+fn enum_duplicate_variant_is_error() {
+    let errs = resolve_str("enum E { A, A }\nfunc main(): int = 0")
+        .expect_err("duplicate variant must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding for variant A, got {errs:?}"
+    );
+}
+
+#[test]
+fn enum_name_clashes_with_function_is_error() {
+    // D3: variant/enum names share the flat identifier namespace with
+    // functions — `enum E { A }` after `func E()` is a duplicate.
+    let errs = resolve_str("func E(): int = 0\nenum E { A }")
+        .expect_err("enum/function name collision must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding, got {errs:?}"
+    );
+}
+
+#[test]
+fn enum_forward_reference_resolves() {
+    // The constructor path resolves even when the enum is declared after
+    // its use (same forward-reference rule as top-level functions).
+    let hir =
+        resolve_str("func main(): int {\n    x = Color.Red;\n    0\n}\nenum Color { Red, Green }")
+            .expect("forward-referenced enum must resolve");
+    assert_eq!(hir.enums.len(), 1);
+}
+
+#[test]
+fn enum_payload_ref_type_is_error() {
+    let errs = resolve_str("enum E { A(ref int) }\nfunc main(): int = 0")
+        .expect_err("`ref` payload must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::RefNotAllowedHere { .. })),
+        "expected RefNotAllowedHere, got {errs:?}"
+    );
+}
+
+#[test]
+fn enum_decl_inside_function_is_parser_error() {
+    // Top-level only (mirror struct): the parser rejects it, so the resolver
+    // never sees a nested enum.
+    let src = "func main(): int {\n    enum E { A }\n    0\n}";
+    let tokens = fleen_compiler::lexer::tokenize(src).expect("lexer should succeed");
+    assert!(
+        fleen_compiler::parser::parse(tokens).is_err(),
+        "nested enum must be a parser error"
+    );
+}

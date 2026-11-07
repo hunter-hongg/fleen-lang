@@ -1125,6 +1125,29 @@ impl TypeChecker {
             }
 
             ExprHir::Call(func, args) => self.typeck_call(*func, args, expected),
+            // 0.0.6 T03: the resolver now produces enum constructor
+            // references; constructor *typing* (T04) maps them to the
+            // registered enum table. Until T04 lands, report the missing
+            // feature clearly instead of silently mis-typing.
+            ExprHir::EnumCtor {
+                enum_name,
+                variant_name,
+                hir_id,
+                span,
+                ..
+            } => {
+                let _ = hir_id;
+                self.add_error(
+                    TypeckErrorKind::UnsupportedFeature {
+                        feature: format!(
+                            "enum constructor `{}`::`{}` (typing lands in 0.0.6 T04)",
+                            enum_name, variant_name
+                        ),
+                    },
+                    span,
+                );
+                Err(())
+            }
             ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
             // 0.0.2 U05: ownership expressions — validated here; the

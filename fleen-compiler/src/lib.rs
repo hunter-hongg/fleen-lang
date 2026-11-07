@@ -362,14 +362,17 @@ fn compile_pre_parsed(
 
     let mut items = Vec::new();
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
     let span = asts[root.0 as usize].span;
     for hir in hirs {
         items.extend(hir.items);
         structs.extend(hir.structs);
+        enums.extend(hir.enums);
     }
     let merged = resolver::hir::Hir {
         items,
         structs,
+        enums,
         span,
     };
     let typed = typeck::typeck(merged).map_err(CompileError::Typeck)?;

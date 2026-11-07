@@ -4,7 +4,7 @@
 > tests.  Decisions D1–D6 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01 implemented 2026-11-04; T02–T08 pending.**
+> **Status: T01–T03 implemented; T04–T08 pending.**
 
 ---
 
@@ -92,14 +92,45 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T03 — Resolver: visibility + import wiring (F1; D3)
 
-- [ ] Enum names join the module export/import machinery (`pub enum`
-      importable cross-module, like `pub struct`)
-- [ ] Variant names register in the per-enum namespace; a dotted constructor
-      path (`Color.Red`) resolves through the existing module-path rules
-- [ ] Collision rules: variant vs function/struct/enum name conflicts are
-      compile errors at registration (`DuplicateDefinition` family)
-- [ ] Tests: resolver valid (import/pub of enums, dotted constructor paths);
+- [x] Enum names join the module export/import machinery (`pub enum`
+      importable cross-module, like `pub struct`) — `ExportKind::Enum`
+      added; `exports_of_ast` registers the enum name with its visibility
+      and its variant names (`ExportDef::enum_variants`, so a cross-module
+      constructor path can resolve them); `register_imported_items` skips
+      enums like structs (no runtime binding)
+- [x] Variant names register in the per-enum namespace; a dotted constructor
+      path (`Color.Red`) resolves through the existing module-path rules —
+      `ExprHir::EnumCtor` carries the enum name, the variant name and the
+      payload types; a call-shaped constructor (`Shape.Circle(1.5)`) reuses
+      the existing `Expr::Call` path
+- [x] Collision rules: variant vs function/struct/enum name conflicts are
+      compile errors at registration (`DuplicateBinding` family) — the
+      module table's item map is the collision source of truth (struct and
+      enum names never enter the binding scope), plus a per-enum duplicate
+      variant check
+- [x] Tests: resolver valid (import/pub of enums, dotted constructor paths);
       invalid (private enum access → `PrivateAccess`, name collisions)
+
+**As-built notes (review-driven additions beyond the card):**
+- `Hir` gained an `enums: Vec<EnumDeclHir>` table (mirroring `structs`) —
+  enums are a type-table input for typeck (T04), not executable code. The
+  T02-era `ResolveErrorKind::UnsupportedEnumDeclaration` is removed: it had
+  no producer left.
+- Enum declarations are collected in a **pre-pass** (`collect_enums`), not
+  inline in the main item loop, so a constructor path resolves regardless
+  of declaration order — the same forward-reference rule global functions
+  follow (a `use before declaration` is legal for a type, as it is for a
+  function).
+- Payload types obey the struct-field `ref` rule (D1): `enum E { A(ref int) }`
+  is a `RefNotAllowedHere` error.
+- A **cross-module** constructor (`shapes.Color.Red`) resolves the variant
+  name from the module table's export, and the enum must be `pub` — a
+  non-`pub` enum reached cross-module is a `PrivateAccess` error. The
+  resolver does **not** carry payload types across the module boundary:
+  typeck (T04) converts them from the enum's own declaration.
+- typeck (T04) does not know `Type::Enum` yet, so an `ExprHir::EnumCtor`
+  reaching it reports `UnsupportedFeature("enum constructor ...")` — the
+  resolver resolves, typeck defers.
 
 **Depends on**: T02.
 **Refs**: PLAN §5 (Resolve row), D3.

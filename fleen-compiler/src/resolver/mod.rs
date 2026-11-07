@@ -28,9 +28,10 @@ use crate::lexer::Span;
 use crate::parser::ast::*;
 use error::{ResolveError, ResolveErrorKind};
 use hir::{
-    BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, ExprChooseHir, ExprForHir, ExprHir,
-    ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir, HirId, HirItem, ImportDeclHir,
-    ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir, VarBindingHir,
+    BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, EnumDeclHir, EnumVariantHir,
+    ExprChooseHir, ExprForHir, ExprHir, ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir,
+    HirId, HirItem, ImportDeclHir, ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir,
+    VarBindingHir,
 };
 pub use modules::{CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE};
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
@@ -141,8 +142,11 @@ struct Resolver {
     /// Module table and the module currently being resolved (0.0.3 V05).
     table: ModuleTable,
     cur_module: usize,
+    /// 0.0.6 T03: enums declared in the current module, keyed by bare name.
+    /// Populated by a pre-pass before expression resolution so a constructor
+    /// path resolves regardless of declaration order (like global functions).
+    enum_table: HashMap<String, EnumDeclHir>,
 }
-
 impl Resolver {
     fn new_for_module(
         table: &ModuleTable,
@@ -158,6 +162,7 @@ impl Resolver {
             global_funcs: HashMap::new(),
             table: table.clone(),
             cur_module: module_id,
+            enum_table: HashMap::new(),
         }
     }
 
@@ -262,6 +267,10 @@ impl Resolver {
         self.register_imported_items();
         self.predeclare_global_functions(&ast);
         let global_funcs = std::mem::take(&mut self.global_funcs);
+        // 0.0.6 T03: collect enum declarations before expression resolution
+        // so a constructor path resolves regardless of declaration order
+        // (the same forward-reference rule global functions follow).
+        let enums = self.collect_enums(&ast);
 
         let mut hir_items = Vec::new();
         let mut structs: Vec<StructDeclHir> = Vec::new();
@@ -307,6 +316,11 @@ impl Resolver {
                 });
                 continue;
             }
+            // Enum declarations were collected by the pre-pass (`collect_enums`);
+            // they are a type-table input for typeck (T04), not executable code.
+            if let Item::Decl(Decl::Enum(_)) = &item {
+                continue;
+            }
             if let Ok(hir_item) = self.resolve_item(item, &global_funcs) {
                 hir_items.push(hir_item);
             }
@@ -322,6 +336,7 @@ impl Resolver {
             Hir {
                 items: hir_items,
                 structs,
+                enums,
                 span: ast.span,
             },
             self.binding_id_counter,
@@ -372,9 +387,9 @@ impl Resolver {
                 if self.scopes.current_get(&qualified).is_some() {
                     continue;
                 }
-                // Structs have no runtime binding; their names are resolved
-                // through the typeck struct table.
-                if matches!(item.kind, ExportKind::Struct) {
+                // Structs and enums have no runtime binding; their names are
+                // resolved through the typeck struct/enum table.
+                if matches!(item.kind, ExportKind::Struct | ExportKind::Enum) {
                     continue;
                 }
                 let binding_id = self.next_binding_id();
@@ -382,7 +397,7 @@ impl Resolver {
                     ExportKind::Func => BindingKind::Function,
                     ExportKind::Const => BindingKind::Const,
                     ExportKind::Global => BindingKind::Variable,
-                    ExportKind::Struct => continue,
+                    ExportKind::Struct | ExportKind::Enum => continue,
                 };
                 let binding = Binding {
                     id: binding_id,
@@ -503,21 +518,10 @@ impl Resolver {
             // (they feed the typeck struct table, not `items`), and the parser
             // rejects struct declarations inside blocks, so this arm cannot run.
             Decl::Struct(_) => unreachable!("struct declarations never reach resolve_decl"),
-            // 0.0.6 T02: enum declarations are parser-only. The enum name and
-            // payload types are registered by typeck (T04), and the choose
-            // exhaustiveness/lowering by T05. Record the unsupported
-            // declaration and produce no HIR item: a bare `Err(())`
-            // contributed no diagnostic, so unsupported (and duplicate)
-            // enums compiled silently.
-            Decl::Enum(e) => {
-                self.add_error(
-                    ResolveErrorKind::UnsupportedEnumDeclaration {
-                        name: e.name.clone(),
-                    },
-                    e.span,
-                );
-                Err(())
-            }
+            // 0.0.6 T03: enum declarations are intercepted by `resolve_program`
+            // (they feed the typeck enum table, not `items`), and the parser
+            // rejects enum declarations inside blocks, so this arm cannot run.
+            Decl::Enum(_) => unreachable!("enum declarations never reach resolve_decl"),
         }
     }
 
@@ -1070,7 +1074,9 @@ impl Resolver {
             }
             Expr::Field(obj, field) => {
                 let span = obj.span();
-                if let Some(hir) = self.try_resolve_module_path(&obj, &field, span)? {
+                if let Some(hir) = self.try_resolve_enum_variant(&obj, &field, span)? {
+                    hir
+                } else if let Some(hir) = self.try_resolve_module_path(&obj, &field, span)? {
                     hir
                 } else {
                     let o = self.resolve_expr(*obj)?;
@@ -1516,6 +1522,245 @@ impl Resolver {
         }
 
         Ok(None)
+    }
+
+    /// 0.0.6 T03 pre-pass: collect every top-level `enum` declaration in
+    /// declaration order, mangling names for the module table and checking
+    /// collisions (duplicate enum, enum vs function/var, variant names).
+    /// Returns the HIR enum table for typeck (T04).
+    fn collect_enums(&mut self, ast: &Ast) -> Vec<EnumDeclHir> {
+        let module = self.table.modules[self.cur_module].clone();
+        let mut enums: Vec<EnumDeclHir> = Vec::new();
+        for item in &ast.items {
+            let Item::Decl(Decl::Enum(e)) = item else {
+                continue;
+            };
+            let mangled = module.mangled_name(&e.name);
+            if let Some(first) = enums.iter().find(|d| d.name == mangled) {
+                self.errors.push(ResolveError {
+                    kind: ResolveErrorKind::DuplicateBinding {
+                        name: mangled.clone(),
+                        first_span: first.span,
+                    },
+                    span: e.span,
+                });
+                continue;
+            }
+            // An enum name shares the flat identifier namespace with
+            // functions and structs (D3 locks). The module table's item map
+            // holds every top-level declaration of this module by name
+            // (func / const / var / struct / enum), so it is the collision
+            // source of truth — struct and enum names never enter the
+            // binding scope. The map holds one entry per name (the last
+            // declaration wins), so a same-named struct/func/const/var is
+            // visible here.
+            let collides = module
+                .items
+                .get(&e.name)
+                .is_some_and(|item| item.kind != crate::resolver::modules::ExportKind::Enum);
+            if collides {
+                let first_span = module
+                    .items
+                    .get(&e.name)
+                    .map(|item| item.span)
+                    .unwrap_or(e.span);
+                self.errors.push(ResolveError {
+                    kind: ResolveErrorKind::DuplicateBinding {
+                        name: e.name.clone(),
+                        first_span,
+                    },
+                    span: e.span,
+                });
+                continue;
+            }
+            // A top-level function or variable already bound in the global
+            // scope is the same collision, seen from the binding side.
+            if let Some(first) = self.scopes.get(&e.name) {
+                self.errors.push(ResolveError {
+                    kind: ResolveErrorKind::DuplicateBinding {
+                        name: e.name.clone(),
+                        first_span: first.span,
+                    },
+                    span: e.span,
+                });
+                continue;
+            }
+            // Variant payload types obey the same `ref` rule as struct
+            // fields (D1: payloads obey struct-field storage rules).
+            for variant in &e.variants {
+                for ty in &variant.payload_types {
+                    if type_contains_ref(ty) {
+                        self.errors.push(ResolveError {
+                            kind: ResolveErrorKind::RefNotAllowedHere {
+                                context: "enum payload type",
+                            },
+                            span: variant.span,
+                        });
+                    }
+                }
+            }
+            // Duplicate variant names within one enum are a registration
+            // error (D3: the variant namespace is per-enum, checked here).
+            let variants: Vec<EnumVariantHir> = e
+                .variants
+                .iter()
+                .map(|v| EnumVariantHir {
+                    name: v.name.clone(),
+                    payload_types: v
+                        .payload_types
+                        .iter()
+                        .map(|ty| self.resolve_type(ty, v.span))
+                        .collect(),
+                    span: v.span,
+                })
+                .collect();
+            for (i, v) in variants.iter().enumerate() {
+                if let Some(first) = variants[..i].iter().find(|p| p.name == v.name) {
+                    self.errors.push(ResolveError {
+                        kind: ResolveErrorKind::DuplicateBinding {
+                            name: v.name.clone(),
+                            first_span: first.span,
+                        },
+                        span: v.span,
+                    });
+                }
+            }
+            let decl = EnumDeclHir {
+                name: mangled,
+                variants,
+                span: e.span,
+                is_pub: e.is_pub,
+            };
+            self.enum_table.insert(e.name.clone(), decl.clone());
+            enums.push(decl);
+        }
+        enums
+    }
+
+    /// Try to resolve a dotted path whose final segment is an enum variant
+    /// constructor (`Color.Red`, `shapes.Color.Red`). Returns None when the
+    /// path is not an enum reference (the caller falls through to module
+    /// path / field access).
+    fn try_resolve_enum_variant(
+        &mut self,
+        obj: &Expr,
+        field: &str,
+        span: Span,
+    ) -> Result<Option<ExprHir>, ()> {
+        // The path is `Enum.Variant` or `module.Enum.Variant`: the base
+        // expression holds everything left of the variant segment.
+        let base_segments: Vec<String> = match obj {
+            Expr::Ident(name, _) => vec![name.clone()],
+            Expr::Field(inner, f) => {
+                let mut segs = vec![f.clone()];
+                let mut cur: &Expr = inner;
+                loop {
+                    match cur {
+                        Expr::Ident(name, _) => {
+                            segs.push(name.clone());
+                            break;
+                        }
+                        Expr::Field(i2, f2) => {
+                            segs.push(f2.clone());
+                            cur = i2;
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                segs.reverse();
+                segs
+            }
+            _ => return Ok(None),
+        };
+        // A local binding shadows an enum name.
+        if base_segments.iter().any(|s| self.scopes.get(s).is_some()) {
+            return Ok(None);
+        }
+        // Same-module enum: the base is exactly the enum name.
+        if base_segments.len() == 1 {
+            let enum_name = &base_segments[0];
+            let Some(decl) = self.enum_table.get(enum_name) else {
+                return Ok(None);
+            };
+            let Some(variant) = decl.variants.iter().find(|v| v.name == *field) else {
+                self.add_error(
+                    ResolveErrorKind::UndeclaredVariable {
+                        name: format!("{}.{}", enum_name, field),
+                    },
+                    span,
+                );
+                return Err(());
+            };
+            return Ok(Some(ExprHir::EnumCtor {
+                enum_name: decl.name.clone(),
+                variant_name: field.to_string(),
+                payload_types: variant.payload_types.clone(),
+                arity: variant.payload_types.len(),
+                hir_id: self.next_hir_id(),
+                span,
+            }));
+        }
+        // Cross-module enum: `module.Enum.Variant` — the module prefix must
+        // be imported and the enum `pub` (checked in the module table).
+        let (mid, prefix_len) = match self.table.longest_module_prefix(&base_segments) {
+            Some(found) => found,
+            None => return Ok(None),
+        };
+        // The base must be exactly `<module prefix>.<Enum>`.
+        if prefix_len + 1 != base_segments.len() {
+            return Ok(None);
+        }
+        let enum_name = &base_segments[prefix_len];
+        let target = &self.table.modules[mid];
+        let module = self.table.modules[self.cur_module].clone();
+        let is_imported = mid == self.cur_module
+            || module
+                .imports
+                .iter()
+                .any(|imp| imp.path.iter().eq(target.path.iter()));
+        if !is_imported {
+            return Ok(None);
+        }
+        // The enum must be exported by the module's item table and pub.
+        let Some(item) = target.items.get(enum_name) else {
+            return Ok(None);
+        };
+        if !matches!(item.kind, crate::resolver::modules::ExportKind::Enum) {
+            return Ok(None);
+        }
+        if !item.is_pub && mid != self.cur_module {
+            self.add_error(
+                ResolveErrorKind::PrivateAccess {
+                    item: enum_name.clone(),
+                    module: target.path_string(),
+                },
+                span,
+            );
+            return Err(());
+        }
+        // The variant list travels with the export (the module table is
+        // built from the raw AST), so a cross-module constructor path
+        // resolves against the *importing* module's view of the enum.
+        if !item.enum_variants.iter().any(|v| v == field) {
+            self.add_error(
+                ResolveErrorKind::UndeclaredVariable {
+                    name: format!("{}.{}", enum_name, field),
+                },
+                span,
+            );
+            return Err(());
+        }
+        Ok(Some(ExprHir::EnumCtor {
+            enum_name: target.mangled_name(enum_name),
+            variant_name: field.to_string(),
+            // Cross-module payload types are converted by typeck (T04) from
+            // the enum's own declaration; the resolver does not duplicate
+            // the payload list across the module boundary.
+            payload_types: Vec::new(),
+            arity: 0,
+            hir_id: self.next_hir_id(),
+            span,
+        }))
     }
 
     fn resolve_if_expr(&mut self, if_expr: ExprIf) -> Result<ExprIfHir, ()> {

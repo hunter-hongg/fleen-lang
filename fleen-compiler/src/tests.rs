@@ -570,3 +570,39 @@ fn compile_project_rejects_private_struct_type() {
         Err(CompileError::Resolve(_))
     ));
 }
+
+// ========== 0.0.6 T03: cross-module enum visibility ==========
+
+#[test]
+fn compile_project_imports_pub_enum() {
+    // `pub enum` joins the module export/import machinery exactly like
+    // `pub struct`: the enum name is visible across the module boundary.
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import shapes;\nfunc main(): int { x = shapes.Color.Red; 0 }\n",
+    );
+    session.add_file("src/shapes/mod.fln", "pub enum Color { Red, Green }\n");
+    // The resolver must resolve the cross-module constructor path. The
+    // typeck stage rejects the enum *type* until T04 adds `Type::Enum`, so
+    // the assertion is: the failure is NOT a resolver failure.
+    if let Err(CompileError::Resolve(errs)) = session.compile_project(root) {
+        panic!("resolver rejected the cross-module enum: {errs:?}");
+    }
+}
+
+#[test]
+fn compile_project_rejects_private_enum_access() {
+    // A non-`pub` enum stays module-local: reaching it from another module
+    // is a `PrivateAccess` error.
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "import shapes;\nfunc main(): int { x = shapes.Color.Red; 0 }\n",
+    );
+    session.add_file("src/shapes/mod.fln", "enum Color { Red, Green }\n");
+    assert!(matches!(
+        session.compile_project(root),
+        Err(CompileError::Resolve(_))
+    ));
+}
