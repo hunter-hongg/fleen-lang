@@ -2742,3 +2742,33 @@ fn t05_enum_pattern_mismatch_on_foreign_variant() {
         "expected EnumPatternMismatch, got {errs:?}"
     );
 }
+
+#[test]
+fn t05_enum_zero_payload_variant_with_binding_is_mismatch() {
+    // The third EnumPatternMismatch trigger (beside a non-enum scrutinee and
+    // a foreign variant): `Point` declares no payload, so `when Point(x)`
+    // has nothing to bind.
+    let errs = compile_err(
+        "enum Shape { Point, Circle(float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Point(x) { 0 }\n        when Circle(r) { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::EnumPatternMismatch { .. })),
+        "expected EnumPatternMismatch for a zero-payload variant binding, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_enum_two_payload_variant_binds_first_payload() {
+    // `Pair(int, string)` declares two payloads; the pattern grammar binds
+    // the FIRST one (PLAN §3.2), so `x` is an int and the arm type-checks —
+    // binding payload 1 (string) or the whole enum would be a type error.
+    // The scrutinee is a fresh constructor value: a bare non-Copy owned
+    // local would demand an explicit `move` in the consuming scrutinee
+    // position (the U05 rule), which is not what this test pins.
+    compile_ok(
+        "enum Pair2 { Pair(int, string), }\n\
+         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(x) { x }\n    }\n}",
+    );
+}

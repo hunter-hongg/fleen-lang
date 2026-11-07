@@ -236,6 +236,18 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
   is reachable. The MIR carries `EnumPayload` without an index operand; T06
   decides the final encoding (D4 fixes `EnumPayload` with a `u16` index
   operand, so T06 adds the operand).
+- **Review round (post-merge tightening).** The stack-depth test now runs the
+  shared `assert_stack_depths_consistent` validator (unguarded and guarded
+  sources) instead of only asserting explicit termination; a new shape test
+  pins the flat instruction order — test chain, fallback (`Pop ; Unit`
+  defensive pair), then the per-arm `EnumPayload ; StoreLocal` bodies — and
+  the guard test additionally requires the staging block to end in
+  `JumpIfFalse` with the payload stored before the guard. Two coverage gaps
+  closed: a zero-payload variant written with a binding (`when Point(x)`,
+  the third `EnumPatternMismatch` trigger) and a 2-payload variant binding
+  its first payload. The T04-reserved `EnumVariantEntry.span` was still
+  unused after T05 landed, so it was removed — re-add it with a real
+  consumer if T06 needs declaration spans.
 
 **Depends on**: T04.
 **Refs**: PLAN §3.4, D3.

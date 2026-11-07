@@ -2756,20 +2756,91 @@ fn t05_choose_enum_guard_emits_false_jump_and_preserves_scrutinee() {
         )
     });
     assert!(has_cond_jump, "guard must emit a conditional jump");
+    // The guarded arm's staging block — EnumPayload followed by StoreLocal —
+    // must end in the guard's JumpIfFalse (the guard may fail, so the parked
+    // scrutinee is tested against the next variant, not consumed).
+    let staging = func
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::EnumPayload))
+                && matches!(b.terminator, Terminator::JumpIfFalse(_))
+        })
+        .expect("the guarded arm's staging block ends in JumpIfFalse");
+    assert!(
+        staging
+            .instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::StoreLocal(_))),
+        "the staging block stores the payload before the guard runs"
+    );
 }
 
 #[test]
 fn t05_choose_enum_stack_depths_consistent() {
-    // Reuse the stack-depth invariant: every path through an enum choose
-    // must leave a well-formed stack (all blocks terminated, depths match).
-    let src = "enum Shape { Point, Circle(float), }\n\
-               func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n    }\n}";
+    // Run the full stack-depth validator (worklist walk, entry-depth
+    // agreement, no underflow, `Return` sees exactly one value) over an
+    // unguarded and a guarded enum choose — not just a termination spot
+    // check.
+    assert_stack_depths_consistent(
+        "enum Shape { Point, Circle(float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n    }\n}",
+    );
+    assert_stack_depths_consistent(
+        "enum Shape { Point, Circle(float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Circle(r) if r > 1.0 { 2 }\n        when Circle(r) { 1 }\n        when Point { 0 }\n    }\n}",
+    );
+}
+
+#[test]
+fn t05_choose_enum_block_order_matches_template() {
+    // The TICKETS T05 template, pinned on the flat instruction order:
+    // the test chain first, then the fallback (`Pop ; Unit` defensive
+    // pair), then the per-arm bodies — every payload move is the
+    // `EnumPayload ; StoreLocal` pair from BYTECODE §6.8. Both variants
+    // carry a Copy payload, so the enum itself is Copy (a bare param
+    // scrutinee needs no `move`) and each body moves one payload out.
+    let src = "enum Shape { Circle(float), Square(float), }\n\
+               func f(s: Shape): int {\n    choose s {\n        when Circle(r) { 0 }\n        when Square(t) { 1 }\n    }\n}";
     let mir = lower_src(src);
-    let func = find_func(&mir, "f");
-    for b in &func.blocks {
+    let ins = flat(find_func(&mir, "f"));
+    let is0 = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::EnumIs(0)));
+    let is1 = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::EnumIs(1)));
+    let pop = ins.iter().position(|i| matches!(i.kind, MirInstrKind::Pop));
+    let unit = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::Unit));
+    let (is0, is1, pop, unit) = match (is0, is1, pop, unit) {
+        (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+        _ => panic!("missing template instructions: EnumIs0/EnumIs1/Pop/Unit"),
+    };
+    assert!(is0 < is1, "test chain follows declaration order");
+    assert!(is1 < pop, "the chain falls through into the fallback");
+    assert!(
+        pop + 1 == unit,
+        "the fallback pops the parked scrutinee, then pushes the defensive Unit"
+    );
+    let payloads: Vec<usize> = ins
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i.kind, MirInstrKind::EnumPayload))
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(payloads.len(), 2, "one payload move per payload variant");
+    assert!(
+        unit < payloads[0] && payloads[0] < payloads[1],
+        "the arm bodies come after the fallback, in arm order"
+    );
+    for &p in &payloads {
         assert!(
-            !matches!(b.terminator, Terminator::Return) || b.instrs.is_empty(),
-            "an enum-choose body block must be explicitly terminated, not a placeholder Return"
+            matches!(ins[p + 1].kind, MirInstrKind::StoreLocal(_)),
+            "EnumPayload must be immediately followed by StoreLocal (§6.8)"
         );
     }
 }
