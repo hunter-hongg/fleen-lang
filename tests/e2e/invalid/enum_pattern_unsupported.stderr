@@ -1,1 +1,1 @@
-enum variant patterns
+pattern requires a matching enum scrutinee

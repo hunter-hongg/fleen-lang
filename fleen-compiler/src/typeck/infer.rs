@@ -1761,6 +1761,23 @@ impl TypeChecker {
                 hir_id: pat_hir_id,
                 span,
             } => {
+                // 0.0.6 T05 (D3): a bare identifier on an enum scrutinee is
+                // a zero-payload variant pattern — *unless* a local binding
+                // of the same name is in scope, which shadows the variant
+                // (the same precedence `resolve_ident` applies on the value
+                // side). Shadowing wins over the variant match.
+                let shadowed = self.scopes.get(name).is_some();
+                if !shadowed
+                    && let Type::Enum(info) = scrutinee_type
+                    && let Some(idx) = self.enum_variant_index(info.id, name)
+                {
+                    return Ok(TypedPatternHir::EnumVariant {
+                        enum_id: info.id,
+                        variant_index: idx as u32,
+                        name: name.clone(),
+                        span: *span,
+                    });
+                }
                 // Pattern binding: new variable with scrutinee type.
                 // Keep the resolver's binding_id for consistency with
                 // guard/body identifier uses and `lower`.
@@ -1845,24 +1862,91 @@ impl TypeChecker {
                     span: *span,
                 })
             }
-            PatternHir::Enum { span, .. } => {
-                // 0.0.6 T02: enum patterns are parser-only. The enum table
-                // is not registered until typeck (T04) and the choose
-                // matching/lowering lands in T05, so the pattern cannot be
-                // checked here. Record a hard error instead of an opaque
-                // placeholder: the placeholder reached `lower`, left the
-                // arm's MIR block unterminated, and the whole function
-                // returned early with no diagnostic.
-                self.add_error(
-                    TypeckErrorKind::UnsupportedFeature {
-                        feature: "enum variant patterns".to_string(),
+            PatternHir::Enum {
+                name,
+                binding_name,
+                binding_id: pat_binding_id,
+                hir_id: pat_hir_id,
+                span,
+            } => {
+                // 0.0.6 T05: `Variant(binding)` is now fully typed. The
+                // scrutinee must be the enum that declares `name`, and the
+                // binding takes the variant's first payload (index 0) as a
+                // move — the same rule as `Ok(v)` / `Err(e)` (D7).
+                let mismatch = |tc: &mut Self| {
+                    tc.add_error(
+                        TypeckErrorKind::EnumPatternMismatch {
+                            variant: name.clone(),
+                            found: scrutinee_type.clone(),
+                        },
+                        *span,
+                    );
+                };
+                let Type::Enum(info) = scrutinee_type else {
+                    mismatch(self);
+                    return Err(());
+                };
+                // The scrutinee is an enum but does not declare this
+                // variant, or the variant is zero-payload (nothing to bind).
+                let Some(variant_index) = self.enum_variant_index(info.id, name) else {
+                    mismatch(self);
+                    return Err(());
+                };
+                let payload_ty = match self.enum_first_payload(info.id, variant_index as u32) {
+                    Some(t) => t.clone(),
+                    None => {
+                        mismatch(self);
+                        return Err(());
+                    }
+                };
+                let new_binding_id = *pat_binding_id;
+                let new_hir_id = *pat_hir_id;
+                // Declare the **binding** name (not the variant name) so the
+                // guard and the arm body can read the payload.
+                let _ = self.scopes.declare(
+                    binding_name.clone(),
+                    Binding {
+                        id: new_binding_id,
+                        kind: BindingKind::Variable,
+                        mutable: true,
+                        builtin: false,
+                        ref_param: false,
+                        span: *span,
+                        hir_id: new_hir_id,
+                        global_name: None,
                     },
-                    *span,
                 );
-                Err(())
+                self.binding_types
+                    .insert(new_binding_id, payload_ty.clone());
+                Ok(TypedPatternHir::Enum {
+                    enum_id: info.id,
+                    variant_index: variant_index as u32,
+                    name: name.clone(),
+                    binding_id: new_binding_id,
+                    ty: payload_ty,
+                    hir_id: new_hir_id,
+                    span: *span,
+                })
             }
             PatternHir::Error => Ok(TypedPatternHir::Error),
         }
+    }
+
+    /// The index of variant `name` within enum `id`, or `None` if the enum
+    /// does not declare it (0.0.6 T05).
+    fn enum_variant_index(&self, id: EnumId, name: &str) -> Option<usize> {
+        self.enums[id.0 as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == name)
+    }
+
+    /// The converted first payload type of enum `id`'s variant at `index`,
+    /// or `None` for a zero-payload variant (0.0.6 T05).
+    fn enum_first_payload(&self, id: EnumId, index: u32) -> Option<&Type> {
+        self.enums[id.0 as usize].variants[index as usize]
+            .payload_types
+            .first()
     }
 
     /// Check choose exhaustiveness.
@@ -1906,6 +1990,43 @@ impl TypeChecker {
                 if !has_false {
                     missing.push("false".to_string());
                 }
+                self.add_error(
+                    TypeckErrorKind::ChooseNotExhaustive {
+                        scrutinee_type: scrutinee_type.clone(),
+                        missing_patterns: missing,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            return Ok(());
+        }
+
+        // 0.0.6 T05 (D3): an enum scrutinee is exhaustive when every
+        // declared variant is covered by a guard-free arm (or an
+        // `otherwise` fallback, handled above). Zero-payload variants
+        // arrive as `EnumVariant`, payload variants as `Enum`; a variant
+        // is covered by either form (the binding is irrelevant to
+        // exhaustiveness).
+        if let Type::Enum(info) = scrutinee_type {
+            let variants = &self.enums[info.id.0 as usize].variants;
+            let mut missing: Vec<String> = Vec::new();
+            for (idx, variant) in variants.iter().enumerate() {
+                let is_covered = arms.iter().any(|arm| {
+                    arm.guard.is_none()
+                        && match &arm.pattern {
+                            TypedPatternHir::Enum { variant_index, .. }
+                            | TypedPatternHir::EnumVariant { variant_index, .. } => {
+                                *variant_index as usize == idx
+                            }
+                            _ => false,
+                        }
+                });
+                if !is_covered {
+                    missing.push(variant.name.clone());
+                }
+            }
+            if !missing.is_empty() {
                 self.add_error(
                     TypeckErrorKind::ChooseNotExhaustive {
                         scrutinee_type: scrutinee_type.clone(),

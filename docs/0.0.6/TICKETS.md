@@ -4,7 +4,7 @@
 > tests.  Decisions D1–D6 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T03 implemented; T04–T08 pending.**
+> **Status: T01–T05 implemented; T06–T08 pending.**
 
 ---
 
@@ -164,19 +164,78 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T05 — Typeck + Lower: `choose` on enums + exhaustiveness (F3; D3)
 
-- [ ] Exhaustiveness generalizes the `Result` case: scrutinee
+- [x] Exhaustiveness generalizes the `Result` case: scrutinee
       `Type::Enum(id)` enumerates the registered variants; guard-free arms
       must cover all of them (`ChooseNotExhaustive` names the missing
       variants); `otherwise` short-circuits; guards never count (§10.5 rules
       unchanged)
-- [ ] Lowering: `DupDeep; EnumIs v; JumpIfTrue arm` chain per variant test,
+- [x] Lowering: `DupDeep; EnumIs v; JumpIfTrue arm` chain per variant test,
       then `EnumPayload v i` + `StoreLocal` for the pattern binding — the
       BYTECODE §6.8 Result template generalized
-- [ ] Guard arms preserve the scrutinee for later arms (same sequence rule as
+- [x] Guard arms preserve the scrutinee for later arms (same sequence rule as
       the Result-with-guard note in §6.8)
-- [ ] Tests: typeck (exhaustive / missing variant / guarded-only arm rejected);
+- [x] Tests: typeck (exhaustive / missing variant / guarded-only arm rejected);
       lower (hand-checked bytecode shape for a 2-variant and a 3-variant enum,
       with-guard sequence)
+
+**As-built notes (review-driven additions beyond the card):**
+
+- **Zero-payload variants are `PatternHir::Ident`, not a new pattern form.**
+  The parser emits `Pattern::Ident` for a bare `when Point { … }` (PLAN §3.2),
+  so typeck must discriminate it: on an enum scrutinee, a name that matches a
+  declared variant of that enum (and is not shadowed by a local binding) is a
+  variant pattern — `TypedPatternHir::EnumVariant`; otherwise it stays the
+  wildcard/identifier binding. Shadowing wins over the variant match, the
+  same precedence `resolve_ident` applies on the value side.
+- **HIR gap closed: `PatternHir::Enum` had no binding name.** T02's pattern
+  carried only the *variant* name, so typeck could not declare the payload
+  binding in the arm scope — the guard and the body could not read it (the
+  first T05 test run failed with `UndefinedVariable: r`). `PatternHir::Enum`
+  now carries `binding_name` alongside `name`; typeck declares the binding
+  name (not the variant name) in the arm scope. This is the same shape
+  `PatternHir::ResultCtor` already had.
+- **New typeck error `EnumPatternMismatch { variant, found }`.** A
+  `Variant(..)` pattern on a non-enum scrutinee, on an enum that does not
+  declare the variant, or on a zero-payload variant (nothing to bind) is
+  reported with the variant name. `PatternTypeMismatch` could not be reused:
+  its `pattern` field is `&'static str` and cannot carry a dynamic variant
+  name.
+- **Lowering shape (the BYTECODE §6.8 template generalized).** The scrutinee
+  is *parked* on the stack for the whole `choose`; each variant gets a test
+  block `Dup/DupDeep ; EnumIs v ; JumpIfTrue body`. Because
+  `JumpIfTrue`/`JumpIfFalse` fall through to the **physically next** block
+  (BYTECODE §6.3), the block allocation order encodes the CFG: test blocks
+  are allocated first (the chain), then the fallback, then the body blocks.
+  Every edge is resolved immediately — no deferred jumps.
+- **Guard arms stage the payload instead of moving it.** A guard may fail,
+  and a failed guard must leave the parked scrutinee intact for the later
+  tests. A guarded `Variant(b)` therefore moves the payload out of a `Dup`
+  copy into `b`'s own slot (`Dup ; EnumPayload ; StoreLocal b`) before the
+  guard runs, and jumps to the next variant's test when the guard is false.
+  The parked scrutinee is consumed only on the guard-success path. This is
+  the `for`-over-`Range` staging precedent applied to a pattern binding.
+- **`EnumPayload` consumes the enum** (`e -> p`, the `UnwrapOk` analogue),
+  so an unguarded payload arm needs no `Pop` before it; a zero-payload
+  variant arm has nothing to move and `Pop`s the parked scrutinee.
+- **MIR-level instructions only.** `MirInstrKind::EnumIs(u32)` and
+  `MirInstrKind::EnumPayload` are introduced here; their bytecodes
+  (`EnumNew` 0xCB / `EnumIs` 0xCC / `EnumPayload` 0xCD) and the `enum_defs`
+  table are T06. Codegen surfaces a clean deferral for the two new
+  instructions (the T04 `enum_lower_deferral` precedent), so no broken
+  bytecode can be produced before T06 lands.
+- **T02/T04 fixtures retired.** `tests/typeck/invalid/enum_pattern_unsupported.fln`
+  and `tests/e2e/invalid/enum_pattern_unsupported.{fln,stderr}` asserted the
+  T02-era "unsupported feature" stopgap; T05 replaces them with the real
+  `EnumPatternMismatch` diagnostic (the T02 card's promise — "pin the
+  downstream 'not supported yet' behavior until T03–T05 land" — is now
+  discharged).
+- **Out of scope, deliberately:** reading a variant's 2nd/3rd payload inside
+  an arm body. The pattern grammar binds one payload (PLAN §3.2 keeps the
+  `Ok(x)` one-binding level) and there is no user-visible "read payload i"
+  expression yet, so a 2+ payload variant matches but only its first payload
+  is reachable. The MIR carries `EnumPayload` without an index operand; T06
+  decides the final encoding (D4 fixes `EnumPayload` with a `u16` index
+  operand, so T06 adds the operand).
 
 **Depends on**: T04.
 **Refs**: PLAN §3.4, D3.

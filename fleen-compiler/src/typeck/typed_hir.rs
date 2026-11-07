@@ -811,5 +811,27 @@ pub enum TypedPatternHir {
         hir_id: HirId,
         span: Span,
     },
+    /// `Variant(binding)` (0.0.6 T05): a payload-carrying enum-variant
+    /// pattern on an enum scrutinee. Binds the first payload (index 0) as
+    /// a move (same rule as `Ok`/`Err`); the variant is resolved to
+    /// `(enum_id, variant_index)` so lower emits `EnumIs` / `EnumPayload`.
+    Enum {
+        enum_id: EnumId,
+        variant_index: u32,
+        name: String,
+        binding_id: BindingId,
+        ty: Type,
+        hir_id: HirId,
+        span: Span,
+    },
+    /// `Variant` (0.0.6 T05): a zero-payload variant written bare (the
+    /// parser produces an `Ident` pattern for it). No binding; matches on
+    /// the variant discriminant only.
+    EnumVariant {
+        enum_id: EnumId,
+        variant_index: u32,
+        name: String,
+        span: Span,
+    },
     Error,
 }

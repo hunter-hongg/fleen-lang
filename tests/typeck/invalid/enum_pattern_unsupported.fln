@@ -1,7 +1,6 @@
-// expect-typeck: UnsupportedFeature
-// 0.0.6 T02: an enum-variant pattern parses (T02) but the variant table it
-// needs is registered in T04 and the matching/lowering in T05 — typeck must
-// reject it as unsupported rather than emit an opaque placeholder pattern.
+// expect-typeck: EnumPatternMismatch
+// 0.0.6 T05: `Foo(x)` on an `int` scrutinee is now a real type error
+// (EnumPatternMismatch), not the T02-era "unsupported feature" placeholder.
 func main() {
     r = choose 1 { when Foo(x) { 111 } otherwise { 222 } };
     print(r as string);

@@ -1,0 +1,12 @@
+// 0.0.6 T05: an enum `choose` with a guard-free arm per variant is
+// exhaustive on its own — no `otherwise` needed (the `Ok` + `Err` rule
+// generalized to N variants, D3).
+enum Color { Red, Green, Blue, }
+
+func rank(c: Color): int {
+    choose c {
+        when Red { 0 }
+        when Green { 1 }
+        when Blue { 2 }
+    }
+}

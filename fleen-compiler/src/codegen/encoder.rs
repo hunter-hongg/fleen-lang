@@ -268,6 +268,16 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::AddrOf(_) => Opcode::AddrOf,
         MirInstrKind::LoadPtr => Opcode::LoadPtr,
         MirInstrKind::StorePtr => Opcode::StorePtr,
+        // 0.0.6 T05: the enum-choose MIR instructions are lowered here, but
+        // their bytecode opcodes (0xCC/0xCD) and the `enum_defs` table are a
+        // T06 deliverable. Fail cleanly rather than emit a bad stream (the
+        // T04 `enum_lower_deferral` precedent).
+        MirInstrKind::EnumIs(_) | MirInstrKind::EnumPayload => {
+            return Err(CodegenError {
+                message: "unsupported feature: enum choose (bytecode opcodes land in 0.0.6 T06)"
+                    .to_string(),
+            });
+        }
     })
 }
 

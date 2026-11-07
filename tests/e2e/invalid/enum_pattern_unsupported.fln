@@ -1,8 +1,9 @@
-// 0.0.6 T02 regression: an enum-variant pattern in `choose` must fail the
-// compile loudly. The pattern parses (T02) but its semantics — registration,
-// matching, lowering — land in T04/T05, so the whole pipeline must reject it
-// instead of silently miscompiling (the old placeholder returned from the
-// function before printing "B").
+// 0.0.6 T05: an enum-variant pattern in `choose` must fail the compile
+// loudly. `Foo(x)` names a variant of no enum, and the scrutinee is an
+// `int`, so typeck rejects it with `EnumPatternMismatch` (T05) instead of
+// the T02-era "unsupported feature" placeholder — the whole pipeline must
+// reject it instead of silently miscompiling (the old placeholder returned
+// from the function before printing "B").
 func main() {
     print("A");
     r = choose 1 { when Foo(x) { 111 } otherwise { 222 } };

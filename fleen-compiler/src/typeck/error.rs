@@ -78,6 +78,10 @@ pub enum TypeckErrorKind {
     UnhandledResult { ty: Type },
     /// `Ok`/`Err` pattern used on a non-Result scrutinee.
     PatternTypeMismatch { pattern: &'static str, found: Type },
+    /// 0.0.6 T05: an enum-variant pattern `Variant(..)` that does not match
+    /// the scrutinee — either the scrutinee is not an enum, or it names a
+    /// variant the scrutinee's enum does not declare.
+    EnumPatternMismatch { variant: String, found: Type },
     // ---- 0.0.2 U05: ownership error family ----
     /// Use of a binding whose owned value was definitely moved earlier.
     UseAfterMove {
@@ -407,6 +411,14 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`{pattern}` pattern requires a `Result<T, E>` scrutinee, \
+                     found `{}`",
+                    found.name()
+                )
+            }
+            TypeckErrorKind::EnumPatternMismatch { variant, found } => {
+                write!(
+                    f,
+                    "`{variant}` pattern requires a matching enum scrutinee, \
                      found `{}`",
                     found.name()
                 )

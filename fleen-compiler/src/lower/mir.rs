@@ -281,4 +281,15 @@ pub enum MirInstrKind {
     LoadPtr,
     /// Write through a pointer: v ptr -> (delta -1, min 2). Operand-less.
     StorePtr,
+    // 0.0.6 T05: enum choose instructions (MIR-level; opcodes 0xCC/0xCD are
+    // a T06 deliverable, mirroring 0.0.5's MIR-before-opcode split).
+    /// Test an enum on top of the stack against a variant by index,
+    /// pushing whether it matches: e -> bool (delta 0, min 1). The enum is
+    /// **consumed** — lower `Dup`/`DupDeep`s the scrutinee first (same
+    /// shape as `IsErr`). u32 = variant index within the enum declaration.
+    EnumIs(u32),
+    /// Move the variant's payload (index 0) out of the enum: e -> p (delta
+    /// 0, min 1). Consumes the enum, like `UnwrapOk`. T05 supports the
+    /// first payload only (PLAN §3.2).
+    EnumPayload,
 }

@@ -557,7 +557,10 @@ fn arr_len_u16(n: usize, span: Span) -> Result<u16, LowerError> {
 fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
     match &arm.pattern {
         TypedPatternHir::Literal(lit) => lit.span(),
-        TypedPatternHir::Ident { span, .. } | TypedPatternHir::ResultCtor { span, .. } => *span,
+        TypedPatternHir::Ident { span, .. }
+        | TypedPatternHir::ResultCtor { span, .. }
+        | TypedPatternHir::Enum { span, .. }
+        | TypedPatternHir::EnumVariant { span, .. } => *span,
         TypedPatternHir::Error => arm.body.span,
     }
 }
@@ -1938,6 +1941,11 @@ impl<'a> FnBodyCx<'a> {
             return self.lower_choose_result(fb, e);
         }
 
+        // Special case: enum scrutinee (0.0.6 T05).
+        if matches!(e.scrutinee.ty(), Type::Enum(_)) {
+            return self.lower_choose_enum(fb, e);
+        }
+
         // Generic choose (0.0.1 algorithm, updated with MirInstr struct).
         self.lower_expr_into(fb, &e.scrutinee)?;
 
@@ -1995,6 +2003,17 @@ impl<'a> FnBodyCx<'a> {
                 TypedPatternHir::ResultCtor { span, .. } => {
                     return Err(LowerError::new(
                         LowerErrorKind::ChooseResultNeedsOkErrArms,
+                        *span,
+                    ));
+                }
+                // 0.0.6 T05: variant patterns only reach the dedicated
+                // `lower_choose_enum` path; encountering one here means the
+                // typeck invariant is broken -- fail loudly (the T02 lesson).
+                TypedPatternHir::Enum { span, .. } | TypedPatternHir::EnumVariant { span, .. } => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "enum variant pattern on a non-enum choose",
+                        },
                         *span,
                     ));
                 }
@@ -2171,6 +2190,210 @@ impl<'a> FnBodyCx<'a> {
         // scrutinee block).
         fb.resolve(jump_err, first_err.expect("has Err arm (checked above)"));
 
+        Ok(())
+    }
+
+    /// Lower a `choose` on an enum scrutinee (0.0.6 T05).
+    ///
+    /// Shape (TICKETS T05): the scrutinee is **parked** on the stack for the
+    /// whole `choose`. Each variant gets a test block —
+    /// `Dup/DupDeep ; EnumIs v ; JumpIfTrue body` — chained by explicit
+    /// jumps in source order, with the `otherwise` fallback (typeck
+    /// guarantees one for a guard-ful choose) at the end. A matched body
+    /// `Pop`s the parked scrutinee (consumed — §6.8) and runs.
+    ///
+    /// **Guard arms**: a guard may fail, so the payload must not be moved
+    /// out of the parked scrutinee before the guard runs (later arms still
+    /// test it). A guarded `Variant(b)` therefore stages its payload into a
+    /// hidden temp slot — `Dup/DupDeep ; EnumPayload ; StoreLocal tmp` —
+    /// evaluates the guard, and on success `LoadLocal tmp ; StoreLocal b`
+    /// moves it into the variable's own slot for the body (the
+    /// `for`-over-`Range` staging precedent). On guard failure the arm
+    /// jumps straight to the next test / fallback with the parked scrutinee
+    /// still on the stack.
+    fn lower_choose_enum(
+        &mut self,
+        fb: &mut FnBuilder,
+        e: &TypedExprChooseHir,
+    ) -> Result<(), LowerError> {
+        let scr_span = e.scrutinee.span();
+        let deep = e.scrutinee.ty().is_owned();
+        let dup = || {
+            if deep {
+                MirInstrKind::DupDeep
+            } else {
+                MirInstrKind::Dup
+            }
+        };
+
+        // Partition arms in source order: variant arms build the test chain
+        // (guarded or not); an optional `otherwise` / `_` arm is the
+        // fallback.
+        let mut variant_arms: Vec<&TypedChooseArmHir> = Vec::new();
+        let mut fallback: Option<&TypedChooseArmHir> = None;
+        for arm in &e.arms {
+            match &arm.pattern {
+                TypedPatternHir::Enum { .. } | TypedPatternHir::EnumVariant { .. } => {
+                    variant_arms.push(arm)
+                }
+                _ => fallback = Some(arm),
+            }
+        }
+        let n = variant_arms.len();
+        if n == 0 {
+            // Defensive: typeck's exhaustiveness check rejects an empty choose.
+            return Err(LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "enum choose with no variant arms",
+                },
+                e.span,
+            ));
+        }
+
+        // `JumpIfTrue(t)` / `JumpIfFalse(t)` take the branch on `t` and
+        // **fall through to the physically next block** otherwise (BYTECODE
+        // §6.3). Block allocation order therefore encodes the CFG:
+        //
+        //   [current]   : lower + park the scrutinee ; Jump test[0]
+        //   test[0..n]  : Dup/DupDeep ; EnumIs v_i ; JumpIfTrue body[i]
+        //                 (untaken falls through to test[i+1] / `fallback`)
+        //   fallback    : Pop ; <otherwise | defensive Unit> ; Jump merge
+        //   body[i]     : unguarded -> (EnumPayload | Pop) ; <body> ;
+        //                 Jump merge
+        //                 guarded   -> stage payload into its binding slot
+        //                 from a Dup copy, eval guard, JumpIfFalse next_test
+        //   guard_ok[i] : (guarded only, physically after body[i]) Pop ;
+        //                 <body> ; Jump merge
+        //   merge       : join
+        //
+        // A guarded arm must not consume the parked scrutinee before the
+        // guard runs (a failed guard still needs later tests to see it), so
+        // the payload is moved out of a Dup copy into the binding slot; both
+        // the guard and the body read that slot. The parked enum is only
+        // consumed (`Pop`) on the guard-pass path.
+        let test_blocks: Vec<BlockId> = (0..n).map(|_| fb.new_block()).collect();
+        let fallback_blk = fb.new_block();
+        let mut body_blocks: Vec<BlockId> = Vec::with_capacity(n);
+        let mut guard_ok: Vec<Option<BlockId>> = Vec::with_capacity(n);
+        for arm in &variant_arms {
+            body_blocks.push(fb.new_block());
+            // A guarded arm's success block must be physically next (the
+            // untaken edge of `JumpIfFalse` falls through to it).
+            guard_ok.push(if arm.guard.is_some() {
+                Some(fb.new_block())
+            } else {
+                None
+            });
+        }
+        let merge = fb.new_block();
+
+        // Park the scrutinee in the current block, then enter the test chain.
+        self.lower_expr_into(fb, &e.scrutinee)?;
+        fb.jump(test_blocks[0]);
+
+        // Emit the test chain in declaration order.
+        for i in 0..n {
+            let arm = variant_arms[i];
+            let v = match &arm.pattern {
+                TypedPatternHir::Enum { variant_index, .. }
+                | TypedPatternHir::EnumVariant { variant_index, .. } => *variant_index,
+                _ => unreachable!("variant_arms holds only enum patterns"),
+            };
+            fb.start(test_blocks[i]);
+            fb.emit(MirInstr::new(dup(), scr_span));
+            fb.emit(MirInstr::new(MirInstrKind::EnumIs(v), scr_span));
+            let j = fb.jump_if_true_later();
+            fb.resolve(j, body_blocks[i]);
+            // untaken: fall through to test[i+1] (or `fallback` after the last)
+        }
+
+        // Fallback: consume the parked scrutinee and run `otherwise`. With a
+        // guard-free exhaustive choose there is no `otherwise`; the block is
+        // unreachable but must still be terminated, so emit a defensive
+        // `Unit` value (the generic `choose` no-match precedent).
+        fb.start(fallback_blk);
+        fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+        match fallback {
+            Some(arm) => self.lower_block(fb, &arm.body)?,
+            None => fb.emit(MirInstr::new(MirInstrKind::Unit, scr_span)),
+        }
+        fb.jump(merge);
+
+        // Emit each matched arm's body.
+        for i in 0..n {
+            let arm = variant_arms[i];
+            fb.start(body_blocks[i]);
+            let next_test = if i + 1 < n {
+                test_blocks[i + 1]
+            } else {
+                fallback_blk
+            };
+            match (&arm.pattern, &arm.guard) {
+                (
+                    TypedPatternHir::Enum {
+                        binding_id, span, ..
+                    },
+                    Some(guard),
+                ) => {
+                    self.slots.slot_for(*binding_id);
+                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    // Move the payload out of a Dup copy into the binding
+                    // slot; the parked scrutinee stays for later tests. Both
+                    // the guard and the body read this slot.
+                    fb.emit(MirInstr::new(dup(), scr_span));
+                    fb.emit(MirInstr::new(MirInstrKind::EnumPayload, *span));
+                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                    self.lower_expr_into(fb, guard)?;
+                    let j = fb.jump_if_false_later();
+                    fb.resolve(j, next_test);
+                    // guard passed: fall through to guard_ok[i]
+                }
+                (
+                    TypedPatternHir::Enum {
+                        binding_id, span, ..
+                    },
+                    None,
+                ) => {
+                    self.slots.slot_for(*binding_id);
+                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    // `EnumPayload` consumes the parked enum (e -> p, like
+                    // `UnwrapOk`); no `Pop` before it.
+                    fb.emit(MirInstr::new(MirInstrKind::EnumPayload, *span));
+                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                    self.lower_block(fb, &arm.body)?;
+                    fb.jump(merge);
+                }
+                (TypedPatternHir::EnumVariant { .. }, Some(guard)) => {
+                    // Zero-payload: nothing to stage, so evaluate the guard
+                    // directly (the parked scrutinee stays for later arms).
+                    self.lower_expr_into(fb, guard)?;
+                    let j = fb.jump_if_false_later();
+                    fb.resolve(j, next_test);
+                }
+                (TypedPatternHir::EnumVariant { .. }, None) => {
+                    // Zero-payload variant: no binding, just consume the
+                    // parked enum and run the body.
+                    fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+                    self.lower_block(fb, &arm.body)?;
+                    fb.jump(merge);
+                }
+                _ => unreachable!("variant_arms holds only enum patterns"),
+            }
+        }
+
+        // Guarded arms' success path (physically after body[i]): consume the
+        // parked scrutinee and run the body.
+        for i in 0..n {
+            if let Some(gb) = guard_ok[i] {
+                let arm = variant_arms[i];
+                fb.start(gb);
+                fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+                self.lower_block(fb, &arm.body)?;
+                fb.jump(merge);
+            }
+        }
+
+        fb.start(merge);
         Ok(())
     }
 }

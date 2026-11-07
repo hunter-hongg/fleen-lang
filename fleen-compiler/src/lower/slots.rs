@@ -145,6 +145,10 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
                     TypedPatternHir::ResultCtor { binding_id, .. } => {
                         alloc.slot_for(*binding_id);
                     }
+                    TypedPatternHir::Enum { binding_id, .. } => {
+                        alloc.slot_for(*binding_id);
+                    }
+                    TypedPatternHir::EnumVariant { .. } => {}
                     TypedPatternHir::Error => {}
                 }
                 if let Some(guard) = &arm.guard {

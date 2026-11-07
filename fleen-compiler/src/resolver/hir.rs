@@ -471,8 +471,12 @@ pub enum PatternHir {
     /// Placeholder for a pattern that failed to resolve (error already recorded).
     Error,
     /// `when Variant(binding)` (0.0.6 T02); semantics checked by typeck.
+    /// `name` is the **variant** name; `binding_name` is the identifier the
+    /// payload is bound to (typeck declares it in the arm scope, so the
+    /// guard and body can read it — the T05 fix).
     Enum {
         name: String,
+        binding_name: String,
         binding_id: BindingId,
         hir_id: HirId,
         span: Span,

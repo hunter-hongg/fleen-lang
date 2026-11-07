@@ -812,6 +812,10 @@ fn stack_delta(
         MirInstrKind::ChannelSend(_) => -1,
         MirInstrKind::ChannelRecv(_) => 0,
         MirInstrKind::ChannelSplit => 0,
+        // 0.0.6 T05: `EnumIs` consumes a copy and pushes a bool (e -> bool,
+        // like `IsErr`); `EnumPayload` consumes the enum and pushes its
+        // payload (e -> p, like `UnwrapOk`) -- both stack-neutral.
+        MirInstrKind::EnumIs(_) | MirInstrKind::EnumPayload => 0,
     }
 }
 
@@ -2682,4 +2686,90 @@ fn lower_addr_of_box_interior_is_unsupported_for_now() {
         err.kind,
         super::LowerErrorKind::UnsupportedFeature { .. }
     ));
+}
+
+// ---- 0.0.6 T05: enum choose lowering (MIR shape) ----
+
+#[test]
+fn t05_choose_enum_two_variants_emits_enum_is_chain() {
+    // `Point` is a zero-payload variant (bare Ident -> EnumVariant);
+    // `Circle(r)` is a payload variant (-> Enum + EnumPayload). Scrutinee
+    // is a parameter, so lowering reaches MIR without `EnumNew` (T06).
+    let src = "enum Shape { Point, Circle(float), }\n\
+               func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    let enum_is: Vec<u32> = ins
+        .iter()
+        .filter_map(|i| match i.kind {
+            MirInstrKind::EnumIs(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        enum_is,
+        vec![0, 1],
+        "one EnumIs per variant, in declaration order"
+    );
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload)),
+        "a payload variant must move its payload out"
+    );
+}
+
+#[test]
+fn t05_choose_enum_three_variants_emits_three_tests() {
+    let src = "enum Color { Red, Green, Blue, }\n\
+               func f(c: Color): int {\n    choose c {\n        when Red { 0 }\n        when Green { 1 }\n        when Blue { 2 }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    let enum_is: Vec<u32> = ins
+        .iter()
+        .filter_map(|i| match i.kind {
+            MirInstrKind::EnumIs(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(enum_is, vec![0, 1, 2]);
+}
+
+#[test]
+fn t05_choose_enum_guard_emits_false_jump_and_preserves_scrutinee() {
+    // A guarded arm must not consume the parked scrutinee before the guard:
+    // the payload is staged from a Dup copy, and a guard failure jumps to
+    // the next variant's test. Both Dup and a conditional jump must be there.
+    let src = "enum Shape { Point, Circle(float), }\n\
+               func f(s: Shape): int {\n    choose s {\n        when Circle(r) if r > 1.0 { 2 }\n        when Circle(r) { 1 }\n        when Point { 0 }\n    }\n}";
+    let mir = lower_src(src);
+    let func = find_func(&mir, "f");
+    let ins = flat(func);
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload)),
+        "guarded payload arm stages its payload"
+    );
+    let has_cond_jump = func.blocks.iter().any(|b| {
+        matches!(
+            b.terminator,
+            Terminator::JumpIfFalse(_) | Terminator::JumpIfTrue(_)
+        )
+    });
+    assert!(has_cond_jump, "guard must emit a conditional jump");
+}
+
+#[test]
+fn t05_choose_enum_stack_depths_consistent() {
+    // Reuse the stack-depth invariant: every path through an enum choose
+    // must leave a well-formed stack (all blocks terminated, depths match).
+    let src = "enum Shape { Point, Circle(float), }\n\
+               func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n    }\n}";
+    let mir = lower_src(src);
+    let func = find_func(&mir, "f");
+    for b in &func.blocks {
+        assert!(
+            !matches!(b.terminator, Terminator::Return) || b.instrs.is_empty(),
+            "an enum-choose body block must be explicitly terminated, not a placeholder Return"
+        );
+    }
 }

@@ -2034,9 +2034,12 @@ impl Resolver {
                 // identifier pattern and its type is determined by
                 // typeck (T04/T05). The variant name travels on the HIR
                 // pattern; matching against the registration table is T05.
+                // The *binding* name travels too (T05): typeck declares it
+                // in the arm scope so the guard and body can read it.
                 let (binding_id, hir_id) = self.declare_pattern_binding(&binding, span)?;
                 Ok(PatternHir::Enum {
                     name: name.clone(),
+                    binding_name: binding,
                     binding_id,
                     hir_id,
                     span,

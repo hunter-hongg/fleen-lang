@@ -2662,3 +2662,83 @@ fn unsafe_async_call_from_safe_is_error() {
         }]
     );
 }
+
+// ---- 0.0.6 T05: choose on enums + exhaustiveness (D3) ----
+
+#[test]
+fn t05_choose_enum_exhaustive_is_ok() {
+    // Guard-free arms covering every variant are exhaustive; no `otherwise`.
+    compile_ok(
+        "enum Shape { Point, Circle(float), Rect(float, float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a) { 2 }\n    }\n}",
+    );
+}
+
+#[test]
+fn t05_choose_enum_missing_variant_names_it() {
+    let errs = compile_err(
+        "enum Color { Red, Green, Blue, }\n\
+         func f(c: Color): int {\n    choose c {\n        when Red { 0 }\n        when Green { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["Blue"]
+        )),
+        "expected ChooseNotExhaustive missing Blue, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_choose_enum_guarded_only_arm_is_not_exhaustive() {
+    // A guarded arm never counts (same rule as Bool/Result).
+    let errs = compile_err(
+        "enum Color { Red, Green, }\n\
+         func f(c: Color): int {\n    choose c {\n        when Red if true { 0 }\n        when Green { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["Red"]
+        )),
+        "expected guarded-only Red to be reported missing, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_choose_enum_otherwise_short_circuits_exhaustiveness() {
+    compile_ok(
+        "enum Color { Red, Green, Blue, }\n\
+         func f(c: Color): int {\n    choose c {\n        when Red { 0 }\n        otherwise { 1 }\n    }\n}",
+    );
+}
+
+#[test]
+fn t05_enum_pattern_payload_binding_takes_declared_type() {
+    // `when Circle(r)` binds r: float (index-0 payload); using it as an int
+    // must fail to type-check, proving the binding is typed and moved.
+    let errs = compile_err(
+        "enum Shape { Point, Circle(float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { r + 1 }\n    }\n}",
+    );
+    assert!(
+        !errs.is_empty(),
+        "expected a float-vs-int type error, got none"
+    );
+}
+
+#[test]
+fn t05_enum_pattern_mismatch_on_foreign_variant() {
+    // `when Blue(x)` on a Color scrutinee that does not declare Blue.
+    let errs = compile_err(
+        "enum Color { Red, Green, }\n\
+         func f(c: Color): int {\n    choose c {\n        when Red { 0 }\n        when Green { 1 }\n        when Blue(x) { 2 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::EnumPatternMismatch { .. })),
+        "expected EnumPatternMismatch, got {errs:?}"
+    );
+}

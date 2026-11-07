@@ -1,0 +1,11 @@
+// expect-typeck: ChooseNotExhaustive
+// 0.0.6 T05: a missing variant makes the `choose` non-exhaustive — the
+// error names the missing variant (`Blue`).
+enum Color { Red, Green, Blue, }
+
+func rank(c: Color): int {
+    choose c {
+        when Red { 0 }
+        when Green { 1 }
+    }
+}

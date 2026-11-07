@@ -836,8 +836,13 @@ impl<'a> Cx<'a> {
 fn pattern_binding(pat: &TypedPatternHir) -> Option<BindingId> {
     match pat {
         TypedPatternHir::Ident { binding_id, .. }
-        | TypedPatternHir::ResultCtor { binding_id, .. } => Some(*binding_id),
-        TypedPatternHir::Literal(_) | TypedPatternHir::Error => None,
+        | TypedPatternHir::ResultCtor { binding_id, .. }
+        // 0.0.6 T05: `Variant(b)` moves the first payload out, exactly like
+        // `Ok(v)` / `Err(e)`; a zero-payload `EnumVariant` binds nothing.
+        | TypedPatternHir::Enum { binding_id, .. } => Some(*binding_id),
+        TypedPatternHir::EnumVariant { .. }
+        | TypedPatternHir::Literal(_)
+        | TypedPatternHir::Error => None,
     }
 }
 
