@@ -1,0 +1,5 @@
+// 0.0.6 T04: payload arity is checked against the declaration.
+enum Shape { Point, Circle(float), Rect(float, float), }
+func main(): Shape {
+    Shape.Rect(1.0)
+}

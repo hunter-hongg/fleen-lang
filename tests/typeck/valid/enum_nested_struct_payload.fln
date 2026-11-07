@@ -1,0 +1,8 @@
+// 0.0.6 T04 (D1): payloads obey struct-field rules — a Copy struct payload
+// keeps the enum Copy; construction checks payload types.
+struct Point { x: int, y: int, }
+enum Shape { Origin, At(Point), }
+func main(): Shape {
+    p = Point { x: 1, y: 2 };
+    Shape.At(p)
+}

@@ -1,0 +1,5 @@
+// 0.0.6 T04 (D3): a payload variant without call parentheses produces no value.
+enum Shape { Point, Circle(float), }
+func main(): Shape {
+    Circle
+}

@@ -131,6 +131,13 @@ pub enum TypeckErrorKind {
     /// A struct refers to itself, directly or indirectly (including via
     /// `box`); the cycle path is reported (`A → B → A`).
     RecursiveStruct { path: String },
+    /// An enum payload type graph reaches the enum being declared —
+    /// directly, via `box`, or via `[T]` (0.0.6 T04, D2): the
+    /// `RecursiveStruct` cycle check generalized to the enum table. The
+    /// cycle path is reported (`A → B → A`).
+    RecursiveEnum { path: String },
+    /// Two enum declarations share one name (0.0.6 T04).
+    DuplicateEnumName { name: String },
     /// A struct literal does not initialize a declared field.
     MissingField { struct_name: String, field: String },
     /// A struct literal or field access names a field the struct does not
@@ -556,6 +563,21 @@ impl fmt::Display for TypeckErrorKind {
                     "recursive struct is not allowed: {path} — a struct's \
                      size must be statically known; help: break the cycle \
                      with `box` indirection syntax once it exists"
+                )
+            }
+            TypeckErrorKind::RecursiveEnum { path } => {
+                write!(
+                    f,
+                    "recursive enum is not allowed: {path} — an enum's size \
+                     must be statically known; help: break the cycle with \
+                     `box` indirection syntax once it exists"
+                )
+            }
+            TypeckErrorKind::DuplicateEnumName { name } => {
+                write!(
+                    f,
+                    "duplicate enum name `{name}` — enums and structs share \
+                     one type namespace"
                 )
             }
             TypeckErrorKind::MissingField { struct_name, field } => {

@@ -1,0 +1,5 @@
+// expect-typeck: FutureNotStorable
+// 0.0.6 T04 (D1): payloads obey struct-field storage rules — a `Future<T>`
+// payload is non-storable (a suspendable coroutine frame, never deep-copied).
+enum E { A, B(Future<int>), }
+func main(): int = 0

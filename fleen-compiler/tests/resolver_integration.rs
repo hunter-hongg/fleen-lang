@@ -1674,6 +1674,43 @@ fn enum_duplicate_variant_is_error() {
 }
 
 #[test]
+fn cross_enum_variant_name_reuse_is_allowed_but_first_enum_wins_bare() {
+    // 0.0.6 T04 (D3): two enums may reuse a variant name (uniqueness is only
+    // per-enum), so bare `X` is ambiguous by construction. The
+    // `variant_to_enum` map is first-wins by declaration order — matching the
+    // flat-namespace rule — so the unqualified spelling resolves to `A`, while
+    // the qualified spellings `A.X` / `B.X` stay unambiguous.
+    // (1) reuse itself is not a DuplicateBinding;
+    resolve_str("enum A { X }\nenum B { X }\nfunc main(): int = 0")
+        .expect("cross-enum variant-name reuse must be allowed");
+    // (2) a bare `X` resolves to the first-declared enum (`A`).
+    let hir = resolve_str("enum A { X }\nenum B { X }\nfunc main(): int {\n    x = X;\n    0\n}")
+        .expect("bare variant `X` must resolve");
+    let mut found = None;
+    for item in &hir.items {
+        if let fleen_compiler::resolver::hir::HirItem::Decl(decl) = item
+            && let DeclHir::Func(f) = decl
+            && let fleen_compiler::resolver::hir::FuncBodyHir::Block(b) = &f.body
+            && let Some(fleen_compiler::resolver::hir::StmtHir::Decl(d)) = b.stmts.first()
+            && let DeclHir::Var(v) = d
+            && let ExprHir::EnumCtor {
+                enum_name,
+                variant_name,
+                ..
+            } = &*v.init
+        {
+            assert_eq!(variant_name, "X");
+            found = Some(enum_name.clone());
+        }
+    }
+    assert_eq!(
+        found.as_deref(),
+        Some("A"),
+        "bare `X` must resolve to the first-declared enum, got {found:?}"
+    );
+}
+
+#[test]
 fn enum_name_clashes_with_function_is_error() {
     // D3: variant/enum names share the flat identifier namespace with
     // functions — `enum E { A }` after `func E()` is a duplicate.
@@ -1684,6 +1721,25 @@ fn enum_name_clashes_with_function_is_error() {
             .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
         "expected DuplicateBinding, got {errs:?}"
     );
+}
+
+#[test]
+fn enum_name_clashes_with_struct_is_error() {
+    // D3 / T03 card: struct and enum names share the flat identifier
+    // namespace, so an enum may not be named like a struct — in either
+    // declaration order. (The module item map is last-wins, so only checking
+    // it lets one of the two orders slip through.)
+    for src in [
+        "struct S { a: int }\nenum S { A }\nfunc main(): int = 0",
+        "enum S { A }\nstruct S { a: int }\nfunc main(): int = 0",
+    ] {
+        let errs = resolve_str(src).expect_err("enum/struct name collision must fail");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+            "expected DuplicateBinding for {src:?}, got {errs:?}"
+        );
+    }
 }
 
 #[test]

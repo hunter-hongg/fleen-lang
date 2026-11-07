@@ -1,0 +1,7 @@
+// 0.0.6 T04 (D3): enums have no `==` — `choose` is the comparison story.
+enum Color { Red, Green, }
+func main(): bool {
+    a = Color.Red;
+    b = Color.Green;
+    a == b
+}

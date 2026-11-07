@@ -483,6 +483,9 @@ fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
         Type::Channel(inner) => Type::Channel(Box::new(substitute(inner, subst))),
         Type::Ptr(inner) => Type::Ptr(Box::new(substitute(inner, subst))),
         Type::Struct(info) => Type::Struct(info.clone()),
+        // An enum is a nominal leaf — no schematic `Var` inside it to
+        // substitute (0.0.6 T04).
+        Type::Enum(info) => Type::Enum(info.clone()),
         Type::Int
         | Type::Float
         | Type::Bool

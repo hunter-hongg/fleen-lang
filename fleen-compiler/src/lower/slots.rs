@@ -107,6 +107,13 @@ fn collect_block(alloc: &mut SlotAlloc, block: &TypedBlockHir) {
 fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
     match expr {
         TypedExprHir::Assign { rhs, .. } => collect_expr(alloc, rhs),
+        // 0.0.6 T04: constructor payload arguments allocate like any
+        // sub-expression (the opcodes land in T06).
+        TypedExprHir::EnumCtor { args, .. } => {
+            for a in args {
+                collect_expr(alloc, a);
+            }
+        }
         TypedExprHir::If(e) => {
             collect_expr(alloc, &e.condition);
             collect_block(alloc, &e.then_branch);

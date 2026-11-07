@@ -1011,6 +1011,22 @@ fn is_copy_exhaustive() {
     assert!(!copy_info.is_owned());
     assert!(!owned_info.is_copy());
     assert!(owned_info.is_owned());
+    // 0.0.6 T04: the enum verdict mirrors the struct verdict — the cached
+    // D1 flag (Copy iff every variant payload is Copy).
+    let copy_enum = Type::Enum(Box::new(EnumInfo {
+        id: EnumId(0),
+        name: "CopyE".into(),
+        copy: true,
+    }));
+    let owned_enum = Type::Enum(Box::new(EnumInfo {
+        id: EnumId(1),
+        name: "OwnedE".into(),
+        copy: false,
+    }));
+    assert!(copy_enum.is_copy());
+    assert!(!copy_enum.is_owned());
+    assert!(!owned_enum.is_copy());
+    assert!(owned_enum.is_owned());
 }
 
 #[test]

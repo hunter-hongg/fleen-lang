@@ -399,6 +399,14 @@ impl<'a> Cx<'a> {
             | TypedExprHir::ResultCtor { value: inner, .. } => {
                 self.walk_expr(inner, false);
             }
+            // 0.0.6 T04: enum constructor payloads are read-only positions
+            // (same rule as Ok/Err payloads) — each arg is walked with
+            // producer=false; T06's EnumNew packs them by value.
+            TypedExprHir::EnumCtor { args, .. } => {
+                for a in args {
+                    self.walk_expr(a, false);
+                }
+            }
             // 0.0.4 F3: `e await` consumes the future (driven once), so the
             // operand is a producing position — a bare owned future is an
             // implicit move into `await`.
@@ -923,6 +931,12 @@ fn scan_owned_local_uses(
         TypedExprHir::Index { arr, idx, .. } => {
             scan_owned_local_uses(arr, out, globals, global_names, entry);
             scan_owned_local_uses(idx, out, globals, global_names, entry);
+        }
+        // 0.0.6 T04: constructor payloads are plain reads for this scan.
+        TypedExprHir::EnumCtor { args, .. } => {
+            for a in args {
+                scan_owned_local_uses(a, out, globals, global_names, entry);
+            }
         }
         TypedExprHir::ArrayLit { elems, .. } => {
             for elem in elems {

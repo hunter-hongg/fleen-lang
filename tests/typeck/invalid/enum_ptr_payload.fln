@@ -1,0 +1,5 @@
+// expect-typeck: PtrNotStorable
+// 0.0.6 T04 (D1): payloads obey struct-field storage rules — a `ptr<T>`
+// payload is non-storable (a move-only handle, never deep-copied).
+enum E { A, B(ptr<int>), }
+func main(): int = 0

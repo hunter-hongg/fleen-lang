@@ -1,0 +1,5 @@
+// 0.0.6 T04 (D3): a dotted payload constructor types against the declaration.
+enum Shape { Point, Circle(float), }
+func main(): Shape {
+    Shape.Circle(1.5)
+}

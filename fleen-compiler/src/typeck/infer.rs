@@ -10,10 +10,10 @@ use crate::resolver::scope::{Binding, BindingKind, ScopeStack};
 use crate::typeck::builtins::{BuiltinParam, find_builtin};
 use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
-    Access, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir, TypedConstDeclHir,
-    TypedDeclHir, TypedExprChooseHir, TypedExprForHir, TypedExprHir, TypedExprIfHir,
-    TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir,
-    TypedPatternHir, TypedStmtHir, TypedStructDef, TypedVarBindingHir,
+    Access, EnumId, EnumInfo, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir,
+    TypedConstDeclHir, TypedDeclHir, TypedExprChooseHir, TypedExprForHir, TypedExprHir,
+    TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem,
+    TypedParamHir, TypedPatternHir, TypedStmtHir, TypedStructDef, TypedVarBindingHir,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
@@ -36,6 +36,31 @@ impl StructEntry {
     fn field_index(&self, name: &str) -> Option<usize> {
         self.fields.iter().position(|(n, _, _)| n == name)
     }
+}
+
+/// One registered enum declaration (0.0.6 T04), indexed by [`EnumId`].
+/// Mirrors [`StructEntry`]: raw payload types are kept until every verdict
+/// is final so the enum↔struct copy dependency can reach a fixed point.
+struct EnumEntry {
+    name: String,
+    /// Declared variants in declaration order: (name, raw payload types,
+    /// span). Raw (`ast::Type`) payloads are retained for the copy fixed
+    /// point; `convert_type` turns them into `Type` on demand.
+    variants: Vec<EnumVariantEntry>,
+    /// D2 cached verdict: an enum is Copy iff every variant's payload is
+    /// Copy. Final after the fixed-point pass.
+    copy: bool,
+    decl_span: Span,
+}
+
+/// A single variant within an [`EnumEntry`].
+struct EnumVariantEntry {
+    name: String,
+    /// Converted payload types (final after `collect_enums` phase 3).
+    payload_types: Vec<Type>,
+    /// Variant declaration span (reserved for T05's payload-read errors).
+    #[allow(dead_code)]
+    span: Span,
 }
 
 /// Collect the names of every named (struct) type mentioned anywhere in
@@ -63,6 +88,11 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
         ast::Type::Range => {}
     }
 }
+
+/// Raw per-variant payload data during `collect_enums` (0.0.6 T04):
+/// (variant name, [(payload AST type, payload span)], variant span).
+/// Indexed by `EnumId` until every copy verdict is final.
+type RawEnumVariants = Vec<(String, Vec<(ast::Type, Span)>, Span)>;
 
 /// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
 /// the object binding, plus the field being written.
@@ -122,6 +152,10 @@ pub struct TypeChecker {
     structs: Vec<StructEntry>,
     /// Struct name → id (declaration order; duplicates are rejected).
     struct_by_name: HashMap<String, StructId>,
+    /// Enum table, indexed by [`EnumId`] (0.0.6 T04).
+    enums: Vec<EnumEntry>,
+    /// Enum name → id (declaration order; duplicates are rejected).
+    enum_by_name: HashMap<String, EnumId>,
     /// Function name → (is_unsafe, is_trusted) mapping. Built during typeck.
     func_flags: HashMap<String, (bool, bool)>,
 }
@@ -145,6 +179,8 @@ impl TypeChecker {
             global_ids: HashSet::new(),
             structs: Vec::new(),
             struct_by_name: HashMap::new(),
+            enums: Vec::new(),
+            enum_by_name: HashMap::new(),
             func_flags: HashMap::new(),
         }
     }
@@ -239,20 +275,29 @@ impl TypeChecker {
             ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
             // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
             ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
-            ast::Type::Named(name) => match self.struct_by_name.get(name) {
-                Some(&id) => {
+            ast::Type::Named(name) => {
+                // A named type resolves through the struct table first, then
+                // the enum table (0.0.6 T04) — both are nominal user types
+                // and share one name namespace, enforced at registration.
+                if let Some(&id) = self.struct_by_name.get(name) {
                     let entry = &self.structs[id.0 as usize];
                     Type::Struct(Box::new(StructInfo {
                         id,
                         name: entry.name.clone().into_boxed_str(),
                         copy: entry.copy,
                     }))
-                }
-                None => {
+                } else if let Some(&id) = self.enum_by_name.get(name) {
+                    let entry = &self.enums[id.0 as usize];
+                    Type::Enum(Box::new(EnumInfo {
+                        id,
+                        name: entry.name.clone().into_boxed_str(),
+                        copy: entry.copy,
+                    }))
+                } else {
                     self.add_error(TypeckErrorKind::UnknownType { name: name.clone() }, span);
                     Type::Unsupported(name.clone())
                 }
-            },
+            }
         }
     }
 
@@ -342,6 +387,223 @@ impl TypeChecker {
                 })
                 .collect();
             self.structs[i].fields = converted;
+        }
+    }
+
+    /// Build the enum table from the HIR's enum declarations (0.0.6 T04).
+    ///
+    /// Three phases, mirroring [`Self::collect_structs`]:
+    /// 1. register every declaration's name (duplicates reported);
+    /// 2. cycle detection (`RecursiveEnum`, D2) — an enum payload may not
+    ///    reach the enum being declared — directly, via `box`, or via
+    ///    `[T]` — then copy-ness (`is_copy(E)` = every variant payload is
+    ///    Copy, D1). Enum verdicts may depend on struct verdicts (an enum
+    ///    payload may name a struct), so this pass runs **after**
+    ///    [`Self::collect_structs`]; struct fields cannot name enums in
+    ///    0.0.6, so no reverse dependency exists.
+    /// 3. payload-type conversion with the struct-field storage checks
+    ///    (`ChannelNotStorable` / `FutureNotStorable` / `PtrNotStorable`).
+    fn collect_enums(&mut self, hir: &Hir) {
+        // Phase 1: register names; keep raw payload types until verdicts
+        // are final (index = EnumId).
+        let mut raw: Vec<RawEnumVariants> = Vec::new();
+        for decl in &hir.enums {
+            if self.enum_by_name.contains_key(&decl.name) {
+                self.add_error(
+                    TypeckErrorKind::DuplicateEnumName {
+                        name: decl.name.clone(),
+                    },
+                    decl.span,
+                );
+                continue;
+            }
+            let id = EnumId(self.enums.len() as u32);
+            self.enums.push(EnumEntry {
+                name: decl.name.clone(),
+                variants: Vec::new(),
+                copy: false,
+                decl_span: decl.span,
+            });
+            raw.push(
+                decl.variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.name.clone(),
+                            v.payload_types
+                                .iter()
+                                .map(|ty| (ty.clone(), v.span))
+                                .collect(),
+                            v.span,
+                        )
+                    })
+                    .collect(),
+            );
+            self.enum_by_name.insert(decl.name.clone(), id);
+        }
+
+        // Phase 2a: cycle detection (D2). Only enum-to-enum edges close an
+        // enum cycle; the struct side is acyclic by construction
+        // (`RecursiveStruct` already ran), so a payload reaching a struct
+        // terminates there.
+        let mut color: Vec<u8> = vec![0; self.enums.len()]; // 0 white, 1 gray, 2 black
+        for start in 0..self.enums.len() {
+            if color[start] == 0 {
+                self.detect_enum_cycle(start, &raw, &mut color, &mut Vec::new());
+            }
+        }
+
+        // Phase 2b: copy-ness in dependency order (memoized DFS over enum
+        // payloads; struct verdicts are already final).
+        let ids: Vec<EnumId> = (0..self.enums.len() as u32).map(EnumId).collect();
+        for id in ids {
+            let copy = self.compute_enum_copy(id, &raw);
+            self.enums[id.0 as usize].copy = copy;
+        }
+
+        // Phase 3: convert payload types now that every verdict is final,
+        // with the struct-field storage checks (D1: payloads obey struct
+        // field rules).
+        for (i, variants) in raw.into_iter().enumerate() {
+            let converted: Vec<EnumVariantEntry> = variants
+                .into_iter()
+                .map(|(name, payloads, span)| {
+                    let payload_types: Vec<Type> = payloads
+                        .into_iter()
+                        .map(|(ty, sp)| {
+                            let conv = self.convert_type(&ty, sp);
+                            if conv.contains_channel() {
+                                self.add_error(TypeckErrorKind::ChannelNotStorable, sp);
+                            } else if conv.contains_future() {
+                                self.add_error(TypeckErrorKind::FutureNotStorable, sp);
+                            } else if conv.contains_ptr() {
+                                self.add_error(TypeckErrorKind::PtrNotStorable, sp);
+                            }
+                            conv
+                        })
+                        .collect();
+                    EnumVariantEntry {
+                        name,
+                        payload_types,
+                        span,
+                    }
+                })
+                .collect();
+            self.enums[i].variants = converted;
+        }
+    }
+
+    /// DFS cycle detection over enum payload references (0.0.6 D2). `path`
+    /// carries the current stack of enum names; a gray hit closes a cycle
+    /// and reports `RecursiveEnum` with the full path. Struct references
+    /// terminate (they cannot close an enum cycle in 0.0.6).
+    fn detect_enum_cycle(
+        &mut self,
+        id: usize,
+        raw: &[RawEnumVariants],
+        color: &mut [u8],
+        path: &mut Vec<String>,
+    ) {
+        if color[id] == 1 {
+            // Cycle closes here: render from the first occurrence of `id`.
+            let start = path
+                .iter()
+                .position(|n| *n == self.enums[id].name)
+                .unwrap_or(0);
+            let mut cycle: Vec<String> = path[start..].to_vec();
+            cycle.push(self.enums[id].name.clone());
+            let span = self.enums[id].decl_span;
+            self.add_error(
+                TypeckErrorKind::RecursiveEnum {
+                    path: cycle.join(" → "),
+                },
+                span,
+            );
+            return;
+        }
+        if color[id] == 2 {
+            return;
+        }
+        color[id] = 1;
+        path.push(self.enums[id].name.clone());
+        let refs = self.enum_payload_enum_refs(&raw[id]);
+        for r in refs {
+            self.detect_enum_cycle(r, raw, color, path);
+        }
+        path.pop();
+        color[id] = 2;
+    }
+
+    /// Enum ids directly referenced by enum `raw` payload types (via `Named`
+    /// names resolved through the enum table; struct names and unknown names
+    /// are skipped — they get their own error at conversion time).
+    fn enum_payload_enum_refs(&self, variants: &RawEnumVariants) -> Vec<usize> {
+        let mut refs = Vec::new();
+        for (_, payloads, _) in variants {
+            for (ty, _) in payloads {
+                collect_named_type_refs(ty, &mut |name| {
+                    if let Some(&r) = self.enum_by_name.get(name) {
+                        refs.push(r.0 as usize);
+                    }
+                });
+            }
+        }
+        refs
+    }
+
+    /// D1 copy verdict for enum `id`: Copy iff every variant payload type is
+    /// Copy. Enum references recurse into the table verdict; struct
+    /// references consult the struct table's final verdict (structs cannot
+    /// name enums in 0.0.6, so no reverse edge exists).
+    fn compute_enum_copy(&mut self, id: EnumId, raw: &[RawEnumVariants]) -> bool {
+        let idx = id.0 as usize;
+        let mut all_copy = true;
+        for (_, payloads, _) in &raw[idx] {
+            for (ty, _) in payloads {
+                if !self.ast_type_is_copy_with_enums(ty) {
+                    all_copy = false;
+                    break;
+                }
+            }
+            if !all_copy {
+                break;
+            }
+        }
+        all_copy
+    }
+
+    /// Copy-ness of a raw payload type: base types as usual, struct
+    /// references through the struct table verdict, enum references through
+    /// the enum table verdict (in-progress enums read `false`, matching the
+    /// struct side's cycle degradation).
+    fn ast_type_is_copy_with_enums(&mut self, ty: &ast::Type) -> bool {
+        match ty {
+            ast::Type::Base(BaseType::Int)
+            | ast::Type::Base(BaseType::Float)
+            | ast::Type::Base(BaseType::Bool)
+            | ast::Type::Base(BaseType::Unit) => true,
+            ast::Type::Base(BaseType::String) => false,
+            ast::Type::Named(name) => {
+                if let Some(&id) = self.enum_by_name.get(name) {
+                    return self.enums[id.0 as usize].copy;
+                }
+                if let Some(&id) = self.struct_by_name.get(name) {
+                    return self.structs[id.0 as usize].copy;
+                }
+                false
+            }
+            ast::Type::Array(_) | ast::Type::Box(_) | ast::Type::Ref(_) => false,
+            ast::Type::Range => true, // Range is Copy: two ints (D5)
+            // F3: a Future owns its suspend state — never Copy.
+            ast::Type::Future(_) => false,
+            ast::Type::Result(ok, err) => {
+                self.ast_type_is_copy_with_enums(ok) && self.ast_type_is_copy_with_enums(err)
+            }
+            ast::Type::Func(_, _) => true,
+            // F9: a channel owns its buffer — never Copy (move-only).
+            ast::Type::Channel(_) => false,
+            // 0.0.5 T02 D1: a ptr is a move-only handle — never Copy.
+            ast::Type::Ptr(_) => false,
         }
     }
 
@@ -532,6 +794,9 @@ impl TypeChecker {
     pub fn typeck(mut self, hir: Hir) -> Result<TypedHir, Vec<TypeckError>> {
         self.register_builtins();
         self.collect_structs(&hir);
+        // 0.0.6 T04: enums after structs — an enum payload may name a struct,
+        // so struct copy verdicts must be final first (D1).
+        self.collect_enums(&hir);
         self.collect_func_signatures(&hir);
         self.collect_global_ids(&hir);
 
@@ -1129,25 +1394,16 @@ impl TypeChecker {
             // references; constructor *typing* (T04) maps them to the
             // registered enum table. Until T04 lands, report the missing
             // feature clearly instead of silently mis-typing.
+            // 0.0.6 T04 (D3): a zero-payload variant in value position
+            // (`Point`, `Shape.Point`). A payload variant reaching this arm
+            // without call parentheses is an arity error — the payload form
+            // must be constructed through `typeck_call`.
             ExprHir::EnumCtor {
                 enum_name,
                 variant_name,
-                hir_id,
                 span,
                 ..
-            } => {
-                let _ = hir_id;
-                self.add_error(
-                    TypeckErrorKind::UnsupportedFeature {
-                        feature: format!(
-                            "enum constructor `{}`::`{}` (typing lands in 0.0.6 T04)",
-                            enum_name, variant_name
-                        ),
-                    },
-                    span,
-                );
-                Err(())
-            }
+            } => self.typeck_enum_ctor_value(enum_name, variant_name, span),
             ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
             // 0.0.2 U05: ownership expressions — validated here; the
@@ -1741,9 +1997,13 @@ impl TypeChecker {
         // handle discipline (split-only forking) keeps distinct. 0.0.4 (T08):
         // a Future has no `==` — the derived comparison would inspect two
         // suspended frames, and either operand's frame read is a fork.
+        // 0.0.6 T04 (D3): enums have no `==` either — matching via `choose`
+        // is the comparison story (same posture as structs/arrays).
         if matches!(op, "==" | "!=")
-            && (matches!(typed_lhs.ty(), Type::Struct(_) | Type::Array(_))
-                || typed_lhs.ty().contains_channel()
+            && (matches!(
+                typed_lhs.ty(),
+                Type::Struct(_) | Type::Array(_) | Type::Enum(_)
+            ) || typed_lhs.ty().contains_channel()
                 || typed_lhs.ty().contains_future()
                 || typed_rhs.ty().contains_channel()
                 || typed_rhs.ty().contains_future())
@@ -1980,6 +2240,27 @@ impl TypeChecker {
                 );
                 return Err(());
             }
+        }
+
+        // 0.0.6 T04 (D3): an enum-variant constructor call — `Circle(1.5)`
+        // (bare) and `Shape.Circle(1.5)` (dotted) both arrive as a call whose
+        // callee already resolved to `ExprHir::EnumCtor`. Payload typing is
+        // typeck's job; interception must happen before the callee is
+        // typechecked as an ordinary expression.
+        if let ExprHir::EnumCtor {
+            enum_name,
+            variant_name,
+            ..
+        } = &func
+        {
+            let span = func.span();
+            return self.typeck_enum_ctor_call(
+                span,
+                enum_name.clone(),
+                variant_name.clone(),
+                args,
+                expected,
+            );
         }
 
         // `Ok(...)` / `Err(...)`: builtin Result constructors (PLAN §3.4.1),
@@ -2349,6 +2630,138 @@ impl TypeChecker {
             typed_args,
             ret_type,
         ))
+    }
+
+    /// Type a zero-payload variant in value position (0.0.6 T04, D3):
+    /// `Point` or `Shape.Point` produces the enum value itself. A payload
+    /// variant here is an arity error — the payload form is constructed
+    /// through [`Self::typeck_enum_ctor_call`].
+    fn typeck_enum_ctor_value(
+        &mut self,
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let Some(&id) = self.enum_by_name.get(&enum_name) else {
+            // The resolver only emits `EnumCtor` for declared enums; reaching
+            // here is a resolver/typeck contract break, reported as unknown
+            // type to stay total.
+            self.add_error(
+                TypeckErrorKind::UnknownType {
+                    name: enum_name.clone(),
+                },
+                span,
+            );
+            return Err(());
+        };
+        let variant_idx = self.enums[id.0 as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == variant_name)
+            .unwrap_or_else(|| unreachable!("resolver guarantees the variant name is declared"));
+        let (payload_tys, enum_ty) = {
+            let entry = &self.enums[id.0 as usize];
+            let payload_tys = entry.variants[variant_idx].payload_types.clone();
+            let enum_ty = Type::Enum(Box::new(EnumInfo {
+                id,
+                name: entry.name.clone().into_boxed_str(),
+                copy: entry.copy,
+            }));
+            (payload_tys, enum_ty)
+        };
+        if !payload_tys.is_empty() {
+            self.add_error(
+                TypeckErrorKind::ArityMismatch {
+                    expected: payload_tys.len(),
+                    found: 0,
+                },
+                span,
+            );
+            return Err(());
+        }
+        Ok(TypedExprHir::EnumCtor {
+            enum_id: id,
+            variant_idx: variant_idx as u16,
+            payload_tys,
+            args: Vec::new(),
+            ty: enum_ty,
+            span,
+        })
+    }
+
+    /// Type an enum-variant constructor call (0.0.6 T04, D3): arity and
+    /// payload types are checked against the enum's own declaration (the
+    /// resolver deliberately does not carry payloads across a module
+    /// boundary), and each argument is a consuming position exactly like a
+    /// struct-literal initializer. The result type is the enum.
+    fn typeck_enum_ctor_call(
+        &mut self,
+        span: Span,
+        enum_name: String,
+        variant_name: String,
+        args: Vec<ExprHir>,
+        expected: Option<&Type>,
+    ) -> Result<TypedExprHir, ()> {
+        let Some(&id) = self.enum_by_name.get(&enum_name) else {
+            self.add_error(
+                TypeckErrorKind::UnknownType {
+                    name: enum_name.clone(),
+                },
+                span,
+            );
+            return Err(());
+        };
+        let variant_idx = self.enums[id.0 as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == variant_name)
+            .unwrap_or_else(|| unreachable!("resolver guarantees the variant name is declared"));
+        let (payload_tys, enum_ty) = {
+            let entry = &self.enums[id.0 as usize];
+            let payload_tys = entry.variants[variant_idx].payload_types.clone();
+            let enum_ty = Type::Enum(Box::new(EnumInfo {
+                id,
+                name: entry.name.clone().into_boxed_str(),
+                copy: entry.copy,
+            }));
+            (payload_tys, enum_ty)
+        };
+        if args.len() != payload_tys.len() {
+            self.add_error(
+                TypeckErrorKind::ArityMismatch {
+                    expected: payload_tys.len(),
+                    found: args.len(),
+                },
+                span,
+            );
+            return Err(());
+        }
+        let mut typed_args = Vec::with_capacity(args.len());
+        for (arg, payload_ty) in args.into_iter().zip(payload_tys.iter()) {
+            let typed = self.typeck_expr(arg, Some(payload_ty))?;
+            if let Err(e) = unify(payload_ty, &typed.ty(), typed.span()) {
+                self.add_error(e.kind, e.span);
+                return Err(());
+            }
+            // A constructor argument is a consuming position: a bare owned
+            // local needs `move` / `clone` (struct-literal rule).
+            self.reject_bare_owned_arg(&typed, typed.span())?;
+            typed_args.push(typed);
+        }
+        if let Some(expected_ty) = expected
+            && let Err(e) = unify(expected_ty, &enum_ty, span)
+        {
+            self.add_error(e.kind, e.span);
+            return Err(());
+        }
+        Ok(TypedExprHir::EnumCtor {
+            enum_id: id,
+            variant_idx: variant_idx as u16,
+            payload_tys,
+            args: typed_args,
+            ty: enum_ty,
+            span,
+        })
     }
 
     /// Check a `Ok(...)` / `Err(...)` constructor call (PLAN §3.4.1, D6).

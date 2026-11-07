@@ -1,0 +1,7 @@
+// 0.0.6 T04: a Copy enum flows free — construction, returns and passing.
+enum Op { Add, Mul, }
+func pick(o: Op): Op = o
+func main(): Op {
+    o = Op.Add;
+    pick(o)
+}

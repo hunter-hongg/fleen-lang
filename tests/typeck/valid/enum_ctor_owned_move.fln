@@ -1,0 +1,7 @@
+// 0.0.6 T04 (D1): an enum with an owned payload is owned — `move` transfers it.
+enum Op { Add, Tag(string), }
+func consume(x: Op): int = 0
+func main(): int {
+    o = Tag("a");
+    consume(move o)
+}

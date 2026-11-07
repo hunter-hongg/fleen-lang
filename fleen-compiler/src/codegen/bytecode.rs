@@ -161,6 +161,15 @@ impl FieldTypeTag {
             Type::Box(_) => FieldTypeTag::Box,
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
+            // An enum is not a serializable struct-field type either
+            // (0.0.6 T04): the enum's own representation is an `enum_defs`
+            // table entry emitted by the enum opcodes (T06), not a
+            // FieldTypeTag. The `Unit` mapping keeps the match total;
+            // reaching it is a typeck/lower bug.
+            Type::Enum(_) => {
+                debug_assert!(false, "enum cannot be a struct field type (0.0.6 T04)");
+                FieldTypeTag::Unit
+            }
             Type::Range => FieldTypeTag::Range,
             // `Future` can never be a *struct field* (0.0.4): the disk-format
             // tags are untouched (PLAN §6), and a suspendable coroutine frame

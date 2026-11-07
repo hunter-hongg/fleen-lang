@@ -14,6 +14,24 @@ use crate::resolver::hir::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructId(pub u32);
 
+/// Unique ID of an enum declaration (0.0.6 T04). Allocated contiguously
+/// from 0 in declaration order; feeds `EnumNew(id)` lowering and the
+/// bytecode `enum_defs` table (T06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumId(pub u32);
+
+/// Shared per-declaration enum data carried inside `Type::Enum`
+/// (0.0.6 T04). Mirrors [`StructInfo`]: `id` is what lowering emits;
+/// `name` renders error messages without access to the enum table; `copy`
+/// is the cached D2 verdict (an enum is Copy iff every variant payload is
+/// Copy) so the pure `Type::is_copy` stays total.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumInfo {
+    pub id: EnumId,
+    pub name: Box<str>,
+    pub copy: bool,
+}
+
 /// Shared per-declaration struct data carried inside `Type::Struct`
 /// (0.0.3 V02). `id` is what lowering emits; `name` renders error messages
 /// without access to the struct table; `copy` is the cached D2 verdict
@@ -53,6 +71,8 @@ pub enum Type {
     Ref(Box<Type>),
     /// User-defined struct type (0.0.3 V02).
     Struct(Box<StructInfo>),
+    /// User-defined enum type (0.0.6 T04).
+    Enum(Box<EnumInfo>),
     /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
     /// (`range`/`range_from`); iterates `start..end` (end-exclusive). Copy.
     Range,
@@ -96,6 +116,7 @@ impl Type {
             Type::Box(inner) => format!("box<{}>", inner.name()),
             Type::Ref(inner) => format!("ref {}", inner.name()),
             Type::Struct(info) => info.name.to_string(),
+            Type::Enum(info) => info.name.to_string(),
             Type::Range => "Range".to_string(),
             Type::Future(inner) => format!("Future<{}>", inner.name()),
             Type::Channel(inner) => format!("channel<{}>", inner.name()),
@@ -188,6 +209,9 @@ impl Type {
             // D2: a struct is Copy iff every field is Copy — precomputed
             // per declaration by the struct-table pass (dependency order).
             Type::Struct(info) => info.copy,
+            // D2: an enum is Copy iff every variant's payload is Copy —
+            // precomputed per declaration by the enum-table pass (0.0.6 T04).
+            Type::Enum(info) => info.copy,
             Type::Range => true, // D5: Range is Copy (two ints)
             // F3: a Future owns its suspended state — never Copy (driven once).
             // 0.0.5 T02 D1: a ptr is a move-only handle — copying it would
@@ -216,6 +240,12 @@ impl Type {
             Type::Result(t, e) => t.is_owned() || e.is_owned(),
             // A struct with any non-Copy field is an owned type (D2).
             Type::Struct(info) => !info.copy,
+            // An enum with any non-Copy variant payload is an owned type (D2,
+            // 0.0.6 T04). Must be listed before the catch-all below: a plain
+            // `_ => false` would classify a non-Copy enum as neither copy nor
+            // owned, and the ownership checker would then let it be consumed
+            // freely without `move`/`clone`.
+            Type::Enum(info) => !info.copy,
             // F3: a Future owns its suspended coroutine frame; it is moved
             // (e.g. into `std.async.run` or `await`), never shared.
             Type::Future(_) => true,
@@ -422,6 +452,19 @@ pub enum TypedExprHir {
         ty: Type,
         span: Span,
     },
+    /// Enum variant constructor (0.0.6 T04): `Circle(e1, …, en)` or a
+    /// zero-payload `Point`. `variant_idx` is the declaration-order variant
+    /// index (feeds `EnumNew`'s `u16` variant operand in T06); `payload_tys`
+    /// are the converted payload types in declaration order; `ty` is the
+    /// full enum type.
+    EnumCtor {
+        enum_id: EnumId,
+        variant_idx: u16,
+        payload_tys: Vec<Type>,
+        args: Vec<TypedExprHir>,
+        ty: Type,
+        span: Span,
+    },
     /// `box <expr>` (0.0.2 U05/U06: heap allocation; type is `Box<inner>`)
     Box(Box<TypedExprHir>, Span),
     /// `deref <box>` (0.0.2 U05/U06: read the pointee copy; type is the
@@ -596,6 +639,7 @@ impl TypedExprHir {
             TypedExprHir::Question { ty, .. } => ty.clone(),
             TypedExprHir::Await { ty, .. } => ty.clone(),
             TypedExprHir::ResultCtor { ty, .. } => ty.clone(),
+            TypedExprHir::EnumCtor { ty, .. } => ty.clone(),
             TypedExprHir::Box(inner, _) => Type::Box(Box::new(inner.ty())),
             TypedExprHir::Deref(inner, _) => match inner.ty() {
                 // typeck guarantees the deref operand is a `box<T>` (U05);
@@ -661,6 +705,7 @@ impl TypedExprHir {
             TypedExprHir::Question { span, .. } => *span,
             TypedExprHir::Await { span, .. } => *span,
             TypedExprHir::ResultCtor { span, .. } => *span,
+            TypedExprHir::EnumCtor { span, .. } => *span,
             TypedExprHir::Box(_, s) | TypedExprHir::Deref(_, s) | TypedExprHir::DerefPtr(_, s) => {
                 *s
             }

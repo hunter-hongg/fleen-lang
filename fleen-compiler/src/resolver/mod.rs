@@ -146,6 +146,15 @@ struct Resolver {
     /// Populated by a pre-pass before expression resolution so a constructor
     /// path resolves regardless of declaration order (like global functions).
     enum_table: HashMap<String, EnumDeclHir>,
+    /// 0.0.6 T04 (D3): variant name → declaring enum name, built from the
+    /// same enum pre-pass. Backs bare-variant construction (`Circle`,
+    /// `Point`): a bare identifier that names a variant and is not shadowed
+    /// by a local binding, function, const or var resolves to an enum
+    /// constructor, exactly as the dotted `Shape.Circle` spelling does.
+    /// Per-enum variant names are already unique (checked at registration),
+    /// but two enums may reuse a variant name, so this map is first-wins by
+    /// declaration order.
+    variant_to_enum: HashMap<String, String>,
 }
 impl Resolver {
     fn new_for_module(
@@ -163,6 +172,7 @@ impl Resolver {
             table: table.clone(),
             cur_module: module_id,
             enum_table: HashMap::new(),
+            variant_to_enum: HashMap::new(),
         }
     }
 
@@ -1420,6 +1430,33 @@ impl Resolver {
     /// Resolve an identifier expression (variable or function reference).
     /// The recorded span is the *use* site, not the definition site.
     fn resolve_ident(&mut self, name: String, span: Span) -> Result<ExprHir, ()> {
+        // 0.0.6 T04 (D3): a bare identifier that names an enum variant and is
+        // not shadowed by a local binding, function, const or var resolves to
+        // that variant's constructor, exactly as the dotted `Shape.Circle`
+        // spelling does. Scope lookup happens first, so a declared
+        // function/const/var with the same name wins (shadowing); only when
+        // the name is not a binding do we fall to the variant map.
+        if self.scopes.get(&name).is_none()
+            && let Some(enum_name) = self.variant_to_enum.get(&name).cloned()
+        {
+            let decl = self
+                .enum_table
+                .get(&enum_name)
+                .expect("variant map names a live enum");
+            let variant = decl
+                .variants
+                .iter()
+                .find(|v| v.name == name.as_str())
+                .expect("variant map names a declared variant");
+            return Ok(ExprHir::EnumCtor {
+                enum_name: decl.name.clone(),
+                variant_name: name,
+                payload_types: variant.payload_types.clone(),
+                arity: variant.payload_types.len(),
+                hir_id: self.next_hir_id(),
+                span,
+            });
+        }
         let binding_id = match self.scopes.get(&name) {
             Some(binding) => binding.id,
             None => {
@@ -1547,23 +1584,40 @@ impl Resolver {
                 continue;
             }
             // An enum name shares the flat identifier namespace with
-            // functions and structs (D3 locks). The module table's item map
-            // holds every top-level declaration of this module by name
-            // (func / const / var / struct / enum), so it is the collision
-            // source of truth — struct and enum names never enter the
-            // binding scope. The map holds one entry per name (the last
-            // declaration wins), so a same-named struct/func/const/var is
-            // visible here.
-            let collides = module
+            // functions, structs and other enums (D3 locks). The module
+            // table's item map is the first source checked, but it is built
+            // last-wins (one entry per name), so an enum that shares a name
+            // with a *later* struct would otherwise slip through: the map
+            // would hold the enum, the struct pre-pass never consults enums,
+            // and the clash is silently accepted. To catch enum-vs-struct in
+            // both declaration orders we check the raw AST directly. (Struct
+            // and enum names never enter the binding scope, so func/const/var
+            // clashes are still visible through the item map below.)
+            let struct_clash = ast
                 .items
-                .get(&e.name)
-                .is_some_and(|item| item.kind != crate::resolver::modules::ExportKind::Enum);
-            if collides {
-                let first_span = module
+                .iter()
+                .any(|item| matches!(item, Item::Decl(Decl::Struct(s)) if s.name == e.name));
+            let collides = struct_clash
+                || module
                     .items
                     .get(&e.name)
-                    .map(|item| item.span)
-                    .unwrap_or(e.span);
+                    .is_some_and(|item| item.kind != crate::resolver::modules::ExportKind::Enum);
+            if collides {
+                let first_span = if struct_clash {
+                    ast.items
+                        .iter()
+                        .find_map(|item| match item {
+                            Item::Decl(Decl::Struct(s)) if s.name == e.name => Some(s.span),
+                            _ => None,
+                        })
+                        .unwrap_or(e.span)
+                } else {
+                    module
+                        .items
+                        .get(&e.name)
+                        .map(|item| item.span)
+                        .unwrap_or(e.span)
+                };
                 self.errors.push(ResolveError {
                     kind: ResolveErrorKind::DuplicateBinding {
                         name: e.name.clone(),
@@ -1632,6 +1686,17 @@ impl Resolver {
                 is_pub: e.is_pub,
             };
             self.enum_table.insert(e.name.clone(), decl.clone());
+            // Seed the variant → enum map for bare-variant construction
+            // (0.0.6 T04, D3). A later declaration with the same variant name
+            // does not overwrite an earlier one: the map is first-wins by
+            // declaration order, matching the flat-namespace rule (the
+            // per-enum duplicate check above already rejects repeats within a
+            // single enum; only cross-enum reuse reaches here).
+            for v in &decl.variants {
+                self.variant_to_enum
+                    .entry(v.name.clone())
+                    .or_insert_with(|| e.name.clone());
+            }
             enums.push(decl);
         }
         enums

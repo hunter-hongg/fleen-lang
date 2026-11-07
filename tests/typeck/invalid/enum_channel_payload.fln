@@ -1,0 +1,5 @@
+// expect-typeck: ChannelNotStorable
+// 0.0.6 T04 (D1): payloads obey struct-field storage rules — a `channel<T>`
+// payload is non-storable (move-only handle, never deep-copied).
+enum E { A, B(channel<int>), }
+func main(): int = 0

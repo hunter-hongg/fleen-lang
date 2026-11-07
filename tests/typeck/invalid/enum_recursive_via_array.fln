@@ -1,0 +1,3 @@
+// 0.0.6 T04 (D2): the cycle check sees through `[T]`.
+enum E { A, B([E]), }
+func main(): int = 0

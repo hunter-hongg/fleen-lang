@@ -1,0 +1,7 @@
+// 0.0.6 T04: `as string` stays scalar-only — printing an enum requires a
+// `choose` projection.
+enum Color { Red, Green, }
+func main() {
+    c = Color.Red;
+    print(c as string);
+}

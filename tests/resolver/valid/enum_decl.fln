@@ -1,7 +1,7 @@
-// 0.0.6 T02: enum declarations parse but are not yet registered (T03/T04).
-// The resolver must report the unsupported declaration instead of silently
-// dropping it — the old placeholder returned `Err(())` without recording a
-// diagnostic, so `enum E { A } enum E { B }` compiled without any error.
+// 0.0.6 T03: a top-level `enum` declaration is registered by the resolver
+// (it joins the module export/import machinery like a struct) and collected
+// into the HIR `enums` table as a type-table input for typeck (T04). It is
+// not executable code, so it contributes no item; the program still runs.
 enum Color {
     Red,
     Green,

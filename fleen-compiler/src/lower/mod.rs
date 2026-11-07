@@ -740,6 +740,17 @@ impl<'a> FnBodyCx<'a> {
         expr: &TypedExprHir,
     ) -> Result<(), LowerError> {
         match expr {
+            // 0.0.6 T04: constructors are fully typed here but their opcode
+            // (`EnumNew`) is a T06 deliverable — defer with a precise error
+            // instead of emitting nothing (the Box-before-U06 precedent).
+            TypedExprHir::EnumCtor { span, .. } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "enum construction (lowering lands in 0.0.6 T06)",
+                    },
+                    *span,
+                ));
+            }
             TypedExprHir::Int(v, _) => {
                 fb.emit(MirInstr::new(MirInstrKind::ConstInt(*v), expr.span()))
             }
