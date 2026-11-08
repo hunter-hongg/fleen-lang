@@ -333,7 +333,10 @@ mod tests {
         // Bare `Future` (no `<...>`) stays a Named struct type.
         let ast = parse_str("s: Future = make();\n");
         if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
-            assert!(matches!(v.ty.as_ref(), Some(Type::Named(n)) if n == "Future"));
+            assert!(matches!(
+                v.ty.as_ref(),
+                Some(Type::Named { name, args, .. }) if name == "Future" && args.is_empty()
+            ));
         } else {
             panic!("expected var binding, got {:?}", ast.items[0]);
         }
@@ -960,10 +963,15 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
     }
 
     #[test]
-    fn parse_result_type_square_brackets_invalid() {
-        // P4: Result[int, string] (square brackets) should now be invalid
-        let err = parse_err("const r: Result[int, string] = 42;");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    fn parse_result_type_square_brackets_valid() {
+        // 0.0.7 T01/D9: bracket spelling `Result[T, E]` is accepted at use sites.
+        let ast = parse_str("const r: Result[int, string] = 42;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Const(c)) => {
+                assert!(matches!(c.ty, Some(Type::Result(_, _))));
+            }
+            _ => panic!("expected Const decl"),
+        }
     }
 
     #[test]
@@ -2063,4 +2071,258 @@ func main() {
     fn parse_unsafe_modifier_without_func_is_error() {
         parse_err("unsafe x = 1;");
     }
+    // ========== 0.0.7 T01: enum type params + parameterized type use sites ==========
+
+    #[test]
+    fn parse_enum_decl_one_type_param() {
+        let ast = parse_str("enum Option<T> { Some(T), None }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.name, "Option");
+            assert_eq!(e.type_params, vec!["T".to_string()]);
+            assert_eq!(e.variants.len(), 2);
+            assert_eq!(e.variants[0].name, "Some");
+            assert!(matches!(e.variants[0].payload_types.as_slice(), [Type::Named { name, args, .. }] if name == "T" && args.is_empty()));
+            assert!(e.variants[1].payload_types.is_empty());
+        } else {
+            panic!("expected Enum decl, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl_two_type_params_and_trailing_comma() {
+        let ast = parse_str("enum Pair<A, B,> { Both(A, B), Empty }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.type_params, vec!["A".to_string(), "B".to_string()]);
+            assert_eq!(e.variants[0].payload_types.len(), 2);
+        } else {
+            panic!("expected Enum decl, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl_three_type_params() {
+        let ast = parse_str("enum Triple<A, B, C> { V(A, B, C) }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.type_params.len(), 3);
+        } else {
+            panic!("expected Enum decl");
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl_empty_type_params_is_error() {
+        parse_err("enum X<> { A }\n");
+    }
+
+    #[test]
+    fn parse_enum_decl_zero_type_params_still_works() {
+        let ast = parse_str("enum Color { Red, Green }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert!(e.type_params.is_empty());
+            assert_eq!(e.name, "Color");
+        } else {
+            panic!("expected Enum decl");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_with_angle_args() {
+        let ast = parse_str("x: Option<int> = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Option");
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(args[0], Type::Base(BaseType::Int)));
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_with_bracket_args() {
+        let ast = parse_str("x: Option[int] = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Option");
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(args[0], Type::Base(BaseType::Int)));
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_two_args_angle() {
+        let ast = parse_str("x: Pair<string, int> = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Pair");
+                    assert_eq!(args.len(), 2);
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_two_args_bracket_and_trailing_comma() {
+        let ast = parse_str("x: Pair[string, int,] = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Pair");
+                    assert_eq!(args.len(), 2);
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_nested_args() {
+        let ast = parse_str("x: Option<Pair<int, string>> = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Option");
+                    assert_eq!(args.len(), 1);
+                    match &args[0] {
+                        Type::Named { name: n2, args: a2, .. } => {
+                            assert_eq!(n2, "Pair");
+                            assert_eq!(a2.len(), 2);
+                        }
+                        other => panic!("expected nested Named, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_nested_mixed_delimiters() {
+        let ast = parse_str("x: Option[Pair<int, bool>] = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "Option");
+                    match &args[0] {
+                        Type::Named { name: n2, args: a2, .. } => {
+                            assert_eq!(n2, "Pair");
+                            assert_eq!(a2.len(), 2);
+                        }
+                        other => panic!("expected nested Named, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_dotted_named_type_with_args() {
+        let ast = parse_str("x: net.Option<int> = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Named { name, args, .. } => {
+                    assert_eq!(name, "net.Option");
+                    assert_eq!(args.len(), 1);
+                }
+                other => panic!("expected Named, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_named_type_empty_angle_args_is_error() {
+        parse_err("x: Option<> = make();\n");
+    }
+
+    #[test]
+    fn parse_named_type_empty_bracket_args_is_error() {
+        parse_err("x: Option[] = make();\n");
+    }
+
+    #[test]
+    fn parse_result_bracket_syntax_with_complex_args() {
+        let ast = parse_str("x: Result[Option<int>, string] = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            match v.ty.as_ref().unwrap() {
+                Type::Result(ok, err) => {
+                    assert!(matches!(ok.as_ref(), Type::Named { name, args, .. } if name == "Option" && args.len() == 1));
+                    assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
+                }
+                other => panic!("expected Result, got {:?}", other),
+            }
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_future_still_special_not_named_generic() {
+        // Future<T> remains Type::Future (special), not Type::Named.
+        let ast = parse_str("f: Future<int> = gen();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(v.ty.as_ref(), Some(Type::Future(_))));
+        } else {
+            panic!("expected Var");
+        }
+    }
+
+    #[test]
+    fn parse_channel_and_ptr_still_special() {
+        let ast = parse_str("c: channel<int> = make();\n");
+        if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
+            assert!(matches!(v.ty.as_ref(), Some(Type::Channel(_))));
+        } else {
+            panic!("expected Var");
+        }
+        let ast = parse_str("func f(p: ptr<int>) { }\n");
+        // just parse ok
+        assert!(!ast.items.is_empty());
+    }
+
+    #[test]
+    fn parse_enum_type_param_used_in_variant_payload() {
+        let ast = parse_str("enum Either<L, R> { Left(L), Right(R) }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.type_params, vec!["L", "R"]);
+            assert!(matches!(&e.variants[0].payload_types[0], Type::Named { name, .. } if name == "L"));
+            assert!(matches!(&e.variants[1].payload_types[0], Type::Named { name, .. } if name == "R"));
+        } else {
+            panic!("expected Enum");
+        }
+    }
+
+    #[test]
+    fn parse_enum_pub_with_type_params() {
+        let ast = parse_str("pub enum Box<T> { Val(T) }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert!(e.is_pub);
+            assert_eq!(e.type_params, vec!["T"]);
+        } else {
+            panic!("expected Enum");
+        }
+    }
+
 }

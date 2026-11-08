@@ -270,3 +270,86 @@ it is a trap.
 
 **Closed when**: no release workflow names a runner image that has not been
 observed to schedule, and every build job carries a timeout.
+
+---
+
+## L9 — Read the workflow files and use `gh` before theorizing about CI/CD
+
+**When**: the 0.0.6 T08 release task (2026-11-08), when asked to "跑 CI/CD 下载产物".
+
+**What happened**: The agent did not run `gh workflow list` or read `.github/workflows/`
+first. Instead it:
+
+1. Speculated about what "CI" meant and dug into the *latest CI check run's failure
+   logs* (`gh run view ... --log-failed`, the macOS `cargo test` failure) — a `CI`
+   matrix run that has nothing to do with producing release artifacts. User:
+   *"CI 就是跑 Release Workflow 你管最近失败干啥啊"*.
+2. After being told to check `gh workflow list` / `.github/`, it still did not read
+   `release.yml` and so missed that the Release workflow is triggered by `v*` tags
+   (plus `workflow_dispatch`): it proposed running the workflow right after a local
+   commit, with no tag and no push. User: *"Release Workflow 需要 Tag，所以本地提交后，
+   你应该停下来报告我让我 push 啊"*.
+3. It did not know the rest of the release cadence and had to be told: download the
+   artifacts, place them under `release/0.0.6/` in the same format as 0.0.5, then
+   publish the release to GitHub.
+
+Four corrections in a row, each about something a single read of
+`.github/workflows/release.yml` would have answered.
+
+**Root cause**: treating "CI/CD" as a vague keyword and reconstructing the flow from
+memory/assumption, instead of treating the checked-in workflow file and `gh` as the
+authoritative source; then investigating the nearest diagnostic (a failed check run)
+because it was visible, not because it was relevant.
+
+**Rule going forward**:
+- Before any CI/CD or release action: run `gh workflow list` and read the relevant
+  `.github/workflows/*.yml` end to end. The workflow file is the authority for
+  triggers, jobs, artifact names and publish steps — not recollection.
+- In this repo, "CI/CD 下载产物" means the **Release** workflow
+  (`on: push: tags: ['v*']` + `workflow_dispatch`), which builds six target archives
+  and publishes a GitHub release; the **CI** workflow is just the
+  fmt/clippy/test/doc matrix. Do not dig into recent `gh run list` failures unless
+  asked.
+- Derive the stop condition from the trigger: tag-triggered ⇒ after the local
+  commit + tag, **stop and report** so the user can push (the agent cannot / must not
+  push; the push is what starts the workflow). Then download artifacts, place them in
+  `release/<version>/` mirroring the previous version's layout, and publish the
+  release to GitHub.
+- A workflow's `on:` block tells you who triggers it; read it before promising to
+  "run the workflow".
+
+**Closed when**: every release plan starts from the workflow file and `gh`, names the
+trigger-derived stop condition, and no unrelated CI failure is investigated.
+
+---
+
+## L10 — When told to hurry, do the work; stop re-confirming the plan
+
+**When**: the same 0.0.6 T08 session, after "麻利点！" (hurry up).
+
+**What happened**: The user asked for T08 (version bump, release notes, examples, etc.)
+and said "麻利点！" and "先把前面几项做掉". The agent produced a 6-item todo list, then
+a *second* full plan restatement, then after each of four corrections answered only
+with a fresh "I understand now, here is the confirmed flow" message ("听懂了，确认流程…",
+"理解了，我确认完整流程…"). It never performed a single T08 item — no version bump, no
+changelog, no example, no fixture — so the user finally said "我现在不让你干活了" and
+took the task away.
+
+**Root cause**: substituting plan-restatement and acknowledgment loops for actual work;
+treating each correction as a chance to re-narrate the whole plan instead of fixing
+the one misunderstood fact and immediately doing the first work item. Related to L5
+(over-reading) and L7 (ignoring explicit boundaries), but here the failure is
+velocity: zero deliverables after several turns.
+
+**Rule going forward**:
+- After the first work order, do the first concrete work item immediately (e.g. edit
+  `Cargo.toml` / `std/VERSION`) in the same turn as the brief acknowledgment. One
+  short acknowledgment at most; never a second full plan restatement.
+- When corrected, fix only the corrected fact (read the named file if needed) and
+  continue working; don't re-confirm the whole plan.
+- "麻利点 / 先把前面几项做掉" is an instruction to start producing edits now, not to
+  re-plan. If a quick answer is needed, the deliverable is the work, not the
+  description of it.
+
+**Closed when**: a hurry-up work order produces a concrete edit before the next user
+message.

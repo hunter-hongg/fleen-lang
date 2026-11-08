@@ -61,11 +61,16 @@ struct EnumVariantEntry {
     payload_types: Vec<Type>,
 }
 
-/// Collect the names of every named (struct) type mentioned anywhere in
-/// `ty` (recursing through composites) and feed them to `f`.
+/// Collect the names of every named (struct/enum) type mentioned anywhere in
+/// `ty` (recursing through composites and type args) and feed them to `f`.
 fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
     match ty {
-        ast::Type::Named(name) => f(name),
+        ast::Type::Named { name, args, .. } => {
+            f(name);
+            for a in args {
+                collect_named_type_refs(a, f);
+            }
+        }
         ast::Type::Array(el) | ast::Type::Box(el) | ast::Type::Ref(el) => {
             collect_named_type_refs(el, f)
         }
@@ -82,8 +87,7 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
         ast::Type::Future(inner) => collect_named_type_refs(inner, f),
         ast::Type::Channel(inner) => collect_named_type_refs(inner, f),
         ast::Type::Ptr(inner) => collect_named_type_refs(inner, f),
-        ast::Type::Base(_) => {}
-        ast::Type::Range => {}
+        ast::Type::Base(_) | ast::Type::Range => {}
     }
 }
 
@@ -273,10 +277,26 @@ impl TypeChecker {
             ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
             // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
             ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
-            ast::Type::Named(name) => {
-                // A named type resolves through the struct table first, then
-                // the enum table (0.0.6 T04) — both are nominal user types
-                // and share one name namespace, enforced at registration.
+            ast::Type::Named { name, args, .. } => {
+                // T01/T04 prep: parameterized use-site types are parsed but
+                // full generic resolution/arity checking lands in T04. For now,
+                // resolve the base name if no args (monomorphic path unchanged);
+                // if args are present, keep as Unsupported placeholder to avoid
+                // mis-resolving arity until T04 (and still convert args for
+                // downstream sanity where needed).
+                if !args.is_empty() {
+                    // Convert args so nested Named types still resolve; base is
+                    // deferred to T04. Placeholder keeps compilation total.
+                    let _converted_args: Vec<Type> =
+                        args.iter().map(|a| self.convert_type(a, span)).collect();
+                    self.add_error(
+                        TypeckErrorKind::UnknownType {
+                            name: format!("{name}<...> (parameterized types not yet resolved)"),
+                        },
+                        span,
+                    );
+                    return Type::Unsupported(name.clone());
+                }
                 if let Some(&id) = self.struct_by_name.get(name) {
                     let entry = &self.structs[id.0 as usize];
                     Type::Struct(Box::new(StructInfo {
@@ -579,7 +599,13 @@ impl TypeChecker {
             | ast::Type::Base(BaseType::Bool)
             | ast::Type::Base(BaseType::Unit) => true,
             ast::Type::Base(BaseType::String) => false,
-            ast::Type::Named(name) => {
+            ast::Type::Named { name, args, .. } => {
+                // Parameterized named types: T04 will compute argument-dependent
+                // is_copy (D2). Until then, conservatively non-Copy when args
+                // present to avoid unsound Copy assumptions.
+                if !args.is_empty() {
+                    return false;
+                }
                 if let Some(&id) = self.enum_by_name.get(name) {
                     return self.enums[id.0 as usize].copy;
                 }
@@ -696,16 +722,21 @@ impl TypeChecker {
             | ast::Type::Base(BaseType::Bool)
             | ast::Type::Base(BaseType::Unit) => true,
             ast::Type::Base(BaseType::String) => false,
-            ast::Type::Named(name) => match self.struct_by_name.get(name) {
-                Some(&id) => {
-                    if self.structs[id.0 as usize].copy {
-                        true
-                    } else {
-                        self.compute_struct_copy(id, raw, in_progress)
-                    }
+            ast::Type::Named { name, args, .. } => {
+                if !args.is_empty() {
+                    return false; // parameterized: D2/T04
                 }
-                None => false,
-            },
+                match self.struct_by_name.get(name) {
+                    Some(&id) => {
+                        if self.structs[id.0 as usize].copy {
+                            true
+                        } else {
+                            self.compute_struct_copy(id, raw, in_progress)
+                        }
+                    }
+                    None => false,
+                }
+            }
             ast::Type::Array(_) | ast::Type::Box(_) | ast::Type::Ref(_) => false,
             ast::Type::Range => true, // Range is Copy: two ints (D5)
             // F3: a Future owns its suspend state — never a Copy struct field

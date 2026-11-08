@@ -608,6 +608,14 @@ func halve(n: int): Result<int, string> {
 
 ## 7. Pattern Matching: choose
 
+> **0.0.7 planning (not implemented yet)**: the pattern grammar becomes recursive —
+> full multi-payload destructuring `when Pair(a, b)` (0.0.6's "first payload only"
+> limit is lifted), nested patterns `when Ok(Some(x))`, or-patterns `when 1 | 2`
+> (alternatives must bind the same names with the same types), and type guards
+> `when v: int` (compile-time ascription, NOT a runtime type test). Exhaustiveness
+> treats an or-pattern as the union of its alternatives' coverage. See
+> `docs/0.0.7/PLAN.md` D4–D7; the notes below describe the implemented 0.0.6 state.
+
 ```fleen
 choose value {
     when 0 { "zero" }
@@ -834,6 +842,20 @@ std.async.run([producer(move ch), consumer(move peer)]);   // move a handle into
   blocked on channels is a `ChannelDeadlock` runtime error
 
 ### 9.8 `enum` (0.0.6)
+
+> **0.0.7 planning (not implemented yet) — parameterized enums (D1–D3 of `docs/0.0.7/PLAN.md`)**:
+> an `enum` may declare type parameters in the head (`enum Option<T> { Some(T), None }`,
+> `enum Pair<A, B> { Pair(A, B) }`); parameters live in a declaration-local scope. Every use
+> site must be **fully applied** (`Option<int>`, both `<>` and `[]` spellings — `Result[T, E]`
+> style; bare `Option` in type position is a compile error `TypeConstructorNeedsArgs`).
+> `is_copy(App(T1..Tn))` is computed by substituting the arguments into the payload types and
+> re-evaluating the struct-mirror rule (`Option<int>` Copy, `Option<string>` owned). The
+> `RecursiveEnum` ban carries forward unchanged (`enum List<T> { Cons(T, List<T>) }` is
+> rejected). Full multi-payload destructuring, nested patterns, or-patterns and type guards
+> come with it (§7 note above). Bytecode v7: `enum_defs` gains one `type_param_count: u32`
+> per enum; no new opcodes; no `FieldTypeTag` change. `Result[T, E]` stays builtin; the
+> `Result` → std-enum migration is deferred to 0.1.0 (D9). The rest of this subsection
+> describes the implemented 0.0.6 state.
 
 ```fleen
 enum Color {
@@ -1438,6 +1460,7 @@ T01–T08 implemented; see `docs/0.0.6/PLAN.md` decisions D1–D6 and `docs/0.0.
 | 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` / `deref_ptr` (T01–T06) + toolchain maturity: clap CLI (T07), six-target tag-triggered release pipeline (T09), std distribution with strict version pinning (T08) — **implemented (T01–T10)**; see `docs/0.0.5/PLAN.md` (D1–D8) and `docs/0.0.5/TICKETS.md` |
 | 0.0.6 | `enum` declarations with typed payloads (T01–T04) + generalized `choose` exhaustiveness and lowering (T05) + bytecode v6 `EnumNew`/`EnumIs`/`EnumPayload` and the `enum_defs` table (T06) + array library completion `concat`/`flatten`, `fold`→`foldl` + `foldr` (T07) — **implemented (T01–T08)**; see `docs/0.0.6/PLAN.md` (D1–D6) and `docs/0.0.6/TICKETS.md` |
+| 0.0.7 | parameterized enums — user-defined type constructors (`enum Option<T>`, fully applied at every use, no bare `Option`), argument-dependent `is_copy` — plus pattern matching completion: full multi-payload destructuring, nested patterns, or-patterns `p₁ \| p₂`, type guards `when v: T`; bytecode v7 (`enum_defs` gains one `type_param_count: u32` per enum, no new opcodes). `Result[T, E]` stays builtin — **planning (D1–D10 settled, no code yet)**; see `docs/0.0.7/PLAN.md` and `docs/0.0.7/TICKETS.md` |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks

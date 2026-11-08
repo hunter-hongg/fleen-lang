@@ -553,7 +553,15 @@ generalized `choose` exhaustiveness (the `Result` rule applied to enums, D3), by
 decisions D1–D6 settled, tickets in `docs/0.0.6/TICKETS.md`). T01–T08 are implemented and
 green (keywords, enum decl/constructor, resolution, typeck + `is_copy` + `RecursiveEnum` +
 exhaustiveness, choose lowering, bytecode v6 + verify/VM, array helpers + `foldl`/`foldr`,
-integration fixtures/examples, docs/version sync).**
+integration fixtures/examples, docs/version sync). Release published (tag and archives cut).**
+
+**0.0.7 goal: parameterized types + pattern matching completion — user-defined type constructors
+(`enum Option<T>` …, fully applied at every use site; no bare `Option` in type position),
+argument-dependent `is_copy`, full multi-payload destructuring, nested patterns, or-patterns
+(`p₁ | p₂`), and type guards (`when v: T`); bytecode v7 (`enum_defs` gains one `type_param_count:
+u32` per enum, no new opcodes, no `FieldTypeTag` change). `Result[T, E]` retained as a builtin;
+`Result` → std migration deferred to 0.1.0. Non-breaking additive (plan in `docs/0.0.7/PLAN.md`,
+decisions D1–D10 settled, tickets in `docs/0.0.7/TICKETS.md`). Planning; no code written yet.**
 
 ---
 
@@ -654,6 +662,10 @@ u = move a;                  // transfer; a is unusable afterwards
 // std.collection.range (V06), iterated by `for` (D4/D5)
 
 // enum (0.0.6) — a tagged union; is_copy(E) = all payloads of all variants Copy
+// 0.0.7 planning: enums become parameterized type constructors — `enum Option<T> { Some(T), None }`
+// (D1); every use site must be fully applied (`Option<int>`, no bare `Option`, D1);
+// is_copy(App(T1..Tn)) = substitute args into payloads and re-evaluate (D2);
+// recursive enums stay banned (D3). See docs/0.0.7/PLAN.md.
 enum Shape {
     Point,
     Circle(float),
@@ -794,6 +806,10 @@ choose x {
 
 ### choose (Pattern Matching)
 
+> **0.0.7 planning (not implemented yet)**: patterns become recursive — multi-payload
+> destructuring `when Pair(a, b)`, nested patterns `when Some(Some(x))`, or-patterns
+> `when 1 | 2`, and type guards `when v: int`. See `docs/0.0.7/PLAN.md` D4–D7.
+
 ```fleen
 choose value {
     when 0 { "zero" }
@@ -903,8 +919,7 @@ completion (`std.arr.concat`/`flatten` intrinsics, `fold` → `foldl` plus `fold
 implemented and green. The E2E valid `enum_demo.fln` and the invalid fixtures
 (non-exhaustive choose, recursive enum, `as string` on enum, `==` on enum) are in place;
 the full suite and all examples pass. Breaking set (D6): `enum` reserved; `fold` → `foldl`.
-Version 0.0.6 (release publication — tag/archives — is separate and pending; see
-`docs/0.0.6/PLAN.md` and `docs/0.0.6/TICKETS.md`).
+Version 0.0.6 (release published — tag and archives cut).
 
 ---
 

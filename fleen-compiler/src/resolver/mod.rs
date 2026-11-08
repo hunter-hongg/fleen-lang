@@ -57,9 +57,9 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Future(inner) => type_contains_ref(inner),
         Type::Channel(inner) => type_contains_ref(inner),
         Type::Ptr(inner) => type_contains_ref(inner),
+        Type::Named { args, .. } => args.iter().any(type_contains_ref),
         Type::Range => false,
         Type::Base(_) => false,
-        Type::Named(_) => false,
     }
 }
 
@@ -209,7 +209,18 @@ impl Resolver {
                 params.iter().map(|p| self.resolve_type(p, span)).collect(),
                 Box::new(self.resolve_type(ret, span)),
             ),
-            Type::Named(name) => self.resolve_type_name(name, span),
+            Type::Named { name, args, span: ty_span } => {
+                let resolved_name = self.resolve_type_name_str(name, *ty_span);
+                let resolved_args = args
+                    .iter()
+                    .map(|a| self.resolve_type(a, *ty_span))
+                    .collect::<Vec<_>>();
+                Type::Named {
+                    name: resolved_name,
+                    args: resolved_args,
+                    span: *ty_span,
+                }
+            }
             // 0.0.4 F3: `Future<T>` recurses so a nested named type resolves.
             Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, span))),
             // 0.0.4 F9: `channel<T>` recurses so the payload type resolves.
@@ -220,15 +231,15 @@ impl Resolver {
         }
     }
 
-    fn resolve_type_name(&mut self, name: &str, span: Span) -> Type {
+    fn resolve_type_name_str(&mut self, name: &str, span: Span) -> String {
         let module = self.table.modules[self.cur_module].clone();
         if !name.contains('.') {
             // A bare name is a struct declared in the current module; leave
             // unknown names for typeck to report with its full error text.
             if module.items.contains_key(name) {
-                return Type::Named(module.mangled_name(name));
+                return module.mangled_name(name);
             }
-            return Type::Named(name.to_string());
+            return name.to_string();
         }
 
         // Qualified type path: `a.b.T` must name a module in the table and a
@@ -256,13 +267,13 @@ impl Resolver {
                             },
                             span,
                         );
-                        return Type::Named(name.to_string());
+                        return name.to_string();
                     }
-                    return Type::Named(target.mangled_name(item_name));
+                    return target.mangled_name(item_name);
                 }
             }
         }
-        Type::Named(name.to_string())
+        name.to_string()
     }
 
     /// Main entry point: resolve the entire program.
@@ -1681,6 +1692,7 @@ impl Resolver {
             }
             let decl = EnumDeclHir {
                 name: mangled,
+                type_param_count: e.type_params.len(),
                 variants,
                 span: e.span,
                 is_pub: e.is_pub,

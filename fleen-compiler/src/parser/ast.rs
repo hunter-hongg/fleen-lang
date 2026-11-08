@@ -46,13 +46,14 @@ pub enum Decl {
     Enum(EnumDecl),
 }
 
-/// `enum` declaration (0.0.6 T02): ordered variants, each with a name plus
-/// 0+ payload types (tuple-shaped). Mirrors `StructDecl` shape: top-level
-/// only, no trailing semicolon (the ASI pass may insert one after the
-/// closing `}`).
+/// `enum` declaration (0.0.6 T02, extended 0.0.7 T01 D1): ordered variants,
+/// each with a name plus 0+ payload types. `type_params` lists declaration-
+/// local type parameter names (`enum Option<T>` → `["T"]`); empty for a
+/// monomorphic enum.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     pub name: String,
+    pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
     pub is_pub: bool,
@@ -172,9 +173,15 @@ pub enum Type {
     /// `ptr<T>` — a raw pointer (0.0.5 T02, D1/D2). Non-Copy, move-only;
     /// produced only by the unsafe op `addr`. There is no bare-`ptr` type.
     Ptr(Box<Type>),
-    /// A named user type (a struct, 0.0.3 V02). Whether the name actually
-    /// refers to a declared struct is resolved by typeck.
-    Named(String),
+    /// A named user type (0.0.3 V02), optionally applied to type arguments
+    /// (0.0.7 T01, D1/D9). `args` is empty for a monomorphic name; both
+    /// `Name<T>` and `Name[T]` spellings are accepted at use sites.
+    /// Whether the name resolves (and arity matches) is typeck's business.
+    Named {
+        name: String,
+        args: Vec<Type>,
+        span: Span,
+    },
 }
 
 /// Base types.
@@ -221,7 +228,14 @@ impl fmt::Display for Type {
             Type::Box(t) => write!(f, "box<{}>", t),
             Type::Ref(t) => write!(f, "ref {}", t),
             Type::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
-            Type::Named(name) => write!(f, "{name}"),
+            Type::Named { name, args, .. } => {
+                if args.is_empty() {
+                    write!(f, "{name}")
+                } else {
+                    let as_: Vec<String> = args.iter().map(|t| t.to_string()).collect();
+                    write!(f, "{name}<{}>", as_.join(", "))
+                }
+            }
             Type::Func(params, ret) => {
                 let ps: Vec<String> = params.iter().map(|t| t.to_string()).collect();
                 write!(f, "({},) -> {}", ps.join(", "), ret)

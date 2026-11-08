@@ -511,14 +511,19 @@ impl Parser {
         })
     }
 
-    /// Parse an `enum` declaration (0.0.6 T02): `enum Name { variant, ... }`
-    /// — top-level only, no trailing semicolon (the ASI pass may insert one
-    /// after the closing `}`; tolerated here). Variants are ordered, each
-    /// with 0+ payload types.
+    /// Parse an `enum` declaration (0.0.6 T02, extended 0.0.7 T01 D1):
+    /// `enum Name [ "<" ident { "," ident } [ "," ] ">" ] "{" variant, ... "}"`
+    /// — top-level only. `type_params` are declaration-local identifiers;
+    /// empty `<>` is a parse error.
     fn parse_enum_decl(&mut self) -> Result<ast::EnumDecl, ParseError> {
         let start = self.current().span.start;
         self.expect(&crate::lexer::TokenKind::Enum, "`enum`")?;
         let name = self.parse_ident()?;
+        let type_params = if self.check(&crate::lexer::TokenKind::Lt) {
+            self.parse_enum_type_params()?
+        } else {
+            Vec::new()
+        };
         self.expect(&crate::lexer::TokenKind::LBrace, "`{` after enum name")?;
         let mut variants = Vec::new();
         if !self.check(&crate::lexer::TokenKind::RBrace) {
@@ -589,10 +594,75 @@ impl Parser {
         let end = self.prev_span_end();
         Ok(ast::EnumDecl {
             name,
+            type_params,
             variants,
             span: self.span(start, end),
             is_pub: false,
         })
+    }
+
+    /// Parse `enum` type parameters: `<` ident { "," ident } [ "," ] `>`.
+    /// Requires at least one parameter; an empty `<>` is a parse error.
+    fn parse_enum_type_params(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(&crate::lexer::TokenKind::Lt, "`<` in enum type parameters")?;
+        if self.check(&crate::lexer::TokenKind::Gt) {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "type parameter (an enum type parameter list needs at least one parameter)".to_string(),
+                    found: self.current().kind.clone(),
+                },
+                span: self.current().span,
+            });
+        }
+        let mut params = Vec::new();
+        loop {
+            let p = self.parse_ident()?;
+            params.push(p);
+            if !self.matches(&crate::lexer::TokenKind::Comma) {
+                break;
+            }
+            if self.check(&crate::lexer::TokenKind::Gt) {
+                break; // trailing comma
+            }
+        }
+        self.expect(&crate::lexer::TokenKind::Gt, "`>` after enum type parameters")?;
+        Ok(params)
+    }
+
+    /// Parse optional type arguments after a named type: `<T, U>` or `[T, U]`
+    /// (0.0.7 T01, D1/D9). Returns empty vec if neither delimiter follows.
+    fn parse_optional_type_args(&mut self) -> Result<Vec<ast::Type>, ParseError> {
+        let (open, close, close_msg) = if self.check(&crate::lexer::TokenKind::Lt) {
+            (crate::lexer::TokenKind::Lt, crate::lexer::TokenKind::Gt, "`>` after type arguments")
+        } else if self.check(&crate::lexer::TokenKind::LBracket) {
+            (crate::lexer::TokenKind::LBracket, crate::lexer::TokenKind::RBracket, "`]` after type arguments")
+        } else {
+            return Ok(Vec::new());
+        };
+        self.expect(&open, "type argument list")?;
+        if self.check(&close) {
+            // Empty `Name<>` / `Name[]` in type position — parse as error here
+            // (T01 allows parser to reject obvious empty-arg forms).
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "type argument (type argument list needs at least one type)".to_string(),
+                    found: self.current().kind.clone(),
+                },
+                span: self.current().span,
+            });
+        }
+        let mut args = Vec::new();
+        loop {
+            args.push(self.parse_type()?);
+            if !self.matches(&crate::lexer::TokenKind::Comma) {
+                break;
+            }
+            if self.check(&close) {
+                break; // trailing comma
+            }
+        }
+        self.expect(&close, close_msg)?;
+        Ok(args)
     }
 
     /// Parse a const declaration: `const ident [: type] = expr ;`
@@ -883,20 +953,25 @@ impl Parser {
                 ast::Type::Base(ast::BaseType::Unit)
             }
             crate::lexer::TokenKind::Ident(name) => {
-                // Named user type (a struct, 0.0.3 V02). 0.0.3 V05 accepts a
-                // dotted module path (`net.Point`) in type position; whether
-                // the name resolves is typeck's business.
+                // Named user type (0.0.3 V02), optionally with type args
+                // (0.0.7 T01 D1/D9). Dotted module paths (`net.Point`) are
+                // accepted; type args apply to the whole path (`net.Option<int>`).
+                let start = self.current().span.start;
                 let mut name = name.clone();
                 self.advance();
                 while self.check(&crate::lexer::TokenKind::Dot) {
                     self.advance();
-                    // Namespace segment: `net.Point`, `std.async`-style keyword
-                    // members are accepted here too (0.0.4).
                     name.push('.');
                     let seg = self.parse_namespace_segment()?;
                     name.push_str(&seg);
                 }
-                ast::Type::Named(name)
+                let args = self.parse_optional_type_args()?;
+                let end = self.prev_span_end();
+                ast::Type::Named {
+                    name,
+                    args,
+                    span: self.span(start, end),
+                }
             }
             crate::lexer::TokenKind::LParen => {
                 // Function type: (T, T, ...) -> T
@@ -937,13 +1012,18 @@ impl Parser {
                 ast::Type::Ref(Box::new(inner))
             }
             crate::lexer::TokenKind::ResultType => {
-                // P4: Result<T, E> with angle brackets (per EBNF)
+                // Result<T, E> (angle) or Result[T, E] (bracket, 0.0.7 D9).
                 self.advance();
-                self.expect(&crate::lexer::TokenKind::Lt, "`<` in Result type")?;
+                let (close, close_msg) = if self.matches(&crate::lexer::TokenKind::LBracket) {
+                    (crate::lexer::TokenKind::RBracket, "`]` in Result type")
+                } else {
+                    self.expect(&crate::lexer::TokenKind::Lt, "`<` or `[` in Result type")?;
+                    (crate::lexer::TokenKind::Gt, "`>` in Result type")
+                };
                 let ok = self.parse_type()?;
                 self.expect(&crate::lexer::TokenKind::Comma, "`,` in Result type")?;
                 let err = self.parse_type()?;
-                self.expect(&crate::lexer::TokenKind::Gt, "`>` in Result type")?;
+                self.expect(&close, close_msg)?;
                 ast::Type::Result(Box::new(ok), Box::new(err))
             }
             crate::lexer::TokenKind::Channel => {

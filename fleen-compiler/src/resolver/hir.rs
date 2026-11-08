@@ -141,13 +141,14 @@ pub struct ConstDeclHir {
     pub span: Span,
 }
 
-/// Enum declaration in HIR (0.0.6 T03). Like structs, enums bypass per-item
-/// resolution and are a type-table input for typeck (T04); they never become
-/// executable code. Variant payload types stay in their AST form; typeck
-/// converts them once its enum table is built.
+/// Enum declaration in HIR (0.0.6 T03, extended 0.0.7 T01/T03 prep).
+/// `type_param_count` is the number of declaration-local type parameters;
+/// 0 for a monomorphic enum. (Names are not carried into HIR; resolver/typeck
+/// own the declaration-local scope.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDeclHir {
     pub name: String,
+    pub type_param_count: usize,
     pub variants: Vec<EnumVariantHir>,
     pub span: Span,
     pub is_pub: bool,
