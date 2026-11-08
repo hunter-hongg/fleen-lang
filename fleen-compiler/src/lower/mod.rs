@@ -614,8 +614,15 @@ enum InlineIterKind {
     Map,
     /// `filter(xs, pred)`: `[T]` built by pushing elems where `pred` is true.
     Filter,
-    /// `fold(xs, init, f)`: a single accumulator (`f(acc, elem)` each step).
+    /// `foldl(xs, init, f)`: a single accumulator (`f(acc, elem)` each
+    /// step). 0.0.6 T07: renamed from `fold` (D5/D6 — direction-explicit,
+    /// no alias).
     Fold,
+    /// `foldr(xs, init, f)`: a single accumulator walking the array
+    /// **backward** by index (`f(elem, acc)` each step — the T/A argument
+    /// order is reversed relative to `foldl`, D5). No reverse copy: the
+    /// loop index counts down.
+    FoldR,
     /// `take(xs, n)`: the first `min(n, len(xs))` elems, unchanged.
     Take,
 }
@@ -626,7 +633,9 @@ impl InlineIterKind {
         match name {
             "std.collection.iter.map" => Some(Self::Map),
             "std.collection.iter.filter" => Some(Self::Filter),
-            "std.collection.iter.fold" => Some(Self::Fold),
+            // 0.0.6 T07 (D5/D6): `fold` is now `foldl`, and `foldr` joins.
+            "std.collection.iter.foldl" => Some(Self::Fold),
+            "std.collection.iter.foldr" => Some(Self::FoldR),
             "std.collection.iter.take" => Some(Self::Take),
             _ => None,
         }
@@ -634,14 +643,19 @@ impl InlineIterKind {
 
     /// Is the function-valued argument the last (index `args.len() - 1`)?
     ///
-    /// `map`/`filter` take it second, `fold` takes it third (`init` second);
-    /// `take` has no function argument.
+    /// `map`/`filter` take it second, `foldl`/`foldr` take it third
+    /// (`init` second); `take` has no function argument.
     fn fn_arg_index(&self) -> Option<usize> {
         match self {
             Self::Map | Self::Filter => Some(1),
-            Self::Fold => Some(2),
+            Self::Fold | Self::FoldR => Some(2),
             Self::Take => None,
         }
+    }
+
+    /// 0.0.6 T07: is this a fold (single accumulator, no output array)?
+    fn is_fold(&self) -> bool {
+        matches!(self, Self::Fold | Self::FoldR)
     }
 }
 
@@ -1758,9 +1772,9 @@ impl<'a> FnBodyCx<'a> {
             // Continue emitting into the merge block below.
         }
 
-        // `__out = []` for the array-building helpers; `fold` uses the
+        // `__out = []` for the array-building helpers; a fold uses the
         // pre-stored `init` slot as its accumulator.
-        let out = if matches!(kind, InlineIterKind::Fold) {
+        let out = if kind.is_fold() {
             slots[1]
         } else {
             let o = self.fresh_temp();
@@ -1769,18 +1783,35 @@ impl<'a> FnBodyCx<'a> {
             o
         };
 
-        // `__i = 0`.
+        // `__i` — 0 counting up for the forward helpers; `count - 1`
+        // counting down for `foldr` (0.0.6 T07). An empty array yields
+        // `__i = -1`, which fails the head check immediately — no special
+        // case needed (int slots are signed i64).
         let i = self.fresh_temp();
-        fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+        if matches!(kind, InlineIterKind::FoldR) {
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
+            fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), span));
+            fb.emit(MirInstr::new(MirInstrKind::ISub, span));
+        } else {
+            fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+        }
         fb.emit(MirInstr::new(MirInstrKind::StoreLocal(i), span));
 
-        // Loop: head checks `__i < __count`.
+        // Loop: head checks `__i < __count` (forward) or `0 <= __i`
+        // (backward — the `Le` operand order is `a <= b`, so the constant
+        // goes first).
         let head = fb.new_block();
         fb.jump(head);
         fb.start(head);
-        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
-        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
-        fb.emit(MirInstr::new(MirInstrKind::Lt, span));
+        if matches!(kind, InlineIterKind::FoldR) {
+            fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+            fb.emit(MirInstr::new(MirInstrKind::Le, span));
+        } else {
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+            fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
+            fb.emit(MirInstr::new(MirInstrKind::Lt, span));
+        }
         let cond_false = fb.jump_if_false_later();
 
         let body = fb.new_block();
@@ -1833,6 +1864,15 @@ impl<'a> FnBodyCx<'a> {
                 self.emit_indirect_call(fb, fs, &[acc, elem], span);
                 fb.emit(MirInstr::new(MirInstrKind::StoreLocal(acc), span));
                 self.emit_loop_increment(fb, i, head, span);
+            }
+            InlineIterKind::FoldR => {
+                // `acc = f(elem, acc)` — the T/A argument order reversed
+                // (D5); the loop index is decremented toward -1.
+                let fs = f.ok_or_else(|| self.iter_missing_fn(span))?;
+                let acc = out;
+                self.emit_indirect_call(fb, fs, &[elem, acc], span);
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(acc), span));
+                self.emit_loop_decrement(fb, i, head, span);
             }
             InlineIterKind::Take => {
                 // pass the element through unchanged.
@@ -1888,6 +1928,17 @@ impl<'a> FnBodyCx<'a> {
         fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
         fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), span));
         fb.emit(MirInstr::new(MirInstrKind::IAdd, span));
+        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(i), span));
+        fb.jump(head);
+    }
+
+    /// `foldr`'s backward step: `__i -= 1`, then re-enter the head block
+    /// (0.0.6 T07). The head checks `0 <= __i`, so the loop ends after the
+    /// index passes the array start.
+    fn emit_loop_decrement(&mut self, fb: &mut FnBuilder, i: u16, head: BlockId, span: Span) {
+        fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
+        fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), span));
+        fb.emit(MirInstr::new(MirInstrKind::ISub, span));
         fb.emit(MirInstr::new(MirInstrKind::StoreLocal(i), span));
         fb.jump(head);
     }

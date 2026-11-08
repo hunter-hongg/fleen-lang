@@ -1,4 +1,4 @@
-// 0.0.3 V07 std test: std.collection.iter (schematic iterator helpers).
+// 0.0.6 std test: std.collection.iter (schematic iterator helpers).
 import std.io;
 import std.str;
 import std.arr;
@@ -9,6 +9,8 @@ func twice(x: int): int = x * 2
 func is_even(x: int): bool = x % 2 == 0
 
 func add(a: int, b: int): int = a + b
+
+func sub(a: int, b: int): int = a - b
 
 func shout(s: string): string {
     std.str.concat(s, "!")
@@ -35,9 +37,23 @@ func main() {
     std.io.println(evens[0] as string);
     std.io.println(evens[1] as string);
 
-    // fold — a single accumulator over the array.
-    total = std.collection.iter.fold(nums, 0, add);
+    // foldl — a single accumulator over the array, left to right.
+    // 0.0.6 rename: the 0.0.3 `fold` is `foldl` (D5/D6, no alias).
+    total = std.collection.iter.foldl(nums, 0, add);
     std.io.println(total as string);
+
+    // foldr — the right fold: `f(elem, acc)`, right to left, walked
+    // backward by index (no reverse copy).
+    total_r = std.collection.iter.foldr(nums, 0, add);
+    std.io.println(total_r as string);
+
+    // Associativity differential (D5): subtraction separates the two
+    // directions — `foldl` = ((0-1)-2)-3-4 = -10; `foldr` = 1-(2-(3-(4-0)))
+    // = -2.
+    left = std.collection.iter.foldl(nums, 0, sub);
+    std.io.println(left as string);
+    right = std.collection.iter.foldr(nums, 0, sub);
+    std.io.println(right as string);
 
     // take — the first min(n, len) elements.
     two = std.collection.iter.take(nums, 2);
@@ -50,4 +66,10 @@ func main() {
     // take on a type-polymorphic source ([string]) — single type variable.
     s2 = std.collection.iter.take(words, 1);
     std.io.println(std.arr.len(clone s2) as string);
+
+    // foldr on an empty array — `__i` starts at -1, the head check fails
+    // immediately, and `init` is the result (no special case).
+    empty: [int] = [];
+    none = std.collection.iter.foldr(clone empty, 42, sub);
+    std.io.println(none as string);
 }

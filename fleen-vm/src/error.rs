@@ -122,6 +122,15 @@ pub enum RuntimeErrorKind {
     /// (0.0.5 T06). Defensive: typeck restricts those opcodes to `ptr<T>`;
     /// reaching this needs hand-written or ahead-of-its-time bytecode.
     PtrExpected,
+    /// `EnumNew` named an enum id outside the `enum_defs` table, or a
+    /// variant id outside that enum's variant list (0.0.6 T07, defensive:
+    /// verify rejects it first — the VM backstop mirrors the struct rule).
+    EnumIndexOutOfRange(u16),
+    /// `EnumIs`/`EnumPayload` found a non-enum value, or `EnumPayload`'s
+    /// variant operand does not match the value's variant id / its payload
+    /// index is out of range (0.0.6 T07, D4: the `ResultMismatch`
+    /// generalization for forged bytecode).
+    EnumPayloadMismatch { variant_ref: u16 },
     /// An opcode is encoded in the module but the VM does not implement it
     /// yet (e.g. an opcode from a future version). Defensive: verify accepts
     /// them; reaching this needs hand-written or ahead-of-its-time bytecode.
@@ -231,6 +240,14 @@ impl std::fmt::Display for RuntimeErrorKind {
             RuntimeErrorKind::PtrExpected => {
                 write!(f, "pointer opcode expected a `ptr<T>` value on the stack")
             }
+            RuntimeErrorKind::EnumIndexOutOfRange(id) => {
+                write!(f, "enum id {id} out of range")
+            }
+            RuntimeErrorKind::EnumPayloadMismatch { variant_ref } => write!(
+                f,
+                "enum payload opcode applied to a mismatched variant (operand \
+                 names variant {variant_ref})"
+            ),
             RuntimeErrorKind::Unimplemented(what) => write!(f, "unimplemented opcode: {what}"),
         }
     }

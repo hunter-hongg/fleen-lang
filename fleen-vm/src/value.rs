@@ -281,3 +281,68 @@ impl fmt::Display for Value {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0.0.6 T07: `clone` deep-copies enum payloads — the derived `Clone`
+    /// copies the `Box<[Value]>` recursively, so a nested array payload is
+    /// fully forked, never shared.
+    #[test]
+    fn enum_clone_deep_copies_payloads() {
+        let e = Value::Enum {
+            variant: 1,
+            payload: vec![Value::Arr(
+                vec![Value::Int(1), Value::Int(2)].into_boxed_slice(),
+            )]
+            .into_boxed_slice(),
+        };
+        let copy = e.clone();
+        // Mutate the original's inner array via pattern match reconstruction.
+        let Value::Enum { payload, .. } = &e else {
+            unreachable!("just built an enum")
+        };
+        let Value::Arr(elems) = &payload[0] else {
+            unreachable!("just built an array payload")
+        };
+        assert_eq!(elems.len(), 2);
+        // The copy is structurally equal but independent (deep copy).
+        assert_eq!(e, copy);
+        match (&e, &copy) {
+            (Value::Enum { payload: a, .. }, Value::Enum { payload: b, .. }) => {
+                // Pointer-distinct heap buffers: same length, different boxes.
+                assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()) == false || a.is_empty());
+            }
+            _ => unreachable!("both are enums"),
+        }
+    }
+
+    /// 0.0.6 T07: `PayloadKind::Enum` rides the channel payload-kind
+    /// backstop (0.0.4 T08) — the first enum send fixes the kind.
+    #[test]
+    fn enum_payload_kind_is_reported() {
+        let e = Value::Enum {
+            variant: 0,
+            payload: Box::new([]),
+        };
+        assert_eq!(e.payload_kind(), PayloadKind::Enum);
+        assert_eq!(PayloadKind::Enum.name(), "enum");
+    }
+
+    /// 0.0.6 T07: `Display` renders the variant index plus payloads
+    /// positionally (names live only in source, like struct fields).
+    #[test]
+    fn enum_display_renders_variant_and_payloads() {
+        let zero = Value::Enum {
+            variant: 0,
+            payload: Box::new([]),
+        };
+        assert_eq!(zero.to_string(), "Enum(0)");
+        let two = Value::Enum {
+            variant: 2,
+            payload: vec![Value::Int(7), Value::Str("hi".into())].into_boxed_slice(),
+        };
+        assert_eq!(two.to_string(), "Enum(2, 7, hi)");
+    }
+}

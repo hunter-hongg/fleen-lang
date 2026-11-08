@@ -2043,7 +2043,7 @@ fn iter_helpers_two_type_variables_substitute_independently() {
     assert!(resolved.conflict.is_none(), "no conflict expected");
 
     // fold([string], "", (string, string) -> string) ->> string.
-    let fold = find_builtin("std.collection.iter.fold").expect("iter.fold must be a builtin");
+    let fold = find_builtin("std.collection.iter.foldl").expect("iter.foldl must be a builtin");
     let resolved = resolve_schematic_call(
         &fold,
         &[

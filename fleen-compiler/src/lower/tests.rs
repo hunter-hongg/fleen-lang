@@ -2349,11 +2349,11 @@ fn lower_inline_iter_filter_emits_conditional_push() {
 
 #[test]
 fn lower_inline_iter_fold_uses_accumulator_slot() {
-    // `std.collection.iter.fold([1,2,3], 0, add)` expands to a loop that
+    // `std.collection.iter.foldl([1,2,3], 0, add)` expands to a loop that
     // calls `add(acc, elem)` and stores the result back into the accumulator.
     let span = Span::SYNTHETIC;
     let typed = make_inline_iter_hir(
-        "std.collection.iter.fold",
+        "std.collection.iter.foldl",
         vec![make_helper_decl("add", &[Type::Int, Type::Int], Type::Int)],
         vec![
             make_int_array_arg(span),

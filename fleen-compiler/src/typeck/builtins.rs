@@ -85,9 +85,12 @@ pub struct BuiltinSig {
 /// - `std.arr.get`: `[T], int -> Result<T, string>`
 /// - `std.arr.set`: `[T], int, T -> [T]`  (returns a new array)
 /// - `std.arr.push`: `[T], T -> [T]`  (returns a new array)
-/// - `std.collection.iter.*` (0.0.3 V07): `map` / `filter` / `fold` /
-///   `take` — two type variables where needed; each call is expanded
-///   inline by `lower` (see `InlineIter`), so there is no runtime call.
+/// - `std.arr.concat`: `[T], [T] -> [T]`  (0.0.6 T07, D5)
+/// - `std.arr.flatten`: `[[T]] -> [T]`  (one level; 0.0.6 T07, D5)
+/// - `std.collection.iter.*` (0.0.3 V07): `map` / `filter` / `foldl` /
+///   `foldr` (0.0.6 T07, D5 — `fold` renamed) / `take` — two type
+///   variables where needed; each call is expanded inline by `lower`
+///   (see `InlineIter`), so there is no runtime call.
 ///
 /// `print`: `(string...) -> unit` — 0.0.2 strict string check (PLAN §6).
 /// Non-string arguments report `ArgTypeMismatch` with help `x as string`
@@ -259,6 +262,31 @@ pub fn builtins() -> Vec<BuiltinSig> {
             ret: arr_t0(),
             lowering: BuiltinLowering::Intrinsic,
         },
+        // 0.0.6 T07 (D5): `concat` joins two arrays into a fresh one —
+        // arrays are owned (D3), so neither argument is mutated.
+        BuiltinSig {
+            name: "std.arr.concat",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), arr_t0()],
+                ret: arr_t0(),
+            },
+            ret: arr_t0(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // 0.0.6 T07 (D5): `flatten` removes **one** level of nesting —
+        // `[[T]] -> [T]`. Chaining `flatten` reaches deeper layers
+        // explicitly (PLAN §1 D5); the schematic unification binds
+        // `T0` to the inner element type through the nested
+        // `Array(Array(Var))` walk in `collect_bindings`.
+        BuiltinSig {
+            name: "std.arr.flatten",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Array(Box::new(arr_t0()))],
+                ret: arr_t0(),
+            },
+            ret: arr_t0(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
         // std.collection.iter — schematic iterator helpers (0.0.3 V07,
         // F4). Each call is expanded inline by `lower` (`InlineIter`) into
         // the loop it compiles to; there are no iterator objects here. The
@@ -286,9 +314,24 @@ pub fn builtins() -> Vec<BuiltinSig> {
             lowering: BuiltinLowering::InlineIter,
         },
         BuiltinSig {
-            name: "std.collection.iter.fold",
+            name: "std.collection.iter.foldl",
             param: BuiltinParam::Schematic {
                 params: vec![arr_t0(), t1(), Type::Func(vec![t1(), t0()], Box::new(t1()))],
+                ret: t1(),
+            },
+            ret: t1(),
+            lowering: BuiltinLowering::InlineIter,
+        },
+        // 0.0.6 T07 (D5): `foldr` — the right fold. The accumulator
+        // function takes `(elem, acc)` (the T/A argument order is
+        // reversed relative to `foldl`), and the lowering walks the
+        // array **backward** by index (no reverse copy). Renaming the
+        // direction-ambiguous `fold` to `foldl` and adding `foldr`
+        // together is the D6 breaking set — no alias.
+        BuiltinSig {
+            name: "std.collection.iter.foldr",
+            param: BuiltinParam::Schematic {
+                params: vec![arr_t0(), t1(), Type::Func(vec![t0(), t1()], Box::new(t1()))],
                 ret: t1(),
             },
             ret: t1(),

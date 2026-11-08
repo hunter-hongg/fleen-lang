@@ -3885,14 +3885,28 @@ fn enum_new_is_and_payload_round_trip() {
 #[test]
 fn enum_new_forged_enum_id_is_defensively_rejected() {
     // Enum id 9 with only one enum defined: the VM backstop (verify rejects
-    // it first in compiled code) reports `StructOutOfRange` for the id.
+    // it first in compiled code) reports `EnumIndexOutOfRange` for the id.
     let m = enum_vm_module(enc(&[
         (Opcode::EnumNew, [u16b(9), u16b(0)].concat()),
         (Opcode::Return, vec![]),
     ]));
     assert_eq!(
         Vm::new(m).run().unwrap_err().kind,
-        RuntimeErrorKind::StructOutOfRange(9)
+        RuntimeErrorKind::EnumIndexOutOfRange(9)
+    );
+}
+
+#[test]
+fn enum_new_forged_variant_id_is_defensively_rejected() {
+    // Variant id 2 in a two-variant enum: same defensive family, the
+    // variant operand is out of range.
+    let m = enum_vm_module(enc(&[
+        (Opcode::EnumNew, [u16b(0), u16b(2)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::EnumIndexOutOfRange(2)
     );
 }
 
@@ -3909,7 +3923,7 @@ fn enum_payload_variant_mismatch_is_defensively_rejected() {
     ]));
     assert_eq!(
         Vm::new(m).run().unwrap_err().kind,
-        RuntimeErrorKind::ResultMismatch
+        RuntimeErrorKind::EnumPayloadMismatch { variant_ref: 0 }
     );
 }
 
@@ -3924,8 +3938,66 @@ fn enum_payload_index_out_of_range_is_defensively_rejected() {
     ]));
     assert_eq!(
         Vm::new(m).run().unwrap_err().kind,
-        RuntimeErrorKind::IndexOutOfRange { index: 1, len: 1 }
+        RuntimeErrorKind::EnumPayloadMismatch { variant_ref: 1 }
     );
+}
+
+#[test]
+fn enum_is_on_non_enum_value_is_defensively_rejected() {
+    // `EnumIs` on an int (forged bytecode — typeck only emits it under an
+    // enum scrutinee): the defensive family, not a silent false.
+    let m = enum_vm_module(enc(&[
+        (Opcode::Const, u32b(0)),
+        (Opcode::EnumIs, u16b(0)),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::EnumPayloadMismatch { variant_ref: 0 }
+    );
+}
+
+#[test]
+fn enum_eq_is_defensively_rejected() {
+    // `==` on an enum value: typeck rejects the source form; hand-written
+    // bytecode hits the VM backstop (same posture as struct/array, D3).
+    let m = enum_vm_module(enc(&[
+        (Opcode::EnumNew, [u16b(0), u16b(0)].concat()),
+        (Opcode::EnumNew, [u16b(0), u16b(0)].concat()),
+        (Opcode::Eq, vec![]),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ArithTypeMismatch
+    );
+}
+
+#[test]
+fn enum_value_moves_out_of_its_slot() {
+    // An owned enum stored in a local moves with `MoveLocal` (the slot is
+    // cleared to Unit) and the value survives the move intact.
+    let mut m = enum_vm_module(enc(&[
+        (Opcode::True, vec![]),
+        (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
+        (Opcode::StoreLocal, u16b(0)),
+        (Opcode::MoveLocal, u16b(0)),
+        (Opcode::EnumPayload, [u16b(1), u16b(0)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    m.functions = vec![func(
+        enc(&[
+            (Opcode::True, vec![]),
+            (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::MoveLocal, u16b(0)),
+            (Opcode::EnumPayload, [u16b(1), u16b(0)].concat()),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    )];
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
 }
 
 // ---------------------------------------------------------------------------

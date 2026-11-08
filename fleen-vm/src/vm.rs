@@ -49,6 +49,11 @@ fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
         Value::Ptr(_) => Some(DeepFork::Ptr),
         Value::Ok(inner) | Value::Err(inner) => deep_fork_kind(inner),
         Value::Arr(elems) => elems.iter().find_map(deep_fork_kind),
+        // 0.0.6 T07: an enum value is a container — its payloads travel with
+        // the same copy rules as `Ok`/`Err` fields (D1: payloads obey
+        // struct-field storage rules, and typeck rejects Future/channel/ptr
+        // payloads anyway; this is the forged-bytecode backstop).
+        Value::Enum { payload, .. } => payload.iter().find_map(deep_fork_kind),
         _ => None,
     }
 }
@@ -593,6 +598,10 @@ impl Vm {
             Value::Err(v) => self.value_has_blocked_channel(v),
             Value::Struct(fields) => fields.iter().any(|f| self.value_has_blocked_channel(f)),
             Value::Arr(elems) => elems.iter().any(|e| self.value_has_blocked_channel(e)),
+            // 0.0.6 T07: enum payloads are a container (see `deep_fork_kind`).
+            Value::Enum { payload, .. } => {
+                payload.iter().any(|p| self.value_has_blocked_channel(p))
+            }
             Value::Range { .. } => false,
             Value::Future(f) => self.frame_has_blocked_channel(f),
             _ => false,
@@ -1072,7 +1081,8 @@ impl Vm {
                 Value::Arr(elems) => Ok(Value::Int(elems.len() as i64)),
                 _ => Err(RuntimeErrorKind::StackShape),
             },
-            "std.arr.get" | "std.arr.push" | "std.arr.set" => {
+            "std.arr.get" | "std.arr.push" | "std.arr.set" | "std.arr.concat"
+            | "std.arr.flatten" => {
                 // These builtins copy their arguments (whole-array `to_vec`
                 // or an element clone). The schematic/fixed arg guards reject
                 // future-typed *bare reads*, but a `move`'d array whose
@@ -1091,6 +1101,8 @@ impl Vm {
                 match name {
                     "std.arr.get" => self.builtin_arr_get(&args),
                     "std.arr.push" => self.builtin_arr_push(&args),
+                    "std.arr.concat" => self.builtin_arr_concat(&args),
+                    "std.arr.flatten" => self.builtin_arr_flatten(&args),
                     _ => self.builtin_arr_set(&args),
                 }
             }
@@ -1147,6 +1159,41 @@ impl Vm {
             _ => return Err(RuntimeErrorKind::StackShape),
         };
         elems.push(args[1].clone());
+        Ok(Value::Arr(elems.into_boxed_slice()))
+    }
+
+    /// `std.arr.concat` — arrays are owned (D3): a fresh array with the
+    /// second array's elements appended after the first's (0.0.6 T07, D5).
+    /// Neither argument is mutated.
+    fn builtin_arr_concat(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let mut elems: Vec<Value> = match self.read_ref(&args[0])?.as_value() {
+            Value::Arr(elems) => elems.to_vec(),
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        match self.read_ref(&args[1])?.as_value() {
+            Value::Arr(rest) => elems.extend(rest.iter().cloned()),
+            _ => return Err(RuntimeErrorKind::StackShape),
+        }
+        Ok(Value::Arr(elems.into_boxed_slice()))
+    }
+
+    /// `std.arr.flatten` — arrays are owned (D3): a fresh array of the
+    /// inner elements, one level of nesting removed (0.0.6 T07, D5). The
+    /// schematic signature `[[T]] -> [T]` is checked by typeck; a
+    /// non-array element here is defensive (`StackShape`).
+    fn builtin_arr_flatten(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let outer = match binding.as_value() {
+            Value::Arr(elems) => elems,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let mut elems: Vec<Value> = Vec::new();
+        for inner in outer {
+            match self.read_ref(inner)?.as_value() {
+                Value::Arr(parts) => elems.extend(parts.iter().cloned()),
+                _ => return Err(RuntimeErrorKind::StackShape),
+            }
+        }
         Ok(Value::Arr(elems.into_boxed_slice()))
     }
 
@@ -2178,17 +2225,17 @@ impl Vm {
             }
             Opcode::EnumNew => {
                 let s = take!(4);
-                let enum_id = u16::from_le_bytes([s[0], s[1]]) as u32;
+                let enum_id = u16::from_le_bytes([s[0], s[1]]);
                 let variant_idx = u16::from_le_bytes([s[2], s[3]]);
                 let def = self
                     .module
                     .enum_defs
                     .get(enum_id as usize)
-                    .ok_or(RuntimeErrorKind::StructOutOfRange(enum_id as u16))?;
+                    .ok_or(RuntimeErrorKind::EnumIndexOutOfRange(enum_id))?;
                 let variant = def
                     .variants
                     .get(variant_idx as usize)
-                    .ok_or(RuntimeErrorKind::StructOutOfRange(variant_idx))?;
+                    .ok_or(RuntimeErrorKind::EnumIndexOutOfRange(variant_idx))?;
                 let n = variant.payload_types.len();
                 // Pop payload values in reverse.
                 let mut payload = Vec::with_capacity(n);
@@ -2207,7 +2254,11 @@ impl Vm {
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let matches = match v {
                     Value::Enum { variant, .. } => variant == target,
-                    _ => return Err(RuntimeErrorKind::ResultMismatch),
+                    _ => {
+                        return Err(RuntimeErrorKind::EnumPayloadMismatch {
+                            variant_ref: target,
+                        });
+                    }
                 };
                 self.stack.push(Value::Bool(matches));
             }
@@ -2219,18 +2270,17 @@ impl Vm {
                 match v {
                     Value::Enum { variant, payload } => {
                         if variant != variant_ref {
-                            return Err(RuntimeErrorKind::ResultMismatch);
+                            return Err(RuntimeErrorKind::EnumPayloadMismatch { variant_ref });
                         }
                         let p = payload
                             .get(index)
-                            .ok_or(RuntimeErrorKind::IndexOutOfRange {
-                                index: index as i64,
-                                len: payload.len(),
-                            })?
+                            .ok_or(RuntimeErrorKind::EnumPayloadMismatch { variant_ref })?
                             .clone();
                         self.stack.push(p);
                     }
-                    _ => return Err(RuntimeErrorKind::ResultMismatch),
+                    _ => {
+                        return Err(RuntimeErrorKind::EnumPayloadMismatch { variant_ref });
+                    }
                 }
             }
         }
