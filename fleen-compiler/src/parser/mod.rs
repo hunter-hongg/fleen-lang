@@ -617,6 +617,15 @@ impl Parser {
         let mut params = Vec::new();
         loop {
             let p = self.parse_ident()?;
+            if matches!(p.as_str(), "int" | "float" | "bool" | "string" | "unit" | "char") {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "type parameter name (must not shadow a base type name)".to_string(),
+                        found: crate::lexer::TokenKind::Ident(p.clone()),
+                    },
+                    span: self.current().span,
+                });
+            }
             params.push(p);
             if !self.matches(&crate::lexer::TokenKind::Comma) {
                 break;
@@ -641,8 +650,8 @@ impl Parser {
         };
         self.expect(&open, "type argument list")?;
         if self.check(&close) {
-            // Empty `Name<>` / `Name[]` in type position — parse as error here
-            // (T01 allows parser to reject obvious empty-arg forms).
+            // Empty `Name<>` / `Name[]` in type position — reject as a
+            // parse error (requires at least one type argument).
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
                     expected: "type argument (type argument list needs at least one type)".to_string(),

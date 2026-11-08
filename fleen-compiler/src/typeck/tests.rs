@@ -2773,3 +2773,21 @@ fn t05_enum_two_payload_variant_binds_first_payload() {
          func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(x) { x }\n    }\n}",
     );
 }
+
+#[test]
+fn parameterized_type_use_site_reports_unresolved_t01() {
+    let errs = compile_err("func f(x: Option<int>): int { 0 }");
+    assert!(
+        errs.iter().any(|e| matches!(&e.kind, TypeckErrorKind::UnknownType { name } if name.contains("parameterized types not yet resolved"))),
+        "expected unresolved parameterized type error, got {errs:?}"
+    );
+}
+
+#[test]
+fn parameterized_type_use_site_bracket_reports_unresolved_t01() {
+    let errs = compile_err("func f(x: Option[int]): int { 0 }");
+    assert!(
+        errs.iter().any(|e| matches!(&e.kind, TypeckErrorKind::UnknownType { name } if name.contains("parameterized types not yet resolved"))),
+        "expected unresolved parameterized type error, got {errs:?}"
+    );
+}

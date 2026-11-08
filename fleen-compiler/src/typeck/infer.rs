@@ -281,14 +281,9 @@ impl TypeChecker {
                 // T01/T04 prep: parameterized use-site types are parsed but
                 // full generic resolution/arity checking lands in T04. For now,
                 // resolve the base name if no args (monomorphic path unchanged);
-                // if args are present, keep as Unsupported placeholder to avoid
-                // mis-resolving arity until T04 (and still convert args for
-                // downstream sanity where needed).
+                // if args are present, report UnknownType to avoid silently
+                // mis-resolving arity until T04.
                 if !args.is_empty() {
-                    // Convert args so nested Named types still resolve; base is
-                    // deferred to T04. Placeholder keeps compilation total.
-                    let _converted_args: Vec<Type> =
-                        args.iter().map(|a| self.convert_type(a, span)).collect();
                     self.add_error(
                         TypeckErrorKind::UnknownType {
                             name: format!("{name}<...> (parameterized types not yet resolved)"),

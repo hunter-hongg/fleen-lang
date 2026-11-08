@@ -232,8 +232,8 @@ impl fmt::Display for Type {
                 if args.is_empty() {
                     write!(f, "{name}")
                 } else {
-                    let as_: Vec<String> = args.iter().map(|t| t.to_string()).collect();
-                    write!(f, "{name}<{}>", as_.join(", "))
+                    let arg_strs: Vec<String> = args.iter().map(|t| t.to_string()).collect();
+                    write!(f, "{name}<{}>", arg_strs.join(", "))
                 }
             }
             Type::Func(params, ret) => {

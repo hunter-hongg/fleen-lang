@@ -2290,16 +2290,23 @@ func main() {
     }
 
     #[test]
-    fn parse_channel_and_ptr_still_special() {
+    fn parse_channel_type_still_special() {
         let ast = parse_str("c: channel<int> = make();\n");
         if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
-            assert!(matches!(v.ty.as_ref(), Some(Type::Channel(_))));
+            assert!(matches!(v.ty.as_ref(), Some(Type::Channel(inner)) if matches!(inner.as_ref(), Type::Base(BaseType::Int))));
         } else {
-            panic!("expected Var");
+            panic!("expected Var with Channel type");
         }
+    }
+
+    #[test]
+    fn parse_ptr_type_still_special() {
         let ast = parse_str("func f(p: ptr<int>) { }\n");
-        // just parse ok
-        assert!(!ast.items.is_empty());
+        if let Item::Decl(Decl::Func(fd)) = &ast.items[0] {
+            assert!(matches!(&fd.params[0].ty, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Base(BaseType::Int))));
+        } else {
+            panic!("expected Func with ptr param");
+        }
     }
 
     #[test]
@@ -2325,4 +2332,13 @@ func main() {
         }
     }
 
+    #[test]
+    fn parse_enum_decl_type_param_shadows_base_type_is_error() {
+        parse_err("enum Bad<int> { V(int) }");
+    }
+
+    #[test]
+    fn parse_orphan_gt_in_type_position_is_error() {
+        parse_err("func f(x: Option<int>>): int { 0 }");
+    }
 }

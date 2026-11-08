@@ -1,2 +1,0 @@
-// Result type with square brackets (P4)
-const r: Result[int, string] = 42;
