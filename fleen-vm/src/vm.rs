@@ -1203,6 +1203,12 @@ impl Vm {
         RuntimeErrorKind::IndexOutOfRange { index, len }
     }
 
+    /// The defensive rejection for `EnumIs` / `EnumPayload` (0.0.6 T07
+    /// review): one constructor so the three refusal paths cannot drift.
+    fn enum_payload_mismatch(variant_ref: u16) -> RuntimeErrorKind {
+        RuntimeErrorKind::EnumPayloadMismatch { variant_ref }
+    }
+
     pub(crate) fn step(&mut self) -> Result<(), RuntimeErrorKind> {
         let frame = *self.frames.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
         let func = &self.module.functions[frame.func.0 as usize];
@@ -2232,10 +2238,12 @@ impl Vm {
                     .enum_defs
                     .get(enum_id as usize)
                     .ok_or(RuntimeErrorKind::EnumIndexOutOfRange(enum_id))?;
-                let variant = def
-                    .variants
-                    .get(variant_idx as usize)
-                    .ok_or(RuntimeErrorKind::EnumIndexOutOfRange(variant_idx))?;
+                let variant = def.variants.get(variant_idx as usize).ok_or(
+                    RuntimeErrorKind::EnumVariantOutOfRange {
+                        enum_id,
+                        variant: variant_idx,
+                    },
+                )?;
                 let n = variant.payload_types.len();
                 // Pop payload values in reverse.
                 let mut payload = Vec::with_capacity(n);
@@ -2254,11 +2262,7 @@ impl Vm {
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let matches = match v {
                     Value::Enum { variant, .. } => variant == target,
-                    _ => {
-                        return Err(RuntimeErrorKind::EnumPayloadMismatch {
-                            variant_ref: target,
-                        });
-                    }
+                    _ => return Err(Self::enum_payload_mismatch(target)),
                 };
                 self.stack.push(Value::Bool(matches));
             }
@@ -2267,21 +2271,18 @@ impl Vm {
                 let variant_ref = u16::from_le_bytes([s[0], s[1]]);
                 let index = u16::from_le_bytes([s[2], s[3]]) as usize;
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
-                match v {
-                    Value::Enum { variant, payload } => {
-                        if variant != variant_ref {
-                            return Err(RuntimeErrorKind::EnumPayloadMismatch { variant_ref });
-                        }
-                        let p = payload
-                            .get(index)
-                            .ok_or(RuntimeErrorKind::EnumPayloadMismatch { variant_ref })?
-                            .clone();
-                        self.stack.push(p);
-                    }
-                    _ => {
-                        return Err(RuntimeErrorKind::EnumPayloadMismatch { variant_ref });
-                    }
+                let (variant, payload) = match v {
+                    Value::Enum { variant, payload } => (variant, payload),
+                    _ => return Err(Self::enum_payload_mismatch(variant_ref)),
+                };
+                if variant != variant_ref {
+                    return Err(Self::enum_payload_mismatch(variant_ref));
                 }
+                let p = payload
+                    .get(index)
+                    .ok_or(Self::enum_payload_mismatch(variant_ref))?
+                    .clone();
+                self.stack.push(p);
             }
         }
         self.frames

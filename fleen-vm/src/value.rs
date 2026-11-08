@@ -311,8 +311,13 @@ mod tests {
         assert_eq!(e, copy);
         match (&e, &copy) {
             (Value::Enum { payload: a, .. }, Value::Enum { payload: b, .. }) => {
-                // Pointer-distinct heap buffers: same length, different boxes.
-                assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()) == false || a.is_empty());
+                // Pointer-distinct payload buffers, and the inner array is
+                // pointer-distinct too: the copy is deep, not just one level.
+                assert_ne!(a.as_ptr(), b.as_ptr());
+                let (Value::Arr(x), Value::Arr(y)) = (&a[0], &b[0]) else {
+                    unreachable!("payload is an array")
+                };
+                assert_ne!(x.as_ptr(), y.as_ptr());
             }
             _ => unreachable!("both are enums"),
         }

@@ -2523,6 +2523,63 @@ fn std_arr_push_appends_element() {
     );
 }
 
+#[test]
+fn std_arr_concat_appends_second_array() {
+    // concat([1, 2], [3]) → [1, 2, 3] (0.0.6 T07, D5): a fresh array, the
+    // second appended after the first, neither argument mutated.
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 1
+            (Opcode::Const, u32b(2)),  // 2
+            (Opcode::ArrNew, u16b(2)), // [1, 2] (arg 0, bottom)
+            (Opcode::Const, u32b(3)),  // 3
+            (Opcode::ArrNew, u16b(1)), // [3] (arg 1, top)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        2,
+        vec![
+            Const::Str("std.arr.concat".into()),
+            Const::Int(1),
+            Const::Int(2),
+            Const::Int(3),
+        ],
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap(),
+        Value::Arr(Box::new([Value::Int(1), Value::Int(2), Value::Int(3)]))
+    );
+}
+
+#[test]
+fn std_arr_flatten_removes_one_level() {
+    // flatten([[1], [2, 3]]) → [1, 2, 3] (0.0.6 T07, D5): one level of
+    // nesting removed; the outer array is ArrNew over two inner arrays.
+    let m = builtin_call_module(
+        enc(&[
+            (Opcode::Const, u32b(1)),  // 1
+            (Opcode::ArrNew, u16b(1)), // [1]
+            (Opcode::Const, u32b(2)),  // 2
+            (Opcode::Const, u32b(3)),  // 3
+            (Opcode::ArrNew, u16b(2)), // [2, 3]
+            (Opcode::ArrNew, u16b(2)), // [[1], [2, 3]] (arg 0)
+            (Opcode::Call, u16b(1)),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        vec![
+            Const::Str("std.arr.flatten".into()),
+            Const::Int(1),
+            Const::Int(2),
+            Const::Int(3),
+        ],
+    );
+    assert_eq!(
+        Vm::new(m).run().unwrap(),
+        Value::Arr(Box::new([Value::Int(1), Value::Int(2), Value::Int(3)]))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 0.0.4 T04 (D1): coroutine frame save/restore.
 //
@@ -3898,15 +3955,18 @@ fn enum_new_forged_enum_id_is_defensively_rejected() {
 
 #[test]
 fn enum_new_forged_variant_id_is_defensively_rejected() {
-    // Variant id 2 in a two-variant enum: same defensive family, the
-    // variant operand is out of range.
+    // Variant id 2 in a two-variant enum: its own defensive kind (0.0.6 T07
+    // review) so the message names the enum and the offending variant id.
     let m = enum_vm_module(enc(&[
         (Opcode::EnumNew, [u16b(0), u16b(2)].concat()),
         (Opcode::Return, vec![]),
     ]));
     assert_eq!(
         Vm::new(m).run().unwrap_err().kind,
-        RuntimeErrorKind::EnumIndexOutOfRange(2)
+        RuntimeErrorKind::EnumVariantOutOfRange {
+            enum_id: 0,
+            variant: 2
+        }
     );
 }
 
@@ -3977,26 +4037,16 @@ fn enum_eq_is_defensively_rejected() {
 fn enum_value_moves_out_of_its_slot() {
     // An owned enum stored in a local moves with `MoveLocal` (the slot is
     // cleared to Unit) and the value survives the move intact.
-    let mut m = enum_vm_module(enc(&[
+    let code = enc(&[
         (Opcode::True, vec![]),
         (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
         (Opcode::StoreLocal, u16b(0)),
         (Opcode::MoveLocal, u16b(0)),
         (Opcode::EnumPayload, [u16b(1), u16b(0)].concat()),
         (Opcode::Return, vec![]),
-    ]));
-    m.functions = vec![func(
-        enc(&[
-            (Opcode::True, vec![]),
-            (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
-            (Opcode::StoreLocal, u16b(0)),
-            (Opcode::MoveLocal, u16b(0)),
-            (Opcode::EnumPayload, [u16b(1), u16b(0)].concat()),
-            (Opcode::Return, vec![]),
-        ]),
-        0,
-        1,
-    )];
+    ]);
+    let mut m = enum_vm_module(code.clone());
+    m.functions = vec![func(code, 0, 1)];
     assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
 }
 

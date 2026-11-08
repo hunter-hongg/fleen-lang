@@ -39,4 +39,16 @@ func main() {
     pushed = std.arr.push([1, 2], 3);
     std.io.println(std.arr.len(clone pushed) as string);
     std.io.println(pushed[2] as string);
+
+    // concat (0.0.6 T07, D5): a fresh array, second appended after first.
+    joined = std.arr.concat([1, 2], [3, 4]);
+    std.io.println(std.arr.len(clone joined) as string);
+    std.io.println(joined[0] as string);
+    std.io.println(joined[3] as string);
+
+    // flatten (0.0.6 T07, D5): one level of nesting removed.
+    nested: [[int]] = [[1, 2], [3]];
+    flat = std.arr.flatten(nested);
+    std.io.println(std.arr.len(clone flat) as string);
+    std.io.println(flat[2] as string);
 }

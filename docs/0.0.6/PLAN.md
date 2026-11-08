@@ -148,9 +148,13 @@ the first free band; `FieldTypeTag` currently ends at 11):
   adding `foldr` is how the ambiguity becomes permanent. All call sites
   (`std/collection/iter.fln` header, `tests/std/iter.fln`,
   `tests/e2e/valid/iter_helpers.fln`, `examples/0.0.3/tour`) move in T07.
-- `flatten` is **one level only**: `flatten(xs)` on `[[[T]]]` is a type error
+- `flatten` peels **one level only**: on `[[[T]]]` it yields `[[T]]`
   (schematic unification binds `T = [U]` and the intrinsic consumes one
-  layer); chaining `flatten` reaches deeper layers explicitly.
+  layer); chaining `flatten` reaches deeper layers explicitly. The type
+  error is the *element-type* mismatch — a non-nested argument
+  (`flatten([int])`) fails the substituted-param unify (as-built wording,
+  0.0.6 T07 review: the original prose called `[[[T]]]` itself a type
+  error, contradicting the mechanism it describes).
 - Ownership follows the 0.0.3 array semantics: arguments are read as copies,
   results are fresh owned arrays; nothing mutates in place.
 - *Rejected*: a `std.list` module distinct from `std.arr` — there is one

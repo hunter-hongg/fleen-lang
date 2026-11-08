@@ -122,10 +122,14 @@ pub enum RuntimeErrorKind {
     /// (0.0.5 T06). Defensive: typeck restricts those opcodes to `ptr<T>`;
     /// reaching this needs hand-written or ahead-of-its-time bytecode.
     PtrExpected,
-    /// `EnumNew` named an enum id outside the `enum_defs` table, or a
-    /// variant id outside that enum's variant list (0.0.6 T07, defensive:
-    /// verify rejects it first — the VM backstop mirrors the struct rule).
+    /// `EnumNew` named an enum id outside the `enum_defs` table (0.0.6 T07,
+    /// defensive: verify rejects it first — the VM backstop mirrors the
+    /// struct rule).
     EnumIndexOutOfRange(u16),
+    /// `EnumNew` named a variant id outside enum `enum_id`'s variant list
+    /// (0.0.6 T07 review: split from `EnumIndexOutOfRange` so the two
+    /// defensive `EnumNew` checks carry distinct, actionable messages).
+    EnumVariantOutOfRange { enum_id: u16, variant: u16 },
     /// `EnumIs`/`EnumPayload` found a non-enum value, or `EnumPayload`'s
     /// variant operand does not match the value's variant id / its payload
     /// index is out of range (0.0.6 T07, D4: the `ResultMismatch`
@@ -242,6 +246,9 @@ impl std::fmt::Display for RuntimeErrorKind {
             }
             RuntimeErrorKind::EnumIndexOutOfRange(id) => {
                 write!(f, "enum id {id} out of range")
+            }
+            RuntimeErrorKind::EnumVariantOutOfRange { enum_id, variant } => {
+                write!(f, "enum {enum_id} has no variant {variant}")
             }
             RuntimeErrorKind::EnumPayloadMismatch { variant_ref } => write!(
                 f,

@@ -280,7 +280,9 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 - [x] `Value::Enum { variant: u16, payload: Box<[Value]> }` — not serialized;
       `clone` deep-copies payloads; `Eq` on an enum is a defensive VM error
-      (same posture as struct/array); `fmt.rs` debug rendering
+      (same posture as struct/array); `Value` `Display` debug rendering
+      (value.rs — the card originally said `fmt.rs`, which is the
+      runtime-error message formatter and needed no change)
 - [x] Dispatch: `EnumNew` / `EnumIs` / `EnumPayload`; defensive errors
       `EnumIndexOutOfRange`, `EnumPayloadMismatch` (variant ≠ operand; payload
       index out of range joins the family)
@@ -294,9 +296,10 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
       header is the API contract); all `fold` call sites renamed:
       `tests/std/iter.fln`, `tests/e2e/valid/iter_helpers.fln`,
       `examples/0.0.3/tour`
-- [x] Tests: VM unit (enum value clone/move, defensive errors); std tests for
-      concat/flatten/foldl/foldr incl. a foldl-vs-foldr associativity
-      differential (`(a-b)-c` vs `a-(b-c)` on `[1,2,3]`)
+- [x] Tests: VM unit (enum value clone/move, defensive errors, the
+      concat/flatten intrinsics); std tests for concat/flatten/foldl/foldr
+      incl. a foldl-vs-foldr associativity differential (`(0-1)-2-3-4` =
+      -10 vs `1-(2-(3-(4-0)))` = -2 on `[1,2,3,4]`)
 
 **As-built notes (review-driven additions beyond the card):**
 - The VM defensive errors are new `RuntimeErrorKind` variants
@@ -330,6 +333,15 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
   `cargo test -p fleen-vm --test compat regenerate_fixtures -- --ignored`
   (the documented tool), and the golden-encoding tests needed no change
   (they build their own modules).
+- T07 review fixes (post-review): the forged-variant `EnumNew` check got
+  its own `EnumVariantOutOfRange { enum_id, variant }` kind so the two
+  `EnumNew` refusals carry distinct, actionable messages; the three
+  `EnumPayloadMismatch` construction sites collapsed onto one helper;
+  `concat` / `flatten` gained the std-level (`tests/std/arr.fln`) and VM
+  unit tests the card's checkbox names; the `is_foldr` predicate mirrors
+  `is_fold`; the foldl-vs-foldr differential runs on `[1,2,3,4]` with
+  init 0 (left `-10` vs right `-2`), not the card's earlier illustrative
+  `[1,2,3]`.
 
 **Depends on**: T06; T05 for the lowering the fold rename touches.
 **Refs**: PLAN §4, §6, D4, D5.

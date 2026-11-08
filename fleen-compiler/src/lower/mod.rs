@@ -657,6 +657,11 @@ impl InlineIterKind {
     fn is_fold(&self) -> bool {
         matches!(self, Self::Fold | Self::FoldR)
     }
+
+    /// 0.0.6 T07 review: the backward-fold predicate, sibling of `is_fold`.
+    fn is_foldr(&self) -> bool {
+        matches!(self, Self::FoldR)
+    }
 }
 
 /// Per-function lowering context.
@@ -1788,7 +1793,7 @@ impl<'a> FnBodyCx<'a> {
         // `__i = -1`, which fails the head check immediately — no special
         // case needed (int slots are signed i64).
         let i = self.fresh_temp();
-        if matches!(kind, InlineIterKind::FoldR) {
+        if kind.is_foldr() {
             fb.emit(MirInstr::new(MirInstrKind::LoadLocal(count), span));
             fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), span));
             fb.emit(MirInstr::new(MirInstrKind::ISub, span));
@@ -1803,7 +1808,7 @@ impl<'a> FnBodyCx<'a> {
         let head = fb.new_block();
         fb.jump(head);
         fb.start(head);
-        if matches!(kind, InlineIterKind::FoldR) {
+        if kind.is_foldr() {
             fb.emit(MirInstr::new(MirInstrKind::ConstInt(0), span));
             fb.emit(MirInstr::new(MirInstrKind::LoadLocal(i), span));
             fb.emit(MirInstr::new(MirInstrKind::Le, span));
