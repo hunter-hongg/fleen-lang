@@ -1,3 +1,54 @@
+## [0.0.6] - 2026-11-08
+
+### Added
+- Tagged unions: `enum` declarations with ordered variants and typed payloads
+  (zero- and multi-payload), variant constructors (`Color.Red`, the dotted form
+  `EnumName.Variant`), and generalized `choose` exhaustiveness (the `Result` rule
+  applied to enums — one arm per variant, or an `otherwise` arm). 0.0.6 patterns
+  bind the **first payload only**; a multi-payload variant can be constructed but
+  not fully destructured.
+- `enum` is a reserved word (the 0.0.6 breaking change, D6).
+- Type rules (D1/D2): `is_copy(E)` = all payloads of all variants are Copy (the
+  same rule as a struct); owned enums are consumed by `choose` (`choose move s`).
+  Recursive enums (directly or through an array/payload) are rejected at typeck
+  (`RecursiveEnum`). Enums are not comparable (`==` is a type error) and the
+  0.0.2 `as string` cast whitelist does not include them.
+- Bytecode v6 (writers emit version 6, readers accept `{1, 2, 3, 4, 5, 6}`): the
+  enum instructions `EnumNew` (0xCB, u16 enum id + u16 variant id, `p1 … pn → e`),
+  `EnumIs` (0xCC, u16 variant ref, `e → bool`), `EnumPayload` (0xCD, u16 variant
+  ref + u16 payload index, `e → p`); the `Value::Enum { variant, payload }`
+  runtime value (not serialized); the appended `enum_defs` table (after
+  `struct_defs`) and `FieldTypeTag::Enum = 12` (D4). `enum_defs` is written only
+  for `version >= 6`, so the v1–v5 layout is byte-identical.
+- Verify cross-checks `EnumNew` ids/payload arity (`EnumIndexOutOfRange`), gates
+  the v6 opcodes (0xCB–0xCD) out of v1–v5 modules, and tracks their stack effects;
+  the VM re-checks ids at runtime (`EnumIndexOutOfRange` / `EnumVariantOutOfRange`
+  / `EnumPayloadMismatch`).
+- Array library completion (D5): `std.arr.concat` and `std.arr.flatten` intrinsics;
+  `std.collection.iter.fold` renamed to `foldl` and `foldr` added (the same eager
+  builtin-backed helpers as `map`/`filter`/`foldl`).
+- E2E valid fixture `tests/e2e/valid/enum_demo.fln` (+ `.expected`); invalid
+  fixtures `enum_choose_not_exhaustive`, `enum_recursive`, `enum_cast`, `enum_eq`
+  (each `.fln` + `.stderr` + `.exit`).
+- `examples/0.0.6/tour` — a multi-module project (enums, pattern matching, and
+  `concat`/`flatten`/`foldl`/`foldr`) with `tests/enum_case.{fln,expected}` and
+  `examples/0.0.6/README.md`.
+- `release/0.0.6/RELEASE_NOTES.md`.
+
+### Changed
+- Workspace and std `VERSION` bumped to `0.0.6`; bytecode version is 6 (readers
+  accept `{1, 2, 3, 4, 5, 6}`).
+- Synced `docs/DESIGN.md` (composite-types enum entry + §9.8, §17 matrix and 0.0.6
+  goal, §18 roadmap), `docs/BYTECODE.md` (v0.0.6 header, §2/§3.2 enum types, §4.2
+  0xCB–0xCD, §5.17, §6.11, §8 verify + stack depths, §9 `enum_defs`/version 6, §10
+  version table), `docs/SYNTAX.ebnf` (v0.0.6, `enum_decl`/`enum_variant`/
+  `enum_pattern`), `SPEC.md` / `AGENTS.md` / `CLAUDE.md` (0.0.6 goal, §14 enum
+  block, §15 matrix + 0.0.6 status), and `docs/0.0.6/TICKETS.md` (T08 complete).
+
+### Breaking
+- `enum` is a reserved word (D6) — an identifier named `enum` is now a parse error.
+- `std.collection.iter.fold` is renamed to `foldl` and `foldr` is added (D5).
+
 # Changelog
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/),

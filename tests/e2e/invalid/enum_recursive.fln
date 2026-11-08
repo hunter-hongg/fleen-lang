@@ -1,0 +1,9 @@
+// 0.0.6 T08 e2e: a recursive enum is rejected — an enum's size must be
+// statically known, so a payload may not reach the enum being declared
+// (D2). `box` indirection does not lift the ban in 0.0.6.
+enum E {
+    A,
+    B(E),
+}
+
+func main(): int = 0

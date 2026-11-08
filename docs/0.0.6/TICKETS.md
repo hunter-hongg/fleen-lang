@@ -4,7 +4,7 @@
 > tests.  Decisions D1–D6 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T07 implemented; T08 pending.**
+> **Status: T01–T08 implemented.**
 
 ---
 
@@ -350,12 +350,12 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T08 — Integration matrix + docs sync + version bump (F6; D6)
 
-- [ ] E2E fixtures: `tests/e2e/valid/enum_demo.fln` (construct + choose +
+- [x] E2E fixtures: `tests/e2e/valid/enum_demo.fln` (construct + choose +
       payload use across Copy and owned enums); invalid: non-exhaustive
       choose, recursive enum, `as string` on enum, `==` on enum
-- [ ] Compatibility: full existing suite green (v1–v5 fixtures, projects,
-      std tests) — the rename must leave zero stale `fold` references
-- [ ] Docs sync:
+- [x] Compatibility: full existing suite green (v1–v5 fixtures, projects,
+      std tests) — the rename leaves zero stale `fold` references
+- [x] Docs sync:
       - `docs/SYNTAX.ebnf`: `enum_decl` / `enum_pattern`
       - `docs/BYTECODE.md`: §5.17, §9 `enum_defs`, §10 v6 row
       - `docs/DESIGN.md`: §9 enum section, §17 feature table `enum` row,
@@ -364,9 +364,9 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
         paragraph, §14 quick-reference section, §15 table
       - `CHANGELOG.md`: 0.0.6 entry with the explicit breaking set
         {`enum` reserved; `fold` → `foldl`} per D6
-- [ ] Version bump: workspace `Cargo.toml` → `0.0.6`; `std/VERSION` → `0.0.6`
-- [ ] Examples: `examples/0.0.6/` (at least one enum demo)
-- [ ] Release publication (tag/archives) stays the separate step, as in 0.0.3–0.0.5
+- [x] Version bump: workspace `Cargo.toml` → `0.0.6`; `std/VERSION` → `0.0.6`
+- [x] Examples: `examples/0.0.6/` (at least one enum demo)
+- [x] Release publication (tag/archives) stays the separate step, as in 0.0.3–0.0.5
 
 **Depends on**: T01–T07 all green.
 **Refs**: PLAN §10, D6.
@@ -392,3 +392,18 @@ No recursive enums (`RecursiveEnum` stays a compile error), no `==`, no
 generic enums, no multi-binding patterns, no serialization of enum values,
 no monadic combinators. Any of these needs a new decision entry in PLAN §1
 first.
+
+
+### T08 — Integration fixtures, examples, and the doc/version sync (D6) — DONE
+
+- `tests/e2e/valid/enum_demo.fln` + `.expected`; invalid fixtures
+  `enum_choose_not_exhaustive`, `enum_recursive`, `enum_cast`, `enum_eq` (`.fln` +
+  `.stderr` + `.exit`), needles verified against the real toolchain.
+- `examples/0.0.6/tour` (multi-module: enums, `choose`, `concat`/`flatten`/`foldl`/`foldr`)
+  + `tests/enum_case.{fln,expected}` + `examples/0.0.6/README.md`; tour and tests run green.
+- Docs synced: `docs/SYNTAX.ebnf`, `docs/BYTECODE.md` (v0.0.6, §2/§3.2/§4.2/§5.17/§6.11/§8/§9/§10),
+  `docs/DESIGN.md` (§9.8, §17, §18, composite types), `SPEC.md`/`AGENTS.md`/`CLAUDE.md` (§13/§14/§15),
+  `CHANGELOG.md` (0.0.6), `docs/0.0.6/TICKETS.md`. `flnc` version 6 confirmed in
+  `fleen-compiler/src/codegen/mod.rs` (`MODULE_VERSION = 6`) and `codegen/flnc.rs`
+  (`READ_VERSIONS = [1,2,3,4,5,6]`).
+- Version bumped: workspace `Cargo.toml` 0.0.6, `std/VERSION` 0.0.6. T08 complete.

@@ -1,0 +1,12 @@
+// 0.0.6 T08 e2e: enums have no `==` — a `choose` is the comparison story
+// (D3). Equality on an enum value is a compile error, not a runtime one.
+enum Color {
+    Red,
+    Green,
+}
+
+func main(): bool {
+    a = Color.Red;
+    b = Color.Green;
+    a == b
+}

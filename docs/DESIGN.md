@@ -702,6 +702,8 @@ unit
 ```fleen
 [T]              // array (0.0.3): owned for every T; literals `[e1, e2, …]`, `a[i]` read/write, bounds-checked
 struct S { … }   // user-defined aggregate (0.0.3); a struct name is a type; is_copy = all fields Copy
+enum E { … }     // user-defined tagged union (0.0.6): ordered variants with typed payloads;
+                 // an enum name is a type; is_copy = all payloads Copy
 Range            // builtin Copy type (0.0.3 V04): an int interval, end-exclusive; constructed
                  // via std.collection.range (no `..` syntax in source); `for x in r` iterates it
 box<T>           // heap pointer, single ownership; box expr allocates, deref reads/writes (0.0.2, §10.3)
@@ -711,8 +713,9 @@ Future<T>        // a suspended async coroutine (0.0.4, §9.6): non-Copy, driven
 channel<T>       // message-passing channel (0.0.4, §9.7): non-Copy, move-only, owns its buffer
 ```
 
-> For struct / array syntax and rules see the §9.4 and §9.5 subsections below; the bytecode for
-> each is in `docs/BYTECODE.md` §5.12–5.13 and the design decisions are in `docs/0.0.3/PLAN.md` D1–D5.
+> For struct / array / enum syntax and rules see the §9.4, §9.5 and §9.8 subsections below; the
+> bytecode for each is in `docs/BYTECODE.md` §5.12–5.13 and §5.17, and the design decisions are in
+> `docs/0.0.3/PLAN.md` D1–D5 and `docs/0.0.6/PLAN.md` D1–D6.
 
 ### 9.4 struct (0.0.3)
 
@@ -829,6 +832,79 @@ std.async.run([producer(move ch), consumer(move peer)]);   // move a handle into
   shared-memory containers (`Mutex`/`Atomic`) — channels are the only cross-task
   communication (D3). A run ends when no task is runnable; a program whose tasks are all
   blocked on channels is a `ChannelDeadlock` runtime error
+
+### 9.8 `enum` (0.0.6)
+
+```fleen
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+enum Shape {
+    Point,
+    Circle(float),
+    Rect(float, float),
+}
+
+pub enum Status {          // `pub` makes the enum importable across modules
+    Open,
+    Closed,
+}
+
+c = Color.Red;              // a variant name is a constructor
+s = Shape.Circle(2.0);      // dotted form: enum name . variant name
+t = Shape.Rect(3.0, 4.0);   // a variant may carry several payloads
+
+func area(s: Shape): float {
+    choose s {                                  // an owned enum needs `move`
+        when Point { 0.0 }
+        when Circle(r) { 3.14159 * r * r }
+        when Rect(w) { w * 0.0 }                // only the FIRST payload is nameable
+    }
+}
+```
+
+**Rules:**
+- `enum` **is a reserved word** (the 0.0.6 breaking change, D6): it has a declaration form,
+  so it can never be a plain identifier
+- A declaration is `enum Name { Variant, Variant(T), … }`; the body needs **at least one**
+  variant (an empty `enum E {}` is a parse error — unlike `struct E {}`), the variants are
+  **ordered** (the declaration order is the variant index used by the bytecode, §5.17), and
+  a trailing comma is allowed
+- A variant's payload list is `(T1, T2, …)`; a variant **without** parentheses has no payload
+  (`Foo()` with empty parens is a grammar error)
+- A **variant name is a constructor**: `Color.Red` constructs a `Color`; the dotted form
+  `EnumName.Variant` is the explicit spelling, and a bare `Red` also works where the enum
+  type is known (the resolver resolves it against the expected type). The payload count and
+  the payload types are checked by typeck (`EnumCtorArity` / payload type mismatch)
+- `is_copy(E)` = **all payloads of all variants are Copy** (D1) — the same rule as a struct's
+  `is_copy`. An enum with a `string` payload is therefore an **owned** type: consuming
+  positions need `move` / `clone`, and `choose` over it consumes the scrutinee
+  (`choose move s { … }`)
+- A pattern is `when Variant { … }` for a zero-payload variant and `when Variant(binding) { … }`
+  for a payload variant. In 0.0.6 a pattern binds **only the first payload** — `when Rect(w, h)`
+  is a parse error; a multi-payload variant can be *constructed* but not fully destructured
+  (a known limit, T05)
+- A `choose` over an enum is **exhaustive** when it has one arm per variant (the same rule as
+  `Result`, D3); a missing variant is `ChooseNotExhaustive` and names the missing variant
+  (`choose is not exhaustive for type \`Color\`: missing Blue`). An `otherwise` arm is allowed
+  and makes the `choose` exhaustive regardless
+- Enums are **not comparable**: `==` on an enum is a typeck error
+  (`invalid operand type \`Color\` for operator \`==\``), and an enum cannot be cast with
+  `as string` (the 0.0.2 cast whitelist is scalars only)
+- **Recursive enums are forbidden** (directly or through an array / a payload) →
+  `RecursiveEnum`: an enum's size must be statically known, and Fleen has no `box` indirection
+  syntax yet. A self-referential enum is rejected at the typeck level, before codegen
+- An enum is **not** a `struct`: it has no field access (`e.f`), no `==`, and no
+  `as`-conversion; it is matched with `choose`, not with `is` / `as`
+
+> **Design note**: the enum is the language's first *tagged union*. It deliberately stays
+> small in 0.0.6 — no generics on payloads, no `box` indirection, no first-class payload
+> destructuring beyond the first payload — so that the Copy / ownership rules of §10 can be
+> inherited unchanged from structs (D1) and the exhaustiveness rule from `Result` (D3).
+> The bytecode cost is three instructions and one appended table (`docs/BYTECODE.md` §5.17, §9).
 
 ### Function Types
 
@@ -1290,36 +1366,38 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 |
-|---------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ |
-| Function types | ✅ | ✅ | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ |
-| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) |
-| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) |
-| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) |
-| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) |
-| FFI | ❌ | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) |
-| Pointers `ptr` / `addr` / `unsafe` | ❌ | ❌ | ❌ (0.0.5) | ❌ (0.0.5) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 |
+|---------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ |
+| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ |
+| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) | ✅ | ✅ |
+| Pointers `ptr` / `addr` / `deref_ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §10.7) | ✅ |
+| `unsafe` / `trusted` | ❌ | ❌ | ❌ | ❌ | ✅ (T03, §12) | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §9.8) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **0.0.1 goal: Fibonacci runs.**
 
@@ -1342,6 +1420,13 @@ borrow-free boundary (T01–T09 implemented; see `docs/0.0.4/PLAN.md` decisions 
 distribution (T01–T10 implemented; see `docs/0.0.5/PLAN.md` decisions D1–D8 and
 `docs/0.0.5/TICKETS.md`).**
 
+**0.0.6 goal: tagged unions — `enum` declarations with ordered variants and typed payloads,
+generalized `choose` exhaustiveness (the `Result` rule applied to enums, D3), bytecode v6
+(`EnumNew`/`EnumIs`/`EnumPayload` + the `enum_defs` table), and an array library completion
+(`concat`/`flatten`, `fold` → `foldl` plus `foldr`). Recursive enums are a compile error
+(D2); enums are not comparable and patterns bind the first payload only (0.0.6 limits).
+T01–T08 implemented; see `docs/0.0.6/PLAN.md` decisions D1–D6 and `docs/0.0.6/TICKETS.md`.**
+
 ---
 
 ## 18. Roadmap
@@ -1352,6 +1437,7 @@ distribution (T01–T10 implemented; see `docs/0.0.5/PLAN.md` decisions D1–D8 
 | 0.0.3 | `struct` / `[T]` / `for` + `Range` — **implemented (V01–V04)**; modules / `pub` — **implemented (V05)**; std library — **implemented (V06)**; iterator helpers — **implemented (V07)**; flint — **implemented (V08)**; integrated & gated (V09); docs & version synced (V10). 0.0.3 is **complete** |
 | 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` / `deref_ptr` (T01–T06) + toolchain maturity: clap CLI (T07), six-target tag-triggered release pipeline (T09), std distribution with strict version pinning (T08) — **implemented (T01–T10)**; see `docs/0.0.5/PLAN.md` (D1–D8) and `docs/0.0.5/TICKETS.md` |
+| 0.0.6 | `enum` declarations with typed payloads (T01–T04) + generalized `choose` exhaustiveness and lowering (T05) + bytecode v6 `EnumNew`/`EnumIs`/`EnumPayload` and the `enum_defs` table (T06) + array library completion `concat`/`flatten`, `fold`→`foldl` + `foldr` (T07) — **implemented (T01–T08)**; see `docs/0.0.6/PLAN.md` (D1–D6) and `docs/0.0.6/TICKETS.md` |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks

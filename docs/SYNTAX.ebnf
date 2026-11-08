@@ -1,5 +1,5 @@
 (* ============================================ *)
-(* Fleen EBNF Grammar v0.0.5                    *)
+(* Fleen EBNF Grammar v0.0.6                    *)
 (* New in 0.0.2: box/deref/move/clone prefix    *)
 (* expressions, the ? suffix, Ok/Err patterns,  *)
 (* deref assignment targets, the as cast layer, *)
@@ -33,6 +33,10 @@
 (* (`ptr` / `addr` / `deref_ptr` / `unsafe` /    *)
 (* `trusted` are reserved words — a 0.0.4 program *)
 (* using them as identifiers must rename.)       *)
+(* New in 0.0.6: `enum` declarations with typed  *)
+(* variants, and the variant pattern in `choose`; *)
+(* `enum` is a reserved word — a 0.0.5 program    *)
+(* using it as an identifier must rename.         *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -47,10 +51,12 @@ module_path     = ident , { "." , ident } ;
 (* ---------- Declarations ---------- *)
 
 (* 0.0.3 V05: `pub` is a top-level-only visibility modifier on func / const /
-   struct / global var; it is illegal elsewhere (on `import`, inside a block). *)
+   struct / enum / global var; it is illegal elsewhere (on `import`, inside a
+   block). *)
 declaration     = [ "pub" ] , ( const_decl
                 | func_decl
                 | struct_decl
+                | enum_decl
                 | var_binding )
                 | expr_stmt ;
 
@@ -59,6 +65,17 @@ declaration     = [ "pub" ] , ( const_decl
 struct_decl     = "struct" , ident , "{" , [ field_decl , { "," , field_decl } ] , [ "," ] , "}" ;
 
 field_decl      = ident , ":" , type ;
+
+(* 0.0.6 T02: an enum declaration — ordered variants, each with a name and an
+   optional payload type list; top-level only (like `struct`), no trailing
+   semicolon, a trailing comma is allowed, and at least one variant is
+   required (an empty `enum E { }` is a parse error).
+   A variant with no payload list is the zero-payload form; the payload types
+   are checked against the declaration by typeck (arity and types), and a
+   recursive enum is rejected (D2). *)
+enum_decl       = "enum" , ident , "{" , enum_variant , { "," , enum_variant } , [ "," ] , "}" ;
+
+enum_variant    = ident , [ "(" , type , { "," , type } , ")" ] ;
 
 
 (* ---------- Variable Bindings ---------- *)
@@ -111,8 +128,8 @@ type            = base_type
 
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
 
-(* 0.0.3: a bare name as a type — a user struct (V02) or the builtin Range (V04).
-   Which names are valid types is checked by typeck. *)
+(* 0.0.3: a bare name as a type — a user struct (V02), a user enum (0.0.6) or
+   the builtin Range (V04). Which names are valid types is checked by typeck. *)
 named_type      = ident ;
 
 array_type      = "[" , type , "]" ;
@@ -205,7 +222,8 @@ otherwise_clause = "otherwise" , block ;
 pattern         = neg_pattern
                 | literal
                 | ident
-                | result_pattern ;
+                | result_pattern
+                | enum_pattern ;
 
 (* P5: choose pattern also accepts negated numeric literals *)
 neg_pattern     = "-" , (int_lit | float_lit) ;
@@ -213,6 +231,15 @@ neg_pattern     = "-" , (int_lit | float_lit) ;
 (* 0.0.2: the Ok/Err patterns for Result; bindings follow move semantics;
    Ok + Err arms together are exhaustive, no otherwise needed *)
 result_pattern  = ( "Ok" | "Err" ) , "(" , ident , ")" ;
+
+(* 0.0.6 T02: the enum variant pattern — `Variant` or `Variant(binding)`.
+   The binding names the variant's FIRST payload (a 0.0.6 pattern binds at
+   most one value, like the `Ok(x)` form); a zero-payload variant is matched
+   by the bare `Variant` spelling (no parentheses).
+   The variant name must belong to the scrutinee's enum type — a mismatch is
+   the typeck error `EnumPatternMismatch`. One arm per variant makes the
+   `choose` exhaustive (no `otherwise` needed, D3). *)
+enum_pattern    = ident , [ "(" , ident , ")" ] ;
 
 
 (* ---------- Operator Precedence (lowest to highest) ---------- *)
@@ -282,6 +309,14 @@ primary         = literal
                 | array_literal
                 | struct_literal
                 | channel_ctor ;
+
+(* 0.0.6 T02: an enum constructor needs NO new grammar rule — it is the
+   existing `ident` primary followed by the dotted path and the call
+   suffix: `Color.Red` (zero payload) is `ident` + field_suffix, and
+   `Shape.Circle(2.0)` (payload) is `ident` + field_suffix + call_suffix.
+   Whether the path names a variant of a declared enum (and the payload
+   arity/types) is checked by the semantic phases.  A bare `Circle` without
+   parentheses is NOT a constructor — a payload variant must be called. *)
 
 (* 0.0.4 T07: `channel<T>(capacity)` — the reserved-word channel constructor.
    capacity 0 is a rendezvous channel (direct handoff), > 0 a bounded buffer;

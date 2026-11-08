@@ -1,0 +1,20 @@
+// `flint test` fixture (0.0.6): an enum case — the F-project e2e shape
+// the T08 matrix pins for project mode.
+import std.io;
+
+enum Signal {
+    Stop,
+    Note(int),
+}
+
+func describe(s: Signal): string {
+    choose s {
+        when Stop { "stop" }
+        when Note(n) { n as string }
+    }
+}
+
+func main() {
+    std.io.println(describe(Signal.Stop));
+    std.io.println(describe(Signal.Note(7)));
+}

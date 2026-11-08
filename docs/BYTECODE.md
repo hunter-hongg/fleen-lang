@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.5
+# Fleen Bytecode Specification v0.0.6
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -17,6 +17,7 @@
 > `.flnc` version bumps to 4 (no layout change — no new tables). Design decisions are
 > in `docs/0.0.4/PLAN.md`.
 > **v0.0.5 additions**: pointer / unsafe instructions (0xC8–0xCA) — `AddrOf` / `LoadPtr` / `StorePtr` — and the `.flnc` version bumps to 5 (no layout change — no new tables). Design decisions are in `docs/0.0.5/PLAN.md`.
+> **v0.0.6 additions**: enum instructions (0xCB–0xCD) — `EnumNew` / `EnumIs` / `EnumPayload` — the appended `enum_defs` table, `FieldTypeTag::Enum = 12`, and `Value::Enum` in the value model. The `.flnc` version bumps to 6 (one appended table — the v1–v5 layout stays byte-identical). Design decisions are in `docs/0.0.6/PLAN.md`.
 
 ---
 
@@ -27,7 +28,7 @@ Fleen compiles to a **custom stack-based bytecode**, executed by a purpose-built
 - **Execution model**: stack machine; operands are implicitly on top of the stack
 - **Encoding**: byte stream, little-endian
 - **Instruction format**: `opcode: u8` + fixed- or variable-length operands
-- **Structure**: one bytecode module (`Module`) = constant pool + function table + global variable table + `struct_defs` (v3) + entry point
+- **Structure**: one bytecode module (`Module`) = constant pool + function table + global variable table + `struct_defs` (v3) + `enum_defs` (v6) + entry point
 - **No GC, no exception table, no meta-circular instructions**: consistent with the language design
   (ownership is carried by v2 instructions such as `AllocBox` /
   `MoveLocal` / `CloneLocal`, §5.9–5.10; release is done via deterministic destruction of values)
@@ -51,11 +52,12 @@ Rules:
 
 ```rust
 pub struct Module {
-    pub version: u16,          // bytecode version: 0.0.4 writes 4, readers accept {1, 2, 3, 4}
+    pub version: u16,          // bytecode version: 0.0.6 writes 6, readers accept {1, 2, 3, 4, 5, 6}
     pub constants: Vec<Const>, // constant pool
     pub functions: Vec<Func>,  // function table
     pub globals: Vec<Global>,  // global variable table
     pub struct_defs: Vec<StructDef>, // struct field table (0.0.3, present when version >= 3, §2)
+    pub enum_defs: Vec<EnumDef>,     // enum variant table (0.0.6, present when version >= 6, §2)
     pub entry: FuncId,         // entry function: usually main; synthesized __init__ when globals exist
 }
 ```
@@ -63,6 +65,10 @@ pub struct Module {
 > **`struct_defs` (0.0.3 V02)**: one entry per user struct, giving verify exactly
 > `StructNew`'s field count and each field's type tag (see §2 "Struct Definitions"). It is the
 > single appended table of bytecode version 3 (§9), so it is present only when `version >= 3`.
+
+> **`enum_defs` (0.0.6 T06)**: one entry per user enum, giving verify exactly
+> `EnumNew`'s payload count and each variant's payload type tags (see §2 "Enum Definitions"). It is
+> the appended table of bytecode version 6 (§9), so it is present only when `version >= 6`.
 
 Rules:
 - **Constant pool deduplication**: identical constants are stored once and referenced by index `ConstId(u32)`
@@ -168,6 +174,7 @@ Rules:
 pub enum FieldTypeTag {
     Int = 0,  Float = 1,  Bool = 2,  Str = 3,  Unit = 4,  Func = 5,
     Result = 6, Array = 7, Box = 8,  Ref = 9,  Struct = 10, Range = 11,
+    Enum = 12,  // 0.0.6 T06: a payload whose type is a user enum
 }
 
 pub struct StructDef {
@@ -182,6 +189,29 @@ Rules:
 - Field tags exist only so `fleen-verify` can validate shape without executing; the VM does not
   consult them. Struct values are stored as a plain `Box<[Value]>` (§3.2).
 - The table is **append-only in the module** and read only when `version >= 3` (§9).
+
+### Enum Definitions (`enum_defs`, 0.0.6)
+
+```rust
+pub struct EnumDef {
+    pub variants: Vec<EnumVariantDef>, // one entry per variant, in declaration order
+}
+
+pub struct EnumVariantDef {
+    pub payload_types: Vec<FieldTypeTag>, // one tag per payload; empty for a zero-payload variant
+}
+```
+
+Rules:
+- `EnumDef.variants[variant_idx].payload_types.len()` is exactly the number of payload values
+  `EnumNew` pops; verify cross-checks `EnumNew(enum_id, variant_idx)` against `enum_defs`
+  (a forged enum or variant id is `EnumIndexOutOfRange`).
+- The variant index is the **variant's position in the declaration order**, which is also the
+  value stored in `Value::Enum.variant` and compared by `EnumIs` / `EnumPayload`.
+- Payload tags exist only so `fleen-verify` can validate shape without executing; the VM does not
+  consult them. Enum values are stored as `Value::Enum { variant, payload }` (§3.2).
+- The table is **append-only in the module** (after `struct_defs`) and read only when
+  `version >= 6` (§9).
 
 ---
 
@@ -220,6 +250,7 @@ pub enum Value {
     Range { start: i64, end: i64 },// 0.0.3: builtin int interval (Copy)
     Future(Box<FutureFrame>),      // 0.0.4: suspendable coroutine frame (Future<T>; non-Copy, not serialized)
     Channel(Rc<RefCell<ChannelInner>>), // 0.0.4: channel handle — handles share one buffer (Rc is the semantics, not a shortcut)
+    Enum { variant: u16, payload: Box<[Value]> }, // 0.0.6: enum value — variant index + payload values (in declaration order)
     Unit,           // empty value, placeholder
     Func(FuncId),   // first-class function reference
 }
@@ -249,6 +280,17 @@ Rules:
   not an implementation shortcut. Defensive runtime checks: awaiting a non-future is a
   `FutureExpected` error, and a program whose tasks are all blocked on channels with
   nothing runnable is `ChannelDeadlock`.
+
+> **0.0.6**: `Enum` is likewise **not serialized** (no `.flnc` tag — an enum value is a
+> runtime value only; the *shape* of every enum lives in the `enum_defs` table, §2). The
+> `variant` field is the variant's index in the enum's declaration order, and `payload`
+> holds the variant's payload values in declaration order (empty for a zero-payload
+> variant). An enum is **Copy iff every payload of every variant is Copy** (the same rule
+> as a struct's `is_copy`), so an enum carrying a `string` payload is owned and travels
+> with `move`. Enums are **not comparable** (`==` on an enum is a *typeck* error); `Eq` /
+> `Ne` reaching one in the VM is a defensive `RuntimeError::TypeMismatch` (unreachable via
+> legal bytecode). `DupDeep` recurses into `Enum`'s payload, so `clone` deep-copies an
+> enum's payloads.
 
 > **0.0.2 decision**: 0.0.1's `Str(Rc<str>)` was a temporary decision — strings are immutable with no
 > reference-cycle risk, and `Rc`'s deterministic destruction is not GC. After introducing `move` / `clone`,
@@ -324,13 +366,14 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0xBC–0xBF  Reserved
 0xC0–0xC7  async / channel (0.0.4, §5.15)
 0xC8–0xCA  pointer / unsafe (0.0.5 T05, §5.16)
-0xCB–0xDF  Reserved
+0xCB–0xCD  enum (0.0.6 T06, §5.17)
+0xCE–0xDF  Reserved
 0xE0–0xFF  Reserved
 ```
 
 ---
 
-## 5. Instruction Set (v0.0.1 base + v0.0.2 additions + v0.0.3 additions)
+## 5. Instruction Set (v0.0.1 base + v0.0.2 additions + v0.0.3 additions + v0.0.6 additions)
 
 ### 5.1 Constants and Stack Operations
 
@@ -602,6 +645,21 @@ Rules:
 - All three sit inside the **reserved `0xBC–0xFF` region** (§4.2); no v1/v2/v3/v4 encoding change (§10 compatibility promise)
 - `AddrOf` of a local slot / global id is a *source-level* unsafe op — typeck gates it behind `unsafe` / `trusted` functions (PLAN §3.3); the verifier only checks index ranges (§8)
 - Pointers are **move-only**: `clone p` is a typeck error (`CloneOfPointer`, PLAN D1), while `move p` is the one transfer spelling; pointers — like `Future`/`channel` — never cross an `await` / task / channel boundary
+
+### 5.17 enum (v0.0.6 T06)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `EnumNew` | u16 enum id, u16 variant id | 5 | `p1 … pn → e` (delta 1 − n, min n) | Construct an enum value: pop the variant's `n` payload values (in reverse), push `Value::Enum { variant, payload }`. The enum id indexes `enum_defs`; the variant id is the variant's index in the enum's declaration order and is also the value stored in the enum |
+| `EnumIs` | u16 variant id | 3 | `e → bool` (delta 0, min 1) | Test an enum's variant: pop the enum, push whether its variant index equals the operand. The operand is a *variant reference* (the variant's index in the enum it belongs to) |
+| `EnumPayload` | u16 variant ref, u16 payload index | 5 | `e → p` (delta 0, min 1) | Move one payload out of an enum: pop the enum, push its payload at `payload index` (the first payload is index 0). The variant ref is the defensive check — the VM rejects a payload read whose variant does not match (`EnumPayloadMismatch`) |
+
+Rules:
+- All three sit inside the **reserved `0xCB–0xDF` region** (§4.2) and take the `0xCB–0xCD` slots; no v1–v5 encoding change (§10 compatibility promise). The `.flnc` version bumps to 6 because of the appended `enum_defs` table (§9), not because of these opcodes
+- `EnumNew`'s payload count comes from `enum_defs[enum_id].variants[variant_id].payload_types.len()`; verify cross-checks the ids against that table (a forged id is `EnumIndexOutOfRange`, §8) — the VM re-checks the same ids at runtime (`EnumIndexOutOfRange` / `EnumVariantOutOfRange`)
+- `EnumIs` / `EnumPayload` take a **variant reference**, not an enum id: the lowering resolves the variant once, at compile time, against the scrutinee's enum type
+- The payload count of `EnumNew` is *not* an operand — it is implied by the `enum_defs` table, so a mismatched stack shape is caught by verify's stack-effect pass rather than by the instruction itself
+- An enum is Copy iff all of its payloads are Copy (§3.2); the ownership rules (`move` / `clone`) are enforced by typeck, not by these instructions
 
 ---
 
@@ -919,6 +977,82 @@ Rules:
   `move` / `std.concurrent.split`), and a `ref` payload is rejected outright
   (`ChannelNotBorrowable`) — no bytecode-level check needed
 
+### 6.11 enum (v0.0.6)
+
+```fleen
+enum Shape {
+    Point,
+    Circle(float),
+}
+
+func area(s: Shape): float {
+    choose s {
+        when Point { 0.0 }
+        when Circle(r) { 3.14159 * r * r }
+    }
+}
+
+c = Shape.Circle(2.0);
+```
+
+```text
+; construction — the payload is evaluated first, then EnumNew consumes it.
+; The variant id is the variant's index in the declaration order (Circle = 1);
+; the payload count comes from enum_defs, not from an operand.
+_const_2.0                 ; Const <f64 2.0>
+EnumNew  0, 1             ; p1 → e (enum 0, variant 1)
+
+; the `choose` over an enum lowers to a test chain, one test per variant:
+;   [current]  : <eval scrutinee> ; Jump test[0]
+;   test[i]    : Dup ; EnumIs v_i ; JumpIfTrue body[i]
+;   body[i]    : (EnumPayload v_i, 0 ; StoreLocal slot) ; <body> ; Jump merge
+;   fallback   : Pop ; <otherwise | Unit> ; Jump merge
+;   merge      : join
+_L_area:
+<eval s>                   ; LoadLocal 0
+Jump      test0
+test0:
+Dup                      ; keep the parked scrutinee for the later tests
+EnumIs   0                ; e → bool (is it Point?)
+JumpIfTrue body0
+test1:
+Dup
+EnumIs   1                ; e → bool (is it Circle?)
+JumpIfTrue body1
+fallback:
+Pop                      ; consume the scrutinee (unreachable when exhaustive)
+Unit
+Jump     merge
+body0:
+Pop                      ; a zero-payload arm has nothing to move
+<0.0>
+Jump     merge
+body1:
+EnumPayload 1, 0          ; e → p (the first payload of the matched variant)
+StoreLocal slot
+<3.14159 * r * r>
+Jump     merge
+merge:
+Return
+```
+
+Rules:
+- A **constructor** is `<eval payload…>; EnumNew` — the payload values are pushed in
+  declaration order and popped in reverse by `EnumNew`; the variant id is the variant's
+  index in the enum's declaration order
+- A **`choose` over an enum** lowers to the test chain above: one `EnumIs` test per variant
+  arm, in declaration order, with the scrutinee parked on the stack (duplicated per test).
+  The chain is *linear* — there is no jump table, because the variant count is known at
+  compile time and the arms are ordered
+- An **unguarded payload arm** consumes the parked scrutinee with `EnumPayload` (e → p, like
+  `UnwrapOk`); a **guarded arm** stages the payload out of a `Dup` copy into its binding
+  slot first, so a failed guard still leaves the scrutinee for the later tests
+- A **zero-payload arm** has nothing to move, so it `Pop`s the parked scrutinee instead
+- The `otherwise` arm is the fallback block; when the `choose` is **exhaustive** (one arm
+  per variant, D3) the fallback is unreachable but still terminated with a defensive `Unit`
+- Exhaustiveness, arity, payload types and the `RecursiveEnum` ban are all **typeck** rules —
+  the bytecode carries no check of its own (except verify's `enum_defs` cross-check)
+
 ---
 
 ## 7. Complete Example
@@ -999,6 +1133,11 @@ Constant pool:
       in a v2 module — or a v4 opcode in any v1–v3 module — → `BadOpcode`
 - [ ] **`StructNew(id)` indexes `struct_defs`** and carries exactly `field_types.len()` values;
       `StructIndexOutOfRange` otherwise (0.0.3 V02)
+- [ ] **`EnumNew(enum_id, variant_id)` indexes `enum_defs`** and carries exactly the variant's
+      `payload_types.len()` values; `EnumIndexOutOfRange` otherwise (0.0.6 T06)
+- [ ] **v6 instructions must not appear in a lower-version module**: the v6 opcodes are
+      `0xCB–0xCD` (§4.2), so a range comparison suffices — a v6 opcode in any v1–v5 module →
+      `BadOpcode`
 
 ### Per-Instruction Stack Depth Effect (Δdepth)
 
@@ -1041,6 +1180,9 @@ The stack-depth analysis is based on a static table (`n` is the operand count):
 | `AddrOf` | +1 (`→ ptr`) | 0 |
 | `LoadPtr` | 0 (`ptr → v`) | 1 |
 | `StorePtr` | −1 (`v ptr →`) | 2 |
+| `EnumNew(enum_id, variant_id)` | `1 − n` (n = `enum_defs[enum_id].variants[variant_id].payload_types.len()`) | n |
+| `EnumIs` | 0 (`e → bool`) | 1 |
+| `EnumPayload` | 0 (`e → p`) | 1 |
 | `Return` | treated as a path terminator | 1 (the return value is on the stack top) |
 
 > **U07 erratum**: `AllocBox`'s net effect is **0** (`v → b`: the value is replaced by the box),
@@ -1073,13 +1215,17 @@ the new async/channel instructions live inside function bodies and `Value::Futur
 0.0.5 writes `version = 5`, readers accept `{1, 2, 3, 4, 5}`; it makes **zero layout changes** —
 the pointer / unsafe instructions live inside function bodies, so no new table
 and no field change is needed.
+0.0.6 writes `version = 6`, readers accept `{1, 2, 3, 4, 5, 6}`; it appends **one** new table
+(`enum_defs`) after `struct_defs` — the field order and widths of every existing table are
+unchanged, so a v1–v5 file reads unmodified. The enum instructions live inside function
+bodies and `Value::Enum` is not serialized, so nothing else changes.
 
 ### File Header
 
 | Field | Width | Value |
 |------|------|-----|
 | magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
-| version | u16 | bytecode version: the 0.0.5 compiler writes `5`, readers accept `{1, 2, 3, 4, 5}` |
+| version | u16 | bytecode version: the 0.0.6 compiler writes `6`, readers accept `{1, 2, 3, 4, 5, 6}` |
 
 ### Constant Pool
 
@@ -1129,8 +1275,22 @@ and no field change is needed.
 | `field_types` | `field_count` × u8 (a `FieldTypeTag`, §2) |
 
 The `FieldTypeTag` enum maps to the byte as `Int=0, Float=1, Bool=2, Str=3, Unit=4, Func=5,
-Result=6, Array=7, Box=8, Ref=9, Struct=10, Range=11`; any other byte is a format error.
+Result=6, Array=7, Box=8, Ref=9, Struct=10, Range=11, Enum=12`; any other byte is a format error.
 The table is present only when `version >= 3`.
+
+### Enum Definitions (`enum_defs`, 0.0.6 T06, version ≥ 6 only)
+
+`enum_defs_len: u32`, then one entry at a time:
+
+| Field | Width |
+|------|------|
+| `variant_count` | u32 |
+| variants | `variant_count` × ( `payload_count: u32`, `payload_types`: `payload_count` × u8 (a `FieldTypeTag`, §2) ) |
+
+The payload tags use the same `FieldTypeTag` byte mapping as `struct_defs` (including
+`Enum=12`, which marks a payload whose type is a user enum). The table is present only when
+`version >= 6`, and it is appended **after** `struct_defs`, so the v1–v5 layout is
+byte-identical.
 
 Rules:
 - Reading and writing must go through the same implementation (`codegen::flnc::{to_bytes, from_bytes}`); hand-written parsers are not allowed.
@@ -1138,7 +1298,7 @@ Rules:
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2, 3, 4}` (from 0.0.4 on); v3 appends `struct_defs`; v4 changes no table.
+- `version` accepts `{1, 2, 3, 4, 5, 6}` (from 0.0.6 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`.
 
 ---
 
@@ -1151,6 +1311,7 @@ Rules:
 | 3 | 0.0.3 | + aggregation instructions: `StructNew`/`GetField`/`SetFieldLocal`/`SetFieldGlobal` (0xB0–0xB3), `ArrNew`/`ArrLen`/`ArrGet`/`ArrSetLocal`/`ArrSetGlobal` (0xB4–0xB8), `MakeRange`/`RangeStart`/`RangeEnd` (0xB9–0xBB); `Struct`/`Arr`/`Range` values; the appended `struct_defs` table (§2, §9) |
 | 4 | 0.0.4 | + async / channel instructions: `AsyncStart`/`Suspend`/`Poll`/`Await` (0xC0–0xC3), `ChannelNew`/`ChannelSend`/`ChannelRecv`/`ChannelSplit` (0xC4–0xC7); `Future`/`Channel` runtime values (not serialized); **zero layout changes** — no new table (§5.15) |
 | 5 | 0.0.5 | + pointer / unsafe instructions: `AddrOf`/`LoadPtr`/`StorePtr` (0xC8–0xCA); **zero layout changes** — no new table (§5.16) |
+| 6 | 0.0.6 | + enum instructions: `EnumNew`/`EnumIs`/`EnumPayload` (0xCB–0xCD); the `Enum` runtime value (not serialized); the appended `enum_defs` table and `FieldTypeTag::Enum = 12` (§5.17, §2, §9) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

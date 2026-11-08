@@ -546,6 +546,15 @@ rules, opcodes 0xC8–0xCA + bytecode v5, the VM pointer representation, the CLI
 std distribution, the release pipeline); T10 synced the docs and bumped the version to
 0.0.5 (release publication — tag/archives — is separate and not yet performed).**
 
+**0.0.6 goal: tagged unions — `enum` declarations with ordered variants and typed payloads,
+generalized `choose` exhaustiveness (the `Result` rule applied to enums, D3), bytecode v6
+(`EnumNew`/`EnumIs`/`EnumPayload` + the `enum_defs` table), and an array library completion
+(`concat`/`flatten`, `fold` → `foldl` plus `foldr`) (plan in `docs/0.0.6/PLAN.md`,
+decisions D1–D6 settled, tickets in `docs/0.0.6/TICKETS.md`). T01–T08 are implemented and
+green (keywords, enum decl/constructor, resolution, typeck + `is_copy` + `RecursiveEnum` +
+exhaustiveness, choose lowering, bytecode v6 + verify/VM, array helpers + `foldl`/`foldr`,
+integration fixtures/examples, docs/version sync).**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -562,6 +571,7 @@ unit     // empty-value type
 [T]      // array (0.0.3, owned even for [int]) | deeply covered in "Aggregation Types" below
 Range    // builtin Copy type, start..end end-exclusive (0.0.3 V04)
 MyStruct // a user-defined struct name is a type (0.0.3 V02)
+MyEnum   // a user-defined enum name is a type (0.0.6)
 Future<T>  // a suspended async coroutine, non-Copy, driven once by `e await` (0.0.4)
 channel<T> // message-passing channel, non-Copy and move-only (0.0.4)
 ptr<T>     // raw pointer, non-Copy and move-only, never storable; every use is an
@@ -621,7 +631,7 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
 result = apply(add, 1, 2);
 ```
 
-### Aggregation Types (0.0.3)
+### Aggregation Types (0.0.3) and Enums (0.0.6)
 
 ```fleen
 // struct (0.0.3) — a user-defined aggregate; is_copy(S) = all fields Copy
@@ -642,6 +652,23 @@ u = move a;                  // transfer; a is unusable afterwards
 
 // Range (0.0.3, bytecode v3) — a builtin Copy type; source construction is
 // std.collection.range (V06), iterated by `for` (D4/D5)
+
+// enum (0.0.6) — a tagged union; is_copy(E) = all payloads of all variants Copy
+enum Shape {
+    Point,
+    Circle(float),
+    Rect(float, float),
+}
+s = Shape.Circle(2.0);       // variant constructor (dotted form); Rect(3.0, 4.0) also works
+func area(s: Shape): float {
+    choose move s {                          // an owned enum is consumed by `choose`
+        when Point { 0.0 }
+        when Circle(r) { 3.14159 * r * r }   // binds the first payload only (0.0.6 limit)
+        when Rect(w) { w * 0.0 }
+    }                                        // exhaustive (one arm per variant), no otherwise needed
+}
+// `enum` is a reserved word; recursive enums are rejected (`RecursiveEnum`);
+// enums are not comparable (`==` / `as string` are type errors).
 ```
 
 ### Modules and the std Library (0.0.3)
@@ -820,35 +847,38 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 |
-|---------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ |
-| `const` immutability | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ |
-| Function types | ✅ | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ |
-| `?` | ❌ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) |
-| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, `start..end` end-exclusive; source construction via std `range`, V06) |
-| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`; `for`/`in` are reserved words) |
-| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05: module paths → files, pub visibility, cycle detection, project mode) |
-| `std` library | ❌ | ❌ | ✅ (V06: `io` / `str` / `num` / `arr` / `collection` (range) / `os` / `time` modules; VM intrinsics; schematic `[T]` signatures) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08: `flint-cli` crate, `flint.toml`/`Flint.lock`, git-only deps with `$FLINT_HOME` cache, `new`/`build`/`run`/`test`/`check`) |
-| `async` / `await` | ❌ | ❌ | ❌ (0.0.4) |
-| `unsafe` / `ptr` / `addr` | ❌ | ❌ | ❌ (0.0.5) |
-| FFI | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 |
+|---------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ |
+| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ |
+| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ |
+| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ |
+| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ |
+| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ |
+| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ |
+| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,
@@ -863,6 +893,18 @@ strict version pinning) are implemented and green; bytecode writes v5, readers a
 `{1, 2, 3, 4, 5}`. T10 synced the documentation and bumped the version to 0.0.5 (release
 publication — tag/archives — is separate and not yet performed; see
 `docs/0.0.5/PLAN.md` and `docs/0.0.5/TICKETS.md`).
+
+**Status of 0.0.6**: T01–T08 complete. Tagged unions (`enum` with ordered variants and typed
+payloads, `is_copy` = all payloads Copy, D1), the `RecursiveEnum` ban (D2), generalized
+`choose` exhaustiveness and constructor resolution (D3), bytecode v6 (`EnumNew` 0xCB /
+`EnumIs` 0xCC / `EnumPayload` 0xCD + the `enum_defs` table, `FieldTypeTag::Enum = 12`;
+writers emit version 6, readers accept `{1, 2, 3, 4, 5, 6}`, D4), and the array library
+completion (`std.arr.concat`/`flatten` intrinsics, `fold` → `foldl` plus `foldr`, D5) are
+implemented and green. The E2E valid `enum_demo.fln` and the invalid fixtures
+(non-exhaustive choose, recursive enum, `as string` on enum, `==` on enum) are in place;
+the full suite and all examples pass. Breaking set (D6): `enum` reserved; `fold` → `foldl`.
+Version 0.0.6 (release publication — tag/archives — is separate and pending; see
+`docs/0.0.6/PLAN.md` and `docs/0.0.6/TICKETS.md`).
 
 ---
 

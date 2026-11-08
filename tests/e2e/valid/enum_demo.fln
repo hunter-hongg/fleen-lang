@@ -1,0 +1,56 @@
+// 0.0.6 T08 e2e: the enum feature end to end — declaration, variant
+// construction (bare and dotted), exhaustive `choose` over an enum, payload
+// extraction, and the Copy / owned split (D1).
+//
+// A zero-payload enum is Copy and flows freely; an enum carrying a `string`
+// is owned, so it travels with `move` (like any owned value).
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+enum Shape {
+    Point,
+    Circle(float),
+    Label(string),
+}
+
+// Exhaustive over the three variants — no `otherwise` needed (D3).
+func rank(c: Color): int {
+    choose c {
+        when Red { 0 }
+        when Green { 1 }
+        when Blue { 2 }
+    }
+}
+
+// A payload arm binds the payload; the enum itself is owned, so the
+// scrutinee is moved into the function.
+func describe(s: Shape): string {
+    choose move s {
+        when Point { "point" }
+        when Circle(r) { "circle" }
+        when Label(t) { t }
+    }
+}
+
+func main(): int {
+    // A Copy enum: construct, pass, match.
+    c = Color.Green;
+    print(rank(c) as string);
+    print(rank(Color.Blue) as string);
+
+    // A Copy payload variant — the enum stays Copy.
+    p = Shape.Point;
+    print(describe(move p));
+
+    circle = Shape.Circle(2.0);
+    print(describe(move circle));
+
+    // An owned payload: the enum is owned and must be moved.
+    label = Shape.Label("hello");
+    print(describe(move label));
+    0
+}

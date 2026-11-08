@@ -1,0 +1,62 @@
+// shapes.fln — the 0.0.6 enum declarations of the feature tour.
+//
+// An `enum` declaration is a top-level item like a `struct`: ordered
+// variants, each with a name and an optional payload type list (D1).
+// A `pub` enum crosses the module boundary, exactly like a `pub` struct.
+
+/// A color with three variants — all payloads are `Copy`, so `Color` is a
+/// Copy type and flows by value (no `move` needed).
+pub enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+/// A shape with a zero-payload and a one-payload variant. `Circle` carries
+/// a `float` (Copy), so `Shape` is a Copy type too.
+pub enum Shape {
+    Point,
+    Circle(float),
+}
+
+/// A variant with two payloads. The constructor takes both (`Pair(3, 4)`),
+/// but a pattern binds the **first** payload only — 0.0.6 has no
+/// "read payload i" expression yet, so `when Two(a)` binds `a` and the
+/// second payload is not nameable inside the arm.
+pub enum Pair {
+    Two(int, int),
+}
+
+/// A variant carrying an owned `string` payload — this enum is **owned**,
+/// so its values travel with an explicit `move`.
+pub enum Label {
+    Bare,
+    Text(string),
+}
+
+/// Rank a color. A `choose` over an enum is exhaustive when it has one arm
+/// per variant — no `otherwise` needed (D3).
+pub func rank(c: Color): int {
+    choose c {
+        when Red { 0 }
+        when Green { 1 }
+        when Blue { 2 }
+    }
+}
+
+/// The area of a shape, computed by matching on the variant and binding
+/// its payload.
+pub func area(s: Shape): float {
+    choose s {
+        when Point { 0.0 }
+        when Circle(r) { 3.14159 * r * r }
+    }
+}
+
+/// The text of a label — the owned payload is bound and returned.
+pub func text(l: Label): string {
+    choose move l {
+        when Bare { "" }
+        when Text(t) { t }
+    }
+}

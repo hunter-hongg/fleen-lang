@@ -1,0 +1,21 @@
+// 0.0.6 T08 e2e: a `choose` over an enum that misses a variant is not
+// exhaustive — the compile fails and names the missing variant (`Blue`).
+// The exhaustiveness rule generalizes the `Ok` + `Err` rule of `Result`
+// to N variants (D3).
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+func rank(c: Color): int {
+    choose c {
+        when Red { 0 }
+        when Green { 1 }
+    }
+}
+
+func main(): int {
+    print(rank(Color.Red) as string);
+    0
+}

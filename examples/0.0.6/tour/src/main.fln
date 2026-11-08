@@ -1,0 +1,81 @@
+// 0.0.6 feature tour — `enum` (typed variants) + the 0.0.6 std additions
+// (`concat` / `flatten` / `foldl` / `foldr`).
+//
+// Run (module system + std, one command):
+//     cargo fln --project examples/0.0.6/tour
+//   or flint:   cd examples/0.0.6/tour && cargo run -q -p flint-cli -- run
+//
+// Features loaded by this program:
+//   enum decls (F1)  ordered variants with typed payloads, `pub` visibility
+//   constructors (F2) `Color.Red`, `Shape.Circle(2.0)` — bare and dotted
+//   patterns (F3)    `when Red { … }` / `when Circle(r) { … }` in a `choose`
+//   exhaustiveness    one arm per variant is exhaustive — no `otherwise`
+//   Copy / owned      a Copy payload keeps the enum Copy; a `string` payload
+//                     makes it owned, so the value travels with `move`
+//   std.arr.concat / std.arr.flatten / foldl / foldr (F5)
+
+import shapes;
+import std.arr;
+import std.collection.iter;
+import std.io;
+import std.str;
+
+// A plain function used as a fold accumulator.
+func add(a: int, b: int): int = a + b
+
+// Subtraction separates the two fold directions (it is not associative).
+func sub(a: int, b: int): int = a - b
+
+// Join an array of ints as "[a,b,c]".
+func join_ints(xs: [int]): string {
+    s = "[";
+    for x in xs {
+        s = std.str.concat(s, x as string);
+        s = std.str.concat(s, ",");
+    }
+    std.str.concat(s, "]")
+}
+
+func main() {
+    // ── 1. a Copy enum: construct, pass, match ──
+    std.io.println("== 1. a Copy enum ==");
+    c = shapes.Color.Green;
+    std.io.println("rank(Green) = ", shapes.rank(c) as string);
+    std.io.println("rank(Blue)  = ", shapes.rank(shapes.Color.Blue) as string);
+
+    // ── 2. payload variants: the payload is bound in the arm ──
+    std.io.println("== 2. payload variants ==");
+    p = shapes.Shape.Point;
+    std.io.println("area(Point)   = ", shapes.area(p) as string);
+    circle = shapes.Shape.Circle(2.0);
+    std.io.println("area(Circle)  = ", shapes.area(circle) as string);
+
+    // ── 3. a multi-payload variant: the constructor takes both payloads ──
+    std.io.println("== 3. a multi-payload variant ==");
+    pair = shapes.Pair.Two(3, 4);
+    std.io.println("Pair.Two(3, 4) built");
+
+    // ── 4. an owned payload: the enum is owned and must be moved ──
+    std.io.println("== 4. an owned payload ==");
+    label = shapes.Label.Text("hello");
+    std.io.println("text(Text)    = ", shapes.text(move label));
+    bare = shapes.Label.Bare;
+    std.io.println("text(Bare)    = \"", shapes.text(move bare), "\"");
+
+    // ── 5. std.arr.concat / std.arr.flatten (0.0.6 F5) ──
+    std.io.println("== 5. std.arr.concat / flatten ==");
+    a = [1, 2, 3];
+    joined = std.arr.concat(a, [4, 5]);
+    std.io.println("concat([1,2,3],[4,5]) = ", join_ints(clone joined));
+    nested = [[1, 2], [3, 4]];
+    flat = std.arr.flatten(nested);
+    std.io.println("flatten([[1,2],[3,4]]) = ", join_ints(clone flat));
+
+    // ── 6. foldl / foldr (0.0.6 F5; `fold` was renamed `foldl`) ──
+    std.io.println("== 6. foldl / foldr ==");
+    std.io.println("foldl([1,2,3], 0, +) = ", std.collection.iter.foldl(a, 0, add) as string);
+    std.io.println("foldr([1,2,3], 0, -) = ", std.collection.iter.foldr(a, 0, sub) as string);
+    std.io.println("foldl([1,2,3], 0, -) = ", std.collection.iter.foldl(a, 0, sub) as string);
+
+    std.io.println("tour done");
+}
