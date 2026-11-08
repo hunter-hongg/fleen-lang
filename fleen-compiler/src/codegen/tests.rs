@@ -41,11 +41,12 @@ fn encode_single_block_function() {
     }]);
     let mir = Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     };
     let module = codegen(mir).expect("codegen");
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     assert_eq!(module.entry, FuncId(0));
     let code = &module.functions[0].code;
     // Const <id0> ; Return
@@ -87,6 +88,7 @@ fn jump_targets_are_absolute_offsets() {
     };
     let mir = Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     };
@@ -119,6 +121,7 @@ fn entry_is_init_when_globals_present() {
     };
     let mir = Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main],
         globals: vec![g],
     };
@@ -143,6 +146,7 @@ fn entry_is_init_when_globals_present() {
 fn missing_main_is_error() {
     let mir = Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![],
         globals: vec![],
     };
@@ -181,6 +185,7 @@ fn builtin_keeps_placeholder_body() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![print, main],
         globals: vec![],
     })
@@ -264,6 +269,14 @@ fn all_instructions_encode_with_expected_opcode_and_width() {
             Opcode::ArrSetGlobal,
             2,
         ),
+        // 0.0.6 T06: enum instructions (bytecode v6, 0xCB–0xCD).
+        (instr(MirInstrKind::EnumNew(0, 1)), Opcode::EnumNew, 4),
+        (instr(MirInstrKind::EnumIs(0)), Opcode::EnumIs, 2),
+        (
+            instr(MirInstrKind::EnumPayload(0, 1)),
+            Opcode::EnumPayload,
+            4,
+        ),
     ];
     for (instr, expected_op, operand_len) in cases {
         let f = main_func(vec![MirBlock {
@@ -273,6 +286,7 @@ fn all_instructions_encode_with_expected_opcode_and_width() {
         }]);
         let module = codegen(Mir {
             structs: Vec::new(),
+            enums: Vec::new(),
             funcs: vec![f],
             globals: vec![],
         })
@@ -304,6 +318,7 @@ fn float_and_str_constants_load() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -387,6 +402,7 @@ fn jump_and_jump_if_true_targets_resolve() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -431,6 +447,7 @@ fn backward_jump_offsets_resolve() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -454,6 +471,7 @@ fn bad_jump_target_is_error() {
     assert!(
         codegen(Mir {
             structs: Vec::new(),
+            enums: Vec::new(),
             funcs: vec![f],
             globals: vec![],
         })
@@ -470,6 +488,7 @@ fn call_with_overflowing_func_id_is_error() {
     }]);
     let r = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main],
         globals: vec![],
     });
@@ -502,6 +521,7 @@ fn constants_deduped_across_functions() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![a, b],
         globals: vec![],
     })
@@ -537,6 +557,7 @@ fn init_func_emits_globals_in_order_and_calls_main() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main],
         globals: vec![g1, g2],
     })
@@ -573,6 +594,7 @@ fn empty_globals_gives_empty_global_table_and_main_entry() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main],
         globals: vec![],
     })
@@ -586,6 +608,7 @@ fn empty_globals_gives_empty_global_table_and_main_entry() {
 fn flnc_round_trip() {
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: {
             let mut f = main_func(vec![MirBlock {
                 id: BlockId(0),
@@ -619,6 +642,7 @@ fn flnc_round_trip() {
 fn flnc_rejects_bad_magic_and_trailing_bytes() {
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
             instrs: vec![instr(MirInstrKind::Unit)],
@@ -641,6 +665,7 @@ fn flnc_rejects_bad_magic_and_trailing_bytes() {
 fn sample_module() -> Bytecode {
     codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main_func(vec![MirBlock {
             id: BlockId(0),
             instrs: vec![instr(MirInstrKind::Unit)],
@@ -780,6 +805,7 @@ fn flnc_round_trip_builtin_and_empty_module() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![print, main],
         globals: vec![],
     })
@@ -807,6 +833,7 @@ fn func_params_and_locals_propagate() {
     };
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -890,6 +917,7 @@ fn v2_slot_operands_round_trip_le_u16() {
     );
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -930,6 +958,7 @@ fn jump_offsets_account_for_v2_instruction_widths() {
     );
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -958,6 +987,7 @@ fn span_map_records_instruction_offsets_and_real_spans() {
     );
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -989,6 +1019,7 @@ fn span_map_skips_synthetic_spans() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -1030,6 +1061,7 @@ fn builtin_span_map_stays_empty() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main, print],
         globals: vec![],
     })
@@ -1068,6 +1100,7 @@ fn init_func_span_map_keeps_initializer_spans_only() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![main],
         globals: vec![g],
     })
@@ -1098,6 +1131,7 @@ fn span_map_survives_flnc_round_trip() {
     }]);
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -1178,7 +1212,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     // struct_defs: one entry, two Int fields.
     assert_eq!(module.struct_defs.len(), 1);
     assert_eq!(
@@ -1207,7 +1241,7 @@ func main(): int = 0
     assert_eq!(module.struct_defs.len(), 2);
     let bytes = to_bytes(&module);
     let parsed = from_bytes(&bytes).expect("round trip");
-    assert_eq!(parsed.version, 5);
+    assert_eq!(parsed.version, 6);
     assert_eq!(parsed.struct_defs, module.struct_defs);
 }
 
@@ -1237,6 +1271,7 @@ fn v2_module_fixture() -> Module {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
     }
 }
 
@@ -1313,6 +1348,7 @@ fn range_instrs_encode_as_single_byte_opcodes() {
     );
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -1362,6 +1398,7 @@ fn array_u16_operand_round_trips_le() {
     );
     let module = codegen(Mir {
         structs: Vec::new(),
+        enums: Vec::new(),
         funcs: vec![f],
         globals: vec![],
     })
@@ -1393,7 +1430,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     let main = module
         .functions
         .iter()
@@ -1408,4 +1445,139 @@ func main(): int {
     let bytes = to_bytes(&module);
     let back = from_bytes(&bytes).expect("round trip");
     assert_eq!(back, module);
+}
+
+// ---------------- 0.0.6 T06: bytecode v6 (enum + enum_defs) ---------------
+
+#[test]
+fn enum_opcode_numbers_lock_the_v6_range() {
+    // The three enum instructions own 0xCB–0xCD and nothing else; 0xCE stays
+    // unallocated (BYTECODE §10 append-only rule).
+    assert_eq!(Opcode::EnumNew as u8, 0xCB);
+    assert_eq!(Opcode::EnumIs as u8, 0xCC);
+    assert_eq!(Opcode::EnumPayload as u8, 0xCD);
+    assert_eq!(V6_OPCODE_BASE, 0xCB);
+    assert_eq!(Opcode::from_byte(0xCE), None);
+    for op in [Opcode::EnumNew, Opcode::EnumIs, Opcode::EnumPayload] {
+        assert_eq!(Opcode::from_byte(op as u8), Some(op));
+    }
+    // Operand widths (PLAN D4): EnumNew = id + variant, EnumIs = variant,
+    // EnumPayload = variant + payload index.
+    assert_eq!(Opcode::EnumNew.operand_len(), 4);
+    assert_eq!(Opcode::EnumIs.operand_len(), 2);
+    assert_eq!(Opcode::EnumPayload.operand_len(), 4);
+}
+
+#[test]
+fn enum_defs_flnc_round_trip() {
+    let src = r#"
+enum Color { Red, Green }
+enum Shape { Dot, Pair(int, string), Tint(Color) }
+func main(): int = 0
+"#;
+    let module = compile_full(src);
+    assert_eq!(module.version, 6);
+    assert_eq!(module.enum_defs.len(), 2);
+    // Color: two zero-payload variants.
+    assert_eq!(module.enum_defs[0].variants.len(), 2);
+    assert!(
+        module.enum_defs[0]
+            .variants
+            .iter()
+            .all(|v| v.payload_types.is_empty())
+    );
+    // Shape: Dot / Pair(int, string) / Tint(Color) — the nested-enum payload
+    // must survive as `FieldTypeTag::Enum = 12` through the byte round trip.
+    let shape = &module.enum_defs[1];
+    assert_eq!(shape.variants.len(), 3);
+    assert!(shape.variants[0].payload_types.is_empty());
+    assert_eq!(
+        &*shape.variants[1].payload_types,
+        &[FieldTypeTag::Int, FieldTypeTag::Str]
+    );
+    assert_eq!(&*shape.variants[2].payload_types, &[FieldTypeTag::Enum]);
+
+    let bytes = to_bytes(&module);
+    let parsed = from_bytes(&bytes).expect("v6 round trip");
+    assert_eq!(parsed.version, 6);
+    assert_eq!(parsed.enum_defs, module.enum_defs);
+    assert_eq!(parsed, module);
+}
+
+#[test]
+fn enum_defs_append_only_keeps_v5_bytes_identical() {
+    // BYTECODE §10: the v6 table is appended after `struct_defs`, so the
+    // pre-`enum_defs` byte stream must be byte-for-byte the v5 layout. The
+    // only differences allowed are the version field (6 vs 5) and the tail.
+    let src = r#"
+enum Color { Red, Green }
+enum Shape { Dot, Pair(int, string) }
+struct Point { x: int, y: int }
+func main(): int = 0
+"#;
+    let v6 = compile_full(src);
+    assert_eq!(v6.version, 6);
+    let mut v5 = v6.clone();
+    v5.version = 5;
+    let bytes6 = to_bytes(&v6);
+    let bytes5 = to_bytes(&v5);
+
+    // The v5 stream is a strict prefix of the v6 stream once the version
+    // field is masked back to 5: nothing before the appended table moved.
+    assert!(
+        bytes6.len() > bytes5.len(),
+        "enum_defs tail must be appended"
+    );
+    let mut masked = bytes6[..bytes5.len()].to_vec();
+    masked[4] = 5;
+    masked[5] = 0;
+    assert_eq!(masked, bytes5, "v1–v5 layout must stay byte-identical");
+
+    // A module stamped v5 must not serialize its enum_defs at all: the write
+    // side is version-gated too, so an old reader's layout never changes.
+    assert_eq!(to_bytes(&v5), bytes5, "v5 write must skip enum_defs");
+    // And a v6 read of the full stream reproduces the module exactly.
+    assert_eq!(from_bytes(&bytes6).expect("v6 read"), v6);
+}
+
+#[test]
+fn truncated_enum_defs_is_rejected() {
+    // The appended `enum_defs` table is the tail of a v6 stream. Cutting
+    // anywhere inside it (or cutting the whole table off) must produce a
+    // decode error, never a partial/padded table.
+    let src = "enum Color { Red, Green }\nfunc main(): int = 0\n";
+    let v6 = compile_full(src);
+    let mut v5 = v6.clone();
+    v5.version = 5;
+    let bytes6 = to_bytes(&v6);
+    let bytes5 = to_bytes(&v5);
+    let tail_start = bytes5.len();
+    assert!(
+        bytes6.len() > tail_start,
+        "expected a non-empty enum_defs tail"
+    );
+    for cut in tail_start..bytes6.len() {
+        assert!(
+            from_bytes(&bytes6[..cut]).is_err(),
+            "truncation at byte {cut} (inside enum_defs) must be rejected"
+        );
+    }
+    // Sanity: the untruncated stream still decodes.
+    assert_eq!(from_bytes(&bytes6).expect("full stream"), v6);
+}
+
+#[test]
+fn enum_payload_tag_encodes_and_decodes_as_12() {
+    // `FieldTypeTag::Enum = 12` is the wire tag for an enum-typed payload;
+    // it must survive the byte round trip (1-byte tag per payload).
+    assert_eq!(FieldTypeTag::Enum as u8, 12);
+    let src =
+        "enum Color { Red, Green }\nenum Shape { Tint(Color), Plain }\nfunc main(): int = 0\n";
+    let module = compile_full(src);
+    assert_eq!(
+        &*module.enum_defs[1].variants[0].payload_types,
+        &[FieldTypeTag::Enum]
+    );
+    let parsed = from_bytes(&to_bytes(&module)).expect("round trip");
+    assert_eq!(parsed.enum_defs[1], module.enum_defs[1]);
 }

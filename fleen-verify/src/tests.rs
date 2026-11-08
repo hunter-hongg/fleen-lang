@@ -6,6 +6,7 @@ use fleen_compiler::codegen::*;
 fn module(constants: Vec<Const>, functions: Vec<Func>, globals: Vec<Global>, entry: u32) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants,
         functions,
@@ -24,6 +25,7 @@ fn module_v1(
 ) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         ..module(constants, functions, globals, entry)
     }
@@ -39,6 +41,7 @@ fn v3_module(
 ) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 3,
         ..module(constants, functions, globals, entry)
     }
@@ -657,7 +660,7 @@ func main(): int {
 }
 "#;
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     assert!(
         crate::verify(&module).is_ok(),
         "{:?}",
@@ -968,6 +971,7 @@ fn v3_struct_module() -> Module {
         struct_defs: vec![StructDefMeta {
             field_types: Box::new([FieldTypeTag::Int, FieldTypeTag::Int]),
         }],
+        enum_defs: Vec::new(),
     }
 }
 
@@ -1306,6 +1310,7 @@ fn v4_async_module() -> Module {
     // Depth: Const(+1)→1, Await(Δ0,min1)→1, Return(needs 1) — balanced.
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 4,
         constants: vec![Const::Str("main".into()), Const::Int(1)],
         functions: vec![Func {
@@ -1371,6 +1376,7 @@ fn v4_await_underflow_is_rejected() {
 fn v4_async_single_op(op: Opcode) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 4,
         constants: vec![Const::Str("main".into()), Const::Int(1)],
         functions: vec![Func {
@@ -1440,6 +1446,7 @@ fn v4_channel_module(op: Opcode, setup_pushes: usize) -> Module {
     code.push(Opcode::Return as u8);
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 4,
         constants: vec![Const::Str("main".into()), Const::Int(1)],
         functions: vec![Func {
@@ -1527,6 +1534,7 @@ fn v5_ptr_module() -> Module {
     // Depth: AddrOf(+1)->1, LoadPtr (delta 0, min 1)->1, Return (needs 1).
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into())],
         functions: vec![Func {
@@ -1687,7 +1695,7 @@ fn compiled_ptr_program_verifies() {
     // v5 and verifies (T05's end-to-end contract).
     let src = "trusted func make_ptr(): ptr<int> { x = 42; addr x }\nfunc main(): int = 0";
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     verify::verify(&module).expect("compiled ptr module verifies");
     // The pointer opcode must appear in make_ptr's body.
     let f = module
@@ -1699,4 +1707,278 @@ fn compiled_ptr_program_verifies() {
         })
         .expect("make_ptr function");
     assert!(f.code.contains(&(Opcode::AddrOf as u8)));
+}
+
+// ---------------- 0.0.6 T06: bytecode v6 (enum, 0xCB–0xCD) ----------------
+
+/// A hand-built v6 module whose `main` exercises all three enum opcodes:
+///
+/// ```text
+/// True                 (+1)          -> [payload]
+/// EnumNew(0, 1)        (Δ0, min 1)   -> [enum]        (variant 1: one int payload)
+/// Dup                  (+1, min 1)   -> [enum, enum]
+/// EnumIs(0)            (Δ0, min 1)   -> [enum, bool]
+/// Pop                  (-1, min 1)   -> [enum]
+/// EnumPayload(1, 0)    (Δ0, min 1)   -> [int]
+/// Pop                                  -> []
+/// Unit                                 -> [unit]
+/// Return                               -> ok
+/// ```
+fn v6_enum_module() -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        enum_defs: vec![EnumDefMeta {
+            variants: Box::new([
+                EnumVariantDefMeta {
+                    payload_types: Box::new([]),
+                },
+                EnumVariantDefMeta {
+                    payload_types: Box::new([FieldTypeTag::Int]),
+                },
+                EnumVariantDefMeta {
+                    payload_types: Box::new([FieldTypeTag::Int, FieldTypeTag::Int]),
+                },
+            ]),
+        }],
+        version: 6,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![Func {
+            name: ConstId(0),
+            params: 0,
+            locals: 0,
+            code: Box::new([
+                Opcode::True as u8,
+                Opcode::EnumNew as u8,
+                0,
+                0, // enum id 0
+                1,
+                0, // variant id 1 (one int payload)
+                Opcode::Dup as u8,
+                Opcode::EnumIs as u8,
+                0,
+                0, // variant id 0
+                Opcode::Pop as u8,
+                Opcode::EnumPayload as u8,
+                1,
+                0, // variant id 1
+                0,
+                0, // payload index 0
+                Opcode::Pop as u8,
+                Opcode::Unit as u8,
+                Opcode::Return as u8,
+            ]),
+            span_map: Box::new([]),
+            is_builtin: false,
+        }],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn v6_enum_program_verifies() {
+    let m = v6_enum_module();
+    assert_eq!(m.version, 6);
+    assert_eq!(verify::verify(&m), Ok(()));
+}
+
+#[test]
+fn forged_enum_new_id_is_rejected() {
+    // `EnumNew`'s enum id must index `enum_defs` (T06 cross-check).
+    let mut m = v6_enum_module();
+    let mut code = (*m.functions[0].code).to_vec();
+    // bytes: True(1) + EnumNew(1) -> enum id operand at 2..4.
+    assert_eq!(code[1], Opcode::EnumNew as u8);
+    code[2] = 99;
+    code[3] = 0; // enum id 99 (only 1 enum defined)
+    m.functions[0].code = code.into_boxed_slice();
+    match verify::verify(&m) {
+        Err(VerifyError::EnumIndexOutOfRange { pc: 1, index: 99 }) => {}
+        other => panic!("expected EnumIndexOutOfRange {{ pc: 1, index: 99 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn forged_enum_new_variant_is_rejected() {
+    // The variant id must index the enum's variant list.
+    let mut m = v6_enum_module();
+    let mut code = (*m.functions[0].code).to_vec();
+    assert_eq!(code[1], Opcode::EnumNew as u8);
+    code[4] = 9; // variant 9 (enum 0 has 2 variants)
+    code[5] = 0;
+    m.functions[0].code = code.into_boxed_slice();
+    match verify::verify(&m) {
+        Err(VerifyError::EnumIndexOutOfRange { pc: 1, index: 9 }) => {}
+        other => panic!("expected EnumIndexOutOfRange {{ pc: 1, index: 9 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn enum_new_payload_count_mismatch_is_rejected() {
+    // Variant 1 declares one payload, but nothing pushed it: the depth pass
+    // must see the payload-count mismatch as an underflow.
+    let mut m = v6_enum_module();
+    m.functions[0].code = Box::new([
+        Opcode::EnumNew as u8, // empty stack, needs the variant's payload
+        0,
+        0,
+        1,
+        0,
+        Opcode::Unit as u8,
+        Opcode::Return as u8,
+    ]);
+    match verify::verify(&m) {
+        Err(VerifyError::StackUnderflow {
+            pc: 0,
+            needed: 1,
+            actual: 0,
+        }) => {}
+        other => panic!("expected StackUnderflow {{ pc: 0, needed: 1, actual: 0 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn enum_opcodes_rejected_below_v6() {
+    // v5 is the immediate predecessor: 0xCB must trip the v6 gate exactly.
+    let mut m = v6_enum_module();
+    m.version = 5;
+    match verify::verify(&m) {
+        Err(VerifyError::V6OpcodeInV1V2V3V4V5Module { pc: 1, byte }) => {
+            assert_eq!(byte, Opcode::EnumNew as u8);
+        }
+        other => panic!("version 5: expected V6Opcode gate, got {other:?}"),
+    }
+    // v1–v4 trip an earlier range gate first (0xCB lies above every base, and
+    // the gates are checked in ascending version order), so each version has
+    // one *exact* gate — assert it instead of a catch-all that would pass for
+    // the wrong reason.
+    for (v, expected) in [
+        (1u16, VerifyError::V2OpcodeInV1Module { pc: 1, byte: 0xCB }),
+        (2, VerifyError::V3OpcodeInV1V2Module { pc: 1, byte: 0xCB }),
+        (3, VerifyError::V4OpcodeInV1V2V3Module { pc: 1, byte: 0xCB }),
+        (
+            4,
+            VerifyError::V5OpcodeInV1V2V3V4Module { pc: 1, byte: 0xCB },
+        ),
+    ] {
+        let mut m = v6_enum_module();
+        m.version = v;
+        assert_eq!(
+            verify::verify(&m),
+            Err(expected),
+            "version {v}: wrong opcode-range gate",
+        );
+    }
+}
+
+#[test]
+fn enum_opcodes_numbering_is_locked() {
+    // Mirrors the codegen lock (T06): 0xCB–0xCD, one reserved range.
+    assert_eq!(V6_OPCODE_BASE, 0xCB);
+    assert_eq!(Opcode::EnumNew as u8, 0xCB);
+    assert_eq!(Opcode::EnumIs as u8, 0xCC);
+    assert_eq!(Opcode::EnumPayload as u8, 0xCD);
+}
+
+/// Walk one function's code and return the `pc` of the first `EnumNew`.
+fn first_enum_new(code: &[u8]) -> usize {
+    let mut pc = 0usize;
+    while pc < code.len() {
+        let op =
+            Opcode::from_byte(code[pc]).unwrap_or_else(|| panic!("bad opcode {:#x}", code[pc]));
+        if op == Opcode::EnumNew {
+            return pc;
+        }
+        pc += op.instr_len();
+    }
+    panic!("no EnumNew in code");
+}
+
+#[test]
+fn compiled_enum_program_verifies_then_forged_id_is_rejected() {
+    // End-to-end (Path B): a real source through the whole pipeline yields a
+    // v6 module that verifies; flipping one operand byte in place makes
+    // verify name the forged id — proves the compiler↔verifier contract,
+    // not just one side of it.
+    let src = "enum Color { Red, Green }\nfunc main(): int {\n    c = Color.Red;\n    0\n}\n";
+    let mut m = fleen_compiler::compile(src).expect("compile");
+    assert_eq!(m.version, 6);
+    assert_eq!(m.enum_defs.len(), 1);
+    assert!(!m.enum_defs[0].variants.is_empty());
+    verify::verify(&m).expect("compiled enum module verifies");
+
+    let entry = m.entry.0 as usize;
+    let pc = first_enum_new(&m.functions[entry].code);
+    assert_eq!(m.functions[entry].code[pc], Opcode::EnumNew as u8);
+    // Forge the enum id operand (u16 LE at pc+1) to 0xFFFF.
+    let mut code = (*m.functions[entry].code).to_vec();
+    code[pc + 1] = 0xFF;
+    code[pc + 2] = 0xFF;
+    m.functions[entry].code = code.into_boxed_slice();
+    match verify::verify(&m) {
+        Err(VerifyError::EnumIndexOutOfRange { pc: vpc, index }) => {
+            assert_eq!(vpc, pc);
+            assert_eq!(index, 0xFFFF);
+        }
+        other => panic!("expected EnumIndexOutOfRange {{ index: 65535 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn enum_new_depth_tracks_the_variant_payload_count() {
+    // Variant 2 declares two payloads: `EnumNew` must consume exactly two
+    // values and push one (Δ −1, min 2). The Δdepth is *variable* — read
+    // from `enum_defs` — so a one-payload stack shape must underflow.
+    let mut m = v6_enum_module();
+    m.functions[0].code = Box::new([
+        Opcode::True as u8,
+        Opcode::True as u8,
+        Opcode::EnumNew as u8,
+        0,
+        0, // enum id 0
+        2,
+        0, // variant id 2 (two int payloads)
+        Opcode::Pop as u8,
+        Opcode::Unit as u8,
+        Opcode::Return as u8,
+    ]);
+    assert_eq!(verify::verify(&m), Ok(()));
+
+    // One value short: min depth 2 cannot be met.
+    m.functions[0].code = Box::new([
+        Opcode::True as u8,
+        Opcode::EnumNew as u8,
+        0,
+        0,
+        2,
+        0,
+        Opcode::Pop as u8,
+        Opcode::Unit as u8,
+        Opcode::Return as u8,
+    ]);
+    match verify::verify(&m) {
+        Err(VerifyError::StackUnderflow {
+            pc: 1,
+            needed: 2,
+            actual: 1,
+        }) => {}
+        other => panic!("expected StackUnderflow {{ pc: 1, needed: 2, actual: 1 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn enum_new_stack_effect_is_computed_from_enum_defs() {
+    // Unit-level: the Δdepth comes straight from `enum_defs`, and a forged
+    // *variant* id is reported with the variant index (not the enum id).
+    let m = v6_enum_module();
+    let code = [Opcode::EnumNew as u8, 0, 0, 2, 0]; // EnumNew(0, 2): n = 2
+    let d = verify::decode(&code, 0).expect("decode EnumNew");
+    assert_eq!(verify::stack_effect(&code, &d, &m), Ok((-1, 2)));
+
+    let bad = [Opcode::EnumNew as u8, 0, 0, 9, 0]; // variant 9: out of range
+    let d = verify::decode(&bad, 0).expect("decode EnumNew");
+    assert_eq!(
+        verify::stack_effect(&bad, &d, &m),
+        Err(VerifyError::EnumIndexOutOfRange { pc: 0, index: 9 })
+    );
 }

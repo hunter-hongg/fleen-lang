@@ -11,9 +11,10 @@ use crate::typeck::builtins::{BuiltinParam, find_builtin};
 use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
     Access, EnumId, EnumInfo, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir,
-    TypedConstDeclHir, TypedDeclHir, TypedExprChooseHir, TypedExprForHir, TypedExprHir,
-    TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem,
-    TypedParamHir, TypedPatternHir, TypedStmtHir, TypedStructDef, TypedVarBindingHir,
+    TypedConstDeclHir, TypedDeclHir, TypedEnumDef, TypedEnumVariantDef, TypedExprChooseHir,
+    TypedExprForHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir,
+    TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir,
+    TypedStructDef, TypedVarBindingHir,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
@@ -819,9 +820,24 @@ impl TypeChecker {
             })
             .collect();
 
+        let enums = self
+            .enums
+            .iter()
+            .map(|entry| TypedEnumDef {
+                variants: entry
+                    .variants
+                    .iter()
+                    .map(|v| TypedEnumVariantDef {
+                        payload_types: v.payload_types.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
         Ok(TypedHir {
             items: typed_items,
             structs,
+            enums,
             span: hir.span,
         })
     }

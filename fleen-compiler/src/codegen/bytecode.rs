@@ -111,6 +111,10 @@ pub struct Module {
     /// table. Populated only in v3+ modules; v1/v2 modules keep it empty
     /// (the appended table is read only for version >= 3).
     pub struct_defs: Vec<StructDefMeta>,
+    /// Enum declarations in id order (0.0.6 T06): the `enum_defs` table.
+    /// Populated only in v6+ modules; v1–v5 modules keep it empty (the
+    /// appended table is read only for version >= 6).
+    pub enum_defs: Vec<EnumDefMeta>,
 }
 
 /// One `struct_defs` entry (0.0.3 V02, PLAN §5.5): the field type tags in
@@ -121,6 +125,21 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructDefMeta {
     pub field_types: Box<[FieldTypeTag]>,
+}
+
+/// One `enum_defs` entry (0.0.6 T06, D4): the variant list in declaration
+/// order. Verify cross-checks `EnumNew`'s enum id and variant id against
+/// this table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDefMeta {
+    pub variants: Box<[EnumVariantDefMeta]>,
+}
+
+/// One variant inside an `enum_defs` entry (0.0.6 T06): the payload type
+/// tags in declaration order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariantDefMeta {
+    pub payload_types: Box<[FieldTypeTag]>,
 }
 
 /// Shape-level field type tag (0.0.3 V02). Deliberately coarse: it names
@@ -143,6 +162,8 @@ pub enum FieldTypeTag {
     Struct = 10,
     /// `Range` (0.0.3 V04): a builtin Copy type.
     Range = 11,
+    /// `Enum` (0.0.6 T06): an enum value, represented by the `enum_defs` table.
+    Enum = 12,
 }
 
 impl FieldTypeTag {
@@ -161,37 +182,14 @@ impl FieldTypeTag {
             Type::Box(_) => FieldTypeTag::Box,
             Type::Ref(_) => FieldTypeTag::Ref,
             Type::Struct(_) => FieldTypeTag::Struct,
-            // An enum is not a serializable struct-field type either
-            // (0.0.6 T04): the enum's own representation is an `enum_defs`
-            // table entry emitted by the enum opcodes (T06), not a
-            // FieldTypeTag. The `Unit` mapping keeps the match total;
-            // reaching it is a typeck/lower bug.
-            Type::Enum(_) => {
-                debug_assert!(false, "enum cannot be a struct field type (0.0.6 T04)");
-                FieldTypeTag::Unit
-            }
+            Type::Enum(_) => FieldTypeTag::Enum,
             Type::Range => FieldTypeTag::Range,
-            // `Future` can never be a *struct field* (0.0.4): the disk-format
-            // tags are untouched (PLAN §6), and a suspendable coroutine frame
-            // is not serializable as a field. The Unit mapping keeps the
-            // match total; reaching it is a typeck/lower bug.
-            Type::Future(_) => {
-                debug_assert!(
-                    false,
-                    "Future type reached struct-field codegen: a Future cannot be a struct field"
-                );
-                FieldTypeTag::Unit
-            }
-            // A `ptr` can never be a *struct field* either (0.0.5 T02,
-            // `PtrNotStorable`): the disk-format tags are untouched and a
-            // pointer handle is not serializable as a field. The Unit
-            // mapping keeps the match total; reaching it is a typeck/lower
-            // bug.
-            Type::Ptr(_) => {
-                debug_assert!(
-                    false,
-                    "ptr type reached struct-field codegen: a ptr cannot be a struct field"
-                );
+            // `Future` / `channel` / `ptr` are not storable (0.0.4/0.0.5
+            // T07d/PtrNotStorable); struct fields cannot name them in 0.0.6
+            // and enum payloads are rejected by typeck. Unit keeps the match
+            // total; reaching it is a typeck/lower bug.
+            Type::Future(_) | Type::Channel(_) | Type::Ptr(_) => {
+                debug_assert!(false, "future/channel/ptr cannot be a storable field type");
                 FieldTypeTag::Unit
             }
             // `Var` is only in std builtin signatures (V06); it is always
@@ -209,16 +207,6 @@ impl FieldTypeTag {
                 debug_assert!(
                     false,
                     "Unsupported type reached codegen: `Unsupported` cannot survive typeck"
-                );
-                FieldTypeTag::Unit
-            }
-            // `channel<T>` can never be a struct field (T07d: non-storable);
-            // reaching here is a typeck bug. The Unit mapping keeps the match
-            // total; the debug_assert will catch it in debug builds.
-            Type::Channel(_) => {
-                debug_assert!(
-                    false,
-                    "Channel type reached struct-field codegen: a channel cannot be a struct field (T07d)"
                 );
                 FieldTypeTag::Unit
             }
@@ -377,6 +365,18 @@ pub enum Opcode {
     /// Write through a pointer: v ptr →. Operand-less.
     /// Stack effect: v ptr → (Δ−2, min 2).
     StorePtr = 0xCA,
+    // 0xCB–0xCD enum instructions (0.0.6 T06, bytecode v6).
+    /// Construct an enum value: p1 … pn → e. Operands u16 enum id, u16
+    /// variant id; n is the payload count of that variant in `enum_defs`.
+    /// Stack effect: p1 … pn → e (Δ 1 - n, min n).
+    EnumNew = 0xCB,
+    /// Test an enum's variant: e → bool. Operand u16 variant reference.
+    /// Stack effect: e → bool (Δ0, min 1).
+    EnumIs = 0xCC,
+    /// Move one payload out of an enum: e → p. Operands u16 variant
+    /// reference, u16 payload index.
+    /// Stack effect: e → p (Δ0, min 1).
+    EnumPayload = 0xCD,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -397,6 +397,10 @@ pub const V4_OPCODE_BASE: u8 = 0xC0;
 /// Lowest opcode number reserved for the 0.0.5 (v5) instruction set
 /// (pointers 0xC8–0xCA). v5 opcodes are at or above this.
 pub const V5_OPCODE_BASE: u8 = 0xC8;
+
+/// Lowest opcode number reserved for the 0.0.6 (v6) instruction set
+/// (enums 0xCB–0xCD). v6 opcodes are at or above this.
+pub const V6_OPCODE_BASE: u8 = 0xCB;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -431,6 +435,13 @@ impl Opcode {
             Opcode::SetFieldLocal | Opcode::SetFieldGlobal => 4,
             // `AddrOf`: u16 place id (slot or global id).
             Opcode::AddrOf => 2,
+            // 0.0.6 T06: enum instructions.
+            // `EnumNew`: u16 enum id + u16 variant id.
+            Opcode::EnumNew => 4,
+            // `EnumIs`: u16 variant id.
+            Opcode::EnumIs => 2,
+            // `EnumPayload`: u16 variant id + u16 payload index.
+            Opcode::EnumPayload => 4,
             Opcode::CallValue => 1,
             _ => 0,
         }
@@ -520,6 +531,9 @@ impl Opcode {
             0xC8 => Opcode::AddrOf,
             0xC9 => Opcode::LoadPtr,
             0xCA => Opcode::StorePtr,
+            0xCB => Opcode::EnumNew,
+            0xCC => Opcode::EnumIs,
+            0xCD => Opcode::EnumPayload,
             _ => return None,
         })
     }

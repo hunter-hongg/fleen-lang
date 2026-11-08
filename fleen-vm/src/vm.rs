@@ -229,7 +229,7 @@ impl Vm {
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
-        if !(1..=5).contains(&self.module.version) {
+        if !(1..=6).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -2175,6 +2175,63 @@ impl Vm {
                 };
                 let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 *cell.borrow_mut() = v;
+            }
+            Opcode::EnumNew => {
+                let s = take!(4);
+                let enum_id = u16::from_le_bytes([s[0], s[1]]) as u32;
+                let variant_idx = u16::from_le_bytes([s[2], s[3]]);
+                let def = self
+                    .module
+                    .enum_defs
+                    .get(enum_id as usize)
+                    .ok_or(RuntimeErrorKind::StructOutOfRange(enum_id as u16))?;
+                let variant = def
+                    .variants
+                    .get(variant_idx as usize)
+                    .ok_or(RuntimeErrorKind::StructOutOfRange(variant_idx))?;
+                let n = variant.payload_types.len();
+                // Pop payload values in reverse.
+                let mut payload = Vec::with_capacity(n);
+                for _ in 0..n {
+                    payload.push(self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?);
+                }
+                payload.reverse();
+                self.stack.push(Value::Enum {
+                    variant: variant_idx,
+                    payload: payload.into_boxed_slice(),
+                });
+            }
+            Opcode::EnumIs => {
+                let s = take!(2);
+                let target = u16::from_le_bytes([s[0], s[1]]);
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let matches = match v {
+                    Value::Enum { variant, .. } => variant == target,
+                    _ => return Err(RuntimeErrorKind::ResultMismatch),
+                };
+                self.stack.push(Value::Bool(matches));
+            }
+            Opcode::EnumPayload => {
+                let s = take!(4);
+                let variant_ref = u16::from_le_bytes([s[0], s[1]]);
+                let index = u16::from_le_bytes([s[2], s[3]]) as usize;
+                let v = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                match v {
+                    Value::Enum { variant, payload } => {
+                        if variant != variant_ref {
+                            return Err(RuntimeErrorKind::ResultMismatch);
+                        }
+                        let p = payload
+                            .get(index)
+                            .ok_or(RuntimeErrorKind::IndexOutOfRange {
+                                index: index as i64,
+                                len: payload.len(),
+                            })?
+                            .clone();
+                        self.stack.push(p);
+                    }
+                    _ => return Err(RuntimeErrorKind::ResultMismatch),
+                }
             }
         }
         self.frames

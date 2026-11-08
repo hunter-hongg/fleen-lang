@@ -1,8 +1,0 @@
-// 0.0.6 T04: construction is fully typed by typeck; the `EnumNew` opcode is
-// a T06 deliverable, so lowering reports the deferral cleanly (the
-// Box-before-U06 precedent) instead of emitting broken bytecode.
-enum Op { Add, Mul, }
-func main() {
-    o = Op.Add;
-    print("unreachable");
-}

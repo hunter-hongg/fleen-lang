@@ -66,6 +66,7 @@ pub enum PayloadKind {
     Channel,
     Ptr,
     Cell,
+    Enum,
 }
 
 impl PayloadKind {
@@ -88,6 +89,7 @@ impl PayloadKind {
             PayloadKind::Channel => "channel",
             PayloadKind::Ptr => "ptr",
             PayloadKind::Cell => "cell",
+            PayloadKind::Enum => "enum",
         }
     }
 }
@@ -113,6 +115,7 @@ impl Value {
             Value::Channel(_) => PayloadKind::Channel,
             Value::Ptr(_) => PayloadKind::Ptr,
             Value::Cell(_) => PayloadKind::Cell,
+            Value::Enum { .. } => PayloadKind::Enum,
         }
     }
 }
@@ -163,6 +166,12 @@ pub enum Value {
     /// `Eq` on a struct is a typeck-level error, so a struct only reaches
     /// comparison opcodes through malformed bytecode (defensive error).
     Struct(Box<[Value]>),
+    /// User-defined enum value (0.0.6 T06): the discriminant variant index
+    /// plus the variant's payload values in declaration order. Owned (the
+    /// payload values are moved in). The enum id is a compile-time fact
+    /// (from the `EnumNew` operand), so only the variant id rides the value
+    /// — `EnumPayload` checks it to guard against forged bytecode.
+    Enum { variant: u16, payload: Box<[Value]> },
     /// Array value (0.0.3 V03): elements in source order. **Always owned**
     /// (D3 — even `[int]`); `Eq` on an array is a typeck-level error
     /// (defensive error in the VM).
@@ -254,6 +263,19 @@ impl fmt::Display for Value {
             Value::Future(_) => write!(f, "<future>"),
             // A channel handle — renders as <channel cap=N>.
             Value::Channel(inner) => write!(f, "<channel cap={}>", inner.borrow().cap),
+            Value::Enum { variant, payload } => {
+                write!(f, "Enum({variant}")?;
+                if !payload.is_empty() {
+                    write!(f, ", ")?;
+                    for (i, v) in payload.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{v}")?;
+                    }
+                }
+                write!(f, ")")
+            }
             Value::Ptr(_) => write!(f, "<ptr>"),
             Value::Cell(_) => write!(f, "<cell>"),
         }

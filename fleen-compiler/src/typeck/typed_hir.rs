@@ -294,6 +294,10 @@ pub struct TypedHir {
     /// [`StructId`]; consumed by lowering to emit `StructNew(id)` and by
     /// codegen for the `struct_defs` table.
     pub structs: Vec<TypedStructDef>,
+    /// The enum table, in declaration order (0.0.6 T04/T06). Index =
+    /// [`EnumId`]; consumed by lowering to emit `EnumNew(id)` and by
+    /// codegen for the `enum_defs` table.
+    pub enums: Vec<TypedEnumDef>,
     pub span: Span,
 }
 
@@ -303,6 +307,20 @@ pub struct TypedHir {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedStructDef {
     pub field_types: Vec<Type>,
+}
+
+/// One entry of the enum table (0.0.6 T06): the variants in declaration
+/// order, with their payload types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnumDef {
+    pub variants: Vec<TypedEnumVariantDef>,
+}
+
+/// One variant of a typed enum (0.0.6 T06): payload types in declaration
+/// order; codegen derives the `enum_defs` type tags from them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnumVariantDef {
+    pub payload_types: Vec<Type>,
 }
 
 /// Top-level item in Typed HIR.

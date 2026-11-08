@@ -4,19 +4,18 @@ use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
 
-/// Versions this reader accepts: 0.0.1 (v1), 0.0.2 (v2), 0.0.3 (v3) and
-/// 0.0.4 (v4) modules.
+/// Versions this reader accepts: 0.0.1 (v1) through 0.0.6 (v6).
 ///
 /// v2 adds instructions and fills `span_map`; v3 adds the struct
 /// instructions and the appended `struct_defs` table (read only for
 /// version >= 3); v4 (0.0.4) adds the async/channel instructions
-/// 0xC0–0xC7 (0xC0–0xC3 in T05, 0xC4–0xC7 in T07).
-/// The field order and widths of every existing table are
-/// unchanged (BYTECODE.md §9), so a v1 file reads unmodified.
-/// Versions this reader accepts: 0.0.1 (v1) through 0.0.5 (v5).
-/// v5 (0.0.5 T05) adds the pointer / unsafe instructions 0xC8–0xCA;
-/// its field order and widths are unchanged from v4 (BYTECODE.md §9).
-const READ_VERSIONS: [u16; 5] = [1, 2, 3, 4, 5];
+/// 0xC0–0xC7 (0xC0–0xC3 in T05, 0xC4–0xC7 in T07); v5 (0.0.5 T05)
+/// adds the pointer / unsafe instructions 0xC8–0xCA; v6 (0.0.6 T06)
+/// adds the enum instructions 0xCB–0xCD and the appended `enum_defs`
+/// table (read only for version >= 6).
+/// The field order and widths of every existing table are unchanged
+/// (BYTECODE.md §9), so a v1 file reads unmodified.
+const READ_VERSIONS: [u16; 6] = [1, 2, 3, 4, 5, 6];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +160,20 @@ pub fn to_bytes(m: &Module) -> Vec<u8> {
             }
         }
     }
+    // 0.0.6 T06: the appended `enum_defs` table, only in v6+ modules —
+    // appending after `struct_defs` keeps all v1–v5 layout byte-identical.
+    if m.version >= 6 {
+        w.u32(m.enum_defs.len() as u32);
+        for e in &m.enum_defs {
+            w.u32(e.variants.len() as u32);
+            for v in e.variants.iter() {
+                w.u32(v.payload_types.len() as u32);
+                for tag in v.payload_types.iter() {
+                    w.u8(*tag as u8);
+                }
+            }
+        }
+    }
     w.0
 }
 
@@ -262,21 +275,7 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
             let mut tags = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let byte = r.u8()?;
-                let tag = match byte {
-                    0 => FieldTypeTag::Int,
-                    1 => FieldTypeTag::Float,
-                    2 => FieldTypeTag::Bool,
-                    3 => FieldTypeTag::Str,
-                    4 => FieldTypeTag::Unit,
-                    5 => FieldTypeTag::Func,
-                    6 => FieldTypeTag::Result,
-                    7 => FieldTypeTag::Array,
-                    8 => FieldTypeTag::Box,
-                    9 => FieldTypeTag::Ref,
-                    10 => FieldTypeTag::Struct,
-                    11 => FieldTypeTag::Range,
-                    t => return Err(FlncError(format!("bad field type tag {t}"))),
-                };
+                let tag = decode_field_tag(byte)?;
                 tags.push(tag);
             }
             struct_defs.push(StructDefMeta {
@@ -284,6 +283,30 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
             });
         }
     }
+    // 0.0.6 T06: the appended `enum_defs` table (version-gated).
+    let mut enum_defs = Vec::new();
+    if version >= 6 {
+        let ne = r.u32()? as usize;
+        enum_defs = Vec::with_capacity(r.capacity_hint(ne, 4));
+        for _ in 0..ne {
+            let variant_count = r.u32()? as usize;
+            let mut variants = Vec::with_capacity(r.capacity_hint(variant_count, 4));
+            for _ in 0..variant_count {
+                let payload_count = r.u32()? as usize;
+                let mut payload_types = Vec::with_capacity(payload_count);
+                for _ in 0..payload_count {
+                    payload_types.push(decode_field_tag(r.u8()?)?);
+                }
+                variants.push(EnumVariantDefMeta {
+                    payload_types: payload_types.into_boxed_slice(),
+                });
+            }
+            enum_defs.push(EnumDefMeta {
+                variants: variants.into_boxed_slice(),
+            });
+        }
+    }
+
     if r.pos != buf.len() {
         return Err(FlncError("trailing bytes".into()));
     }
@@ -295,5 +318,25 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
         globals,
         entry,
         struct_defs,
+        enum_defs,
+    })
+}
+
+fn decode_field_tag(byte: u8) -> Result<FieldTypeTag, FlncError> {
+    Ok(match byte {
+        0 => FieldTypeTag::Int,
+        1 => FieldTypeTag::Float,
+        2 => FieldTypeTag::Bool,
+        3 => FieldTypeTag::Str,
+        4 => FieldTypeTag::Unit,
+        5 => FieldTypeTag::Func,
+        6 => FieldTypeTag::Result,
+        7 => FieldTypeTag::Array,
+        8 => FieldTypeTag::Box,
+        9 => FieldTypeTag::Ref,
+        10 => FieldTypeTag::Struct,
+        11 => FieldTypeTag::Range,
+        12 => FieldTypeTag::Enum,
+        t => return Err(FlncError(format!("bad field type tag {t}"))),
     })
 }

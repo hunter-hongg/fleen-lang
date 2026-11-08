@@ -337,6 +337,7 @@ fn check_func_call() {
         only_expr_ty(&TypedHir {
             items: vec![hir.items[1].clone()],
             structs: Vec::new(),
+            enums: Vec::new(),
             span: hir.span
         }),
         Type::Int

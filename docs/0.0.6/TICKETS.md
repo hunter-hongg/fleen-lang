@@ -4,7 +4,7 @@
 > tests.  Decisions D1–D6 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T05 implemented; T06–T08 pending.**
+> **Status: T01–T06 implemented; T07–T08 pending.**
 
 ---
 
@@ -256,19 +256,19 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T06 — Bytecode v6 + codegen + verify (F4; D4)
 
-- [ ] Opcodes `EnumNew` (0xCB), `EnumIs` (0xCC), `EnumPayload` (0xCD) —
+- [x] Opcodes `EnumNew` (0xCB), `EnumIs` (0xCC), `EnumPayload` (0xCD) —
       encodings and stack effects per PLAN D4 (§5.17); existing instructions
       untouched (BYTECODE §10 rule)
-- [ ] `enum_defs` appended table: `enum_defs_len: u32` → per enum
+- [x] `enum_defs` appended table: `enum_defs_len: u32` → per enum
       `variant_count: u32` → per variant `payload_count: u32` +
       `payload_count × u8` `FieldTypeTag`; `FieldTypeTag::Enum = 12`;
       read only when `version >= 6`; written through
       `codegen::flnc::{to_bytes, from_bytes}` only
-- [ ] `MODULE_VERSION = 6`; `READ_VERSIONS = [1, 2, 3, 4, 5, 6]`
-- [ ] verify: `EnumNew(id)` ↔ `enum_defs[id]` cross-check (forged id →
+- [x] `MODULE_VERSION = 6`; `READ_VERSIONS = [1, 2, 3, 4, 5, 6]`
+- [x] verify: `EnumNew(id)` ↔ `enum_defs[id]` cross-check (forged id →
       `EnumIndexOutOfRange`; payload-count mismatch → format error); Δdepth
       entries for the three opcodes
-- [ ] Tests: v6 write/read round-trip; v1–v5 fixture decode unchanged; forged
+- [x] Tests: v6 write/read round-trip; v1–v5 fixture decode unchanged; forged
       `EnumNew` / truncated `enum_defs` rejected (verify + flnc errors)
 
 **Depends on**: T04 (needs enum ids and payload counts to emit).

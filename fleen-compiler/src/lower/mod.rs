@@ -48,6 +48,19 @@ pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
                 field_types: def.field_types,
             })
             .collect(),
+        enums: typed_hir
+            .enums
+            .into_iter()
+            .map(|def| MirEnumDef {
+                variants: def
+                    .variants
+                    .into_iter()
+                    .map(|v| MirEnumVariantDef {
+                        payload_types: v.payload_types,
+                    })
+                    .collect(),
+            })
+            .collect(),
     })
 }
 
@@ -743,14 +756,20 @@ impl<'a> FnBodyCx<'a> {
         expr: &TypedExprHir,
     ) -> Result<(), LowerError> {
         match expr {
-            // 0.0.6 T04: constructors are fully typed here but their opcode
-            // (`EnumNew`) is a T06 deliverable — defer with a precise error
-            // instead of emitting nothing (the Box-before-U06 precedent).
-            TypedExprHir::EnumCtor { span, .. } => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "enum construction (lowering lands in 0.0.6 T06)",
-                    },
+            // 0.0.6 T06: lower the payload arguments left-to-right, then
+            // emit EnumNew with the enum/variant ids from the typed HIR.
+            TypedExprHir::EnumCtor {
+                enum_id,
+                variant_idx,
+                args,
+                span,
+                ..
+            } => {
+                for a in args {
+                    self.lower_expr_into(fb, a)?;
+                }
+                fb.emit(MirInstr::new(
+                    MirInstrKind::EnumNew(enum_id.0, *variant_idx),
                     *span,
                 ));
             }
@@ -2331,7 +2350,10 @@ impl<'a> FnBodyCx<'a> {
             match (&arm.pattern, &arm.guard) {
                 (
                     TypedPatternHir::Enum {
-                        binding_id, span, ..
+                        binding_id,
+                        variant_index,
+                        span,
+                        ..
                     },
                     Some(guard),
                 ) => {
@@ -2341,7 +2363,10 @@ impl<'a> FnBodyCx<'a> {
                     // slot; the parked scrutinee stays for later tests. Both
                     // the guard and the body read this slot.
                     fb.emit(MirInstr::new(dup(), scr_span));
-                    fb.emit(MirInstr::new(MirInstrKind::EnumPayload, *span));
+                    fb.emit(MirInstr::new(
+                        MirInstrKind::EnumPayload(*variant_index, 0),
+                        *span,
+                    ));
                     fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
                     self.lower_expr_into(fb, guard)?;
                     let j = fb.jump_if_false_later();
@@ -2350,7 +2375,10 @@ impl<'a> FnBodyCx<'a> {
                 }
                 (
                     TypedPatternHir::Enum {
-                        binding_id, span, ..
+                        binding_id,
+                        variant_index,
+                        span,
+                        ..
                     },
                     None,
                 ) => {
@@ -2358,7 +2386,10 @@ impl<'a> FnBodyCx<'a> {
                     let slot = self.slots.get(*binding_id).expect("slot just allocated");
                     // `EnumPayload` consumes the parked enum (e -> p, like
                     // `UnwrapOk`); no `Pop` before it.
-                    fb.emit(MirInstr::new(MirInstrKind::EnumPayload, *span));
+                    fb.emit(MirInstr::new(
+                        MirInstrKind::EnumPayload(*variant_index, 0),
+                        *span,
+                    ));
                     fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
                     self.lower_block(fb, &arm.body)?;
                     fb.jump(merge);

@@ -125,6 +125,17 @@ impl Encoder {
             // operands (slot/gid + field offset).
             MirInstrKind::StructNew(id) => self.emit_u16(*id),
             MirInstrKind::GetField(offset) => self.emit_u16(*offset),
+            MirInstrKind::EnumNew(enum_id, variant_idx) => {
+                self.emit_u16(id_u16(*enum_id, "enum id")?);
+                self.emit_u16(*variant_idx);
+            }
+            MirInstrKind::EnumIs(variant_idx) => {
+                self.emit_u16(id_u16(*variant_idx, "variant index")?);
+            }
+            MirInstrKind::EnumPayload(variant_idx, payload_idx) => {
+                self.emit_u16(id_u16(*variant_idx, "variant reference")?);
+                self.emit_u16(*payload_idx);
+            }
             MirInstrKind::SetFieldLocal(slot, offset) => {
                 self.emit_u16(*slot);
                 self.emit_u16(*offset);
@@ -161,6 +172,15 @@ impl Encoder {
 fn fid_u16(fid: crate::lower::mir::FuncId) -> Result<u16, CodegenError> {
     u16::try_from(fid.0).map_err(|_| CodegenError {
         message: format!("function id {} exceeds u16", fid.0),
+    })
+}
+
+/// Fit a MIR enum/variant id (u32) into a bytecode u16 operand slot.
+/// MIR ids are wider than the serialized operand, so a silent `as u16`
+/// truncation would alias a different enum/variant in forged bytecode.
+fn id_u16(id: u32, what: &str) -> Result<u16, CodegenError> {
+    u16::try_from(id).map_err(|_| CodegenError {
+        message: format!("{what} {id} exceeds u16"),
     })
 }
 
@@ -268,16 +288,10 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::AddrOf(_) => Opcode::AddrOf,
         MirInstrKind::LoadPtr => Opcode::LoadPtr,
         MirInstrKind::StorePtr => Opcode::StorePtr,
-        // 0.0.6 T05: the enum-choose MIR instructions are lowered here, but
-        // their bytecode opcodes (0xCC/0xCD) and the `enum_defs` table are a
-        // T06 deliverable. Fail cleanly rather than emit a bad stream (the
-        // T04 `enum_lower_deferral` precedent).
-        MirInstrKind::EnumIs(_) | MirInstrKind::EnumPayload => {
-            return Err(CodegenError {
-                message: "unsupported feature: enum choose (bytecode opcodes land in 0.0.6 T06)"
-                    .to_string(),
-            });
-        }
+        // 0.0.6 T06: enum instructions (0xCB–0xCD).
+        MirInstrKind::EnumNew(..) => Opcode::EnumNew,
+        MirInstrKind::EnumIs(_) => Opcode::EnumIs,
+        MirInstrKind::EnumPayload(..) => Opcode::EnumPayload,
     })
 }
 

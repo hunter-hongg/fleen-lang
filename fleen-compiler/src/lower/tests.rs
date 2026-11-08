@@ -718,6 +718,7 @@ fn stack_delta(
     i: &MirInstr,
     func_params: &std::collections::HashMap<FuncId, u16>,
     struct_fields: &std::collections::HashMap<u16, usize>,
+    enum_variants: &std::collections::HashMap<u32, Vec<usize>>,
 ) -> i64 {
     match &i.kind {
         MirInstrKind::ConstInt(_)
@@ -815,7 +816,14 @@ fn stack_delta(
         // 0.0.6 T05: `EnumIs` consumes a copy and pushes a bool (e -> bool,
         // like `IsErr`); `EnumPayload` consumes the enum and pushes its
         // payload (e -> p, like `UnwrapOk`) -- both stack-neutral.
-        MirInstrKind::EnumIs(_) | MirInstrKind::EnumPayload => 0,
+        MirInstrKind::EnumIs(_) | MirInstrKind::EnumPayload(..) => 0,
+        MirInstrKind::EnumNew(eid, vid) => {
+            1 - enum_variants
+                .get(eid)
+                .and_then(|v| v.get(*vid as usize))
+                .copied()
+                .unwrap_or(0) as i64
+        }
     }
 }
 
@@ -864,6 +872,17 @@ func total_all(xs: [int]): int {
         .enumerate()
         .map(|(i, s)| (i as u16, s.field_types.len()))
         .collect();
+    let enum_variants: std::collections::HashMap<u32, Vec<usize>> = mir
+        .enums
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            (
+                i as u32,
+                e.variants.iter().map(|v| v.payload_types.len()).collect(),
+            )
+        })
+        .collect();
     for func in &mir.funcs {
         let mut entry_depth: Vec<Option<i64>> = vec![None; func.blocks.len()];
         let entry_pos = func
@@ -880,7 +899,7 @@ func total_all(xs: [int]): int {
             let block = &func.blocks[pos];
             let mut d = d0;
             for i in &block.instrs {
-                d += stack_delta(i, &func_params, &struct_fields);
+                d += stack_delta(i, &func_params, &struct_fields, &enum_variants);
                 assert!(d >= 0, "stack underflow in {:?} at {:?}", func.name, i);
             }
             let mut set = |target: BlockId, val: i64| {
@@ -1413,6 +1432,17 @@ fn assert_stack_depths_consistent(src: &str) {
         .enumerate()
         .map(|(i, s)| (i as u16, s.field_types.len()))
         .collect();
+    let enum_variants: std::collections::HashMap<u32, Vec<usize>> = mir
+        .enums
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            (
+                i as u32,
+                e.variants.iter().map(|v| v.payload_types.len()).collect(),
+            )
+        })
+        .collect();
     for func in &mir.funcs {
         if func.is_builtin {
             continue;
@@ -1430,7 +1460,7 @@ fn assert_stack_depths_consistent(src: &str) {
             let block = &func.blocks[pos];
             let mut d = d0;
             for i in &block.instrs {
-                d += stack_delta(i, &func_params, &struct_fields);
+                d += stack_delta(i, &func_params, &struct_fields, &enum_variants);
                 assert!(d >= 0, "stack underflow in {:?} at {:?}", func.name, i);
             }
             let mut set = |target: BlockId, val: i64| {
@@ -1935,6 +1965,7 @@ fn lower_for_range_desugar_uses_range_bounds_once() {
             is_async: false,
         }))],
         structs: Vec::new(),
+        enums: Vec::new(),
         span,
     };
     let mir = super::lower(typed).expect("lower should succeed");
@@ -2112,6 +2143,7 @@ fn make_inline_iter_hir(
     TypedHir {
         items,
         structs: Vec::new(),
+        enums: Vec::new(),
         span,
     }
 }
@@ -2713,7 +2745,7 @@ fn t05_choose_enum_two_variants_emits_enum_is_chain() {
     );
     assert!(
         ins.iter()
-            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload)),
+            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload(..))),
         "a payload variant must move its payload out"
     );
 }
@@ -2746,7 +2778,7 @@ fn t05_choose_enum_guard_emits_false_jump_and_preserves_scrutinee() {
     let ins = flat(func);
     assert!(
         ins.iter()
-            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload)),
+            .any(|i| matches!(i.kind, MirInstrKind::EnumPayload(..))),
         "guarded payload arm stages its payload"
     );
     let has_cond_jump = func.blocks.iter().any(|b| {
@@ -2765,7 +2797,7 @@ fn t05_choose_enum_guard_emits_false_jump_and_preserves_scrutinee() {
         .find(|b| {
             b.instrs
                 .iter()
-                .any(|i| matches!(i.kind, MirInstrKind::EnumPayload))
+                .any(|i| matches!(i.kind, MirInstrKind::EnumPayload(..)))
                 && matches!(b.terminator, Terminator::JumpIfFalse(_))
         })
         .expect("the guarded arm's staging block ends in JumpIfFalse");
@@ -2829,7 +2861,7 @@ fn t05_choose_enum_block_order_matches_template() {
     let payloads: Vec<usize> = ins
         .iter()
         .enumerate()
-        .filter(|(_, i)| matches!(i.kind, MirInstrKind::EnumPayload))
+        .filter(|(_, i)| matches!(i.kind, MirInstrKind::EnumPayload(..)))
         .map(|(p, _)| p)
         .collect();
     assert_eq!(payloads.len(), 2, "one payload move per payload variant");

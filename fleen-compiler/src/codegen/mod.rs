@@ -8,8 +8,9 @@ pub mod flnc;
 mod tests;
 
 pub use bytecode::{
-    Bytecode, Const, ConstId, FieldTypeTag, Func, FuncId, Global, GlobalId, Module, Opcode,
-    SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE, V5_OPCODE_BASE,
+    Bytecode, Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, Global,
+    GlobalId, Module, Opcode, SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE,
+    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -20,17 +21,19 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// Bytecode version emitted by this compiler.
 ///
 /// Version 1 was 0.0.1; version 2 adds the ownership / Result instructions
-/// and a populated `span_map` (BYTECODE.md §10). Version 3 (0.0.3 V02) adds
-/// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table.
-/// Version 4 (0.0.4) adds the async/channel instructions 0xC0–0xC7. Readers
-/// accept all four.
-pub const MODULE_VERSION: u16 = 5;
+/// and a populated `span_map` (BYTECODE.md §10); version 3 (0.0.3 V02) adds
+/// the struct instructions 0xB0–0xB3 and the appended `struct_defs` table;
+/// version 4 (0.0.4) adds the async/channel instructions 0xC0–0xC7; version
+/// 5 (0.0.5) adds the pointer / unsafe instructions 0xC8–0xCA; version 6
+/// (0.0.6 T06) adds the enum instructions 0xCB–0xCD and the appended
+/// `enum_defs` table. Readers accept all six.
+pub const MODULE_VERSION: u16 = 6;
 
 /// Lower MIR into a bytecode module.
 ///
-/// Since 0.0.3 (V02) the emitted module is bytecode version 3: it carries
-/// the struct instructions and the appended `struct_defs` table. 0.0.4 (T05)
-/// bumps the emitter to version 4 and adds the async instructions.
+/// The emitted module is bytecode version 6 (BYTECODE.md §10): it carries
+/// the struct / async / pointer / enum instructions and the appended
+/// `struct_defs` and `enum_defs` tables.
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).
@@ -39,6 +42,7 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         funcs,
         globals,
         structs,
+        enums,
     } = mir;
 
     let mut pool = ConstPool::new();
@@ -139,6 +143,20 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         })
         .collect();
 
+    // Enum table (0.0.6 T06): shape-level payload tags per declaration.
+    let enum_defs = enums
+        .iter()
+        .map(|def| EnumDefMeta {
+            variants: def
+                .variants
+                .iter()
+                .map(|v| EnumVariantDefMeta {
+                    payload_types: v.payload_types.iter().map(FieldTypeTag::of).collect(),
+                })
+                .collect(),
+        })
+        .collect();
+
     Ok(Module {
         version: MODULE_VERSION,
         constants: pool.items,
@@ -146,5 +164,6 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         globals: gmodule,
         entry,
         struct_defs,
+        enum_defs,
     })
 }

@@ -4,7 +4,10 @@ use super::diag::line_col;
 use super::error::{RuntimeError, RuntimeErrorKind};
 use super::value::{PayloadKind, Value};
 use super::vm::Vm;
-use fleen_compiler::codegen::{Const, ConstId, Func, FuncId, Module, Opcode, SpanEntry};
+use fleen_compiler::codegen::{
+    Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, Module, Opcode,
+    SpanEntry,
+};
 
 fn enc(ops: &[(Opcode, Vec<u8>)]) -> Box<[u8]> {
     let mut code = Vec::new();
@@ -37,6 +40,7 @@ fn func(code: Box<[u8]>, params: u16, locals: u16) -> Func {
 fn module_with_entry(entry_code: Box<[u8]>) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into())],
         functions: vec![func(entry_code, 0, 0)],
@@ -49,6 +53,7 @@ fn module_with_entry(entry_code: Box<[u8]>) -> Module {
 fn returns_const() {
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(42)],
         functions: vec![func(
@@ -66,6 +71,7 @@ fn returns_const() {
 fn int_add_and_store_local() {
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(3)],
         functions: vec![func(
@@ -96,6 +102,7 @@ fn division_by_zero() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Int(1), Const::Int(0)],
         ..m
     };
@@ -129,6 +136,7 @@ fn call_and_return() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(4), Const::Int(5)],
         functions: vec![main, add],
@@ -162,6 +170,7 @@ fn indirect_call() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(7)],
         functions: vec![main, double],
@@ -186,6 +195,7 @@ fn jump_if_false() {
     code.push(Opcode::Return as u8);
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(1), Const::Int(2)],
         functions: vec![func(code.into_boxed_slice(), 0, 0)],
@@ -199,6 +209,7 @@ fn jump_if_false() {
 fn immutable_global_rejected() {
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Int(1)],
         functions: vec![func(
@@ -234,6 +245,7 @@ fn v5_module_runs_pre_v5_instruction_streams() {
     // The version-5 gate accepts a module whose body uses no v5 opcode.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         ..v2_module(enc(&[(Opcode::Unit, vec![]), (Opcode::Return, vec![])]))
     };
@@ -247,6 +259,7 @@ fn v6_addr_of_local_load_store_roundtrip() {
     // through the pointer, and returns the value read back.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(1)],
         functions: vec![func(
@@ -281,6 +294,7 @@ fn v6_promotion_is_transparent_to_local_access() {
     // before and after promotion is unchanged.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(43)],
         functions: vec![func(
@@ -308,6 +322,7 @@ fn v6_pointer_backstop_on_corrupted_handle() {
     // `LoadPtr` on a non-pointer value is a malformed-bytecode backstop.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(7)],
         functions: vec![func(
@@ -328,6 +343,7 @@ fn v6_pointer_backstop_on_corrupted_handle() {
     // `StorePtr`: the top value is an int, not a pointer handle.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(7), Const::Int(9)],
         functions: vec![func(
@@ -356,6 +372,7 @@ fn v6_addr_promoted_local_survives_suspend_resume() {
     // depth, and reads through the pointer.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(40), Const::Int(1)],
         functions: vec![
@@ -412,6 +429,7 @@ fn v6_addr_of_global_roundtrip_and_transparency() {
     // plain name and the pointer.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![
             Const::Str("main".into()),
@@ -484,6 +502,7 @@ fn v6_field_write_through_promoted_struct() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(9)));
 }
@@ -495,6 +514,7 @@ fn v6_element_write_through_promoted_array() {
     // element write lands in the cell and a subsequent read sees it.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![
             Const::Str("main".into()),
@@ -535,6 +555,7 @@ fn v6_move_local_on_promoted_slot() {
     // the MoveLocal Cell arm.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         functions: vec![func(
@@ -561,6 +582,7 @@ fn v6_clone_local_on_promoted_slot() {
     // dereferences it) and pushes the value — same as LoadLocal.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         functions: vec![func(
@@ -587,6 +609,7 @@ fn v6_addr_idempotent_same_cell() {
     // pointer is visible through the second (promote_slot's already-Cell arm).
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(42), Const::Int(99)],
         functions: vec![func(
@@ -620,6 +643,7 @@ fn v6_clone_container_with_ptr_rejected() {
     // handle (the deep_fork backstop, mirroring Future/Channel).
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 5,
         constants: vec![Const::Str("main".into()), Const::Int(1)],
         functions: vec![func(
@@ -652,6 +676,7 @@ fn v6_clone_container_with_ptr_rejected() {
 fn v2_module(code: Box<[u8]>) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into())],
         functions: vec![func(code, 0, 0)],
@@ -670,6 +695,7 @@ fn v2_module_gate() {
     // `ToStr` (0xA5, U13) is executed.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(7)],
         functions: vec![func(
@@ -689,12 +715,13 @@ fn v2_module_gate() {
     // Unknown module versions are rejected before execution.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 6,
+        enum_defs: Vec::new(),
+        version: 7,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(6)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(7)))
     );
 }
 
@@ -713,6 +740,7 @@ fn box_alloc_and_deref_roundtrip() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         ..m
     };
@@ -733,6 +761,7 @@ fn box_deref_read_leaves_box_on_stack() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(9)],
         ..m
     };
@@ -752,6 +781,7 @@ fn nested_box_deref_reads_through() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(42)],
         ..m
     };
@@ -766,6 +796,7 @@ fn store_deref_box_writes_through_handle() {
     // this pins the opcode's value-level contract for hand-written modules.)
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
         functions: vec![func(
@@ -795,6 +826,7 @@ fn clone_box_is_independent_after_write() {
     // deref-write shape); deref c must still be 1.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(99)],
         functions: vec![func(
@@ -826,6 +858,7 @@ fn clone_box_copies_pointee_deeply() {
     // only b's slot — and the cloned box holds the same pointee value.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -861,6 +894,7 @@ fn clone_box_copies_pointee_deeply() {
 fn move_local_returns_value() {
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -885,6 +919,7 @@ fn move_local_clears_slot_to_unit() {
     // deferred to frame destruction.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         functions: vec![func(
@@ -909,6 +944,7 @@ fn move_local_clears_slot_to_unit() {
 fn clone_global_reads_global_slot() {
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("owned".into())],
         functions: vec![func(
@@ -967,6 +1003,7 @@ fn ref_handle_forwards_through_call_chain() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f, g],
@@ -1003,6 +1040,7 @@ fn eq_dereferences_borrow_handles() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -1025,6 +1063,7 @@ fn eq_compares_box_pointees() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(3)],
         ..m
     };
@@ -1056,6 +1095,7 @@ fn print_builtin_dereferences_handle_argument() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![
             Const::Str("print".into()),
@@ -1081,6 +1121,7 @@ fn result_branch_module(payload: Const, pack: Opcode, unwrap_err_branch: Opcode)
     let consts = vec![Const::Str("main".into()), payload];
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: consts,
         functions: vec![func(
@@ -1134,6 +1175,7 @@ fn unwrap_mismatch_is_defensive_error() {
     let m = v2_module(ok_then_unwrap_err);
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -1151,6 +1193,7 @@ fn unwrap_mismatch_is_defensive_error() {
     let m = v2_module(err_then_unwrap_ok);
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -1171,6 +1214,7 @@ fn is_err_classifies_variants() {
     let m = v2_module(ok_case);
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -1185,6 +1229,7 @@ fn is_err_classifies_variants() {
     let m = v2_module(err_case);
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -1221,6 +1266,7 @@ fn borrow_out_of_range_is_defensive() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into())],
         functions: vec![main, f],
@@ -1243,6 +1289,7 @@ fn dup_deep_on_handle_copies_target() {
     // copied target directly — a returned handle would read as `<ref>`.
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![func(
@@ -1289,6 +1336,7 @@ fn ord_dereferences_borrow_handles() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -1312,6 +1360,7 @@ fn eq_ok_vs_err_is_false() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(5)],
         ..m
     };
@@ -1337,6 +1386,7 @@ fn store_deref_box_consumes_its_box_operand() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(7)],
         ..m
     };
@@ -1362,6 +1412,7 @@ fn handle_discipline_enforced_at_runtime() {
         ]);
         let m = Module {
             struct_defs: Vec::new(),
+            enum_defs: Vec::new(),
             version: 2,
             constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
             functions: vec![func(code, 0, 1)],
@@ -1446,6 +1497,7 @@ fn string_return_through_call() {
     );
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into()), Const::Str("hi".into())],
         functions: vec![main, f],
@@ -1546,6 +1598,7 @@ fn call_path_error_picks_the_call_entry_not_the_next_instruction() {
     };
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 2,
         constants: vec![
             Const::Str("main".into()),
@@ -1576,6 +1629,7 @@ fn error_without_span_map_entries_degrades() {
     ]));
     let m = Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         // Const 0 stays the function's name so `func` can be attached.
         constants: vec![Const::Str("main".into()), Const::Int(1), Const::Int(0)],
         ..m
@@ -1593,13 +1647,14 @@ fn unsupported_version_has_no_location() {
     // No frame is ever pushed, so no location can be attached.
     let m = Module {
         struct_defs: Vec::new(),
-        version: 6,
+        enum_defs: Vec::new(),
+        version: 7,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(6))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(7))
     );
 }
 
@@ -1650,6 +1705,7 @@ fn struct_field_copy_independence() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(1)));
 }
@@ -1681,6 +1737,7 @@ fn struct_setfield_overwrites_field() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(9)));
 }
@@ -1707,6 +1764,7 @@ fn struct_eq_is_defensive_error() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert!(matches!(
         Vm::new(m).run(),
@@ -1732,6 +1790,7 @@ fn struct_new_out_of_range_id() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
     };
     assert!(matches!(
         Vm::new(m).run(),
@@ -1761,6 +1820,7 @@ fn struct_getfield_out_of_range_offset() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert!(matches!(
         Vm::new(m).run(),
@@ -1795,6 +1855,7 @@ fn struct_setfield_out_of_range_offset() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(2)],
+        enum_defs: Vec::new(),
     };
     assert!(matches!(
         Vm::new(m).run(),
@@ -1839,6 +1900,7 @@ fn struct_deep_clone_via_dupdeep() {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: vec![fleenc_struct_def(1)],
+        enum_defs: Vec::new(),
     };
     // q's write reached only q: p's pointee is still 1.
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(1)));
@@ -1856,6 +1918,7 @@ fn struct_deep_clone_via_dupdeep() {
 fn v3_array_module(constants: Vec<Const>, code: Box<[u8]>, locals: u16) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 3,
         constants,
         functions: vec![func(code, 0, locals)],
@@ -2079,6 +2142,7 @@ fn value_arr_display() {
 fn builtin_call_module(main_code: Box<[u8]>, argc: u16, constants: Vec<Const>) -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 3,
         constants,
         functions: vec![
@@ -2515,6 +2579,7 @@ fn async_host_func() -> Func {
 fn async_fixture() -> Module {
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 1,
         constants: vec![Const::Str("main".into()), Const::Int(5), Const::Int(1)],
         functions: vec![
@@ -2747,7 +2812,7 @@ fn future_value_is_opaque_and_does_not_grow_value() {
 
 fn run_src(src: &str) -> Result<Value, RuntimeError> {
     let module = fleen_compiler::compile(src).expect("compile async source");
-    assert_eq!(module.version, 5, "compiler must emit bytecode v5 now");
+    assert_eq!(module.version, 6, "compiler must emit bytecode v6 now");
     Vm::new(module).run()
 }
 
@@ -2807,7 +2872,7 @@ fn await_emitted_by_lower_produces_v4_and_still_verifies() {
     // and the whole module must still pass fleen-verify's v4 gate.
     let src = "async func f(): int = 5\nfunc main(): int = f() await\n";
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 5);
+    assert_eq!(module.version, 6);
     fleen_verify::verify(&module).expect("v5 async module verifies");
     assert_eq!(Vm::new(module).run().unwrap(), Value::Int(5));
 }
@@ -2837,6 +2902,7 @@ fn async_opcode_module() -> Module {
     ]);
     Module {
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
         version: 4,
         constants: vec![
             Const::Str("main".into()),
@@ -3755,6 +3821,111 @@ func main(): int {
     )
     .expect("parked senders wake in FIFO arrival order");
     assert_eq!(v, Value::Int(10201121));
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.6 T06: enum opcodes (0xCB–0xCD)
+// ---------------------------------------------------------------------------
+
+/// A v6 module with one enum (`Red`: no payloads, `Green`: one payload) whose
+/// `main` runs `entry`. Hand-built so the VM dispatch can be exercised
+/// directly, including forged operands verify would reject.
+fn enum_vm_module(entry: Box<[u8]>) -> Module {
+    Module {
+        struct_defs: Vec::new(),
+        enum_defs: vec![EnumDefMeta {
+            variants: Box::new([
+                EnumVariantDefMeta {
+                    payload_types: Box::new([]),
+                },
+                EnumVariantDefMeta {
+                    payload_types: Box::new([FieldTypeTag::Int]),
+                },
+            ]),
+        }],
+        version: 6,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(entry, 0, 0)],
+        globals: vec![],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn enum_new_is_and_payload_round_trip() {
+    // `True` becomes the payload; `EnumNew(0, 1)` wraps it, `EnumPayload`
+    // unwraps it again — the value round-trips through the runtime enum.
+    let m = enum_vm_module(enc(&[
+        (Opcode::True, vec![]),
+        (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
+        (Opcode::EnumPayload, [u16b(1), u16b(0)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
+
+    // A zero-payload variant needs nothing on the stack (Δ +1) and `EnumIs`
+    // compares the variant id that rides the value.
+    let m = enum_vm_module(enc(&[
+        (Opcode::EnumNew, [u16b(0), u16b(0)].concat()),
+        (Opcode::Dup, vec![]),
+        (Opcode::EnumIs, u16b(0)),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
+
+    // `EnumIs` against a different variant id answers false, not an error.
+    let m = enum_vm_module(enc(&[
+        (Opcode::EnumNew, [u16b(0), u16b(0)].concat()),
+        (Opcode::EnumIs, u16b(1)),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(false));
+}
+
+#[test]
+fn enum_new_forged_enum_id_is_defensively_rejected() {
+    // Enum id 9 with only one enum defined: the VM backstop (verify rejects
+    // it first in compiled code) reports `StructOutOfRange` for the id.
+    let m = enum_vm_module(enc(&[
+        (Opcode::EnumNew, [u16b(9), u16b(0)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::StructOutOfRange(9)
+    );
+}
+
+#[test]
+fn enum_payload_variant_mismatch_is_defensively_rejected() {
+    // The value carries variant 1 but the instruction names variant 0:
+    // `EnumPayload` must refuse to unwrap a foreign variant (forged
+    // bytecode — the D4 defensive check).
+    let m = enum_vm_module(enc(&[
+        (Opcode::True, vec![]),
+        (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
+        (Opcode::EnumPayload, [u16b(0), u16b(0)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ResultMismatch
+    );
+}
+
+#[test]
+fn enum_payload_index_out_of_range_is_defensively_rejected() {
+    // Variant 1 carries one payload; asking for index 1 is out of range.
+    let m = enum_vm_module(enc(&[
+        (Opcode::True, vec![]),
+        (Opcode::EnumNew, [u16b(0), u16b(1)].concat()),
+        (Opcode::EnumPayload, [u16b(1), u16b(1)].concat()),
+        (Opcode::Return, vec![]),
+    ]));
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::IndexOutOfRange { index: 1, len: 1 }
+    );
 }
 
 // ---------------------------------------------------------------------------

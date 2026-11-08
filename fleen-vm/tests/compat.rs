@@ -84,6 +84,7 @@ fn v2_greet_module() -> Module {
         globals: vec![],
         entry: FuncId(0),
         struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
     }
 }
 

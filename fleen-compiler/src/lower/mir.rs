@@ -49,6 +49,23 @@ pub struct Mir {
     /// Struct table in declaration order (0.0.3 V02); index = `StructId`.
     /// Codegen derives the `struct_defs` table from the field types.
     pub structs: Vec<MirStructDef>,
+    /// Enum table in declaration order (0.0.6 T06); index = `EnumId`.
+    /// Codegen derives the `enum_defs` table from the payload types.
+    pub enums: Vec<MirEnumDef>,
+}
+
+/// One enum declaration in MIR (0.0.6 T06): the variants in declaration
+/// order, with their payload type tags.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirEnumDef {
+    pub variants: Vec<MirEnumVariantDef>,
+}
+
+/// One variant of a MIR enum (0.0.6 T06): payload types in declaration
+/// order; codegen derives the `enum_defs` type tags from them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirEnumVariantDef {
+    pub payload_types: Vec<Type>,
 }
 
 /// One struct table entry (0.0.3 V02): the field types in declaration
@@ -281,15 +298,20 @@ pub enum MirInstrKind {
     LoadPtr,
     /// Write through a pointer: v ptr -> (delta -1, min 2). Operand-less.
     StorePtr,
-    // 0.0.6 T05: enum choose instructions (MIR-level; opcodes 0xCC/0xCD are
-    // a T06 deliverable, mirroring 0.0.5's MIR-before-opcode split).
+    // 0.0.6 T06: enum instructions (MIR-level mirrors of bytecode
+    // 0xCB–0xCD). `EnumNew` constructs an enum value; `EnumIs` tests a
+    // discriminant; `EnumPayload` moves one payload out.
+    /// Construct an enum value from `n` payload values popped off the stack:
+    /// `p1 … pn -> e` (delta 1 - n, min n). u32 = enum id, u16 = variant
+    /// id within the declaration.
+    EnumNew(u32, u16),
     /// Test an enum on top of the stack against a variant by index,
     /// pushing whether it matches: e -> bool (delta 0, min 1). The enum is
     /// **consumed** — lower `Dup`/`DupDeep`s the scrutinee first (same
     /// shape as `IsErr`). u32 = variant index within the enum declaration.
     EnumIs(u32),
-    /// Move the variant's payload (index 0) out of the enum: e -> p (delta
-    /// 0, min 1). Consumes the enum, like `UnwrapOk`. T05 supports the
-    /// first payload only (PLAN §3.2).
-    EnumPayload,
+    /// Move the variant's payload (index) out of the enum: e -> p (delta
+    /// 0, min 1). Consumes the enum, like `UnwrapOk`. u32 = variant
+    /// reference, u16 = payload index within the variant.
+    EnumPayload(u32, u16),
 }

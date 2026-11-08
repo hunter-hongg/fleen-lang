@@ -2,7 +2,7 @@
 
 use fleen_compiler::codegen::{
     Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
-    V5_OPCODE_BASE,
+    V5_OPCODE_BASE, V6_OPCODE_BASE,
 };
 
 /// A verification failure.
@@ -109,8 +109,20 @@ pub enum VerifyError {
         pc: usize,
         byte: u8,
     },
+    /// A v6 instruction (opcode >= 0xCB) appears in a v1–v5 module
+    /// (0.0.6 T06; the explicit gate).
+    V6OpcodeInV1V2V3V4V5Module {
+        pc: usize,
+        byte: u8,
+    },
     /// `StructNew` names a struct id outside the `struct_defs` table.
     StructIndexOutOfRange {
+        pc: usize,
+        index: u16,
+    },
+    /// `EnumNew` names an enum id outside the `enum_defs` table, or a
+    /// variant id outside that enum's variant list.
+    EnumIndexOutOfRange {
         pc: usize,
         index: u16,
     },
@@ -241,10 +253,22 @@ impl std::fmt::Display for VerifyError {
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v5, module is v1/v2/v3/v4"
                 )
             }
+            Self::V6OpcodeInV1V2V3V4V5Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v6, module is v1/v2/v3/v4/v5"
+                )
+            }
             Self::StructIndexOutOfRange { pc, index } => {
                 write!(
                     f,
                     "StructNew at pc {pc} references struct id {index}, out of range"
+                )
+            }
+            Self::EnumIndexOutOfRange { pc, index } => {
+                write!(
+                    f,
+                    "EnumNew at pc {pc} references enum/variant id {index}, out of range"
                 )
             }
             Self::EmptyFunctionBody { func } => {
@@ -282,6 +306,34 @@ fn u32_at(code: &[u8], pc: usize) -> Result<u32, VerifyError> {
         code[pc + 2],
         code[pc + 3],
     ]))
+}
+
+/// Resolve the `EnumNew` at `d` against `module.enum_defs`, returning its
+/// variant's payload count.
+///
+/// Both the structural walk (`walk_function`) and the stack-effect pass call
+/// this one check, so a forged enum/variant id can never be reported with a
+/// different `index` depending on which pass notices it first.
+fn enum_new_payload_count(code: &[u8], d: &Decoded, module: &Module) -> Result<i64, VerifyError> {
+    let enum_id = u16_at(code, d.pc + 1)?;
+    let variant_idx = u16_at(code, d.pc + 3)?;
+    let enum_def =
+        module
+            .enum_defs
+            .get(enum_id as usize)
+            .ok_or(VerifyError::EnumIndexOutOfRange {
+                pc: d.pc,
+                index: enum_id,
+            })?;
+    let variant =
+        enum_def
+            .variants
+            .get(variant_idx as usize)
+            .ok_or(VerifyError::EnumIndexOutOfRange {
+                pc: d.pc,
+                index: variant_idx,
+            })?;
+    Ok(variant.payload_types.len() as i64)
 }
 
 /// Decode the instruction starting at `pc`.
@@ -429,7 +481,13 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
                 .len() as i64;
             (1 - n, n)
         }
-        Opcode::GetField => (0, 1), // s → v
+        Opcode::EnumNew => {
+            let n = enum_new_payload_count(code, d, module)?;
+            (1 - n, n)
+        }
+        Opcode::EnumIs => (0, 1),      // e -> bool (consumes)
+        Opcode::EnumPayload => (0, 1), // e -> p (consumes)
+        Opcode::GetField => (0, 1),    // s → v
         Opcode::SetFieldLocal | Opcode::SetFieldGlobal => (-1, 1), // v →
         // 0.0.3 V03: arrays (BYTECODE v3). `ArrNew`'s element count is the
         // operand (static — no abstract interpretation); `ArrLen`/`ArrGet`
@@ -553,6 +611,13 @@ fn walk_function(
                 byte: d.opcode as u8,
             });
         }
+        // 0.0.6 T06: v6 (enum, >= 0xCB) is kept out of v1–v5 modules.
+        if module.version < 6 && (d.opcode as u8) >= V6_OPCODE_BASE {
+            return Err(VerifyError::V6OpcodeInV1V2V3V4V5Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
         match d.opcode {
             // 0.0.3 V02: `StructNew`'s struct id must index the
             // `struct_defs` table; the field count is cross-checked via the
@@ -565,6 +630,11 @@ fn walk_function(
                         index: id,
                     });
                 }
+            }
+            Opcode::EnumNew => {
+                // Structural cross-check: the id/variant must index enum_defs.
+                // The stack-effect pass reuses the same helper below.
+                enum_new_payload_count(code, d, module)?;
             }
             Opcode::Const => {
                 let idx = const_index(code, d)?;
