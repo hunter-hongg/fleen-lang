@@ -4,7 +4,7 @@
 > tests.  Decisions D1–D6 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T06 implemented; T07–T08 pending.**
+> **Status: T01–T07 implemented; T08 pending.**
 
 ---
 
@@ -278,25 +278,58 @@ place (module files named `enum.fln` are NOT importable in 0.0.6).
 
 ## T07 — VM: `Value::Enum` + opcode dispatch + std intrinsics (F4/F5; D4/D5)
 
-- [ ] `Value::Enum { variant: u16, payload: Box<[Value]> }` — not serialized;
+- [x] `Value::Enum { variant: u16, payload: Box<[Value]> }` — not serialized;
       `clone` deep-copies payloads; `Eq` on an enum is a defensive VM error
       (same posture as struct/array); `fmt.rs` debug rendering
-- [ ] Dispatch: `EnumNew` / `EnumIs` / `EnumPayload`; defensive errors
+- [x] Dispatch: `EnumNew` / `EnumIs` / `EnumPayload`; defensive errors
       `EnumIndexOutOfRange`, `EnumPayloadMismatch` (variant ≠ operand; payload
       index out of range joins the family)
-- [ ] std intrinsics (schematic, `std.str.concat` precedent):
+- [x] std intrinsics (schematic, `std.str.concat` precedent):
       `std.arr.concat([T], [T]) -> [T]`, `std.arr.flatten([[T]]) -> [T]`
       registered in `builtins.rs` (`BuiltinLowering::Intrinsic`), implemented
       in the VM builtin dispatcher
-- [ ] `InlineIter`: `fold` → `foldl` rename (inline lowering unchanged);
+- [x] `InlineIter`: `fold` → `foldl` rename (inline lowering unchanged);
       `foldr` added as a backward index loop (no reverse copy)
-- [ ] `std/arr.fln` + `std/collection/iter.fln` headers updated (the module
+- [x] `std/arr.fln` + `std/collection/iter.fln` headers updated (the module
       header is the API contract); all `fold` call sites renamed:
       `tests/std/iter.fln`, `tests/e2e/valid/iter_helpers.fln`,
       `examples/0.0.3/tour`
-- [ ] Tests: VM unit (enum value clone/move, defensive errors); std tests for
+- [x] Tests: VM unit (enum value clone/move, defensive errors); std tests for
       concat/flatten/foldl/foldr incl. a foldl-vs-foldr associativity
       differential (`(a-b)-c` vs `a-(b-c)` on `[1,2,3]`)
+
+**As-built notes (review-driven additions beyond the card):**
+- The VM defensive errors are new `RuntimeErrorKind` variants
+  (`EnumIndexOutOfRange(u16)`, `EnumPayloadMismatch { variant_ref }`),
+  replacing the T06-era reuse of `StructOutOfRange` / `ResultMismatch` /
+  `IndexOutOfRange`; the three T06 VM tests were re-pinned to the new names.
+  The verify-side `VerifyError::EnumIndexOutOfRange` keeps its own shape
+  (`pc`, `index`) — same name, different type family.
+- The enum-value container joins the two deep walks:
+  `deep_fork_kind` and `value_has_blocked_channel` recurse into
+  `Value::Enum` payloads (typeck already rejects Future/channel/ptr
+  payloads — the walks are the forged-bytecode backstops, the same
+  posture as `Ok`/`Err`/array/struct).
+- `clone` deep-copying payloads needed no code: the derived `Clone` on
+  `Box<[Value]>` already copies recursively. Pinned by a unit test
+  (structural equality + distinct heap boxes).
+- `flatten`'s one-level rule is **typeck-native**: the schematic walk
+  binds `T0` through `Array(Array(Var))`, so `[[[int]]]` flattens to
+  `[[int]]` (peels one layer; chain `flatten` to go deeper) — the PLAN
+  D5 wording "a type error" describes the *element type* mismatch
+  (`flatten([int])` is rejected by the substituted-param unify), not a
+  depth check.
+- `foldr`'s lowering is a countdown loop: `__i` starts at
+  `count - 1` (an empty array yields `-1`, failing the head check with
+  no special case), the head tests `0 <= __i` (`Le` with the constant
+  first — `ord_op` pops `b` then `a`), the step is `ISub`, and the
+  accumulator call is `f(elem, acc)` (the D5 reversed order). No
+  reverse copy of the source array.
+- The builtin-table change (2 additions + 1 rename) shifts every
+  subsequent FuncId; the committed v3 fixture was regenerated via
+  `cargo test -p fleen-vm --test compat regenerate_fixtures -- --ignored`
+  (the documented tool), and the golden-encoding tests needed no change
+  (they build their own modules).
 
 **Depends on**: T06; T05 for the lowering the fold rename touches.
 **Refs**: PLAN §4, §6, D4, D5.
