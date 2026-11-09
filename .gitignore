@@ -4,3 +4,4 @@
 !tests/fixtures/**/*.flnc
 release/**/*.tar.gz
 release/**/*.zip
+.flint-test-cache/

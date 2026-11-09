@@ -229,6 +229,8 @@ pub enum TokenKind {
     Bang,
     /// `?` (0.0.2: Result propagation suffix)
     Question,
+    /// `|` (0.0.7 T02: or-patterns in `choose`)
+    Pipe,
     /// Line break (0.0.2: consumed by the ASI pass, never reaches the parser;
     /// collapsed runs of blank lines, not emitted at file start or inside
     /// block comments — see docs/0.0.2/ASI.md §2)
@@ -382,6 +384,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Percent => write!(f, "%"),
             TokenKind::Bang => write!(f, "!"),
             TokenKind::Question => write!(f, "?"),
+            TokenKind::Pipe => write!(f, "|"),
             TokenKind::Newline => write!(f, "newline"),
             TokenKind::Dot => write!(f, "."),
             TokenKind::Comma => write!(f, ","),

@@ -593,8 +593,44 @@ impl Parser {
         }))
     }
 
-    /// Parse a pattern in a choose arm.
+    /// Parse a pattern in a choose arm (0.0.7 T02): `or_pattern`.
+    /// `pattern = or_pattern ; or_pattern = typed_pattern { "|" typed_pattern }`
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.pattern_start_span();
+        let first = self.parse_typed_pattern()?;
+        if !matches!(self.current_kind(), TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.matches(&TokenKind::Pipe) {
+            alts.push(self.parse_typed_pattern()?);
+        }
+        let end = self.prev_span_end();
+        Ok(Pattern::Or(alts, self.span(start, end)))
+    }
+
+    fn pattern_start_span(&self) -> u32 {
+        self.current().span.start
+    }
+
+    /// `typed_pattern = constructor_pattern [ ":" type ]` (`:` tighter than `|`).
+    fn parse_typed_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.pattern_start_span();
+        let pat = self.parse_constructor_pattern()?;
+        if self.matches(&TokenKind::Colon) {
+            let ty = self.parse_type()?;
+            let end = self.prev_span_end();
+            return Ok(Pattern::TypeGuard {
+                pattern: Box::new(pat),
+                ty,
+                span: self.span(start, end),
+            });
+        }
+        Ok(pat)
+    }
+
+    /// `constructor_pattern = literal | ident | ident "(" [pattern {"," pattern}] ")"`.
+    fn parse_constructor_pattern(&mut self) -> Result<Pattern, ParseError> {
         // P5: Support negated numeric patterns (e.g., `when -1 { ... }`)
         let is_neg = self.matches(&TokenKind::Minus);
         let kind = self.current_kind().clone();
@@ -643,10 +679,7 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 reject_neg!();
-                // 0.0.2: `Ok(ident)` / `Err(ident)` result patterns. `Ok` /
-                // `Err` are plain Ident tokens — only the syntactic form
-                // matters here; typeck binds the semantics (U04). Without a
-                // following `(` they stay ordinary identifier patterns.
+                // 0.0.2/0.0.7: `Ok(p)` / `Err(p)` win over Enum; payload is a full pattern.
                 if (name == "Ok" || name == "Err")
                     && matches!(self.peek_kind(1), Some(TokenKind::LParen))
                 {
@@ -657,21 +690,26 @@ impl Parser {
                     };
                     return self.parse_result_pattern(ctor, span);
                 }
-                // 0.0.6 T02: `Variant(binding)` enum patterns generalize the
-                // Result shape (D3). The parser records the form only; typeck
-                // resolves the variant against the registration table. `Ok` /
-                // `Err` win above, so this arm never sees them. Zero-payload
-                // variants match as a bare ident below — no new pattern.
+                // 0.0.6/0.0.7: `Variant(p₁, …, pₙ)`; zero-payload bare → Ident.
                 if matches!(self.peek_kind(1), Some(TokenKind::LParen)) {
                     let vname = name.clone();
-                    self.advance(); // consume the variant name
+                    self.advance(); // consume variant name
                     self.expect(&TokenKind::LParen, "`(` after variant name")?;
-                    let binding = self.parse_ident()?;
-                    self.expect(&TokenKind::RParen, "`)` after enum pattern binding")?;
+                    let mut payloads = Vec::new();
+                    if !self.matches(&TokenKind::RParen) {
+                        payloads.push(self.parse_pattern()?);
+                        while self.matches(&TokenKind::Comma) {
+                            if matches!(self.current_kind(), TokenKind::RParen) {
+                                break; // trailing comma
+                            }
+                            payloads.push(self.parse_pattern()?);
+                        }
+                        self.expect(&TokenKind::RParen, "`)` after enum pattern")?;
+                    }
                     let end = self.prev_span_end();
                     return Ok(Pattern::Enum {
                         name: vname,
-                        binding,
+                        payloads,
                         span: self.span(span.start, end),
                     });
                 }
@@ -693,8 +731,8 @@ impl Parser {
         Ok(pat)
     }
 
-    /// Parse `Ok(ident)` / `Err(ident)` after the constructor token is
-    /// recognized. Caller has not consumed the `Ok`/`Err` identifier yet.
+    /// Parse `Ok(p)` / `Err(p)` after the constructor token is recognized.
+    /// Caller has not consumed the `Ok`/`Err` identifier yet. (0.0.7: payload is a full pattern.)
     fn parse_result_pattern(
         &mut self,
         ctor: ResultCtor,
@@ -702,12 +740,12 @@ impl Parser {
     ) -> Result<Pattern, ParseError> {
         self.advance(); // consume `Ok` / `Err`
         self.expect(&TokenKind::LParen, "`(` after `Ok`/`Err` pattern")?;
-        let binding = self.parse_ident()?;
-        self.expect(&TokenKind::RParen, "`)` after pattern binding")?;
+        let payload = Box::new(self.parse_pattern()?);
+        self.expect(&TokenKind::RParen, "`)` after pattern")?;
         let end = self.prev_span_end();
         Ok(Pattern::ResultCtor {
             ctor,
-            binding,
+            payload,
             span: self.span(ctor_span.start, end),
         })
     }

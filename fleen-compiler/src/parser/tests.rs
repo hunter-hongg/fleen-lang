@@ -1244,12 +1244,12 @@ func main() {
             Item::Expr(Expr::Choose(ch)) => {
                 assert_eq!(ch.arms.len(), 2);
                 assert!(matches!(
-                    ch.arms[0].pattern,
-                    Pattern::ResultCtor { ctor: ResultCtor::Ok, ref binding, .. } if binding == "v"
+                    &ch.arms[0].pattern,
+                    Pattern::ResultCtor { ctor: ResultCtor::Ok, payload, .. } if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "v")
                 ));
                 assert!(matches!(
-                    ch.arms[1].pattern,
-                    Pattern::ResultCtor { ctor: ResultCtor::Err, ref binding, .. } if binding == "e"
+                    &ch.arms[1].pattern,
+                    Pattern::ResultCtor { ctor: ResultCtor::Err, payload, .. } if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "e")
                 ));
             }
             other => panic!("expected Choose expr, got {:?}", other),
@@ -1490,7 +1490,7 @@ func main() {
                 assert_eq!(ch.arms.len(), 2);
                 assert!(matches!(
                     &ch.arms[0].pattern,
-                    Pattern::Enum { name, binding, .. } if name == "Circle" && binding == "r"
+                    Pattern::Enum { name, payloads, .. } if name == "Circle" && matches!(payloads.first(), Some(Pattern::Ident(n, _)) if n == "r")
                 ));
                 assert!(matches!(&ch.arms[1].pattern, Pattern::Ident(n, _) if n == "Point"));
             }
@@ -1516,9 +1516,217 @@ func main() {
 
     #[test]
     fn reject_enum_pattern_two_bindings() {
-        // The grammar binds exactly one payload: `Variant(binding)`.
-        let err = parse_err("choose s { when Rect(a, b) { 1 } }");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        // 0.0.7 T02: parser now accepts multi-payload enum patterns; the
+        // "at most one binding" constraint moves to typeck (T05).
+        let ast = parse_str("choose s { when Rect(a, b) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert!(matches!(
+                    &ch.arms[0].pattern,
+                    Pattern::Enum { name, payloads, .. } if name == "Rect" && payloads.len() == 2
+                ));
+            }
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_or_pattern() {
+        // 0.0.7 D6: `p₁ | p₂` parses into Pattern::Or with every alternative.
+        let ast = parse_str("choose x { when 1 | 2 { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => assert!(matches!(
+                &ch.arms[0].pattern,
+                Pattern::Or(alts, _) if alts.len() == 2
+                    && alts.iter().all(|a| matches!(a, Pattern::Literal(_)))
+            )),
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_or_pattern_of_ctors() {
+        // 0.0.7 D6: constructor patterns in an or-pattern; each sub-pattern is
+        // a full recursive pattern. `Some(x)` is a ctor call (parens), while
+        // bare `None` is a zero-payload variant parsed as `Ident` at this
+        // stage (resolution to `EnumVariant` happens in typeck).
+        let ast = parse_str("choose r { when Ok(Some(x)) | Ok(None) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
+                Pattern::Or(alts, _) => {
+                    assert_eq!(alts.len(), 2);
+                    assert!(matches!(
+                        &alts[0],
+                        Pattern::ResultCtor { payload, .. }
+                            if matches!(**payload, Pattern::Enum { name: ref n, .. } if n == "Some")
+                    ));
+                    assert!(matches!(
+                        &alts[1],
+                        Pattern::ResultCtor { payload, .. }
+                            if matches!(**payload, Pattern::Ident(ref n, _) if n.as_str() == "None")
+                    ));
+                }
+                other => panic!("expected Or pattern, got {:?}", other),
+            },
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_or_pattern_of_literals() {
+        let ast = parse_str("choose v { when 1 | 2 { 0 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert!(matches!(&ch.arms[0].pattern, Pattern::Or(alts, _) if alts.len() == 2));
+            }
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_type_guard_pattern() {
+        let ast = parse_str("choose v { when x: int { 0 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
+                Pattern::TypeGuard {
+                    pattern,
+                    ty: _,
+                    span: _,
+                } => {
+                    assert!(matches!(**pattern, Pattern::Ident(ref n, _) if n == "x"));
+                }
+                other => panic!("expected TypeGuard pattern, got {:?}", other),
+            },
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_type_guard_on_ctor_pattern() {
+        // 0.0.7 D7: the guard binds tighter than `|`, so `Some(v): Option<int>`
+        // is `(Some(v)): Option<int>` — the whole ctor pattern is ascribed.
+        let ast = parse_str("choose v { when Some(v): Option<int> { 0 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert!(matches!(
+                    &ch.arms[0].pattern,
+                    Pattern::TypeGuard { pattern, .. }
+                        if matches!(**pattern, Pattern::Enum { name: ref n, .. } if n == "Some")
+                ));
+            }
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_nested_pattern_ok_pair() {
+        // 0.0.7 D5: `Ok(Pair(a, b))` — ResultCtor payload is a full ctor
+        // pattern with two sub-patterns.
+        let ast = parse_str("choose r { when Ok(Pair(a, b)) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
+                Pattern::ResultCtor { payload, .. } => match &**payload {
+                    Pattern::Enum { name, payloads, .. } => {
+                        assert_eq!(name, "Pair");
+                        assert_eq!(payloads.len(), 2);
+                    }
+                    other => panic!("expected Enum payload, got {:?}", other),
+                },
+                other => panic!("expected ResultCtor, got {:?}", other),
+            },
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_wildcard_payload_pattern() {
+        // 0.0.7 D5: `Some(_)` — wildcard in a payload position.
+        let ast = parse_str("choose v { when Some(_) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
+                Pattern::Enum { payloads, .. } => {
+                    assert!(matches!(payloads.first(), Some(Pattern::Ident(n, _)) if n == "_"));
+                }
+                other => panic!("expected Enum pattern, got {:?}", other),
+            },
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn parse_bare_zero_payload_variant_in_pattern() {
+        // 0.0.7 D4: a zero-payload variant matches bare — `None`, not `None()`.
+        let ast = parse_str("choose v { when None { 0 } when Some(x) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => {
+                assert!(matches!(&ch.arms[0].pattern, Pattern::Ident(n, _) if n == "None"));
+                assert!(
+                    matches!(&ch.arms[1].pattern, Pattern::Enum { name, .. } if name == "Some")
+                );
+            }
+            _ => panic!("expected Choose expr"),
+        }
+    }
+
+    #[test]
+    fn reject_orphan_pipe_in_pattern() {
+        // 0.0.7 D6: `|` at the top of a pattern is a syntax error.
+        let err = parse_err("choose v { when | 1 { 0 } } ;");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn reject_orphan_colon_in_pattern() {
+        // 0.0.7 D7: `:` at the top of a pattern is a syntax error.
+        let err = parse_err("choose v { when : int { 0 } } ;");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn reject_unbalanced_parens_in_nested_pattern() {
+        // 0.0.7 D5: an unclosed ctor-payload paren is a syntax error.
+        let err = parse_err("choose v { when Some(x { 0 } } ;");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn reject_trailing_content_after_pattern() {
+        // 0.0.7 D5: content after a complete pattern (and before the body) is
+        // a syntax error — the parser expects `if` (guard) or `{` (body).
+        let err = parse_err("choose v { when Some(x) 1 { 0 } } ;");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn parse_nested_result_pattern() {
+        // Payloads are recursive patterns (semantics land in T06).
+        let ast = parse_str("choose r { when Ok(Err(e)) { 1 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => assert!(matches!(
+                &ch.arms[0].pattern,
+                Pattern::ResultCtor { ctor: ResultCtor::Ok, payload, .. }
+                    if matches!(payload.as_ref(),
+                        Pattern::ResultCtor { ctor: ResultCtor::Err, payload, .. }
+                            if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "e"))
+            )),
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2081,7 +2289,9 @@ func main() {
             assert_eq!(e.type_params, vec!["T".to_string()]);
             assert_eq!(e.variants.len(), 2);
             assert_eq!(e.variants[0].name, "Some");
-            assert!(matches!(e.variants[0].payload_types.as_slice(), [Type::Named { name, args, .. }] if name == "T" && args.is_empty()));
+            assert!(
+                matches!(e.variants[0].payload_types.as_slice(), [Type::Named { name, args, .. }] if name == "T" && args.is_empty())
+            );
             assert!(e.variants[1].payload_types.is_empty());
         } else {
             panic!("expected Enum decl, got {:?}", ast.items[0]);
@@ -2200,7 +2410,9 @@ func main() {
                     assert_eq!(name, "Option");
                     assert_eq!(args.len(), 1);
                     match &args[0] {
-                        Type::Named { name: n2, args: a2, .. } => {
+                        Type::Named {
+                            name: n2, args: a2, ..
+                        } => {
                             assert_eq!(n2, "Pair");
                             assert_eq!(a2.len(), 2);
                         }
@@ -2222,7 +2434,9 @@ func main() {
                 Type::Named { name, args, .. } => {
                     assert_eq!(name, "Option");
                     match &args[0] {
-                        Type::Named { name: n2, args: a2, .. } => {
+                        Type::Named {
+                            name: n2, args: a2, ..
+                        } => {
                             assert_eq!(n2, "Pair");
                             assert_eq!(a2.len(), 2);
                         }
@@ -2268,7 +2482,9 @@ func main() {
         if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
             match v.ty.as_ref().unwrap() {
                 Type::Result(ok, err) => {
-                    assert!(matches!(ok.as_ref(), Type::Named { name, args, .. } if name == "Option" && args.len() == 1));
+                    assert!(
+                        matches!(ok.as_ref(), Type::Named { name, args, .. } if name == "Option" && args.len() == 1)
+                    );
                     assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
                 }
                 other => panic!("expected Result, got {:?}", other),
@@ -2293,7 +2509,9 @@ func main() {
     fn parse_channel_type_still_special() {
         let ast = parse_str("c: channel<int> = make();\n");
         if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
-            assert!(matches!(v.ty.as_ref(), Some(Type::Channel(inner)) if matches!(inner.as_ref(), Type::Base(BaseType::Int))));
+            assert!(
+                matches!(v.ty.as_ref(), Some(Type::Channel(inner)) if matches!(inner.as_ref(), Type::Base(BaseType::Int)))
+            );
         } else {
             panic!("expected Var with Channel type");
         }
@@ -2303,7 +2521,9 @@ func main() {
     fn parse_ptr_type_still_special() {
         let ast = parse_str("func f(p: ptr<int>) { }\n");
         if let Item::Decl(Decl::Func(fd)) = &ast.items[0] {
-            assert!(matches!(&fd.params[0].ty, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Base(BaseType::Int))));
+            assert!(
+                matches!(&fd.params[0].ty, Type::Ptr(inner) if matches!(inner.as_ref(), Type::Base(BaseType::Int)))
+            );
         } else {
             panic!("expected Func with ptr param");
         }
@@ -2314,8 +2534,12 @@ func main() {
         let ast = parse_str("enum Either<L, R> { Left(L), Right(R) }\n");
         if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
             assert_eq!(e.type_params, vec!["L", "R"]);
-            assert!(matches!(&e.variants[0].payload_types[0], Type::Named { name, .. } if name == "L"));
-            assert!(matches!(&e.variants[1].payload_types[0], Type::Named { name, .. } if name == "R"));
+            assert!(
+                matches!(&e.variants[0].payload_types[0], Type::Named { name, .. } if name == "L")
+            );
+            assert!(
+                matches!(&e.variants[1].payload_types[0], Type::Named { name, .. } if name == "R")
+            );
         } else {
             panic!("expected Enum");
         }

@@ -196,20 +196,29 @@ impl Resolver {
     /// declared in the current module and, for already-qualified names,
     /// validate the target exists and check `pub` visibility. Composite
     /// types recurse so nested `Named` references are rewritten too.
-    fn resolve_type(&mut self, ty: &Type, span: Span) -> Type {
+    fn resolve_type(&mut self, ty: &Type, _span: Span) -> Type {
+        // `_span` is only ever threaded through the recursive calls — every
+        // `Type::Named` arm carries its own `ty_span`, and the base cases
+        // clone. The parameter exists so callers can pass a location for the
+        // future case where resolution itself needs to report one (clippy
+        // `only_used_in_recursion` notes this; the signature is deliberate).
         match ty {
-            Type::Array(elem) => Type::Array(Box::new(self.resolve_type(elem, span))),
-            Type::Box(inner) => Type::Box(Box::new(self.resolve_type(inner, span))),
-            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_type(inner, span))),
+            Type::Array(elem) => Type::Array(Box::new(self.resolve_type(elem, _span))),
+            Type::Box(inner) => Type::Box(Box::new(self.resolve_type(inner, _span))),
+            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_type(inner, _span))),
             Type::Result(ok, err) => Type::Result(
-                Box::new(self.resolve_type(ok, span)),
-                Box::new(self.resolve_type(err, span)),
+                Box::new(self.resolve_type(ok, _span)),
+                Box::new(self.resolve_type(err, _span)),
             ),
             Type::Func(params, ret) => Type::Func(
-                params.iter().map(|p| self.resolve_type(p, span)).collect(),
-                Box::new(self.resolve_type(ret, span)),
+                params.iter().map(|p| self.resolve_type(p, _span)).collect(),
+                Box::new(self.resolve_type(ret, _span)),
             ),
-            Type::Named { name, args, span: ty_span } => {
+            Type::Named {
+                name,
+                args,
+                span: ty_span,
+            } => {
                 let resolved_name = self.resolve_type_name_str(name, *ty_span);
                 let resolved_args = args
                     .iter()
@@ -222,11 +231,11 @@ impl Resolver {
                 }
             }
             // 0.0.4 F3: `Future<T>` recurses so a nested named type resolves.
-            Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, span))),
+            Type::Future(inner) => Type::Future(Box::new(self.resolve_type(inner, _span))),
             // 0.0.4 F9: `channel<T>` recurses so the payload type resolves.
-            Type::Channel(inner) => Type::Channel(Box::new(self.resolve_type(inner, span))),
+            Type::Channel(inner) => Type::Channel(Box::new(self.resolve_type(inner, _span))),
             // 0.0.5 T02: `ptr<T>` recurses so the pointee type resolves.
-            Type::Ptr(inner) => Type::Ptr(Box::new(self.resolve_type(inner, span))),
+            Type::Ptr(inner) => Type::Ptr(Box::new(self.resolve_type(inner, _span))),
             Type::Base(_) | Type::Range => ty.clone(),
         }
     }
@@ -2021,39 +2030,53 @@ impl Resolver {
             }
             Pattern::ResultCtor {
                 ctor,
-                binding,
+                payload,
                 span,
             } => {
-                // 0.0.2: `Ok(v)` / `Err(e)` — the parser only saw the form;
-                // the binding registers like an identifier pattern and its
-                // type (the payload T or E) is determined by typeck (U04).
-                let (binding_id, hir_id) = self.declare_pattern_binding(&binding, span)?;
+                let hir_id = self.next_hir_id();
+                let payload_hir = self.resolve_pattern(*payload)?;
                 Ok(PatternHir::ResultCtor {
                     ctor,
-                    name: binding,
-                    binding_id,
+                    payload: Box::new(payload_hir),
                     hir_id,
                     span,
                 })
             }
             Pattern::Enum {
                 name,
-                binding,
+                payloads,
                 span,
             } => {
-                // 0.0.6 T02: `when Variant(binding)` — the parser only saw
-                // the syntactic form; the binding registers like an
-                // identifier pattern and its type is determined by
-                // typeck (T04/T05). The variant name travels on the HIR
-                // pattern; matching against the registration table is T05.
-                // The *binding* name travels too (T05): typeck declares it
-                // in the arm scope so the guard and body can read it.
-                let (binding_id, hir_id) = self.declare_pattern_binding(&binding, span)?;
+                let hir_id = self.next_hir_id();
+                let mut payloads_hir = Vec::with_capacity(payloads.len());
+                for p in payloads {
+                    payloads_hir.push(self.resolve_pattern(p)?);
+                }
                 Ok(PatternHir::Enum {
-                    name: name.clone(),
-                    binding_name: binding,
-                    binding_id,
+                    name,
+                    payloads: payloads_hir,
                     hir_id,
+                    span,
+                })
+            }
+            Pattern::Or(alts, span) => {
+                // 0.0.7 D6: all alternatives must bind the same names/types
+                // (checked in typeck T05). Resolver declares each alternative's
+                // bindings into the arm scope — the resolver `declare` overwrites
+                // only builtins, so a same-name re-declaration surfaces as
+                // `DuplicateBinding` here, which is the failure we want to
+                // report until typeck's union-typing pass (T05) owns it.
+                let mut alts_hir = Vec::with_capacity(alts.len());
+                for alt in alts {
+                    alts_hir.push(self.resolve_pattern(alt)?);
+                }
+                Ok(PatternHir::Or(alts_hir, span))
+            }
+            Pattern::TypeGuard { pattern, ty, span } => {
+                let inner = self.resolve_pattern(*pattern)?;
+                Ok(PatternHir::TypeGuard {
+                    pattern: Box::new(inner),
+                    ty,
                     span,
                 })
             }

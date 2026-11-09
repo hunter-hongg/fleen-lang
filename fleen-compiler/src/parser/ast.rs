@@ -493,25 +493,34 @@ pub enum ResultCtor {
 }
 
 /// Pattern in a `choose` arm.
+///
+/// 0.0.7 T02: patterns become recursive. `ResultCtor`/`Enum` payloads are full
+/// `Pattern`s (nested, multi-binding); `Or` and `TypeGuard` are new.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// Literal pattern (int, float, bool, string)
+    /// Literal pattern (int, float, bool, string).
     Literal(Expr),
-    /// Identifier pattern (binds variable). Carries the pattern's span.
+    /// Identifier pattern (binds variable, or `_` wildcard). Carries the pattern's span.
     Ident(String, Span),
-    /// `Ok(binding)` / `Err(binding)` (0.0.2: Result pattern; semantics
-    /// resolved by typeck). Carries the whole pattern's span.
+    /// `Ok(p)` / `Err(p)` (0.0.2: Result pattern; 0.0.7: payload is a full pattern).
     ResultCtor {
         ctor: ResultCtor,
-        binding: String,
+        payload: Box<Pattern>,
         span: Span,
     },
-    /// `Variant(binding)` enum-variant pattern (0.0.6 T02): the parser
-    /// records the syntactic form only; typeck resolves the variant
-    /// (T04/T05). Carries the whole pattern's span.
+    /// `Variant(p₁, …, pₙ)` enum-variant pattern (0.0.6; 0.0.7: payloads are full patterns).
+    /// Zero-payload variants written bare are represented as `Ident` (parser), not `Enum`.
     Enum {
         name: String,
-        binding: String,
+        payloads: Vec<Pattern>,
+        span: Span,
+    },
+    /// `p₁ | p₂` (0.0.7 D6). Alternatives are full patterns.
+    Or(Vec<Pattern>, Span),
+    /// `pattern : T` (0.0.7 D7). Compile-time type ascription.
+    TypeGuard {
+        pattern: Box<Pattern>,
+        ty: Type,
         span: Span,
     },
 }
@@ -524,6 +533,8 @@ impl Pattern {
             Pattern::Ident(_, s) => *s,
             Pattern::ResultCtor { span, .. } => *span,
             Pattern::Enum { span, .. } => *span,
+            Pattern::Or(_, span) => *span,
+            Pattern::TypeGuard { span, .. } => *span,
         }
     }
 }

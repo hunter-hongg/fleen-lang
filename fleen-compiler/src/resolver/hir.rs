@@ -451,7 +451,7 @@ pub struct ChooseArmHir {
     pub body: BlockHir,
 }
 
-/// Pattern in HIR.
+/// Pattern in HIR (0.0.7 T02: recursive).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternHir {
     Literal(Box<ExprHir>),
@@ -461,25 +461,43 @@ pub enum PatternHir {
         hir_id: HirId,
         span: Span,
     },
-    /// `Ok(binding)` / `Err(binding)` (0.0.2; semantics checked by typeck).
+    /// `Ok(p)` / `Err(p)` (0.0.2; 0.0.7: payload recursive).
     ResultCtor {
         ctor: ResultCtor,
-        name: String,
-        binding_id: BindingId,
+        payload: Box<PatternHir>,
         hir_id: HirId,
         span: Span,
     },
-    /// Placeholder for a pattern that failed to resolve (error already recorded).
-    Error,
-    /// `when Variant(binding)` (0.0.6 T02); semantics checked by typeck.
-    /// `name` is the **variant** name; `binding_name` is the identifier the
-    /// payload is bound to (typeck declares it in the arm scope, so the
-    /// guard and body can read it — the T05 fix).
+    /// `Variant(p₁, …, pₙ)` (0.0.6; 0.0.7: payloads recursive).
     Enum {
         name: String,
-        binding_name: String,
-        binding_id: BindingId,
+        payloads: Vec<PatternHir>,
         hir_id: HirId,
         span: Span,
     },
+    /// `p₁ | p₂` (0.0.7 D6).
+    Or(Vec<PatternHir>, Span),
+    /// `pattern : T` (0.0.7 D7).
+    TypeGuard {
+        pattern: Box<PatternHir>,
+        ty: Type,
+        span: Span,
+    },
+    /// Placeholder for a pattern that failed to resolve.
+    Error,
+}
+
+impl PatternHir {
+    /// The source span of this pattern.
+    pub fn span(&self) -> Span {
+        match self {
+            PatternHir::Literal(e) => e.span(),
+            PatternHir::Ident { span, .. } => *span,
+            PatternHir::ResultCtor { span, .. } => *span,
+            PatternHir::Enum { span, .. } => *span,
+            PatternHir::Or(_, span) => *span,
+            PatternHir::TypeGuard { span, .. } => *span,
+            PatternHir::Error => Span::SYNTHETIC,
+        }
+    }
 }

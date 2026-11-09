@@ -608,7 +608,9 @@ impl Parser {
         if self.check(&crate::lexer::TokenKind::Gt) {
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "type parameter (an enum type parameter list needs at least one parameter)".to_string(),
+                    expected:
+                        "type parameter (an enum type parameter list needs at least one parameter)"
+                            .to_string(),
                     found: self.current().kind.clone(),
                 },
                 span: self.current().span,
@@ -617,10 +619,14 @@ impl Parser {
         let mut params = Vec::new();
         loop {
             let p = self.parse_ident()?;
-            if matches!(p.as_str(), "int" | "float" | "bool" | "string" | "unit" | "char") {
+            if matches!(
+                p.as_str(),
+                "int" | "float" | "bool" | "string" | "unit" | "char"
+            ) {
                 return Err(ParseError {
                     kind: ParseErrorKind::Expected {
-                        expected: "type parameter name (must not shadow a base type name)".to_string(),
+                        expected: "type parameter name (must not shadow a base type name)"
+                            .to_string(),
                         found: crate::lexer::TokenKind::Ident(p.clone()),
                     },
                     span: self.current().span,
@@ -634,7 +640,10 @@ impl Parser {
                 break; // trailing comma
             }
         }
-        self.expect(&crate::lexer::TokenKind::Gt, "`>` after enum type parameters")?;
+        self.expect(
+            &crate::lexer::TokenKind::Gt,
+            "`>` after enum type parameters",
+        )?;
         Ok(params)
     }
 
@@ -642,9 +651,17 @@ impl Parser {
     /// (0.0.7 T01, D1/D9). Returns empty vec if neither delimiter follows.
     fn parse_optional_type_args(&mut self) -> Result<Vec<ast::Type>, ParseError> {
         let (open, close, close_msg) = if self.check(&crate::lexer::TokenKind::Lt) {
-            (crate::lexer::TokenKind::Lt, crate::lexer::TokenKind::Gt, "`>` after type arguments")
+            (
+                crate::lexer::TokenKind::Lt,
+                crate::lexer::TokenKind::Gt,
+                "`>` after type arguments",
+            )
         } else if self.check(&crate::lexer::TokenKind::LBracket) {
-            (crate::lexer::TokenKind::LBracket, crate::lexer::TokenKind::RBracket, "`]` after type arguments")
+            (
+                crate::lexer::TokenKind::LBracket,
+                crate::lexer::TokenKind::RBracket,
+                "`]` after type arguments",
+            )
         } else {
             return Ok(Vec::new());
         };
@@ -654,7 +671,8 @@ impl Parser {
             // parse error (requires at least one type argument).
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
-                    expected: "type argument (type argument list needs at least one type)".to_string(),
+                    expected: "type argument (type argument list needs at least one type)"
+                        .to_string(),
                     found: self.current().kind.clone(),
                 },
                 span: self.current().span,

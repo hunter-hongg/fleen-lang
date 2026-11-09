@@ -1720,7 +1720,7 @@ impl TypeChecker {
         for arm in &choose_expr.arms {
             self.scopes.enter_block_scope();
 
-            let typed_pattern = self.typeck_pattern(&arm.pattern, &scrutinee_type)?;
+            let typed_pattern = self.typeck_pattern_inner(&arm.pattern, &scrutinee_type)?;
 
             let typed_guard = match &arm.guard {
                 Some(guard) => {
@@ -1777,8 +1777,8 @@ impl TypeChecker {
         }
     }
 
-    /// Type check a pattern.
-    fn typeck_pattern(
+    /// Type check a pattern (arm-level entry).
+    fn typeck_pattern_inner(
         &mut self,
         pattern: &PatternHir,
         scrutinee_type: &Type,
@@ -1846,8 +1846,7 @@ impl TypeChecker {
             }
             PatternHir::ResultCtor {
                 ctor,
-                name,
-                binding_id: pat_binding_id,
+                payload,
                 hir_id: pat_hir_id,
                 span,
             } => {
@@ -1859,7 +1858,6 @@ impl TypeChecker {
                     (ast::ResultCtor::Ok, Some((t, _))) => t.clone(),
                     (ast::ResultCtor::Err, Some((_, e))) => e.clone(),
                     (_, None) => {
-                        // Ok/Err patterns only match a Result scrutinee.
                         self.add_error(
                             TypeckErrorKind::PatternTypeMismatch {
                                 pattern: ctor_name,
@@ -1870,46 +1868,22 @@ impl TypeChecker {
                         return Err(());
                     }
                 };
-                // The payload binding registers like an identifier pattern
-                // (its type is T or E). The binding is a *move* (D7); the
-                // transfer is registered by the ownership checker (U05).
-                let new_binding_id = *pat_binding_id;
-                let new_hir_id = *pat_hir_id;
-                let _ = self.scopes.declare(
-                    name.clone(),
-                    Binding {
-                        id: new_binding_id,
-                        kind: BindingKind::Variable,
-                        mutable: true,
-                        builtin: false,
-                        ref_param: false,
-                        span: *span,
-                        hir_id: new_hir_id,
-                        global_name: None,
-                    },
-                );
-                self.binding_types
-                    .insert(new_binding_id, payload_ty.clone());
+                // T02/T05: recurse into payload pattern. T02 keeps legacy
+                // single-binding semantics for `Ident` payloads.
+                let typed_payload = self.typeck_pattern_inner(payload, &payload_ty)?;
                 Ok(TypedPatternHir::ResultCtor {
                     ctor: *ctor,
-                    name: name.clone(),
-                    binding_id: new_binding_id,
-                    ty: payload_ty,
-                    hir_id: new_hir_id,
+                    payload: Box::new(typed_payload),
+                    hir_id: *pat_hir_id,
                     span: *span,
                 })
             }
             PatternHir::Enum {
                 name,
-                binding_name,
-                binding_id: pat_binding_id,
+                payloads,
                 hir_id: pat_hir_id,
                 span,
             } => {
-                // 0.0.6 T05: `Variant(binding)` is now fully typed. The
-                // scrutinee must be the enum that declares `name`, and the
-                // binding takes the variant's first payload (index 0) as a
-                // move — the same rule as `Ok(v)` / `Err(e)` (D7).
                 let mismatch = |tc: &mut Self| {
                     tc.add_error(
                         TypeckErrorKind::EnumPatternMismatch {
@@ -1923,46 +1897,74 @@ impl TypeChecker {
                     mismatch(self);
                     return Err(());
                 };
-                // The scrutinee is an enum but does not declare this
-                // variant, or the variant is zero-payload (nothing to bind).
                 let Some(variant_index) = self.enum_variant_index(info.id, name) else {
                     mismatch(self);
                     return Err(());
                 };
-                let payload_ty = match self.enum_first_payload(info.id, variant_index as u32) {
-                    Some(t) => t.clone(),
-                    None => {
-                        mismatch(self);
-                        return Err(());
-                    }
-                };
-                let new_binding_id = *pat_binding_id;
-                let new_hir_id = *pat_hir_id;
-                // Declare the **binding** name (not the variant name) so the
-                // guard and the arm body can read the payload.
-                let _ = self.scopes.declare(
-                    binding_name.clone(),
-                    Binding {
-                        id: new_binding_id,
-                        kind: BindingKind::Variable,
-                        mutable: true,
-                        builtin: false,
-                        ref_param: false,
-                        span: *span,
-                        hir_id: new_hir_id,
-                        global_name: None,
-                    },
-                );
-                self.binding_types
-                    .insert(new_binding_id, payload_ty.clone());
+                let decl_payloads = self.enums[info.id.0 as usize].variants[variant_index]
+                    .payload_types
+                    .clone();
+                // T02 staging: `when Variant(a)` still binds the single
+                // payload (the 0.0.6 exhaustiveness tests depend on it);
+                // full multi-payload patterns land in T05/T06, so reject them
+                // here rather than let lower store only payload 0 while extra
+                // bindings read an uninitialized slot (review finding).
+                if payloads.len() > 1 {
+                    self.add_error(
+                        TypeckErrorKind::UnsupportedFeature {
+                            feature: "multi-payload enum pattern (0.0.7 T05)".to_string(),
+                        },
+                        *span,
+                    );
+                    return Err(());
+                }
+                if payloads.len() != decl_payloads.len()
+                    && !(payloads.len() == 1 && !decl_payloads.is_empty())
+                {
+                    mismatch(self);
+                    return Err(());
+                }
+                // SAFETY: `len > 1` is rejected above, so either the variant
+                // declares payloads (index 0 exists) or `payloads` is empty
+                // and this loop body never runs.
+                let mut typed_payloads = Vec::with_capacity(payloads.len());
+                for (i, p) in payloads.iter().enumerate() {
+                    let pty = decl_payloads.get(i).unwrap_or(&decl_payloads[0]).clone();
+                    typed_payloads.push(self.typeck_pattern_inner(p, &pty)?);
+                }
                 Ok(TypedPatternHir::Enum {
                     enum_id: info.id,
                     variant_index: variant_index as u32,
                     name: name.clone(),
-                    binding_id: new_binding_id,
-                    ty: payload_ty,
-                    hir_id: new_hir_id,
+                    payloads: typed_payloads,
+                    hir_id: *pat_hir_id,
                     span: *span,
+                })
+            }
+            PatternHir::Or(alts, span) => {
+                // T02 staging: every alternative is typechecked so its inner
+                // bindings land in the arm scope; the cross-alternative
+                // "same bindings, same types" rule is D6 / T05.
+                let mut typed_alts = Vec::with_capacity(alts.len());
+                for alt in alts {
+                    typed_alts.push(self.typeck_pattern_inner(alt, scrutinee_type)?);
+                }
+                Ok(TypedPatternHir::Or(typed_alts, *span))
+            }
+            PatternHir::TypeGuard {
+                pattern,
+                ty: ascribed,
+                ..
+            } => {
+                // T02 staging: keep the ascribed type so the guard is not
+                // silently widened to the scrutinee type; unification with
+                // the scrutinee is D7 / T05.
+                let typed_inner = self.typeck_pattern_inner(pattern.as_ref(), scrutinee_type)?;
+                let guard_span = pattern.as_ref().span();
+                Ok(TypedPatternHir::TypeGuard {
+                    pattern: Box::new(typed_inner),
+                    ty: self.convert_type(ascribed, guard_span),
+                    span: guard_span,
                 })
             }
             PatternHir::Error => Ok(TypedPatternHir::Error),
@@ -1976,14 +1978,6 @@ impl TypeChecker {
             .variants
             .iter()
             .position(|v| v.name == name)
-    }
-
-    /// The converted first payload type of enum `id`'s variant at `index`,
-    /// or `None` for a zero-payload variant (0.0.6 T05).
-    fn enum_first_payload(&self, id: EnumId, index: u32) -> Option<&Type> {
-        self.enums[id.0 as usize].variants[index as usize]
-            .payload_types
-            .first()
     }
 
     /// Check choose exhaustiveness.

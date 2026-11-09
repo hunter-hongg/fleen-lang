@@ -104,6 +104,29 @@ fn collect_block(alloc: &mut SlotAlloc, block: &TypedBlockHir) {
     }
 }
 
+fn collect_pattern_slots(alloc: &mut SlotAlloc, pat: &TypedPatternHir) {
+    match pat {
+        TypedPatternHir::Literal(lit) => collect_expr(alloc, lit),
+        TypedPatternHir::Ident { binding_id, .. } => {
+            alloc.slot_for(*binding_id);
+        }
+        TypedPatternHir::ResultCtor { payload, .. } => collect_pattern_slots(alloc, payload),
+        TypedPatternHir::Enum { payloads, .. } => {
+            for p in payloads {
+                collect_pattern_slots(alloc, p);
+            }
+        }
+        TypedPatternHir::EnumVariant { .. } => {}
+        TypedPatternHir::Or(alts, _) => {
+            for alt in alts {
+                collect_pattern_slots(alloc, alt);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => collect_pattern_slots(alloc, pattern),
+        TypedPatternHir::Error => {}
+    }
+}
+
 fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
     match expr {
         TypedExprHir::Assign { rhs, .. } => collect_expr(alloc, rhs),
@@ -137,20 +160,7 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
         TypedExprHir::Choose(e) => {
             collect_expr(alloc, &e.scrutinee);
             for arm in &e.arms {
-                match &arm.pattern {
-                    TypedPatternHir::Literal(lit) => collect_expr(alloc, lit),
-                    TypedPatternHir::Ident { binding_id, .. } => {
-                        alloc.slot_for(*binding_id);
-                    }
-                    TypedPatternHir::ResultCtor { binding_id, .. } => {
-                        alloc.slot_for(*binding_id);
-                    }
-                    TypedPatternHir::Enum { binding_id, .. } => {
-                        alloc.slot_for(*binding_id);
-                    }
-                    TypedPatternHir::EnumVariant { .. } => {}
-                    TypedPatternHir::Error => {}
-                }
+                collect_pattern_slots(alloc, &arm.pattern);
                 if let Some(guard) = &arm.guard {
                     collect_expr(alloc, guard);
                 }

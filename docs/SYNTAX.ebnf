@@ -219,7 +219,18 @@ when_clause     = "when" , pattern , [ "if" , expr ] , block ;
 otherwise_clause = "otherwise" , block ;
 (* Note: an otherwise clause carries no semicolon *)
 
-pattern         = neg_pattern
+pattern         = or_pattern ;
+
+(* 0.0.7 D6: or-patterns — any of the alternatives may match.
+   The `|` operator binds looser than a type guard, tighter than the arm `if`. *)
+or_pattern      = typed_pattern , { "|" , typed_pattern } ;
+
+(* 0.0.7 D7: type-guard pattern — `pattern : Type`.
+   Ascribes the scrutinee to a narrower type (compile-time only). *)
+typed_pattern   = constructor_pattern , [ ":" , type ] ;
+
+constructor_pattern
+                = neg_pattern
                 | literal
                 | ident
                 | result_pattern
@@ -229,17 +240,19 @@ pattern         = neg_pattern
 neg_pattern     = "-" , (int_lit | float_lit) ;
 
 (* 0.0.2: the Ok/Err patterns for Result; bindings follow move semantics;
-   Ok + Err arms together are exhaustive, no otherwise needed *)
-result_pattern  = ( "Ok" | "Err" ) , "(" , ident , ")" ;
+   Ok + Err arms together are exhaustive, no otherwise needed.
+   0.0.7 T02: the payload becomes a full recursive pattern. *)
+result_pattern  = ( "Ok" | "Err" ) , "(" , pattern , ")" ;
 
-(* 0.0.6 T02: the enum variant pattern — `Variant` or `Variant(binding)`.
-   The binding names the variant's FIRST payload (a 0.0.6 pattern binds at
-   most one value, like the `Ok(x)` form); a zero-payload variant is matched
-   by the bare `Variant` spelling (no parentheses).
+(* 0.0.6 T02 + 0.0.7 T02: the enum variant pattern — `Variant` or
+   `Variant(pattern , … , pattern)`. Each payload is now a full recursive
+   pattern (multi-payload `Variant(a, b)` parses; the "at most one binding"
+   constraint moves to typeck, T05). A zero-payload variant is matched by
+   the bare `Variant` spelling (no parentheses).
    The variant name must belong to the scrutinee's enum type — a mismatch is
    the typeck error `EnumPatternMismatch`. One arm per variant makes the
    `choose` exhaustive (no `otherwise` needed, D3). *)
-enum_pattern    = ident , [ "(" , ident , ")" ] ;
+enum_pattern    = ident , [ "(" , pattern , { "," , pattern } , ")" ] ;
 
 
 (* ---------- Operator Precedence (lowest to highest) ---------- *)

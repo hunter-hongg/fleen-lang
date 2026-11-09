@@ -808,7 +808,7 @@ pub struct TypedChooseArmHir {
     pub body: TypedBlockHir,
 }
 
-/// Pattern in Typed HIR.
+/// Pattern in Typed HIR (0.0.7 T02: recursive).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedPatternHir {
     Literal(Box<TypedExprHir>),
@@ -819,36 +819,35 @@ pub enum TypedPatternHir {
         hir_id: HirId,
         span: Span,
     },
-    /// `Ok(v)` / `Err(e)` (0.0.2 U04): binds the payload `v: T` / `e: E`
-    /// of a `Result<T, E>` scrutinee; the binding is a move (D7).
+    /// `Ok(p)` / `Err(p)` (recursive payload). T05 owns full semantics.
     ResultCtor {
         ctor: ResultCtor,
-        name: String,
-        binding_id: BindingId,
-        ty: Type,
+        payload: Box<TypedPatternHir>,
         hir_id: HirId,
         span: Span,
     },
-    /// `Variant(binding)` (0.0.6 T05): a payload-carrying enum-variant
-    /// pattern on an enum scrutinee. Binds the first payload (index 0) as
-    /// a move (same rule as `Ok`/`Err`); the variant is resolved to
-    /// `(enum_id, variant_index)` so lower emits `EnumIs` / `EnumPayload`.
+    /// Payload-carrying enum-variant pattern (recursive payloads).
     Enum {
         enum_id: EnumId,
         variant_index: u32,
         name: String,
-        binding_id: BindingId,
-        ty: Type,
+        payloads: Vec<TypedPatternHir>,
         hir_id: HirId,
         span: Span,
     },
-    /// `Variant` (0.0.6 T05): a zero-payload variant written bare (the
-    /// parser produces an `Ident` pattern for it). No binding; matches on
-    /// the variant discriminant only.
+    /// Zero-payload variant (bare). Discriminant match only.
     EnumVariant {
         enum_id: EnumId,
         variant_index: u32,
         name: String,
+        span: Span,
+    },
+    /// 0.0.7 D6.
+    Or(Vec<TypedPatternHir>, Span),
+    /// 0.0.7 D7. `ty` refers to the shared `typed_hir::Type` enum.
+    TypeGuard {
+        pattern: Box<TypedPatternHir>,
+        ty: Type,
         span: Span,
     },
     Error,

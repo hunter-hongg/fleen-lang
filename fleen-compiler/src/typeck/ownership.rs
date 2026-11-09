@@ -813,7 +813,9 @@ impl<'a> Cx<'a> {
             let mut arm_cx = Cx::new(self.globals, self.global_names, self.errors);
             arm_cx.state = after_scrutinee.clone();
             arm_cx.declared = self.declared.clone();
-            if let Some(binding) = pattern_binding(&arm.pattern) {
+            let mut bindings = Vec::new();
+            pattern_bindings(&arm.pattern, &mut bindings);
+            for binding in bindings {
                 arm_cx.state.remove(&binding);
                 arm_cx.declared.insert(binding);
             }
@@ -831,18 +833,25 @@ impl<'a> Cx<'a> {
     }
 }
 
-/// The binding introduced by a pattern, if any: identifier patterns and
-/// `Ok(v)` / `Err(e)` payloads both bind a fresh value per arm.
-fn pattern_binding(pat: &TypedPatternHir) -> Option<BindingId> {
+/// Bindings introduced by a pattern (0.0.7 T02 minimal: recurse for legacy single-binding).
+fn pattern_bindings(pat: &TypedPatternHir, out: &mut Vec<BindingId>) {
     match pat {
-        TypedPatternHir::Ident { binding_id, .. }
-        | TypedPatternHir::ResultCtor { binding_id, .. }
-        // 0.0.6 T05: `Variant(b)` moves the first payload out, exactly like
-        // `Ok(v)` / `Err(e)`; a zero-payload `EnumVariant` binds nothing.
-        | TypedPatternHir::Enum { binding_id, .. } => Some(*binding_id),
+        TypedPatternHir::Ident { binding_id, .. } => out.push(*binding_id),
+        TypedPatternHir::ResultCtor { payload, .. } => pattern_bindings(payload, out),
+        TypedPatternHir::Enum { payloads, .. } => {
+            for p in payloads {
+                pattern_bindings(p, out);
+            }
+        }
+        TypedPatternHir::Or(alts, _) => {
+            if let Some(first) = alts.first() {
+                pattern_bindings(first, out);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => pattern_bindings(pattern, out),
         TypedPatternHir::EnumVariant { .. }
         | TypedPatternHir::Literal(_)
-        | TypedPatternHir::Error => None,
+        | TypedPatternHir::Error => {}
     }
 }
 

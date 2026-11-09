@@ -2664,6 +2664,34 @@ fn unsafe_async_call_from_safe_is_error() {
     );
 }
 
+// ---- 0.0.7 T02: recursive pattern grammar staging ----
+
+#[test]
+fn t02_multi_payload_enum_pattern_is_rejected() {
+    // The parser accepts `when Pair(a, b)` (T02 grammar), but typeck rejects
+    // it until T05/T06 land the full semantics — otherwise the arm body
+    // would read `b` from an uninitialized slot.
+    let errs = compile_err(
+        "enum Pair3 { Pair(int, string), }\n\
+         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(a, b) { 0 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::UnsupportedFeature { .. })),
+        "expected UnsupportedFeature for multi-payload pattern, got {errs:?}"
+    );
+}
+
+#[test]
+fn t02_single_payload_enum_pattern_still_compiles() {
+    // T02 staging keeps the 0.0.6 legacy form: `when Variant(a)` binds the
+    // single payload so the existing exhaustive tests keep passing.
+    compile_ok(
+        "enum Shape2 { Point, Circle(float), Rect(float, float), }\n\
+         func f(s: Shape2): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a) { 2 }\n    }\n}",
+    );
+}
+
 // ---- 0.0.6 T05: choose on enums + exhaustiveness (D3) ----
 
 #[test]

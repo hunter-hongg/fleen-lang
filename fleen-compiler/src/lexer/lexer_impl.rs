@@ -123,6 +123,7 @@ impl<'a> Lexer<'a> {
                 return Ok(self.make_token(TokenKind::Bang, 1));
             }
             '?' => return Ok(self.make_token(TokenKind::Question, 1)),
+            '|' => return Ok(self.make_token(TokenKind::Pipe, 1)),
             '=' => {
                 if self.next_char == Some('=') {
                     return Ok(self.make_token(TokenKind::Eq, 2));

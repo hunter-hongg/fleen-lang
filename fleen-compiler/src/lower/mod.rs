@@ -573,8 +573,28 @@ fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
         TypedPatternHir::Ident { span, .. }
         | TypedPatternHir::ResultCtor { span, .. }
         | TypedPatternHir::Enum { span, .. }
-        | TypedPatternHir::EnumVariant { span, .. } => *span,
+        | TypedPatternHir::EnumVariant { span, .. }
+        | TypedPatternHir::Or(_, span)
+        | TypedPatternHir::TypeGuard { span, .. } => *span,
         TypedPatternHir::Error => arm.body.span,
+    }
+}
+
+/// T02 legacy-compat: the single `Ident` binding from a first enum payload.
+/// Returns the binding id or a `0.0.7 T06` error for nested/complex payloads.
+fn first_payload_binding(
+    payloads: &[TypedPatternHir],
+    span: Span,
+) -> Result<BindingId, LowerError> {
+    if let Some(TypedPatternHir::Ident { binding_id, .. }) = payloads.first() {
+        Ok(*binding_id)
+    } else {
+        Err(LowerError::new(
+            LowerErrorKind::UnsupportedFeature {
+                feature: "nested/multi-payload enum pattern (0.0.7 T06)",
+            },
+            span,
+        ))
     }
 }
 
@@ -2081,6 +2101,14 @@ impl<'a> FnBodyCx<'a> {
                         *span,
                     ));
                 }
+                TypedPatternHir::Or(_, span) | TypedPatternHir::TypeGuard { span, .. } => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "or-pattern / type-guard in non-enum choose (0.0.7 T06)",
+                        },
+                        *span,
+                    ));
+                }
                 // 0.0.6 T05: variant patterns only reach the dedicated
                 // `lower_choose_enum` path; encountering one here means the
                 // typeck invariant is broken -- fail loudly (the T02 lesson).
@@ -2179,7 +2207,7 @@ impl<'a> FnBodyCx<'a> {
         for arm in &e.arms {
             if let TypedPatternHir::ResultCtor {
                 ctor: ResultCtor::Ok,
-                binding_id,
+                payload,
                 span,
                 ..
             } = &arm.pattern
@@ -2193,14 +2221,24 @@ impl<'a> FnBodyCx<'a> {
                         *span,
                     ));
                 }
-                self.slots.slot_for(*binding_id);
-                let slot = self.slots.get(*binding_id).expect("slot just allocated");
-                let arm_ok = fb.new_block();
-                fb.start(arm_ok);
-                fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
-                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                self.lower_block(fb, &arm.body)?;
-                ok_jumps.push(fb.jump_later());
+                // T02 compat: legacy single ident payload.
+                if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
+                    self.slots.slot_for(*binding_id);
+                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    let arm_ok = fb.new_block();
+                    fb.start(arm_ok);
+                    fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
+                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                    self.lower_block(fb, &arm.body)?;
+                    ok_jumps.push(fb.jump_later());
+                } else {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "nested/complex Result pattern payload (0.0.7 T06)",
+                        },
+                        *span,
+                    ));
+                }
             }
         }
 
@@ -2215,7 +2253,7 @@ impl<'a> FnBodyCx<'a> {
         for arm in &e.arms {
             if let TypedPatternHir::ResultCtor {
                 ctor: ResultCtor::Err,
-                binding_id,
+                payload,
                 span,
                 ..
             } = &arm.pattern
@@ -2229,17 +2267,27 @@ impl<'a> FnBodyCx<'a> {
                         *span,
                     ));
                 }
-                self.slots.slot_for(*binding_id);
-                let slot = self.slots.get(*binding_id).expect("slot just allocated");
-                let arm_err = fb.new_block();
-                if first_err.is_none() {
-                    first_err = Some(arm_err);
+                // T02 compat: legacy single ident payload.
+                if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
+                    self.slots.slot_for(*binding_id);
+                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    let arm_err = fb.new_block();
+                    if first_err.is_none() {
+                        first_err = Some(arm_err);
+                    }
+                    fb.start(arm_err);
+                    fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
+                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                    self.lower_block(fb, &arm.body)?;
+                    err_jumps.push(fb.jump_later());
+                } else {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "nested/complex Result pattern payload (0.0.7 T06)",
+                        },
+                        *span,
+                    ));
                 }
-                fb.start(arm_err);
-                fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
-                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                self.lower_block(fb, &arm.body)?;
-                err_jumps.push(fb.jump_later());
             }
         }
 
@@ -2406,15 +2454,17 @@ impl<'a> FnBodyCx<'a> {
             match (&arm.pattern, &arm.guard) {
                 (
                     TypedPatternHir::Enum {
-                        binding_id,
+                        payloads,
                         variant_index,
                         span,
                         ..
                     },
                     Some(guard),
                 ) => {
-                    self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    // T02 compat: legacy single-ident first payload.
+                    let binding_id = first_payload_binding(payloads, *span)?;
+                    self.slots.slot_for(binding_id);
+                    let slot = self.slots.get(binding_id).expect("slot just allocated");
                     // Move the payload out of a Dup copy into the binding
                     // slot; the parked scrutinee stays for later tests. Both
                     // the guard and the body read this slot.
@@ -2431,15 +2481,17 @@ impl<'a> FnBodyCx<'a> {
                 }
                 (
                     TypedPatternHir::Enum {
-                        binding_id,
+                        payloads,
                         variant_index,
                         span,
                         ..
                     },
                     None,
                 ) => {
-                    self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
+                    // T02 compat: legacy single-ident first payload.
+                    let binding_id = first_payload_binding(payloads, *span)?;
+                    self.slots.slot_for(binding_id);
+                    let slot = self.slots.get(binding_id).expect("slot just allocated");
                     // `EnumPayload` consumes the parked enum (e -> p, like
                     // `UnwrapOk`); no `Pop` before it.
                     fb.emit(MirInstr::new(
