@@ -1,0 +1,9 @@
+// Test: a type parameter is not a value — using it as an expression after
+// the declaration is an unresolved binding (0.0.7 T03: type parameters do
+// NOT enter the binding scope).
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func main(): int = T

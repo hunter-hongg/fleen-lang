@@ -1830,6 +1830,44 @@ fn param_enum_duplicate_type_param_is_error() {
 }
 
 #[test]
+fn param_enum_duplicate_type_param_points_at_first_occurrence() {
+    // The duplicate diagnostic names the FIRST occurrence's span (the
+    // parameter identifier), not the whole enum head (0.0.7 T03 review).
+    let errs = resolve_str("enum Pair<T, T> { Pair(T, T) }")
+        .expect_err("duplicate type parameter must be reported");
+    let dup = errs
+        .iter()
+        .find(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. }))
+        .expect("duplicate type parameter must be reported");
+    let ResolveErrorKind::DuplicateBinding { first_span, .. } = &dup.kind else {
+        unreachable!("matched above")
+    };
+    assert!(
+        first_span.end > first_span.start,
+        "first_span must be the first parameter's identifier, not a zero-width or enum-head span"
+    );
+    assert_ne!(
+        *first_span, dup.span,
+        "first_span must differ from the duplicate's own span"
+    );
+}
+
+#[test]
+fn param_type_param_not_in_binding_scope() {
+    // A type parameter is not a value: after `enum Option<T>`, using `T`
+    // as an expression must be an undeclared variable — the parameter
+    // never enters the binding scope (0.0.7 T03).
+    let kinds = resolve_err_kinds("enum Option<T> { Some(T), None }\nfunc main(): int = T");
+    assert!(
+        kinds.iter().any(|k| matches!(
+            k,
+            ResolveErrorKind::UndeclaredVariable { name } if name == "T"
+        )),
+        "a type parameter must not become a value binding, got {kinds:?}"
+    );
+}
+
+#[test]
 fn param_enum_dotted_ctor_resolves() {
     let hir = resolve_str(
         "enum Option<T> { Some(T), None }\n\

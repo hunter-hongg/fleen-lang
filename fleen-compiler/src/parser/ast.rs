@@ -48,15 +48,25 @@ pub enum Decl {
 
 /// `enum` declaration (0.0.6 T02, extended 0.0.7 T01 D1): ordered variants,
 /// each with a name plus 0+ payload types. `type_params` lists declaration-
-/// local type parameter names (`enum Option<T>` → `["T"]`); empty for a
-/// monomorphic enum.
+/// local type parameters (`enum Option<T>` → one `TypeParam` named `T`);
+/// empty for a monomorphic enum. Each parameter carries the span of its
+/// identifier so registration diagnostics can point at the first occurrence
+/// of a duplicate (0.0.7 T03 review).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     pub name: String,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
     pub is_pub: bool,
+}
+
+/// One declaration-local type parameter of an `enum` (0.0.7 T01 D1): the
+/// parameter name plus the span of the identifier it was parsed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    pub span: Span,
 }
 
 /// A single `enum` variant: `name` plus 0+ payload types.

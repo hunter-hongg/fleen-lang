@@ -186,6 +186,45 @@ impl ModuleTable {
     }
 }
 
+impl ExportDef {
+    /// A non-enum export (func / const / global / struct): no variant names,
+    /// no type parameters.
+    fn simple(name: String, is_pub: bool, span: Span, kind: ExportKind) -> Self {
+        Self {
+            name,
+            is_pub,
+            span,
+            kind,
+            enum_variants: Vec::new(),
+            type_param_count: 0,
+        }
+    }
+
+    /// An enum export. 0.0.6 T03: enum names export/import exactly like
+    /// struct names — `pub enum` is importable cross-module, a non-`pub`
+    /// enum stays module-local; the variant names travel with the export so
+    /// a cross-module constructor path (`shapes.Color.Red`) can resolve
+    /// them. 0.0.7 T03 (D1): the type-parameter count travels too — the
+    /// arity a cross-module use site must satisfy; variant names do not
+    /// change with parameterization.
+    fn enum_export(
+        name: String,
+        is_pub: bool,
+        span: Span,
+        enum_variants: Vec<String>,
+        type_param_count: usize,
+    ) -> Self {
+        Self {
+            name,
+            is_pub,
+            span,
+            kind: ExportKind::Enum,
+            enum_variants,
+            type_param_count,
+        }
+    }
+}
+
 /// Collect the top-level item map for one parsed module.
 pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
     let mut items = HashMap::new();
@@ -194,66 +233,28 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
             ast::Item::Import(_) => {}
             ast::Item::Expr(_) => {}
             ast::Item::Decl(decl) => {
-                let (name, is_pub, span, kind, enum_variants, type_param_count) = match decl {
-                    ast::Decl::Func(f) => (
-                        f.name.clone(),
-                        f.is_pub,
-                        f.span,
-                        ExportKind::Func,
-                        Vec::new(),
-                        0,
-                    ),
-                    ast::Decl::Const(c) => (
-                        c.name.clone(),
-                        c.is_pub,
-                        c.span,
-                        ExportKind::Const,
-                        Vec::new(),
-                        0,
-                    ),
-                    ast::Decl::Var(v) => (
-                        v.name.clone(),
-                        v.is_pub,
-                        v.span,
-                        ExportKind::Global,
-                        Vec::new(),
-                        0,
-                    ),
-                    ast::Decl::Struct(s) => (
-                        s.name.clone(),
-                        s.is_pub,
-                        s.span,
-                        ExportKind::Struct,
-                        Vec::new(),
-                        0,
-                    ),
-                    // 0.0.6 T03: enum names export/import exactly like
-                    // struct names. `pub enum` is importable cross-module;
-                    // a non-`pub` enum stays module-local. The variant names
-                    // travel with the export so a cross-module constructor
-                    // path (`shapes.Color.Red`) can resolve them.
-                    // 0.0.7 T03 (D1): the type-parameter count travels too —
-                    // the arity a cross-module use site must satisfy.
-                    ast::Decl::Enum(e) => (
+                let export = match decl {
+                    ast::Decl::Func(f) => {
+                        ExportDef::simple(f.name.clone(), f.is_pub, f.span, ExportKind::Func)
+                    }
+                    ast::Decl::Const(c) => {
+                        ExportDef::simple(c.name.clone(), c.is_pub, c.span, ExportKind::Const)
+                    }
+                    ast::Decl::Var(v) => {
+                        ExportDef::simple(v.name.clone(), v.is_pub, v.span, ExportKind::Global)
+                    }
+                    ast::Decl::Struct(s) => {
+                        ExportDef::simple(s.name.clone(), s.is_pub, s.span, ExportKind::Struct)
+                    }
+                    ast::Decl::Enum(e) => ExportDef::enum_export(
                         e.name.clone(),
                         e.is_pub,
                         e.span,
-                        ExportKind::Enum,
                         e.variants.iter().map(|v| v.name.clone()).collect(),
                         e.type_params.len(),
                     ),
                 };
-                items.insert(
-                    name.clone(),
-                    ExportDef {
-                        name,
-                        is_pub,
-                        span,
-                        kind,
-                        enum_variants,
-                        type_param_count,
-                    },
-                );
+                items.insert(export.name.clone(), export);
             }
         }
     }

@@ -199,6 +199,50 @@ impl Resolver {
         self.errors.push(ResolveError { kind, span });
     }
 
+    /// Report a name collision: the same `DuplicateBinding` shape for every
+    /// registration site (module items, scope bindings, enum type parameters,
+    /// enum variants), with the first declaration's span for diagnostics.
+    fn push_duplicate(&mut self, name: &str, first_span: Span, span: Span) {
+        self.add_error(
+            ResolveErrorKind::DuplicateBinding {
+                name: name.to_string(),
+                first_span,
+            },
+            span,
+        );
+    }
+
+    /// Resolve the payload types of one enum's variants (0.0.6 T04 /
+    /// 0.0.7 T03). This is the ONLY place that installs
+    /// `type_param_scope`: it is active exactly for payload-type resolution
+    /// and is cleared before this returns, so no early path can leak the
+    /// declaration-local parameters into other resolution.
+    fn resolve_enum_variants(
+        &mut self,
+        params: &[String],
+        variants: &[EnumVariant],
+    ) -> Vec<EnumVariantHir> {
+        debug_assert!(
+            self.type_param_scope.is_empty(),
+            "type-parameter scope must be empty outside payload resolution"
+        );
+        self.type_param_scope = params.to_vec();
+        let resolved = variants
+            .iter()
+            .map(|v| EnumVariantHir {
+                name: v.name.clone(),
+                payload_types: v
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.resolve_type(ty, v.span))
+                    .collect(),
+                span: v.span,
+            })
+            .collect();
+        self.type_param_scope.clear();
+        resolved
+    }
+
     /// Resolve type references for 0.0.3 V05: qualify bare struct names
     /// declared in the current module and, for already-qualified names,
     /// validate the target exists and check `pub` visibility. Composite
@@ -1653,25 +1697,13 @@ impl Resolver {
                         .map(|item| item.span)
                         .unwrap_or(e.span)
                 };
-                self.errors.push(ResolveError {
-                    kind: ResolveErrorKind::DuplicateBinding {
-                        name: e.name.clone(),
-                        first_span,
-                    },
-                    span: e.span,
-                });
+                self.push_duplicate(&e.name, first_span, e.span);
                 continue;
             }
             // A top-level function or variable already bound in the global
             // scope is the same collision, seen from the binding side.
             if let Some(first) = self.scopes.get(&e.name) {
-                self.errors.push(ResolveError {
-                    kind: ResolveErrorKind::DuplicateBinding {
-                        name: e.name.clone(),
-                        first_span: first.span,
-                    },
-                    span: e.span,
-                });
+                self.push_duplicate(&e.name, first.span, e.span);
                 continue;
             }
             // Variant payload types obey the same `ref` rule as struct
@@ -1693,54 +1725,34 @@ impl Resolver {
             // DuplicateBinding rule as every other name collision); the
             // names do NOT enter the binding scope — they exist only so the
             // payload types below resolve their bare references to the
-            // parameter, shadowing any module item of the same name.
+            // parameter, shadowing any module item of the same name. The
+            // diagnostic names the first occurrence's span (the parameter's
+            // own identifier), and the error points at the duplicate.
             let mut params: Vec<String> = Vec::with_capacity(e.type_params.len());
-            let mut duplicate_param = false;
+            let mut duplicate_param: Option<(String, Span, Span)> = None;
             for p in &e.type_params {
-                if params.iter().any(|q| q == p) {
-                    self.errors.push(ResolveError {
-                        kind: ResolveErrorKind::DuplicateBinding {
-                            name: p.clone(),
-                            first_span: e.span,
-                        },
-                        span: e.span,
-                    });
-                    duplicate_param = true;
+                if params.contains(&p.name) {
+                    let first_span = e
+                        .type_params
+                        .iter()
+                        .find(|q| q.name == p.name)
+                        .map(|q| q.span)
+                        .unwrap_or(e.span);
+                    duplicate_param = Some((p.name.clone(), first_span, p.span));
                     break;
                 }
-                params.push(p.clone());
+                params.push(p.name.clone());
             }
-            if duplicate_param {
+            if let Some((name, first_span, span)) = duplicate_param {
+                self.push_duplicate(&name, first_span, span);
                 continue;
             }
             // Duplicate variant names within one enum are a registration
             // error (D3: the variant namespace is per-enum, checked here).
-            // The parameter scope is active exactly for the payload-type
-            // resolution and is cleared before anything else resolves.
-            self.type_param_scope = params;
-            let variants: Vec<EnumVariantHir> = e
-                .variants
-                .iter()
-                .map(|v| EnumVariantHir {
-                    name: v.name.clone(),
-                    payload_types: v
-                        .payload_types
-                        .iter()
-                        .map(|ty| self.resolve_type(ty, v.span))
-                        .collect(),
-                    span: v.span,
-                })
-                .collect();
-            self.type_param_scope.clear();
+            let variants = self.resolve_enum_variants(&params, &e.variants);
             for (i, v) in variants.iter().enumerate() {
                 if let Some(first) = variants[..i].iter().find(|p| p.name == v.name) {
-                    self.errors.push(ResolveError {
-                        kind: ResolveErrorKind::DuplicateBinding {
-                            name: v.name.clone(),
-                            first_span: first.span,
-                        },
-                        span: v.span,
-                    });
+                    self.push_duplicate(&v.name, first.span, v.span);
                 }
             }
             let decl = EnumDeclHir {

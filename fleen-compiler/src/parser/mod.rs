@@ -603,7 +603,10 @@ impl Parser {
 
     /// Parse `enum` type parameters: `<` ident { "," ident } [ "," ] `>`.
     /// Requires at least one parameter; an empty `<>` is a parse error.
-    fn parse_enum_type_params(&mut self) -> Result<Vec<String>, ParseError> {
+    /// Each parameter records the span of its identifier (0.0.7 T03: the
+    /// resolver's duplicate-parameter diagnostic points at the first
+    /// occurrence).
+    fn parse_enum_type_params(&mut self) -> Result<Vec<ast::TypeParam>, ParseError> {
         self.expect(&crate::lexer::TokenKind::Lt, "`<` in enum type parameters")?;
         if self.check(&crate::lexer::TokenKind::Gt) {
             return Err(ParseError {
@@ -618,7 +621,9 @@ impl Parser {
         }
         let mut params = Vec::new();
         loop {
+            let pstart = self.current().span.start;
             let p = self.parse_ident()?;
+            let pend = self.prev_span_end();
             if matches!(
                 p.as_str(),
                 "int" | "float" | "bool" | "string" | "unit" | "char"
@@ -632,7 +637,10 @@ impl Parser {
                     span: self.current().span,
                 });
             }
-            params.push(p);
+            params.push(ast::TypeParam {
+                name: p,
+                span: self.span(pstart, pend),
+            });
             if !self.matches(&crate::lexer::TokenKind::Comma) {
                 break;
             }

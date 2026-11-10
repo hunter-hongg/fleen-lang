@@ -72,25 +72,50 @@
 
 ## T03 — Resolver: type-parameter scope + arity-carrying enum registration (F1; D1)
 
-- [ ] `EnumDeclHir` gains `type_param_count: usize` (replacing nothing —
+- [x] `EnumDeclHir` gains `type_param_count: usize` (replacing nothing —
       monomorphic enums keep 0).
-- [ ] Type parameters register in a **declaration-local scope** during
+- [x] Type parameters register in a **declaration-local scope** during
       resolution; they are not visible outside the enum body and are not
       values.
-- [ ] Enum names in the module export table now carry arity;
+- [x] Enum names in the module export table now carry arity;
       `ExportDef::enum_variants` unchanged (variant names do not change with
       parameterization); `register_imported_items` skips enums as before.
-- [ ] Cross-module: importing a parameterized enum carries the arity;
+- [x] Cross-module: importing a parameterized enum carries the arity;
       use-site type applications at the import site are checked against the
       declared arity at typeck (T04).
-- [ ] Collision rules unchanged: variant names still enter the per-enum
+- [x] Collision rules unchanged: variant names still enter the per-enum
       namespace; type-parameter names do **not** enter the binding scope.
-- [ ] Tests: resolver valid (import / pub of parameterized enums, dotted
+- [x] Tests: resolver valid (import / pub of parameterized enums, dotted
       constructor paths); invalid (private parameterized enum cross-module,
       name collisions).
 
 **Depends on**: T01.
 **Refs**: PLAN §5 (Resolve row), D1.
+
+**As-built (post-review hardening, 0.0.7)**:
+- Duplicate-parameter diagnostic is precise: `ast::EnumDecl.type_params` is
+  `Vec<TypeParam>` (name + identifier span — **as-built deviation from T01's
+  `Vec<String>` card text**, needed so `DuplicateBinding.first_span` points
+  at the first occurrence instead of the enum head; SPEC §4). The error's own
+  span is the duplicate parameter's identifier.
+- The declaration-local scope is installed only by
+  `Resolver::resolve_enum_variants` (the single setter, restored before it
+  returns) instead of inline set/clear around payload resolution — no early
+  path can leak it; a `debug_assert` guards emptiness outside the window.
+- Duplicate-name registration uses one helper (`Resolver::push_duplicate`)
+  for all four sites (module items, scope bindings, type parameters, enum
+  variants).
+- `exports_of_ast` builds `ExportDef` through `ExportDef::simple` /
+  `ExportDef::enum_export` constructors instead of a six-element positional
+  tuple.
+- New invalid fixture `tests/resolver/invalid/param_type_param_not_a_value.fln`
+  + tests `param_type_param_not_in_binding_scope` (UndeclaredVariable) and
+  `param_enum_duplicate_type_param_points_at_first_occurrence` (first_span
+  is the identifier, distinct from the error span).
+- Note: PLAN §5's Resolve row says use-site applications "check arity"; per
+  the ticket that check lands at typeck (T04) — resolve only carries the
+  arity through the export table. PLAN wording stays as written; T04
+  implements the check.
 
 ---
 

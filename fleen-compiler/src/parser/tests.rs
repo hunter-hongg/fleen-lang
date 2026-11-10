@@ -2281,12 +2281,21 @@ func main() {
     }
     // ========== 0.0.7 T01: enum type params + parameterized type use sites ==========
 
+    /// The type-parameter names of an enum decl, in declaration order.
+    fn type_param_names(e: &crate::parser::ast::EnumDecl) -> Vec<&str> {
+        e.type_params.iter().map(|p| p.name.as_str()).collect()
+    }
+
     #[test]
     fn parse_enum_decl_one_type_param() {
         let ast = parse_str("enum Option<T> { Some(T), None }\n");
         if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
             assert_eq!(e.name, "Option");
-            assert_eq!(e.type_params, vec!["T".to_string()]);
+            assert_eq!(type_param_names(e), vec!["T"]);
+            assert!(
+                e.type_params[0].span.end > e.type_params[0].span.start,
+                "each type parameter carries its identifier span (0.0.7 T03)"
+            );
             assert_eq!(e.variants.len(), 2);
             assert_eq!(e.variants[0].name, "Some");
             assert!(
@@ -2302,7 +2311,7 @@ func main() {
     fn parse_enum_decl_two_type_params_and_trailing_comma() {
         let ast = parse_str("enum Pair<A, B,> { Both(A, B), Empty }\n");
         if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
-            assert_eq!(e.type_params, vec!["A".to_string(), "B".to_string()]);
+            assert_eq!(type_param_names(e), vec!["A", "B"]);
             assert_eq!(e.variants[0].payload_types.len(), 2);
         } else {
             panic!("expected Enum decl, got {:?}", ast.items[0]);
@@ -2533,7 +2542,7 @@ func main() {
     fn parse_enum_type_param_used_in_variant_payload() {
         let ast = parse_str("enum Either<L, R> { Left(L), Right(R) }\n");
         if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
-            assert_eq!(e.type_params, vec!["L", "R"]);
+            assert_eq!(type_param_names(e), vec!["L", "R"]);
             assert!(
                 matches!(&e.variants[0].payload_types[0], Type::Named { name, .. } if name == "L")
             );
@@ -2550,7 +2559,7 @@ func main() {
         let ast = parse_str("pub enum Box<T> { Val(T) }\n");
         if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
             assert!(e.is_pub);
-            assert_eq!(e.type_params, vec!["T"]);
+            assert_eq!(type_param_names(e), vec!["T"]);
         } else {
             panic!("expected Enum");
         }
