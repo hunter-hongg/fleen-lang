@@ -1,0 +1,4 @@
+// Test: duplicate type parameter names are a registration error (0.0.7 T03).
+enum Pair<T, T> {
+    Pair(T, T),
+}

@@ -1,0 +1,17 @@
+// Test: parameterized enum declarations resolve (0.0.7 T03).
+// Type parameters register in a declaration-local scope; the enum names
+// carry their arity in the export table.
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    Pair(A, B),
+}
+
+func main(): int {
+    o = Option.Some(1);
+    p = Pair.Pair("a", 2);
+    0
+}

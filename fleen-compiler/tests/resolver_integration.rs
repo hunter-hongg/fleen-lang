@@ -1774,3 +1774,161 @@ fn enum_decl_inside_function_is_parser_error() {
         "nested enum must be a parser error"
     );
 }
+
+// ========== 0.0.7 T03: parameterized enums (type-param scope + arity) ==========
+
+#[test]
+fn param_enum_decl_carries_type_param_count() {
+    let hir = resolve_str(
+        "enum Option<T> { Some(T), None }\n\
+         enum Pair<A, B> { Pair(A, B) }\n\
+         enum Shape { Point, Circle(float) }",
+    )
+    .expect("parameterized and monomorphic enums should resolve");
+    let find = |name: &str| {
+        hir.enums
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} should be registered"))
+    };
+    assert_eq!(find("Option").type_param_count, 1);
+    assert_eq!(find("Pair").type_param_count, 2);
+    assert_eq!(find("Shape").type_param_count, 0);
+}
+
+#[test]
+fn param_enum_payload_param_shadows_module_item() {
+    // A module item named `T` must not capture the declaration-local type
+    // parameter: inside `enum Box<T> { Just(T) }` the payload stays the bare
+    // parameter name (unmangled), not the struct (T03; D1).
+    let hir = resolve_str("struct T { x: int }\nenum Box<T> { Just(T) }")
+        .expect("the parameter shadows the module item inside the enum body");
+    let b = hir
+        .enums
+        .iter()
+        .find(|e| e.name == "Box")
+        .expect("Box should be registered");
+    assert_eq!(b.type_param_count, 1);
+    let fleen_compiler::parser::ast::Type::Named { name, args, .. } =
+        &b.variants[0].payload_types[0]
+    else {
+        panic!("expected a named payload type, got {:?}", b.variants[0]);
+    };
+    assert_eq!(name, "T", "payload must stay the bare parameter name");
+    assert!(args.is_empty());
+}
+
+#[test]
+fn param_enum_duplicate_type_param_is_error() {
+    let kinds = resolve_err_kinds("enum Pair<T, T> { Pair(T, T) }");
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, ResolveErrorKind::DuplicateBinding { .. })),
+        "duplicate type parameter must be DuplicateBinding, got {kinds:?}"
+    );
+}
+
+#[test]
+fn param_enum_dotted_ctor_resolves() {
+    let hir = resolve_str(
+        "enum Option<T> { Some(T), None }\n\
+         func main(): int {\n    o = Option.Some(1);\n    0\n}",
+    )
+    .expect("dotted constructor path on a parameterized enum should resolve");
+    assert_eq!(hir.items.len(), 1);
+}
+
+/// Two-module table (root + `lib`) with one parameterized enum, for the
+/// cross-module arity / visibility tests below.
+fn param_enum_table(lib_pub: bool) -> fleen_compiler::resolver::modules::ModuleTable {
+    use fleen_compiler::lexer::Span;
+    use fleen_compiler::parser::ast::ImportDecl;
+    use fleen_compiler::resolver::modules::{
+        CrateDef, ExportDef, ExportKind, ModuleDef, ModuleTable,
+    };
+    use fleen_compiler::source_map::FileId;
+    use std::collections::HashMap;
+
+    let mut table = ModuleTable::default();
+    table.crates.push(CrateDef::root_crate(FileId(0)));
+    table.modules.push(ModuleDef {
+        file: FileId(0),
+        path: Vec::new(),
+        crate_id: 0,
+        is_crate_root: true,
+        imports: vec![ImportDecl {
+            path: vec!["lib".to_string()],
+            span: Span::SYNTHETIC,
+        }],
+        items: HashMap::new(),
+    });
+    let mut items = HashMap::new();
+    items.insert(
+        "Wrapper".to_string(),
+        ExportDef {
+            name: "Wrapper".to_string(),
+            is_pub: lib_pub,
+            span: Span::SYNTHETIC,
+            kind: ExportKind::Enum,
+            enum_variants: vec!["Just".to_string()],
+            type_param_count: 1,
+        },
+    );
+    table.modules.push(ModuleDef {
+        file: FileId(1),
+        path: vec!["lib".to_string()],
+        crate_id: 0,
+        is_crate_root: false,
+        imports: Vec::new(),
+        items,
+    });
+    table
+}
+
+#[test]
+fn param_enum_import_resolves_cross_module() {
+    use fleen_compiler::resolver::modules::ROOT_CRATE;
+    use fleen_compiler::resolver::resolve_module_with_table;
+
+    let table = param_enum_table(true);
+    let main_ast = parse(tokenize("import lib;\nfunc f(w: lib.Wrapper<int>): int = 0").unwrap())
+        .expect("parser should succeed");
+    let lib_ast =
+        parse(tokenize("pub enum Wrapper<T> { Just(T) }").unwrap()).expect("parser should succeed");
+
+    let (main_hir, _, _) = resolve_module_with_table(main_ast, &table, 0, 0, 0)
+        .expect("a qualified parameterized-enum use site should resolve");
+    // One import item + one function declaration.
+    assert_eq!(main_hir.items.len(), 2);
+
+    let (lib_hir, _, _) = resolve_module_with_table(lib_ast, &table, ROOT_CRATE + 1, 0, 0)
+        .expect("the lib module should resolve");
+    let w = lib_hir
+        .enums
+        .iter()
+        .find(|e| e.name == "lib.Wrapper")
+        .expect("Wrapper should be registered");
+    assert_eq!(w.type_param_count, 1, "arity travels with the declaration");
+    let fleen_compiler::parser::ast::Type::Named { name, .. } = &w.variants[0].payload_types[0]
+    else {
+        panic!("expected a named payload type");
+    };
+    assert_eq!(name, "T", "payload parameter stays declaration-local");
+}
+
+#[test]
+fn param_enum_private_cross_module_is_error() {
+    use fleen_compiler::resolver::resolve_module_with_table;
+
+    let table = param_enum_table(false);
+    let main_ast = parse(tokenize("import lib;\nfunc f(w: lib.Wrapper<int>): int = 0").unwrap())
+        .expect("parser should succeed");
+    let errs = resolve_module_with_table(main_ast, &table, 0, 0, 0)
+        .expect_err("a private parameterized enum must not be usable cross-module");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::PrivateAccess { .. })),
+        "expected PrivateAccess, got {errs:?}"
+    );
+}

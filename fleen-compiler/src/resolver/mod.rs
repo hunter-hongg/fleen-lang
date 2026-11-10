@@ -155,6 +155,12 @@ struct Resolver {
     /// but two enums may reuse a variant name, so this map is first-wins by
     /// declaration order.
     variant_to_enum: HashMap<String, String>,
+    /// 0.0.7 T03 (D1): declaration-local type-parameter scope for the enum
+    /// body currently being registered. Set by `collect_enums` around one
+    /// parameterized enum's payload-type resolution and cleared right after:
+    /// the names are `Option<T>`'s `T` — not values, not bindings, not
+    /// visible outside the declaration body.
+    type_param_scope: Vec<String>,
 }
 impl Resolver {
     fn new_for_module(
@@ -173,6 +179,7 @@ impl Resolver {
             cur_module: module_id,
             enum_table: HashMap::new(),
             variant_to_enum: HashMap::new(),
+            type_param_scope: Vec::new(),
         }
     }
 
@@ -243,6 +250,14 @@ impl Resolver {
     fn resolve_type_name_str(&mut self, name: &str, span: Span) -> String {
         let module = self.table.modules[self.cur_module].clone();
         if !name.contains('.') {
+            // 0.0.7 T03 (D1): a declaration-local type parameter shadows
+            // module items — inside `enum Option<T> { Some(T) }` the payload
+            // `T` is the parameter, not a module item named `T`. The name
+            // stays unmangled (it is declaration-local); typeck (T04)
+            // resolves it to `Type::Param(i)` by declaration order.
+            if self.type_param_scope.iter().any(|p| p == name) {
+                return name.to_string();
+            }
             // A bare name is a struct declared in the current module; leave
             // unknown names for typeck to report with its full error text.
             if module.items.contains_key(name) {
@@ -1673,8 +1688,36 @@ impl Resolver {
                     }
                 }
             }
+            // 0.0.7 T03 (D1): register the declaration-local type parameters.
+            // Duplicate parameter names are a registration error (the same
+            // DuplicateBinding rule as every other name collision); the
+            // names do NOT enter the binding scope — they exist only so the
+            // payload types below resolve their bare references to the
+            // parameter, shadowing any module item of the same name.
+            let mut params: Vec<String> = Vec::with_capacity(e.type_params.len());
+            let mut duplicate_param = false;
+            for p in &e.type_params {
+                if params.iter().any(|q| q == p) {
+                    self.errors.push(ResolveError {
+                        kind: ResolveErrorKind::DuplicateBinding {
+                            name: p.clone(),
+                            first_span: e.span,
+                        },
+                        span: e.span,
+                    });
+                    duplicate_param = true;
+                    break;
+                }
+                params.push(p.clone());
+            }
+            if duplicate_param {
+                continue;
+            }
             // Duplicate variant names within one enum are a registration
             // error (D3: the variant namespace is per-enum, checked here).
+            // The parameter scope is active exactly for the payload-type
+            // resolution and is cleared before anything else resolves.
+            self.type_param_scope = params;
             let variants: Vec<EnumVariantHir> = e
                 .variants
                 .iter()
@@ -1688,6 +1731,7 @@ impl Resolver {
                     span: v.span,
                 })
                 .collect();
+            self.type_param_scope.clear();
             for (i, v) in variants.iter().enumerate() {
                 if let Some(first) = variants[..i].iter().find(|p| p.name == v.name) {
                     self.errors.push(ResolveError {

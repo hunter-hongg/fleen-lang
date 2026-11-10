@@ -61,6 +61,13 @@ pub struct ExportDef {
     /// (`shapes.Color.Red`) finds the variants of an imported enum.
     /// Empty for every other item kind.
     pub enum_variants: Vec<String>,
+    /// 0.0.7 T03 (D1): for an enum item, the number of declaration-local
+    /// type parameters (`enum Option<T>` → 1); 0 for monomorphic enums and
+    /// every other item kind. The export table is built from the raw AST
+    /// before per-module resolution, so this is where a cross-module use
+    /// site (T04) finds the declared arity to check its type arguments
+    /// against. Variant names do not change with parameterization.
+    pub type_param_count: usize,
 }
 
 /// One crate participating in a compilation.
@@ -187,13 +194,14 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
             ast::Item::Import(_) => {}
             ast::Item::Expr(_) => {}
             ast::Item::Decl(decl) => {
-                let (name, is_pub, span, kind, enum_variants) = match decl {
+                let (name, is_pub, span, kind, enum_variants, type_param_count) = match decl {
                     ast::Decl::Func(f) => (
                         f.name.clone(),
                         f.is_pub,
                         f.span,
                         ExportKind::Func,
                         Vec::new(),
+                        0,
                     ),
                     ast::Decl::Const(c) => (
                         c.name.clone(),
@@ -201,6 +209,7 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                         c.span,
                         ExportKind::Const,
                         Vec::new(),
+                        0,
                     ),
                     ast::Decl::Var(v) => (
                         v.name.clone(),
@@ -208,6 +217,7 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                         v.span,
                         ExportKind::Global,
                         Vec::new(),
+                        0,
                     ),
                     ast::Decl::Struct(s) => (
                         s.name.clone(),
@@ -215,18 +225,22 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                         s.span,
                         ExportKind::Struct,
                         Vec::new(),
+                        0,
                     ),
                     // 0.0.6 T03: enum names export/import exactly like
                     // struct names. `pub enum` is importable cross-module;
                     // a non-`pub` enum stays module-local. The variant names
                     // travel with the export so a cross-module constructor
                     // path (`shapes.Color.Red`) can resolve them.
+                    // 0.0.7 T03 (D1): the type-parameter count travels too —
+                    // the arity a cross-module use site must satisfy.
                     ast::Decl::Enum(e) => (
                         e.name.clone(),
                         e.is_pub,
                         e.span,
                         ExportKind::Enum,
                         e.variants.iter().map(|v| v.name.clone()).collect(),
+                        e.type_params.len(),
                     ),
                 };
                 items.insert(
@@ -237,6 +251,7 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                         span,
                         kind,
                         enum_variants,
+                        type_param_count,
                     },
                 );
             }
