@@ -1,0 +1,5 @@
+// 0.0.7 D1: a bare parameterized enum is not a type — every use site must be
+// fully applied.
+// expect-typeck: TypeConstructorNeedsArgs
+enum Option<T> { Some(T), None, }
+func f(x: Option): int = 0

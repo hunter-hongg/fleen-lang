@@ -1,0 +1,4 @@
+// 0.0.7 D3: a parameterized recursive enum is still banned — `List<T>` names
+// itself through its own parameter.
+// expect-typeck: RecursiveEnum
+enum List<T> { Cons(T, List<T>), Nil, }

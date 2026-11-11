@@ -1,0 +1,4 @@
+// 0.0.7 D1: too many type arguments — `Pair` declares two parameters.
+// expect-typeck: ArityMismatch
+enum Pair<A, B> { P(A, B), }
+func f(x: Pair[int, string, bool]): int = 0

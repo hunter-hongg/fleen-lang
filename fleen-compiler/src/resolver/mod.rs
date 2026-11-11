@@ -1757,7 +1757,7 @@ impl Resolver {
             }
             let decl = EnumDeclHir {
                 name: mangled,
-                type_param_count: e.type_params.len(),
+                type_params: params.clone(),
                 variants,
                 span: e.span,
                 is_pub: e.is_pub,

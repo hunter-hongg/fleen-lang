@@ -157,6 +157,17 @@ pub enum TypeckErrorKind {
     /// A type annotation names a type that is not declared (unknown struct
     /// name in a `p: Point` position).
     UnknownType { name: String },
+    /// A parameterized enum is applied to too few type arguments (0.0.7
+    /// D1: every use site must be fully applied).
+    TypeConstructorNeedsArgs {
+        name: String,
+        expected: usize,
+        found: usize,
+    },
+    /// A type parameter could not be determined at an enum-constructor site
+    /// (0.0.7 D1: neither the surrounding annotation nor the constructor
+    /// arguments fix it).
+    TypeParameterAmbiguous { name: String },
     /// Two struct declarations share one name.
     DuplicateStructName { name: String },
     // ---- 0.0.3 V03: array error family ----
@@ -631,6 +642,25 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "unknown type `{name}` — help: declare the struct with `struct {name} {{ ... }}`"
+                )
+            }
+            TypeckErrorKind::TypeConstructorNeedsArgs {
+                name,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "type constructor `{name}` needs {expected} type argument(s), found {found} \
+                     — help: every use of a parameterized enum must be fully applied, \
+                     e.g. `{name}<int>` (0.0.7 D1)"
+                )
+            }
+            TypeckErrorKind::TypeParameterAmbiguous { name } => {
+                write!(
+                    f,
+                    "cannot infer type parameter `{name}` — help: annotate the binding with the \
+                     full type, e.g. `x: Option<int> = Option.None;`"
                 )
             }
             TypeckErrorKind::DuplicateStructName { name } => {

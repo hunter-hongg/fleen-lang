@@ -1791,9 +1791,9 @@ fn param_enum_decl_carries_type_param_count() {
             .find(|e| e.name == name)
             .unwrap_or_else(|| panic!("{name} should be registered"))
     };
-    assert_eq!(find("Option").type_param_count, 1);
-    assert_eq!(find("Pair").type_param_count, 2);
-    assert_eq!(find("Shape").type_param_count, 0);
+    assert_eq!(find("Option").type_params.len(), 1);
+    assert_eq!(find("Pair").type_params.len(), 2);
+    assert_eq!(find("Shape").type_params.len(), 0);
 }
 
 #[test]
@@ -1808,7 +1808,7 @@ fn param_enum_payload_param_shadows_module_item() {
         .iter()
         .find(|e| e.name == "Box")
         .expect("Box should be registered");
-    assert_eq!(b.type_param_count, 1);
+    assert_eq!(b.type_params.len(), 1);
     let fleen_compiler::parser::ast::Type::Named { name, args, .. } =
         &b.variants[0].payload_types[0]
     else {
@@ -1947,7 +1947,7 @@ fn param_enum_import_resolves_cross_module() {
         .iter()
         .find(|e| e.name == "lib.Wrapper")
         .expect("Wrapper should be registered");
-    assert_eq!(w.type_param_count, 1, "arity travels with the declaration");
+    assert_eq!(w.type_params.len(), 1, "arity travels with the declaration");
     let fleen_compiler::parser::ast::Type::Named { name, .. } = &w.variants[0].payload_types[0]
     else {
         panic!("expected a named payload type");

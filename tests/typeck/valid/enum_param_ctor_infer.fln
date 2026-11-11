@@ -1,0 +1,8 @@
+// 0.0.7 T04/D1: `Option.Some(1)` fixes `T` from the argument — the surrounding
+// annotation matches and construction typechecks without extra help.
+enum Option<T> { Some(T), None, }
+func use(o: Option<int>): int = 0
+func main(): int {
+    o = Option.Some(1);
+    use(o)
+}

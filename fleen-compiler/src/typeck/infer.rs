@@ -14,7 +14,7 @@ use crate::typeck::typed_hir::{
     TypedConstDeclHir, TypedDeclHir, TypedEnumDef, TypedEnumVariantDef, TypedExprChooseHir,
     TypedExprForHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir,
     TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir,
-    TypedStructDef, TypedVarBindingHir,
+    TypedStructDef, TypedVarBindingHir, substitute_params,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
@@ -48,10 +48,19 @@ struct EnumEntry {
     /// span). Raw (`ast::Type`) payloads are retained for the copy fixed
     /// point; `convert_type` turns them into `Type` on demand.
     variants: Vec<EnumVariantEntry>,
+    /// Declaration-local type parameters in declaration order (0.0.7
+    /// T04/D1); empty for a monomorphic enum. Drives the payload-skeleton
+    /// conversion (`T` → `Type::Param(i)`) and every use-site arity check.
+    type_params: Vec<String>,
     /// D2 cached verdict: an enum is Copy iff every variant's payload is
-    /// Copy. Final after the fixed-point pass.
+    /// Copy. Final after the fixed-point pass. For a parameterized enum this
+    /// stays `false` (a `Param` payload is not statically Copy); the real
+    /// verdict is computed per use site from the substituted payloads (D2).
     copy: bool,
     decl_span: Span,
+    /// Payload-skeleton conversion state (0.0.7 T04): `false` until
+    /// `convert_enum_payloads` has produced the final `variants`.
+    converted: bool,
 }
 
 /// A single variant within an [`EnumEntry`].
@@ -95,6 +104,119 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
 /// (variant name, [(payload AST type, payload span)]).
 /// Indexed by `EnumId` until every copy verdict is final.
 type RawEnumVariants = Vec<(String, Vec<(ast::Type, Span)>)>;
+
+/// Bind undetermined type parameters from an argument's concrete type
+/// (0.0.7 T04/D1): a `Param(i)` slot in the payload skeleton takes the
+/// argument's type at the matching position; composite types recurse so
+/// `Option.Some(1)` against an `Option<?P0>` skeleton binds `?P0 = int`
+/// through the `App` layer. The first binder wins; a conflicting later
+/// binder is a `TypeMismatch` at the second occurrence. Non-composite
+/// disagreements are left to the final per-argument unification.
+fn bind_pattern_params(
+    skeleton: &Type,
+    found: &Type,
+    params: &mut [Option<Type>],
+    span: Span,
+) -> Result<(), TypeckError> {
+    match (skeleton, found) {
+        (Type::Param(i), found) => {
+            let Some(slot) = params.get_mut(*i) else {
+                // Malformed skeleton (index beyond the declaration's arity);
+                // the use-site arity check already ran, so ignore.
+                return Ok(());
+            };
+            match slot {
+                slot @ None => *slot = Some(found.clone()),
+                Some(prev) if *prev == *found => {}
+                Some(prev) => {
+                    return Err(TypeckError::new(
+                        TypeckErrorKind::TypeMismatch {
+                            expected: prev.clone(),
+                            found: found.clone(),
+                        },
+                        span,
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (Type::Func(a, r), Type::Func(b, fr)) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                bind_pattern_params(x, y, params, span)?;
+            }
+            bind_pattern_params(r, fr, params, span)
+        }
+        (Type::Result(a1, b1), Type::Result(a2, b2)) => {
+            bind_pattern_params(a1, a2, params, span)?;
+            bind_pattern_params(b1, b2, params, span)
+        }
+        (Type::Array(a), Type::Array(b))
+        | (Type::Box(a), Type::Box(b))
+        | (Type::Ref(a), Type::Ref(b))
+        | (Type::Future(a), Type::Future(b))
+        | (Type::Channel(a), Type::Channel(b))
+        | (Type::Ptr(a), Type::Ptr(b)) => bind_pattern_params(a, b, params, span),
+        (Type::App(_, a), Type::App(_, b)) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                bind_pattern_params(x, y, params, span)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The argument expectation for a payload skeleton (0.0.7 T04/D1):
+/// `Some(concrete)` when every parameter the skeleton mentions is already
+/// determined (substituted in), `None` while a parameter is still open —
+/// the argument then determines the parameter from its own type instead,
+/// and the final per-argument unification re-checks it.
+fn skeleton_expected(skeleton: &Type, params: &[Option<Type>]) -> Option<Type> {
+    let mut complete = true;
+    visit_param_slots(skeleton, &mut |i| {
+        if params.get(i).is_none_or(|p| p.is_none()) {
+            complete = false;
+        }
+    });
+    if !complete {
+        return None;
+    }
+    // Every slot is bound here, so the `Unit` fallback never fires.
+    let bound: Vec<Type> = params
+        .iter()
+        .map(|p| p.clone().unwrap_or(Type::Unit))
+        .collect();
+    Some(substitute_params(skeleton, &bound))
+}
+
+/// Call `f` with every `Param(i)` index mentioned anywhere in `ty`.
+fn visit_param_slots(ty: &Type, f: &mut impl FnMut(usize)) {
+    match ty {
+        Type::Param(i) => f(*i),
+        Type::Func(ps, r) => {
+            for p in ps {
+                visit_param_slots(p, f);
+            }
+            visit_param_slots(r, f);
+        }
+        Type::Result(a, b) => {
+            visit_param_slots(a, f);
+            visit_param_slots(b, f);
+        }
+        Type::Array(e)
+        | Type::Box(e)
+        | Type::Ref(e)
+        | Type::Future(e)
+        | Type::Channel(e)
+        | Type::Ptr(e) => visit_param_slots(e, f),
+        Type::App(_, args) => {
+            for a in args {
+                visit_param_slots(a, f);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// The assignment target of a field assignment `p.f = expr` (0.0.3 V02, D2):
 /// the object binding, plus the field being written.
@@ -158,6 +280,20 @@ pub struct TypeChecker {
     enums: Vec<EnumEntry>,
     /// Enum name → id (declaration order; duplicates are rejected).
     enum_by_name: HashMap<String, EnumId>,
+    /// 0.0.7 T04/D1: declaration-local type-parameter scope for the enum
+    /// payload conversion currently running. Mirrors the resolver's
+    /// `type_param_scope` pattern: installed around exactly one enum's
+    /// payload conversion in `collect_enums` phase 3 and cleared before the
+    /// next — a bare `Named` name matching a parameter becomes
+    /// `Type::Param(i)`; outside the scope it never does.
+    enum_param_scope: Vec<String>,
+    /// Enums whose payload conversion is in flight (`convert_enum_payloads`
+    /// re-entry guard; a re-entry means an enum cycle, already reported).
+    enum_converting: HashSet<usize>,
+    /// Raw payload shapes kept from `collect_enums` phase 1 for the
+    /// on-demand conversion (`convert_enum_payloads`); drained once every
+    /// enum is converted.
+    enum_raw: Vec<RawEnumVariants>,
     /// Function name → (is_unsafe, is_trusted) mapping. Built during typeck.
     func_flags: HashMap<String, (bool, bool)>,
 }
@@ -183,6 +319,9 @@ impl TypeChecker {
             struct_by_name: HashMap::new(),
             enums: Vec::new(),
             enum_by_name: HashMap::new(),
+            enum_param_scope: Vec::new(),
+            enum_converting: HashSet::new(),
+            enum_raw: Vec::new(),
             func_flags: HashMap::new(),
         }
     }
@@ -278,18 +417,44 @@ impl TypeChecker {
             // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
             ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
             ast::Type::Named { name, args, .. } => {
-                // T01/T04 prep: parameterized use-site types are parsed but
-                // full generic resolution/arity checking lands in T04. For now,
-                // resolve the base name if no args (monomorphic path unchanged);
-                // if args are present, report UnknownType to avoid silently
-                // mis-resolving arity until T04.
+                // 0.0.7 T03/D1: a bare name equal to a declaration-local type
+                // parameter (the `T` of `enum Option<T>`) becomes `Param(i)`
+                // by declaration order. The scope is active only inside one
+                // enum's payload conversion; a parameter applied to type
+                // arguments is an arity error (parameters are not themselves
+                // parameterizable).
+                if let Some(i) = self.enum_param_scope.iter().position(|p| p == name) {
+                    if !args.is_empty() {
+                        self.add_error(
+                            TypeckErrorKind::ArityMismatch {
+                                expected: 0,
+                                found: args.len(),
+                            },
+                            span,
+                        );
+                        return Type::Unsupported(name.clone());
+                    }
+                    return Type::Param(i);
+                }
+                // 0.0.7 T04/D1: a fully applied parameterized enum —
+                // `Option<int>`. Arity is checked against the declaration
+                // (too few → `TypeConstructorNeedsArgs`, too many →
+                // `ArityMismatch`); only enums take type arguments.
                 if !args.is_empty() {
-                    self.add_error(
-                        TypeckErrorKind::UnknownType {
-                            name: format!("{name}<...> (parameterized types not yet resolved)"),
-                        },
-                        span,
-                    );
+                    if let Some(&id) = self.enum_by_name.get(name) {
+                        return self.build_enum_app(id, name, args, span);
+                    }
+                    if self.struct_by_name.contains_key(name) {
+                        self.add_error(
+                            TypeckErrorKind::ArityMismatch {
+                                expected: 0,
+                                found: args.len(),
+                            },
+                            span,
+                        );
+                    } else {
+                        self.add_error(TypeckErrorKind::UnknownType { name: name.clone() }, span);
+                    }
                     return Type::Unsupported(name.clone());
                 }
                 if let Some(&id) = self.struct_by_name.get(name) {
@@ -300,18 +465,150 @@ impl TypeChecker {
                         copy: entry.copy,
                     }))
                 } else if let Some(&id) = self.enum_by_name.get(name) {
-                    let entry = &self.enums[id.0 as usize];
-                    Type::Enum(Box::new(EnumInfo {
-                        id,
-                        name: entry.name.clone().into_boxed_str(),
-                        copy: entry.copy,
-                    }))
+                    // 0.0.7 D1: a bare parameterized enum is not a type — a
+                    // monomorphic one keeps `Type::Enum`.
+                    if self.enums[id.0 as usize].type_params.is_empty() {
+                        Type::Enum(Box::new(self.enum_info_for(id)))
+                    } else {
+                        let expected = self.enums[id.0 as usize].type_params.len();
+                        self.add_error(
+                            TypeckErrorKind::TypeConstructorNeedsArgs {
+                                name: name.clone(),
+                                expected,
+                                found: 0,
+                            },
+                            span,
+                        );
+                        Type::Unsupported(name.clone())
+                    }
                 } else {
                     self.add_error(TypeckErrorKind::UnknownType { name: name.clone() }, span);
                     Type::Unsupported(name.clone())
                 }
             }
         }
+    }
+
+    /// The `EnumInfo` for a fully converted enum entry (0.0.7 T04): the
+    /// 0.0.6 identity fields plus the arity and the `Param(i)`-marked
+    /// payload skeletons that `Type::is_copy` / `substitute_params` need.
+    /// Callers must have run `convert_enum_payloads` for `id` first.
+    fn enum_info_for(&self, id: EnumId) -> EnumInfo {
+        let entry = &self.enums[id.0 as usize];
+        EnumInfo {
+            id,
+            name: entry.name.clone().into_boxed_str(),
+            copy: entry.copy,
+            type_param_count: entry.type_params.len(),
+            payloads: entry
+                .variants
+                .iter()
+                .map(|v| v.payload_types.clone())
+                .collect(),
+        }
+    }
+
+    /// Build `Type::App` for a fully applied parameterized enum use site
+    /// (0.0.7 T04/D1). Checks the use-site arity against the declaration
+    /// (too few → `TypeConstructorNeedsArgs`, too many → `ArityMismatch`),
+    /// converts the arguments, substitutes them into the declaration's
+    /// payload skeletons and re-runs the storable rules on the substituted
+    /// payloads — `Option<ptr<int>>` is rejected exactly like a bare `ptr`
+    /// payload, because the payload copy-out would hand a pointer to safe
+    /// code (the declaration-level walk cannot see it: the skeleton only
+    /// carries a `Param` placeholder).
+    fn build_enum_app(&mut self, id: EnumId, name: &str, args: &[ast::Type], span: Span) -> Type {
+        let expected = self.enums[id.0 as usize].type_params.len();
+        if args.len() < expected {
+            self.add_error(
+                TypeckErrorKind::TypeConstructorNeedsArgs {
+                    name: name.to_string(),
+                    expected,
+                    found: args.len(),
+                },
+                span,
+            );
+            return Type::Unsupported(name.to_string());
+        }
+        if args.len() > expected {
+            self.add_error(
+                TypeckErrorKind::ArityMismatch {
+                    expected,
+                    found: args.len(),
+                },
+                span,
+            );
+            return Type::Unsupported(name.to_string());
+        }
+        let conv_args: Vec<Type> = args.iter().map(|a| self.convert_type(a, span)).collect();
+        self.convert_enum_payloads(id.0 as usize);
+        let info = self.enum_info_for(id);
+        for payloads in &info.payloads {
+            for p in payloads {
+                let sub = substitute_params(p, &conv_args);
+                if sub.contains_channel() {
+                    self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+                } else if sub.contains_future() {
+                    self.add_error(TypeckErrorKind::FutureNotStorable, span);
+                } else if sub.contains_ptr() {
+                    self.add_error(TypeckErrorKind::PtrNotStorable, span);
+                }
+            }
+        }
+        Type::App(Box::new(info), conv_args)
+    }
+
+    /// Convert one enum's raw payload types into the final skeleton stored
+    /// on its [`EnumEntry`] (0.0.6 T04 phase 3, made re-entrant for 0.0.7
+    /// T04): a parameterized payload naming an enum declared *later* must
+    /// find converted skeletons to substitute into, so `build_enum_app`
+    /// enters here on demand and the declaration-order loop below just
+    /// forces every enum. The `type_param_scope`-style single-setter rule
+    /// applies: the scope is installed around exactly one enum's conversion
+    /// and cleared before this returns. Re-entry on the same enum (an enum
+    /// cycle that phase 2a already reported) degrades to an empty skeleton.
+    fn convert_enum_payloads(&mut self, id: usize) {
+        if self.enums[id].converted {
+            return;
+        }
+        if !self.enum_converting.insert(id) {
+            return;
+        }
+        debug_assert!(
+            self.enum_param_scope.is_empty(),
+            "type-parameter scope must be empty outside payload conversion"
+        );
+        self.enum_param_scope = self.enums[id].type_params.clone();
+        // Take the raw shapes out (`self` is borrowed while converting);
+        // every unconverted enum is put back so later conversions still
+        // find their raw payloads.
+        let mut raw_all = std::mem::take(&mut self.enum_raw);
+        let raw = std::mem::take(&mut raw_all[id]);
+        self.enum_raw = raw_all;
+        let converted: Vec<EnumVariantEntry> = raw
+            .into_iter()
+            .map(|(name, payloads)| EnumVariantEntry {
+                name,
+                payload_types: payloads
+                    .into_iter()
+                    .map(|(ty, sp)| {
+                        let conv = self.convert_type(&ty, sp);
+                        if conv.contains_channel() {
+                            self.add_error(TypeckErrorKind::ChannelNotStorable, sp);
+                        } else if conv.contains_future() {
+                            self.add_error(TypeckErrorKind::FutureNotStorable, sp);
+                        } else if conv.contains_ptr() {
+                            self.add_error(TypeckErrorKind::PtrNotStorable, sp);
+                        }
+                        conv
+                    })
+                    .collect(),
+            })
+            .collect();
+        self.enum_param_scope.clear();
+        self.enums[id].variants = converted;
+        self.enums[id].converted = true;
+        self.enum_converting.remove(&id);
     }
 
     /// Build the struct table from the HIR's struct declarations (0.0.3 V02).
@@ -434,8 +731,10 @@ impl TypeChecker {
             self.enums.push(EnumEntry {
                 name: decl.name.clone(),
                 variants: Vec::new(),
+                type_params: decl.type_params.clone(),
                 copy: false,
                 decl_span: decl.span,
+                converted: false,
             });
             raw.push(
                 decl.variants
@@ -453,6 +752,10 @@ impl TypeChecker {
             );
             self.enum_by_name.insert(decl.name.clone(), id);
         }
+        // Keep the raw shapes for the on-demand conversion (0.0.7 T04):
+        // `convert_enum_payloads` reads them from `self.enum_raw` so a
+        // payload conversion can re-enter for a later-declared enum.
+        self.enum_raw = raw.clone();
 
         // Phase 2a: cycle detection (D2). Only enum-to-enum edges close an
         // enum cycle; the struct side is acyclic by construction
@@ -475,33 +778,16 @@ impl TypeChecker {
 
         // Phase 3: convert payload types now that every verdict is final,
         // with the struct-field storage checks (D1: payloads obey struct
-        // field rules).
-        for (i, variants) in raw.into_iter().enumerate() {
-            let converted: Vec<EnumVariantEntry> = variants
-                .into_iter()
-                .map(|(name, payloads)| {
-                    let payload_types: Vec<Type> = payloads
-                        .into_iter()
-                        .map(|(ty, sp)| {
-                            let conv = self.convert_type(&ty, sp);
-                            if conv.contains_channel() {
-                                self.add_error(TypeckErrorKind::ChannelNotStorable, sp);
-                            } else if conv.contains_future() {
-                                self.add_error(TypeckErrorKind::FutureNotStorable, sp);
-                            } else if conv.contains_ptr() {
-                                self.add_error(TypeckErrorKind::PtrNotStorable, sp);
-                            }
-                            conv
-                        })
-                        .collect();
-                    EnumVariantEntry {
-                        name,
-                        payload_types,
-                    }
-                })
-                .collect();
-            self.enums[i].variants = converted;
+        // field rules). Conversion lives in `convert_enum_payloads` (one
+        // enum per call, parameters resolved to `Type::Param(i)` inside the
+        // declaration-local scope); the loop forces every enum in
+        // declaration order and on-demand re-entry covers forward
+        // parameterized references. Drained raw shapes are dropped after.
+        for i in 0..self.enums.len() {
+            self.convert_enum_payloads(i);
         }
+        // Drained by the conversions (each took its slot); ensure clean.
+        self.enum_raw = Vec::new();
     }
 
     /// DFS cycle detection over enum payload references (0.0.6 D2). `path`
@@ -1440,7 +1726,7 @@ impl TypeChecker {
                 variant_name,
                 span,
                 ..
-            } => self.typeck_enum_ctor_value(enum_name, variant_name, span),
+            } => self.typeck_enum_ctor_value(enum_name, variant_name, span, expected),
             ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
             // 0.0.2 U05: ownership expressions — validated here; the
@@ -1815,6 +2101,19 @@ impl TypeChecker {
                         span: *span,
                     });
                 }
+                // 0.0.7 T04: same zero-payload variant rule on a fully
+                // applied scrutinee (`when None`).
+                if !shadowed
+                    && let Type::App(info, _) = scrutinee_type
+                    && let Some(idx) = self.enum_variant_index(info.id, name)
+                {
+                    return Ok(TypedPatternHir::EnumVariant {
+                        enum_id: info.id,
+                        variant_index: idx as u32,
+                        name: name.clone(),
+                        span: *span,
+                    });
+                }
                 // Pattern binding: new variable with scrutinee type.
                 // Keep the resolver's binding_id for consistency with
                 // guard/body identifier uses and `lower`.
@@ -1893,17 +2192,34 @@ impl TypeChecker {
                         *span,
                     );
                 };
-                let Type::Enum(info) = scrutinee_type else {
-                    mismatch(self);
-                    return Err(());
+                // 0.0.7 T04: the fully applied form carries the same
+                // `EnumId`; bind it to the bare info for the rest of the
+                // arm (payload skeletons already hold `Param(i)`).
+                let info = match scrutinee_type {
+                    Type::Enum(info) => info.clone(),
+                    Type::App(info, _) => info.clone(),
+                    _ => {
+                        mismatch(self);
+                        return Err(());
+                    }
                 };
                 let Some(variant_index) = self.enum_variant_index(info.id, name) else {
                     mismatch(self);
                     return Err(());
                 };
-                let decl_payloads = self.enums[info.id.0 as usize].variants[variant_index]
+                // 0.0.7 T04: a fully applied scrutinee substitutes its use-site
+                // arguments into the payload skeleton first — `Some(x)` on an
+                // `Option<int>` binds `x: int`, not the `Param(0)` placeholder.
+                let scrutinee_args = match scrutinee_type {
+                    Type::App(_, args) => args.clone(),
+                    _ => Vec::new(),
+                };
+                let decl_payloads: Vec<Type> = self.enums[info.id.0 as usize].variants
+                    [variant_index]
                     .payload_types
-                    .clone();
+                    .iter()
+                    .map(|p| substitute_params(p, &scrutinee_args))
+                    .collect();
                 // T02 staging: `when Variant(a)` still binds the single
                 // payload (the 0.0.6 exhaustiveness tests depend on it);
                 // full multi-payload patterns land in T05/T06, so reject them
@@ -2039,7 +2355,7 @@ impl TypeChecker {
         // arrive as `EnumVariant`, payload variants as `Enum`; a variant
         // is covered by either form (the binding is irrelevant to
         // exhaustiveness).
-        if let Type::Enum(info) = scrutinee_type {
+        if let Type::Enum(info) | Type::App(info, _) = scrutinee_type {
             let variants = &self.enums[info.id.0 as usize].variants;
             let mut missing: Vec<String> = Vec::new();
             for (idx, variant) in variants.iter().enumerate() {
@@ -2154,7 +2470,7 @@ impl TypeChecker {
         if matches!(op, "==" | "!=")
             && (matches!(
                 typed_lhs.ty(),
-                Type::Struct(_) | Type::Array(_) | Type::Enum(_)
+                Type::Struct(_) | Type::Array(_) | Type::Enum(_) | Type::App(_, _)
             ) || typed_lhs.ty().contains_channel()
                 || typed_lhs.ty().contains_future()
                 || typed_rhs.ty().contains_channel()
@@ -2793,6 +3109,7 @@ impl TypeChecker {
         enum_name: String,
         variant_name: String,
         span: Span,
+        expected: Option<&Type>,
     ) -> Result<TypedExprHir, ()> {
         let Some(&id) = self.enum_by_name.get(&enum_name) else {
             // The resolver only emits `EnumCtor` for declared enums; reaching
@@ -2806,35 +3123,79 @@ impl TypeChecker {
             );
             return Err(());
         };
+        self.convert_enum_payloads(id.0 as usize);
         let variant_idx = self.enums[id.0 as usize]
             .variants
             .iter()
             .position(|v| v.name == variant_name)
             .unwrap_or_else(|| unreachable!("resolver guarantees the variant name is declared"));
-        let (payload_tys, enum_ty) = {
-            let entry = &self.enums[id.0 as usize];
-            let payload_tys = entry.variants[variant_idx].payload_types.clone();
-            let enum_ty = Type::Enum(Box::new(EnumInfo {
-                id,
-                name: entry.name.clone().into_boxed_str(),
-                copy: entry.copy,
-            }));
-            (payload_tys, enum_ty)
-        };
-        if !payload_tys.is_empty() {
+        let param_count = self.enums[id.0 as usize].type_params.len();
+        if param_count == 0 {
+            // Monomorphic enum (0.0.6 shape): the declaration's payload
+            // types are already concrete.
+            let (payload_tys, enum_ty) = {
+                let entry = &self.enums[id.0 as usize];
+                (
+                    entry.variants[variant_idx].payload_types.clone(),
+                    Type::Enum(Box::new(self.enum_info_for(id))),
+                )
+            };
+            if !payload_tys.is_empty() {
+                self.add_error(
+                    TypeckErrorKind::ArityMismatch {
+                        expected: payload_tys.len(),
+                        found: 0,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            return Ok(TypedExprHir::EnumCtor {
+                enum_id: id,
+                variant_idx: variant_idx as u16,
+                payload_tys,
+                args: Vec::new(),
+                ty: enum_ty,
+                span,
+            });
+        }
+        // Parameterized enum (0.0.7 D1). A payload variant in value position
+        // needs its payload arguments (same arity rule as 0.0.6); a
+        // zero-payload variant of a parameterized enum cannot determine the
+        // parameters from its (empty) payloads — the surrounding annotation
+        // must fix them, else the parameters are ambiguous.
+        let skeleton = self.enums[id.0 as usize].variants[variant_idx]
+            .payload_types
+            .clone();
+        if !skeleton.is_empty() {
             self.add_error(
                 TypeckErrorKind::ArityMismatch {
-                    expected: payload_tys.len(),
+                    expected: skeleton.len(),
                     found: 0,
                 },
                 span,
             );
             return Err(());
         }
+        let ambiguous = || TypeckErrorKind::TypeParameterAmbiguous {
+            name: self.enums[id.0 as usize].type_params[0].clone(),
+        };
+        let Some(Type::App(info, args)) = expected else {
+            self.add_error(ambiguous(), span);
+            return Err(());
+        };
+        if info.id != id {
+            // The annotation names a different fully applied enum: its
+            // arguments cannot fix this constructor's parameters.
+            self.add_error(ambiguous(), span);
+            return Err(());
+        }
+        // `App` invariants guarantee `args.len() == type_param_count`.
+        let enum_ty = Type::App(Box::new(self.enum_info_for(id)), args.clone());
         Ok(TypedExprHir::EnumCtor {
             enum_id: id,
             variant_idx: variant_idx as u16,
-            payload_tys,
+            payload_tys: Vec::new(),
             args: Vec::new(),
             ty: enum_ty,
             span,
@@ -2868,38 +3229,130 @@ impl TypeChecker {
             .iter()
             .position(|v| v.name == variant_name)
             .unwrap_or_else(|| unreachable!("resolver guarantees the variant name is declared"));
-        let (payload_tys, enum_ty) = {
-            let entry = &self.enums[id.0 as usize];
-            let payload_tys = entry.variants[variant_idx].payload_types.clone();
-            let enum_ty = Type::Enum(Box::new(EnumInfo {
-                id,
-                name: entry.name.clone().into_boxed_str(),
-                copy: entry.copy,
-            }));
-            (payload_tys, enum_ty)
-        };
-        if args.len() != payload_tys.len() {
+        let param_count = self.enums[id.0 as usize].type_params.len();
+        if param_count == 0 {
+            // Monomorphic enum (0.0.6 shape): the declaration's payload
+            // types are already concrete.
+            let (payload_tys, enum_ty) = {
+                let entry = &self.enums[id.0 as usize];
+                (
+                    entry.variants[variant_idx].payload_types.clone(),
+                    Type::Enum(Box::new(self.enum_info_for(id))),
+                )
+            };
+            if args.len() != payload_tys.len() {
+                self.add_error(
+                    TypeckErrorKind::ArityMismatch {
+                        expected: payload_tys.len(),
+                        found: args.len(),
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            let mut typed_args = Vec::with_capacity(args.len());
+            for (arg, payload_ty) in args.into_iter().zip(payload_tys.iter()) {
+                let typed = self.typeck_expr(arg, Some(payload_ty))?;
+                if let Err(e) = unify(payload_ty, &typed.ty(), typed.span()) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
+                }
+                // A constructor argument is a consuming position: a bare owned
+                // local needs `move` / `clone` (struct-literal rule).
+                self.reject_bare_owned_arg(&typed, typed.span())?;
+                typed_args.push(typed);
+            }
+            if let Some(expected_ty) = expected
+                && let Err(e) = unify(expected_ty, &enum_ty, span)
+            {
+                self.add_error(e.kind, e.span);
+                return Err(());
+            }
+            return Ok(TypedExprHir::EnumCtor {
+                enum_id: id,
+                variant_idx: variant_idx as u16,
+                payload_tys,
+                args: typed_args,
+                ty: enum_ty,
+                span,
+            });
+        }
+        // 0.0.7 D1: parameterized constructor — the parameters are
+        // determined from the surrounding annotation first, then from the
+        // argument types; the first binder wins and a conflicting later
+        // binder is a `TypeMismatch` at that argument. A parameter that
+        // neither fixes (and the variant's payloads do not mention) is
+        // ambiguous.
+        let skeleton = self.enums[id.0 as usize].variants[variant_idx]
+            .payload_types
+            .clone();
+        if args.len() != skeleton.len() {
             self.add_error(
                 TypeckErrorKind::ArityMismatch {
-                    expected: payload_tys.len(),
+                    expected: skeleton.len(),
                     found: args.len(),
                 },
                 span,
             );
             return Err(());
         }
+        let param_names = self.enums[id.0 as usize].type_params.clone();
+        let mut params: Vec<Option<Type>> = vec![None; param_count];
+        if let Some(Type::App(info, expected_args)) = expected
+            && info.id == id
+        {
+            for (slot, ty) in params.iter_mut().zip(expected_args.iter()) {
+                *slot = Some(ty.clone());
+            }
+        }
         let mut typed_args = Vec::with_capacity(args.len());
-        for (arg, payload_ty) in args.into_iter().zip(payload_tys.iter()) {
-            let typed = self.typeck_expr(arg, Some(payload_ty))?;
+        for (arg, sk) in args.into_iter().zip(skeleton.iter()) {
+            // The argument's expectation: the payload skeleton with every
+            // already-determined parameter substituted in; while a parameter
+            // is still open the argument is typed without an expectation so
+            // its own type determines the parameter (pass A). A final
+            // unification against the fully substituted payload below
+            // re-checks every argument.
+            let arg_expected = skeleton_expected(sk, &params);
+            let typed = self.typeck_expr(arg, arg_expected.as_ref())?;
+            if let Err(e) = bind_pattern_params(sk, &typed.ty(), &mut params, typed.span()) {
+                self.add_error(e.kind, e.span);
+                return Err(());
+            }
+            typed_args.push(typed);
+        }
+        // Every parameter must be determined by now; fill the final
+        // arguments and report the first ambiguous one by name.
+        let mut final_args = Vec::with_capacity(param_count);
+        for (i, slot) in params.into_iter().enumerate() {
+            match slot {
+                Some(ty) => final_args.push(ty),
+                None => {
+                    self.add_error(
+                        TypeckErrorKind::TypeParameterAmbiguous {
+                            name: param_names[i].clone(),
+                        },
+                        span,
+                    );
+                    return Err(());
+                }
+            }
+        }
+        // Substitute the parameters: concrete payload types for lowering,
+        // then re-check each argument against them and apply the consuming
+        // position rule (a bare owned local needs `move` / `clone`).
+        let payload_tys: Vec<Type> = skeleton
+            .iter()
+            .map(|sk| substitute_params(sk, &final_args))
+            .collect();
+        for (typed, payload_ty) in typed_args.iter_mut().zip(payload_tys.iter()) {
             if let Err(e) = unify(payload_ty, &typed.ty(), typed.span()) {
                 self.add_error(e.kind, e.span);
                 return Err(());
             }
-            // A constructor argument is a consuming position: a bare owned
-            // local needs `move` / `clone` (struct-literal rule).
-            self.reject_bare_owned_arg(&typed, typed.span())?;
-            typed_args.push(typed);
+            self.reject_bare_owned_arg(typed, typed.span())?;
         }
+        let enum_ty = Type::App(Box::new(self.enum_info_for(id)), final_args);
         if let Some(expected_ty) = expected
             && let Err(e) = unify(expected_ty, &enum_ty, span)
         {

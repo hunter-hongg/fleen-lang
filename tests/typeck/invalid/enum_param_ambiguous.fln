@@ -1,0 +1,8 @@
+// 0.0.7 D1: `None` carries no payload, so `T` is fixed only by the surrounding
+// annotation — absent it, the parameter is ambiguous.
+// expect-typeck: TypeParameterAmbiguous
+enum Option<T> { Some(T), None, }
+func f(): int {
+    x = Option.None;
+    0
+}

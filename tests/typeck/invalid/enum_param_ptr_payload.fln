@@ -1,0 +1,5 @@
+// 0.0.7 D1: `ptr` cannot sit in a parameterized payload — the argument
+// substitution would hand a pointer to safe code (PtrNotStorable).
+// expect-typeck: PtrNotStorable
+enum Option<T> { Some(T), None, }
+func f(x: Option<ptr<int>>): int = 0

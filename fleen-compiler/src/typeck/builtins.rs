@@ -511,6 +511,16 @@ fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
             .find(|(id, _)| *id == *n)
             .map(|(_, t)| t.clone())
             .unwrap_or_else(|| Type::Var(*n)),
+        // 0.0.7 T04: a fully applied enum substitutes into its arguments
+        // like any composite (the `EnumInfo` identity is unchanged).
+        Type::App(info, args) => Type::App(
+            info.clone(),
+            args.iter().map(|t| substitute(t, subst)).collect(),
+        ),
+        // 0.0.7 T04: a declaration-local `Param` never reaches schematic
+        // substitution (it is substituted away at the use site first);
+        // kept as-is to stay total.
+        Type::Param(i) => Type::Param(*i),
         Type::Func(params, ret) => Type::Func(
             params.iter().map(|t| substitute(t, subst)).collect(),
             Box::new(substitute(ret, subst)),

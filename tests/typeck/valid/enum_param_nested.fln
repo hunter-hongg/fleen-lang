@@ -1,0 +1,9 @@
+// 0.0.7 T04/D1: nested applications substitute at every depth —
+// `Option<Pair<int, string>>` is owned because Pair carries a string.
+enum Option<T> { Some(T), None, }
+enum Pair<A, B> { P(A, B), }
+func use(o: Option<Pair<int, string>>): int = 0
+func main(): int {
+    o = Option.Some(Pair.P(1, "a"));
+    use(move o)
+}

@@ -1,0 +1,8 @@
+// 0.0.7 T04/D2: `Option<string>` is owned (string payload) — `move` transfers
+// it, mirroring the monomorphic `enum_ctor_owned_move.fln` rule.
+enum Option<T> { Some(T), None, }
+func consume(x: Option<string>): int = 0
+func main(): int {
+    o = Option.Some("a");
+    consume(move o)
+}

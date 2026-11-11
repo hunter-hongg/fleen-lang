@@ -30,6 +30,16 @@ pub struct EnumInfo {
     pub id: EnumId,
     pub name: Box<str>,
     pub copy: bool,
+    /// Number of declaration-local type parameters (0.0.7 T04/D1): 0 for a
+    /// monomorphic enum, which never appears as [`Type::App`].
+    pub type_param_count: usize,
+    /// Per-variant payload skeletons in declaration order (0.0.7 T04): the
+    /// declaration's own payload types with each type parameter represented
+    /// by [`Type::Param(i)`](Type::Param). `Type::is_copy` / `is_owned` on a
+    /// [`Type::App`] substitute the use-site arguments into these skeletons
+    /// and re-run the rule (D2); for a monomorphic enum the skeletons are
+    /// simply the concrete payload types.
+    pub payloads: Vec<Vec<Type>>,
 }
 
 /// Shared per-declaration struct data carried inside `Type::Struct`
@@ -71,8 +81,23 @@ pub enum Type {
     Ref(Box<Type>),
     /// User-defined struct type (0.0.3 V02).
     Struct(Box<StructInfo>),
-    /// User-defined enum type (0.0.6 T04).
+    /// User-defined enum type (0.0.6 T04). Monomorphic enums (arity 0)
+    /// only; a parameterized enum never appears in this bare form at a use
+    /// site (D1: use sites must be fully applied).
     Enum(Box<EnumInfo>),
+    /// A fully applied parameterized enum type (0.0.7 T04/D1): `Option<int>`
+    /// is `App(option_info, [Int])`. The argument count always equals the
+    /// declaration's `type_param_count` (checked at every application). The
+    /// `EnumInfo` carries the same `EnumId` as the bare form, so lowering
+    /// and codegen treat both alike.
+    App(Box<EnumInfo>, Vec<Type>),
+    /// A declaration-local type parameter (0.0.7 T04/D1): the `T` of
+    /// `enum Option<T> { Some(T) }`, identified by declaration order.
+    /// Deliberately distinct from [`Type::Var(u32)`](Type::Var) (schematic
+    /// std intrinsic variables). Appears only inside `EnumInfo.payloads`
+    /// skeletons; use-site substitution removes every `Param` before a type
+    /// reaches lowering or codegen.
+    Param(usize),
     /// `Range` — builtin iterable type (0.0.3 V04). Constructed via std
     /// (`range`/`range_from`); iterates `start..end` (end-exclusive). Copy.
     Range,
@@ -117,6 +142,15 @@ impl Type {
             Type::Ref(inner) => format!("ref {}", inner.name()),
             Type::Struct(info) => info.name.to_string(),
             Type::Enum(info) => info.name.to_string(),
+            Type::App(info, args) => format!(
+                "{}<{}>",
+                info.name,
+                args.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")
+            ),
+            // Declaration-local parameter: only visible while a payload
+            // skeleton is inspected (error rendering, tests); use-site
+            // substitution removes it before codegen.
+            Type::Param(i) => format!("?P{}", i),
             Type::Range => "Range".to_string(),
             Type::Future(inner) => format!("Future<{}>", inner.name()),
             Type::Channel(inner) => format!("channel<{}>", inner.name()),
@@ -142,6 +176,11 @@ impl Type {
             Type::Future(_) => true,
             Type::Array(elem) => elem.contains_future(),
             Type::Result(t, e) => t.contains_future() || e.contains_future(),
+            // 0.0.7 T04: walk the use-site arguments too — an `Option` whose
+            // argument mentions a future forks exactly like a bare future
+            // would (the declaration-level check runs on skeletons, where a
+            // `Param` placeholder is invisible).
+            Type::App(_, args) => args.iter().any(|a| a.contains_future()),
             _ => false,
         }
     }
@@ -159,6 +198,8 @@ impl Type {
             Type::Channel(_) => true,
             Type::Array(elem) => elem.contains_channel(),
             Type::Result(t, e) => t.contains_channel() || e.contains_channel(),
+            // 0.0.7 T04: walk the use-site arguments (see `contains_future`).
+            Type::App(_, args) => args.iter().any(|a| a.contains_channel()),
             _ => false,
         }
     }
@@ -186,6 +227,11 @@ impl Type {
             Type::Ptr(_) => true,
             Type::Array(elem) => elem.contains_ptr(),
             Type::Result(t, e) => t.contains_ptr() || e.contains_ptr(),
+            // 0.0.7 T04: `Option<ptr<int>>` must be sealed exactly like a
+            // bare `ptr` — the use-site argument substitution can place a
+            // pointer into a payload that the declaration-level skeleton
+            // walk could not see (a `Param` placeholder carries no pointee).
+            Type::App(_, args) => args.iter().any(|a| a.contains_ptr()),
             _ => false,
         }
     }
@@ -212,6 +258,15 @@ impl Type {
             // D2: an enum is Copy iff every variant's payload is Copy —
             // precomputed per declaration by the enum-table pass (0.0.6 T04).
             Type::Enum(info) => info.copy,
+            // 0.0.7 D2: a parameterized enum's verdict is a function of the
+            // use-site arguments — substitute them into the declaration's
+            // payload skeletons and re-run the rule.
+            Type::App(info, args) => app_is_copy(info, args),
+            // 0.0.7 T04: a declaration-local parameter is only inspected
+            // inside a payload skeleton; real verdicts come from
+            // argument-substituted types. Conservative owned keeps the
+            // match total.
+            Type::Param(_) => false,
             Type::Range => true, // D5: Range is Copy (two ints)
             // F3: a Future owns its suspended state — never Copy (driven once).
             // 0.0.5 T02 D1: a ptr is a move-only handle — copying it would
@@ -246,6 +301,10 @@ impl Type {
             // owned, and the ownership checker would then let it be consumed
             // freely without `move`/`clone`.
             Type::Enum(info) => !info.copy,
+            // 0.0.7 D2 mirror: a fully applied enum is owned iff it is not
+            // Copy under argument substitution (`Option<string>` is owned
+            // while `Option<int>` is Copy).
+            Type::App(info, args) => !app_is_copy(info, args),
             // F3: a Future owns its suspended coroutine frame; it is moved
             // (e.g. into `std.async.run` or `await`), never shared.
             Type::Future(_) => true,
@@ -256,6 +315,48 @@ impl Type {
             _ => false,
         }
     }
+}
+
+/// Substitute `Type::Param(i)` occurrences with `args[i]` (0.0.7 T04/D1).
+/// Structural: recurses through every composite type so nested payloads
+/// like `Option<Pair[A, B]>` substitute at every depth. The caller
+/// guarantees `args.len()` equals the declaration's `type_param_count`
+/// (arity is checked before any `Type::App` is built), so the `get` fallback
+/// only fires for malformed trees and keeps the function total.
+pub(crate) fn substitute_params(ty: &Type, args: &[Type]) -> Type {
+    match ty {
+        Type::Param(i) => args
+            .get(*i)
+            .cloned()
+            .unwrap_or_else(|| Type::Unsupported(format!("?P{}", i))),
+        Type::Func(params, ret) => Type::Func(
+            params.iter().map(|p| substitute_params(p, args)).collect(),
+            Box::new(substitute_params(ret, args)),
+        ),
+        Type::Result(ok, err) => Type::Result(
+            Box::new(substitute_params(ok, args)),
+            Box::new(substitute_params(err, args)),
+        ),
+        Type::Array(elem) => Type::Array(Box::new(substitute_params(elem, args))),
+        Type::Box(inner) => Type::Box(Box::new(substitute_params(inner, args))),
+        Type::Ref(inner) => Type::Ref(Box::new(substitute_params(inner, args))),
+        Type::Future(inner) => Type::Future(Box::new(substitute_params(inner, args))),
+        Type::Channel(inner) => Type::Channel(Box::new(substitute_params(inner, args))),
+        Type::Ptr(inner) => Type::Ptr(Box::new(substitute_params(inner, args))),
+        Type::App(info, inner) => Type::App(
+            info.clone(),
+            inner.iter().map(|a| substitute_params(a, args)).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// D2 verdict for a fully applied enum type: Copy iff every
+/// argument-substituted variant payload is Copy.
+fn app_is_copy(info: &EnumInfo, args: &[Type]) -> bool {
+    info.payloads
+        .iter()
+        .all(|payload| payload.iter().all(|p| substitute_params(p, args).is_copy()))
 }
 
 /// The ownership access form of a single `Ident` use (0.0.2 U05).

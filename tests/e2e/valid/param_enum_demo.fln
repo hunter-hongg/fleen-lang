@@ -1,0 +1,60 @@
+// 0.0.7 T04 e2e: parameterized enums end to end — declaration with a type
+// parameter, fully applied use sites (D1), argument-dependent is_copy (D2:
+// `Option<int>` is Copy, `Option<string>` is owned and travels with `move`),
+// and constructor parameter inference from the payload.
+//
+// Nested application `Option<Pair<int, string>>` substitutes at every depth;
+// the empty-payload `None` variant takes its parameter from the annotation.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    P(A, B),
+}
+
+func unwrap_or(o: Option<int>, fallback: int): int {
+    choose o {
+        when Some(v) { v }
+        when None { fallback }
+    }
+}
+
+func main(): int {
+    // Parameter fixed by the payload argument.
+    a = Option.Some(5);
+    print(unwrap_or(a, 0) as string);
+
+    // `Option<int>` is Copy: the same value passes twice, no `move`.
+    b = Option.Some(7);
+    print(unwrap_or(b, 0) as string);
+    print(unwrap_or(b, 0) as string);
+
+    // `Option<string>` is owned: the value travels with `move`.
+    s = Option.Some("hi");
+    choose move s {
+        when Some(t) { print(t); }
+        when None { print("none"); }
+    }
+
+    // Nested application: owned because Pair carries a string. Multi-payload
+    // destructuring is T05; 0.0.7 T04 keeps the single-binding form.
+    p = Option.Some(Pair.P(1, "a"));
+    choose move p {
+        when Some(inner) {
+            choose move inner {
+                when P(first) {
+                    print(first as string);
+                }
+            }
+        }
+        when None { print("none"); }
+    }
+
+    // The empty-payload variant: the annotation fixes the parameter.
+    empty: Option<int> = Option.None;
+    print(unwrap_or(empty, 42) as string);
+    0
+}

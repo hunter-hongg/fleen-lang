@@ -1,0 +1,7 @@
+// 0.0.7 T04/D2: `Option<int>` is Copy — flows free like a plain int would.
+enum Option<T> { Some(T), None, }
+func pick(x: Option<int>): Option<int> = x
+func main(): Option<int> {
+    o = Option.Some(1);
+    pick(o)
+}

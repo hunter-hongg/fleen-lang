@@ -2036,8 +2036,9 @@ impl<'a> FnBodyCx<'a> {
             return self.lower_choose_result(fb, e);
         }
 
-        // Special case: enum scrutinee (0.0.6 T05).
-        if matches!(e.scrutinee.ty(), Type::Enum(_)) {
+        // Special case: enum scrutinee (0.0.6 T05; 0.0.7 T04 adds the fully
+        // applied parameterized form — same runtime representation).
+        if matches!(e.scrutinee.ty(), Type::Enum(_) | Type::App(_, _)) {
             return self.lower_choose_enum(fb, e);
         }
 

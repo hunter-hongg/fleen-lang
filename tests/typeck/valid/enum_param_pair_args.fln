@@ -1,0 +1,8 @@
+// 0.0.7 T04/D1: two parameters applied in order — `Pair<string, int>` is
+// owned because its first payload (string) is.
+enum Pair<A, B> { P(A, B), }
+func use(p: Pair[string, int]): int = 0
+func main(): int {
+    p = Pair.P("a", 2);
+    use(move p)
+}

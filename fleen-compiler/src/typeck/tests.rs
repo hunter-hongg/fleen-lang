@@ -1018,11 +1018,15 @@ fn is_copy_exhaustive() {
         id: EnumId(0),
         name: "CopyE".into(),
         copy: true,
+        type_param_count: 0,
+        payloads: Vec::new(),
     }));
     let owned_enum = Type::Enum(Box::new(EnumInfo {
         id: EnumId(1),
         name: "OwnedE".into(),
         copy: false,
+        type_param_count: 0,
+        payloads: Vec::new(),
     }));
     assert!(copy_enum.is_copy());
     assert!(!copy_enum.is_owned());
@@ -2803,19 +2807,200 @@ fn t05_enum_two_payload_variant_binds_first_payload() {
 }
 
 #[test]
-fn parameterized_type_use_site_reports_unresolved_t01() {
-    let errs = compile_err("func f(x: Option<int>): int { 0 }");
+// 0.0.7 T04/D1: a fully applied parameterized use site now resolves —
+// superseding the T01 placeholder that reported "parameterized types not
+// yet resolved". `Option<int>` is a legal type; a bare `Option` is not.
+fn parameterized_type_use_site_resolves_t04() {
+    compile_ok("enum Option<T> { Some(T), None }\nfunc f(x: Option<int>): int { 0 }");
+}
+
+#[test]
+fn parameterized_type_use_site_bracket_resolves_t04() {
+    compile_ok("enum Option<T> { Some(T), None }\nfunc f(x: Option[int]): int { 0 }");
+}
+
+// ---- 0.0.7 T04: parameterized types + argument-dependent is_copy ----
+
+fn body_stmts(body: &TypedFuncBodyHir) -> &[TypedStmtHir] {
+    match body {
+        TypedFuncBodyHir::Block(b) => &b.stmts,
+        TypedFuncBodyHir::SingleExpr(_) => &[],
+    }
+}
+
+/// Helper: the type of the last local binding of `main`.
+fn last_binding_ty(hir: &TypedHir) -> Type {
+    let mut found: Option<Type> = None;
+    for item in &hir.items {
+        let TypedHirItem::Decl(TypedDeclHir::Func(f)) = item else {
+            continue;
+        };
+        for stmt in body_stmts(&f.body) {
+            if let TypedStmtHir::Decl(TypedDeclHir::Var(binding)) = stmt {
+                found = Some(
+                    binding
+                        .ty
+                        .clone()
+                        .unwrap_or_else(|| binding.init.ty().clone()),
+                );
+            }
+        }
+    }
+    found.unwrap_or_else(|| panic!("no binding found in {hir:?}"))
+}
+
+#[test]
+fn param_option_int_is_copy_flows_free_t04() {
+    // D2: `Option<int>` is Copy — an owned binding flows free with no `move`.
+    let hir = compile_ok(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(): int {\n    o = Option.Some(1);\n    0\n}",
+    );
     assert!(
-        errs.iter().any(|e| matches!(&e.kind, TypeckErrorKind::UnknownType { name } if name.contains("parameterized types not yet resolved"))),
-        "expected unresolved parameterized type error, got {errs:?}"
+        last_binding_ty(&hir).is_copy(),
+        "Option<int> should be Copy: {:?}",
+        last_binding_ty(&hir)
     );
 }
 
 #[test]
-fn parameterized_type_use_site_bracket_reports_unresolved_t01() {
-    let errs = compile_err("func f(x: Option[int]): int { 0 }");
+fn param_option_string_is_owned_needs_move_t04() {
+    // D2: `Option<string>` is owned (string payload) — the use site demands
+    // `move` in a consuming position.
+    let errs = compile_err(
+        "enum Option<T> { Some(T), None, }\n\
+         func use_(x: Option<string>): int = 0\n\
+         func f(): int {\n    o = Option.Some(\"a\");\n    use_(o)\n}",
+    );
     assert!(
-        errs.iter().any(|e| matches!(&e.kind, TypeckErrorKind::UnknownType { name } if name.contains("parameterized types not yet resolved"))),
-        "expected unresolved parameterized type error, got {errs:?}"
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected use-of-moved, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_pair_two_args_owned_t04() {
+    let hir = compile_ok(
+        "enum Pair<A, B> { P(A, B), }\n\
+         func f(): int {\n    p = Pair.P(\"a\", 2);\n    0\n}",
+    );
+    assert!(
+        !last_binding_ty(&hir).is_copy(),
+        "Pair[string, int] should be owned: {:?}",
+        last_binding_ty(&hir)
+    );
+}
+
+#[test]
+fn param_nested_option_pair_t04() {
+    // Nested applications substitute at every depth:
+    // `Option<Pair[int, string>>` is owned because Pair carries a string.
+    let hir = compile_ok(
+        "enum Option<T> { Some(T), None, }\n\
+         enum Pair<A, B> { P(A, B), }\n\
+         func f(): int {\n    o = Option.Some(Pair.P(1, \"a\"));\n    0\n}",
+    );
+    assert!(
+        !last_binding_ty(&hir).is_copy(),
+        "nested owned arg should be owned: {:?}",
+        last_binding_ty(&hir)
+    );
+}
+
+#[test]
+fn param_ctor_arg_fixes_param_t04() {
+    // `Option.Some(1)` fixes `T` from the argument.
+    let hir = compile_ok(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(): int {\n    o = Option.Some(1);\n    0\n}",
+    );
+    assert!(
+        last_binding_ty(&hir).is_copy(),
+        "inferred Option<int> should be Copy: {:?}",
+        last_binding_ty(&hir)
+    );
+}
+
+#[test]
+fn param_bare_use_reports_needs_args_t04() {
+    let errs = compile_err("enum Option<T> { Some(T), None, }\nfunc f(x: Option): int = 0");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::TypeConstructorNeedsArgs { .. })),
+        "expected needs-args, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_too_many_args_t04() {
+    let errs =
+        compile_err("enum Pair<A, B> { P(A, B), }\nfunc f(x: Pair<int, string, bool>): int = 0");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::ArityMismatch { .. })),
+        "expected arity mismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_too_few_args_t04() {
+    let errs = compile_err("enum Pair<A, B> { P(A, B), }\nfunc f(x: Pair<int>): int = 0");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            TypeckErrorKind::TypeConstructorNeedsArgs {
+                expected: 2,
+                found: 1,
+                ..
+            }
+        )),
+        "expected needs-args 2 found 1, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_recursive_list_rejected_t04() {
+    // D3 carries forward: `List<T>` naming itself through its parameter is
+    // still a recursive enum.
+    let errs = compile_err("enum List<T> { Cons(T, List<T>), Nil, }");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::RecursiveEnum { .. })),
+        "expected recursive enum, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_ptr_payload_rejected_t04() {
+    let errs =
+        compile_err("enum Option<T> { Some(T), None, }\nfunc f(x: Option<ptr<int>>): int = 0");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::PtrNotStorable)),
+        "expected ptr-not-storable, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_ambiguous_param_reports_t04() {
+    // `None` carries no payload, so `T` is fixed only by the annotation —
+    // absent it, the parameter is ambiguous.
+    let errs = compile_err(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(): int {\n    x = Option.None;\n    0\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::TypeParameterAmbiguous { .. })),
+        "expected ambiguous param, got {errs:?}"
+    );
+}
+
+#[test]
+fn param_annotation_resolves_ambiguous_none_t04() {
+    compile_ok(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(): int {\n    y: Option<int> = Option.None;\n    0\n}",
     );
 }
