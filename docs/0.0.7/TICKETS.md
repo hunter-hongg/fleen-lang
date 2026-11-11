@@ -121,36 +121,36 @@
 
 ## T04 — Typeck: parameterized type resolution + fully-applied-use + argument-dependent `is_copy` (F1/F2; D1/D2)
 
-- [ ] `Type` gains `App(Box<EnumInfo>, Vec<Type>)` — a fully-applied
+- [x] `Type` gains `App(Box<EnumInfo>, Vec<Type>)` — a fully-applied
       parameterized enum type. The `EnumInfo` inside carries the
       declaration; the `Vec<Type>` carries the substituted arguments.
       Monomorphic enums keep `Type::Enum(EnumInfo)` (arity 0, no `App`
       wrapper).
-- [ ] `type_param_count` on `EnumInfo` is checked at every use-site type
+- [x] `type_param_count` on `EnumInfo` is checked at every use-site type
       application: too few → `TypeConstructorNeedsArgs { name, expected,
       found, span }`; too many → `ArityMismatch` (reuse).
-- [ ] Parameter substitution: inside a declaration body, parameters are
+- [x] Parameter substitution: inside a declaration body, parameters are
       resolved to `Type::Param(usize)` (a new variant for declaration-local
       type parameters — distinct from `Type::Var(u32)` which is for
       schematic builtin signatures). At use sites, `Param(i)` in payloads is
       replaced by the corresponding argument.
-- [ ] **Argument-dependent `is_copy` (D2)**: `is_copy(Type::App(info, args))`
+- [x] **Argument-dependent `is_copy` (D2)**: `is_copy(Type::App(info, args))`
       substitutes args into the declaration's payload types and re-runs the
       struct-mirror rule. `is_copy(Type::Enum(info))` (monomorphic) is the
       arity-0 case and behaves exactly as 0.0.6.
-- [ ] Constructor typing: `Option.Some(1)` — the argument's type fixes
+- [x] Constructor typing: `Option.Some(1)` — the argument's type fixes
       `T = int`; result is `App(Option, [int])`. When the parameter does not
       appear in the chosen variant's payloads (rare — `enum Weird<T> {
       Empty(T), Nothing }` and the arm is `Weird.Nothing`), the surrounding
       annotation must fix it; otherwise `TypeParameterAmbiguous { name,
       span }`.
-- [ ] Storage rules: `ptr<T>` payloads rejected (unchanged);
+- [x] Storage rules: `ptr<T>` payloads rejected (unchanged);
       `Future` / `channel` payloads inherit boundary rules (unchanged).
       Parameterized payloads inherit the same rules via substitution.
-- [ ] **`RecursiveEnum` carries forward (D3)**: the cycle check now walks
+- [x] **`RecursiveEnum` carries forward (D3)**: the cycle check now walks
       through parameterized payloads too — `enum List<T> { Cons(T, List<T>)
       }` is rejected with the full path.
-- [ ] Tests: typeck valid (`Option<int>` Copy flows free; `Option<string>`
+- [x] Tests: typeck valid (`Option<int>` Copy flows free; `Option<string>`
       needs move / clone; `Pair[string, int]` owned; nested `Option<Pair[A,
       B]>`); invalid (bare `Option` as type, `Option<int, string>` too many
       args, `List<T>` recursive, `ptr` payload, ambiguous empty-payload
