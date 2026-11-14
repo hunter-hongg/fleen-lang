@@ -59,6 +59,11 @@ pub struct Mir {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirEnumDef {
     pub variants: Vec<MirEnumVariantDef>,
+    /// Number of declaration-local type parameters (0.0.7 T07/D8): 0 for a
+    /// monomorphic enum. Carried through so codegen can serialize it into
+    /// `enum_defs` — it cannot be derived from the payload types, because a
+    /// parameter need not appear in any variant's payloads.
+    pub type_param_count: u32,
 }
 
 /// One variant of a MIR enum (0.0.6 T06): payload types in declaration

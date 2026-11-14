@@ -4,8 +4,9 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T06 implemented and green (T06 lowers the new pattern shapes;
-> e2e fixtures/examples are T09).**
+> **Status: T01–T07 implemented and green (T07 emits bytecode v7 with the
+> `enum_defs` arity field; T08 is the confirmation card; e2e
+> fixtures/examples are T09).**
 
 ---
 
@@ -340,30 +341,78 @@
 
 ## T07 — Bytecode v7: `enum_defs` arity field + codegen + verify (F8; D8)
 
-- [ ] `enum_defs` v7 layout gains `type_param_count: u32` per enum, written
+- [x] `enum_defs` v7 layout gains `type_param_count: u32` per enum, written
       immediately after `variant_count`. The parameter **names** are not
       serialized (declaration-local; no runtime meaning).
-- [ ] `MODULE_VERSION = 7`; `READ_VERSIONS = [1, 2, 3, 4, 5, 6, 7]`.
+- [x] `MODULE_VERSION = 7`; `READ_VERSIONS = [1, 2, 3, 4, 5, 6, 7]`.
       v1–v6 fixtures are byte-identical (append-only rule respected: one
       new u32 per enum in `enum_defs`, no new opcodes, no `FieldTypeTag`
       change).
-- [ ] verify: `enum_defs` v7 reader consumes the new field; no new
+- [x] verify: `enum_defs` v7 reader consumes the new field; no new
       cross-checks beyond that (the arity field is descriptive, not a
       runtime contract).
-- [ ] Regenerate the v6-compat fixture that carries `enum_defs` (the 0.0.6
-      T07 regeneration procedure: `cargo test -p fleen-vm --test compat
-      regenerate_fixtures -- --ignored`); golden-encoding tests that build
-      their own modules need no change.
-- [ ] Tests: v7 write / read round-trip (parameterized and monomorphic
+- [x] Verify the fixture-regeneration instruction is stale (no committed
+      fixture carries `enum_defs`: only v1/v2/v3 exist, the v2 fixture is
+      hand-built and the v3 builder pins `module.version = 3`), so nothing
+      to regenerate; golden-encoding tests that build their own modules
+      need no change. (Supersedes the original "regenerate the v6-compat
+      fixture" wording — see the as-built note below.)
+- [x] Tests: v7 write / read round-trip (parameterized and monomorphic
       enums); v1–v6 fixture decode unchanged; truncated `enum_defs`
       rejected.
 
 **Depends on**: T04 (needs arity to emit).
 **Refs**: PLAN §7, D8.
 
+**As-built (0.0.7)**:
+- The arity rides through MIR: `MirEnumDef` gains
+  `type_param_count: u32`, set by lower from `TypedEnumDef.type_params.len()`.
+  It cannot be derived in codegen from the payload types — a parameter need
+  not appear in any variant's payloads, and the payloads are declaration-site
+  skeletons (`Param(i)`).
+- Writer/reader symmetry: the new u32 is written after `variant_count` only
+  when `m.version >= 7`, and read only when the *file* `version >= 7`; the
+  table itself stays gated at `>= 6` on both sides, so a v6 stream decodes
+  unshifted and the v1–v5 prefix is untouched (pinned by
+  `enum_defs_append_only_keeps_v5_bytes_identical`, updated to compare the
+  v7 stream against a v5-stamped clone). The reader's `capacity_hint` for
+  `enum_defs` becomes version-aware (min entry 8 bytes on v7, 4 before).
+- **No fixture regeneration was needed — the card's instruction is stale
+  relative to the repo**: there is no committed v6 fixture; only
+  v1/v2/v3 exist (`tests/fixtures/{v1,v2,v3}`), the v2 fixture is hand-built
+  and the v3 builder pins `module.version = 3`, so all byte-identity /
+  decode tests stayed green across the bump without touching any fixture.
+- **Version-gate ripple handled with the compiled-output/legacy distinction**:
+  every `assert_eq!(module.version, 6)` on *compiled* output was bumped to 7
+  (compiler lib tests + doc examples, codegen tests, verify ptr/enum
+  end-to-end tests, vm `run_src`/await tests, codegen_integration); the
+  hand-built legacy modules (`fleen-verify` `v6_enum_module`,
+  `fleen-vm` `enum_vm_module`) stay at `version: 6` — with
+  `type_param_count: 0` added to their literals — and the vm gate tests that
+  probed "unsupported" with version 7 now probe with 8.
+- **VM run gate extended here, narrowing T08**: `Vm::run_inner` accepted
+  `1..=6`, so every compiled-output module was `UnsupportedVersion(7)` at
+  execution. The gate now accepts `1..=7` (comment: v7 changes only the
+  descriptive `enum_defs` field, opcode set and `Value::Enum` shape are
+  identical to v6). T08's remaining work is the confirmation card: run the
+  full toolchain on a parameterized enum and confirm the legacy reader path.
+- verify needs no source change: its per-version opcode floors (`version <
+  N && opcode >= BASE`) have no upper gate, and the arity field is
+  descriptive (D8) — no new cross-checks.
+- New tests: `enum_defs_v7_round_trips_type_param_count` (1-param / 2-param /
+  monomorphic through the byte round trip) and
+  `v6_stream_encodes_without_arity_and_decodes_as_zero` (v7 encoding is
+  exactly one u32 per enum longer; a v6-stamped stream decodes all-zero
+  arity). The v6-era `truncated_enum_defs_is_rejected` now exercises cuts
+  inside the v7 table (including the interleaved arity bytes).
+
 ---
 
 ## T08 — VM: no changes (confirmation card) (F8; D8)
+
+> Note (T07 as-built): the VM *run gate* `1..=6` → `1..=7` already landed
+> with T07 (`Vm::run_inner`) — it was required for any compiled-output
+> module to execute. This card now only runs the confirmations below.
 
 - [ ] Confirm no VM source changes are needed: `Value::Enum` shape
       unchanged; `EnumNew` / `EnumIs` / `EnumPayload` encodings and stack

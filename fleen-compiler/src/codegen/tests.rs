@@ -46,7 +46,7 @@ fn encode_single_block_function() {
         globals: vec![],
     };
     let module = codegen(mir).expect("codegen");
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     assert_eq!(module.entry, FuncId(0));
     let code = &module.functions[0].code;
     // Const <id0> ; Return
@@ -1212,7 +1212,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     // struct_defs: one entry, two Int fields.
     assert_eq!(module.struct_defs.len(), 1);
     assert_eq!(
@@ -1241,7 +1241,7 @@ func main(): int = 0
     assert_eq!(module.struct_defs.len(), 2);
     let bytes = to_bytes(&module);
     let parsed = from_bytes(&bytes).expect("round trip");
-    assert_eq!(parsed.version, 6);
+    assert_eq!(parsed.version, MODULE_VERSION);
     assert_eq!(parsed.struct_defs, module.struct_defs);
 }
 
@@ -1430,7 +1430,7 @@ func main(): int {
 }
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     let main = module
         .functions
         .iter()
@@ -1476,7 +1476,7 @@ enum Shape { Dot, Pair(int, string), Tint(Color) }
 func main(): int = 0
 "#;
     let module = compile_full(src);
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     assert_eq!(module.enum_defs.len(), 2);
     // Color: two zero-payload variants.
     assert_eq!(module.enum_defs[0].variants.len(), 2);
@@ -1499,36 +1499,37 @@ func main(): int = 0
 
     let bytes = to_bytes(&module);
     let parsed = from_bytes(&bytes).expect("v6 round trip");
-    assert_eq!(parsed.version, 6);
+    assert_eq!(parsed.version, MODULE_VERSION);
     assert_eq!(parsed.enum_defs, module.enum_defs);
     assert_eq!(parsed, module);
 }
 
 #[test]
 fn enum_defs_append_only_keeps_v5_bytes_identical() {
-    // BYTECODE §10: the v6 table is appended after `struct_defs`, so the
-    // pre-`enum_defs` byte stream must be byte-for-byte the v5 layout. The
-    // only differences allowed are the version field (6 vs 5) and the tail.
+    // BYTECODE §10: the `enum_defs` table is appended after `struct_defs`, so
+    // the pre-`enum_defs` byte stream must be byte-for-byte the v5 layout.
+    // The only differences allowed are the version field (7 vs 5) and the
+    // tail.
     let src = r#"
 enum Color { Red, Green }
 enum Shape { Dot, Pair(int, string) }
 struct Point { x: int, y: int }
 func main(): int = 0
 "#;
-    let v6 = compile_full(src);
-    assert_eq!(v6.version, 6);
-    let mut v5 = v6.clone();
+    let cur = compile_full(src);
+    assert_eq!(cur.version, MODULE_VERSION);
+    let mut v5 = cur.clone();
     v5.version = 5;
-    let bytes6 = to_bytes(&v6);
+    let bytes_cur = to_bytes(&cur);
     let bytes5 = to_bytes(&v5);
 
-    // The v5 stream is a strict prefix of the v6 stream once the version
+    // The v5 stream is a strict prefix of the v7 stream once the version
     // field is masked back to 5: nothing before the appended table moved.
     assert!(
-        bytes6.len() > bytes5.len(),
+        bytes_cur.len() > bytes5.len(),
         "enum_defs tail must be appended"
     );
-    let mut masked = bytes6[..bytes5.len()].to_vec();
+    let mut masked = bytes_cur[..bytes5.len()].to_vec();
     masked[4] = 5;
     masked[5] = 0;
     assert_eq!(masked, bytes5, "v1–v5 layout must stay byte-identical");
@@ -1536,34 +1537,90 @@ func main(): int = 0
     // A module stamped v5 must not serialize its enum_defs at all: the write
     // side is version-gated too, so an old reader's layout never changes.
     assert_eq!(to_bytes(&v5), bytes5, "v5 write must skip enum_defs");
-    // And a v6 read of the full stream reproduces the module exactly.
-    assert_eq!(from_bytes(&bytes6).expect("v6 read"), v6);
+    // And a v7 read of the full stream reproduces the module exactly.
+    assert_eq!(from_bytes(&bytes_cur).expect("v7 read"), cur);
 }
 
 #[test]
 fn truncated_enum_defs_is_rejected() {
-    // The appended `enum_defs` table is the tail of a v6 stream. Cutting
+    // The appended `enum_defs` table is the tail of the stream. Cutting
     // anywhere inside it (or cutting the whole table off) must produce a
     // decode error, never a partial/padded table.
     let src = "enum Color { Red, Green }\nfunc main(): int = 0\n";
-    let v6 = compile_full(src);
-    let mut v5 = v6.clone();
+    let cur = compile_full(src);
+    let mut v5 = cur.clone();
     v5.version = 5;
-    let bytes6 = to_bytes(&v6);
+    let bytes_cur = to_bytes(&cur);
     let bytes5 = to_bytes(&v5);
     let tail_start = bytes5.len();
     assert!(
-        bytes6.len() > tail_start,
+        bytes_cur.len() > tail_start,
         "expected a non-empty enum_defs tail"
     );
-    for cut in tail_start..bytes6.len() {
+    for cut in tail_start..bytes_cur.len() {
         assert!(
-            from_bytes(&bytes6[..cut]).is_err(),
+            from_bytes(&bytes_cur[..cut]).is_err(),
             "truncation at byte {cut} (inside enum_defs) must be rejected"
         );
     }
     // Sanity: the untruncated stream still decodes.
-    assert_eq!(from_bytes(&bytes6).expect("full stream"), v6);
+    assert_eq!(from_bytes(&bytes_cur).expect("full stream"), cur);
+}
+
+// ---------------- 0.0.7 T07: bytecode v7 (enum_defs arity) ----------------
+
+#[test]
+fn enum_defs_v7_round_trips_type_param_count() {
+    // D8: `enum_defs` gains one `type_param_count: u32` per enum, written
+    // after `variant_count`; a monomorphic enum keeps 0. The arity survives
+    // the byte round trip; the parameter *names* are not serialized.
+    let src = r#"
+enum Opt<T> { Some(T), None2 }
+enum Pair2<A, B> { P(A, B) }
+enum Color { Red, Green }
+func main(): int = 0
+"#;
+    let module = compile_full(src);
+    assert_eq!(module.version, MODULE_VERSION);
+    assert_eq!(module.enum_defs.len(), 3);
+    assert_eq!(module.enum_defs[0].type_param_count, 1, "Opt<T>");
+    assert_eq!(module.enum_defs[1].type_param_count, 2, "Pair2<A, B>");
+    assert_eq!(module.enum_defs[2].type_param_count, 0, "monomorphic Color");
+
+    let parsed = from_bytes(&to_bytes(&module)).expect("v7 round trip");
+    assert_eq!(parsed, module);
+}
+
+#[test]
+fn v6_stream_encodes_without_arity_and_decodes_as_zero() {
+    // The arity field exists only on the v7 wire: a module stamped v6 must
+    // serialize exactly one u32 less per enum, and a v6 read must produce
+    // `type_param_count = 0` (the legacy layout has no such column).
+    let src = "enum Opt<T> { Some(T), None2 }\nenum Color { Red, Green }\nfunc main(): int = 0\n";
+    let cur = compile_full(src);
+    assert_eq!(cur.version, MODULE_VERSION);
+    assert_eq!(cur.enum_defs.len(), 2);
+
+    let mut v6 = cur.clone();
+    v6.version = 6;
+    let bytes7 = to_bytes(&cur);
+    let bytes6 = to_bytes(&v6);
+    // Exactly one u32 per enum separates the two encodings.
+    assert_eq!(
+        bytes7.len(),
+        bytes6.len() + 4 * cur.enum_defs.len(),
+        "v7 adds exactly one u32 per enum_defs entry"
+    );
+
+    let back6 = from_bytes(&bytes6).expect("v6 stream must decode");
+    assert_eq!(back6.version, 6);
+    assert!(
+        back6.enum_defs.iter().all(|e| e.type_param_count == 0),
+        "a v6 read has no arity column"
+    );
+    // Reading the v7 stream back reproduces the declared arities.
+    let back7 = from_bytes(&bytes7).expect("v7 stream must decode");
+    assert_eq!(back7.enum_defs, cur.enum_defs);
 }
 
 #[test]

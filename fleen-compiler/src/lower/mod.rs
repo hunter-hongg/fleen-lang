@@ -59,6 +59,9 @@ pub fn lower(typed_hir: TypedHir) -> Result<Mir, LowerError> {
                         payload_types: v.payload_types,
                     })
                     .collect(),
+                // 0.0.7 T07/D8: the arity rides through MIR so codegen can
+                // serialize it — it is not derivable from the payloads.
+                type_param_count: def.type_params.len() as u32,
             })
             .collect(),
     })

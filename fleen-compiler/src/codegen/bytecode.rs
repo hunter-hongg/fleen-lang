@@ -113,7 +113,8 @@ pub struct Module {
     pub struct_defs: Vec<StructDefMeta>,
     /// Enum declarations in id order (0.0.6 T06): the `enum_defs` table.
     /// Populated only in v6+ modules; v1–v5 modules keep it empty (the
-    /// appended table is read only for version >= 6).
+    /// appended table is read only for version >= 6). Each entry's
+    /// `type_param_count` field is present only in v7+ modules (0.0.7 T07).
     pub enum_defs: Vec<EnumDefMeta>,
 }
 
@@ -129,10 +130,13 @@ pub struct StructDefMeta {
 
 /// One `enum_defs` entry (0.0.6 T06, D4): the variant list in declaration
 /// order. Verify cross-checks `EnumNew`'s enum id and variant id against
-/// this table.
+/// this table. 0.0.7 T07/D8: the entry also carries the declaration's type
+/// parameter arity (0 for a monomorphic enum) — descriptive metadata; the
+/// parameter names are declaration-local and are not serialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDefMeta {
     pub variants: Box<[EnumVariantDefMeta]>,
+    pub type_param_count: u32,
 }
 
 /// One variant inside an `enum_defs` entry (0.0.6 T06): the payload type

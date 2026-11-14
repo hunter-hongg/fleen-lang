@@ -5,8 +5,8 @@ use super::error::{RuntimeError, RuntimeErrorKind};
 use super::value::{PayloadKind, Value};
 use super::vm::Vm;
 use fleen_compiler::codegen::{
-    Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, Module, Opcode,
-    SpanEntry,
+    Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, MODULE_VERSION,
+    Module, Opcode, SpanEntry,
 };
 
 fn enc(ops: &[(Opcode, Vec<u8>)]) -> Box<[u8]> {
@@ -716,12 +716,12 @@ fn v2_module_gate() {
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 7,
+        version: 8,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(7)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(8)))
     );
 }
 
@@ -1648,13 +1648,13 @@ fn unsupported_version_has_no_location() {
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 7,
+        version: 8,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(7))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(8))
     );
 }
 
@@ -2869,7 +2869,10 @@ fn future_value_is_opaque_and_does_not_grow_value() {
 
 fn run_src(src: &str) -> Result<Value, RuntimeError> {
     let module = fleen_compiler::compile(src).expect("compile async source");
-    assert_eq!(module.version, 6, "compiler must emit bytecode v6 now");
+    assert_eq!(
+        module.version, MODULE_VERSION,
+        "run_src executes only current-compiler output"
+    );
     Vm::new(module).run()
 }
 
@@ -2929,7 +2932,7 @@ fn await_emitted_by_lower_produces_v4_and_still_verifies() {
     // and the whole module must still pass fleen-verify's v4 gate.
     let src = "async func f(): int = 5\nfunc main(): int = f() await\n";
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     fleen_verify::verify(&module).expect("v5 async module verifies");
     assert_eq!(Vm::new(module).run().unwrap(), Value::Int(5));
 }
@@ -3899,6 +3902,8 @@ fn enum_vm_module(entry: Box<[u8]>) -> Module {
                     payload_types: Box::new([FieldTypeTag::Int]),
                 },
             ]),
+            // A legacy v6 module: the arity field does not exist on the wire.
+            type_param_count: 0,
         }],
         version: 6,
         constants: vec![Const::Str("main".into())],

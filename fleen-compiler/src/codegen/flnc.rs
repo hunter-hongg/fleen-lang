@@ -4,7 +4,7 @@ use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
 
-/// Versions this reader accepts: 0.0.1 (v1) through 0.0.6 (v6).
+/// Versions this reader accepts: 0.0.1 (v1) through 0.0.7 (v7).
 ///
 /// v2 adds instructions and fills `span_map`; v3 adds the struct
 /// instructions and the appended `struct_defs` table (read only for
@@ -12,10 +12,12 @@ const MAGIC: &[u8; 4] = b"FLNC";
 /// 0xC0–0xC7 (0xC0–0xC3 in T05, 0xC4–0xC7 in T07); v5 (0.0.5 T05)
 /// adds the pointer / unsafe instructions 0xC8–0xCA; v6 (0.0.6 T06)
 /// adds the enum instructions 0xCB–0xCD and the appended `enum_defs`
-/// table (read only for version >= 6).
+/// table (read only for version >= 6); v7 (0.0.7 T07) adds one
+/// `type_param_count: u32` per `enum_defs` entry (read only for
+/// version >= 7).
 /// The field order and widths of every existing table are unchanged
 /// (BYTECODE.md §9), so a v1 file reads unmodified.
-const READ_VERSIONS: [u16; 6] = [1, 2, 3, 4, 5, 6];
+const READ_VERSIONS: [u16; 7] = [1, 2, 3, 4, 5, 6, 7];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +164,16 @@ pub fn to_bytes(m: &Module) -> Vec<u8> {
     }
     // 0.0.6 T06: the appended `enum_defs` table, only in v6+ modules —
     // appending after `struct_defs` keeps all v1–v5 layout byte-identical.
+    // 0.0.7 T07/D8: each entry gains `type_param_count: u32` right after
+    // `variant_count`, written only in v7+ modules so the v6 byte stream
+    // stays exactly as 0.0.6 produced it (append-only rule).
     if m.version >= 6 {
         w.u32(m.enum_defs.len() as u32);
         for e in &m.enum_defs {
             w.u32(e.variants.len() as u32);
+            if m.version >= 7 {
+                w.u32(e.type_param_count);
+            }
             for v in e.variants.iter() {
                 w.u32(v.payload_types.len() as u32);
                 for tag in v.payload_types.iter() {
@@ -284,12 +292,19 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
         }
     }
     // 0.0.6 T06: the appended `enum_defs` table (version-gated).
+    // 0.0.7 T07/D8: the `type_param_count: u32` after `variant_count` is
+    // read only for version >= 7 — mirrors the writer's gate exactly, so a
+    // v6 stream decodes unshifted.
     let mut enum_defs = Vec::new();
     if version >= 6 {
         let ne = r.u32()? as usize;
-        enum_defs = Vec::with_capacity(r.capacity_hint(ne, 4));
+        // Minimum `enum_defs` entry: `variant_count` (4 bytes) plus, on v7+,
+        // the `type_param_count` u32 — used only to preallocate the Vec.
+        let min_enum = if version >= 7 { 4 + 4 } else { 4 };
+        enum_defs = Vec::with_capacity(r.capacity_hint(ne, min_enum));
         for _ in 0..ne {
             let variant_count = r.u32()? as usize;
+            let type_param_count = if version >= 7 { r.u32()? } else { 0 };
             let mut variants = Vec::with_capacity(r.capacity_hint(variant_count, 4));
             for _ in 0..variant_count {
                 let payload_count = r.u32()? as usize;
@@ -303,6 +318,7 @@ pub fn from_bytes(buf: &[u8]) -> Result<Module, FlncError> {
             }
             enum_defs.push(EnumDefMeta {
                 variants: variants.into_boxed_slice(),
+                type_param_count,
             });
         }
     }

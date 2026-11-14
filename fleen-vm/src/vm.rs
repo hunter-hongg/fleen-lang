@@ -234,7 +234,10 @@ impl Vm {
     }
 
     fn run_inner(&mut self) -> Result<Value, RuntimeErrorKind> {
-        if !(1..=6).contains(&self.module.version) {
+        // 0.0.7 T07/D8: v7 adds only the descriptive `type_param_count` field
+        // per `enum_defs` entry — the opcode set and `Value::Enum` shape are
+        // identical to v6, so the run gate extends rather than changes.
+        if !(1..=7).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;

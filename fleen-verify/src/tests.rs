@@ -660,7 +660,7 @@ func main(): int {
 }
 "#;
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     assert!(
         crate::verify(&module).is_ok(),
         "{:?}",
@@ -1695,7 +1695,7 @@ fn compiled_ptr_program_verifies() {
     // v5 and verifies (T05's end-to-end contract).
     let src = "trusted func make_ptr(): ptr<int> { x = 42; addr x }\nfunc main(): int = 0";
     let module = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(module.version, 6);
+    assert_eq!(module.version, MODULE_VERSION);
     verify::verify(&module).expect("compiled ptr module verifies");
     // The pointer opcode must appear in make_ptr's body.
     let f = module
@@ -1739,6 +1739,8 @@ fn v6_enum_module() -> Module {
                     payload_types: Box::new([FieldTypeTag::Int, FieldTypeTag::Int]),
                 },
             ]),
+            // A legacy v6 module: the arity field does not exist on the wire.
+            type_param_count: 0,
         }],
         version: 6,
         constants: vec![Const::Str("main".into())],
@@ -1902,7 +1904,7 @@ fn compiled_enum_program_verifies_then_forged_id_is_rejected() {
     // not just one side of it.
     let src = "enum Color { Red, Green }\nfunc main(): int {\n    c = Color.Red;\n    0\n}\n";
     let mut m = fleen_compiler::compile(src).expect("compile");
-    assert_eq!(m.version, 6);
+    assert_eq!(m.version, MODULE_VERSION);
     assert_eq!(m.enum_defs.len(), 1);
     assert!(!m.enum_defs[0].variants.is_empty());
     verify::verify(&m).expect("compiled enum module verifies");

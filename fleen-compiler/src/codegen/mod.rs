@@ -26,14 +26,17 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// version 4 (0.0.4) adds the async/channel instructions 0xC0–0xC7; version
 /// 5 (0.0.5) adds the pointer / unsafe instructions 0xC8–0xCA; version 6
 /// (0.0.6 T06) adds the enum instructions 0xCB–0xCD and the appended
-/// `enum_defs` table. Readers accept all six.
-pub const MODULE_VERSION: u16 = 6;
+/// `enum_defs` table; version 7 (0.0.7 T07) adds one `type_param_count:
+/// u32` per `enum_defs` entry. No new opcodes, no `FieldTypeTag` change.
+/// Readers accept all seven.
+pub const MODULE_VERSION: u16 = 7;
 
 /// Lower MIR into a bytecode module.
 ///
-/// The emitted module is bytecode version 6 (BYTECODE.md §10): it carries
+/// The emitted module is bytecode version 7 (BYTECODE.md §10): it carries
 /// the struct / async / pointer / enum instructions and the appended
-/// `struct_defs` and `enum_defs` tables.
+/// `struct_defs` and `enum_defs` tables (the latter with the per-enum
+/// `type_param_count` field, 0.0.7 T07/D8).
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).
@@ -144,6 +147,8 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         .collect();
 
     // Enum table (0.0.6 T06): shape-level payload tags per declaration.
+    // 0.0.7 T07/D8: each entry also carries the declared type-parameter
+    // arity (rides through MIR; not derivable from the payloads).
     let enum_defs = enums
         .iter()
         .map(|def| EnumDefMeta {
@@ -154,6 +159,7 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
                     payload_types: v.payload_types.iter().map(FieldTypeTag::of).collect(),
                 })
                 .collect(),
+            type_param_count: def.type_param_count,
         })
         .collect();
 
