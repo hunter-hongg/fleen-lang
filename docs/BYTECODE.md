@@ -1,4 +1,4 @@
-# Fleen Bytecode Specification v0.0.6
+# Fleen Bytecode Specification v0.0.7
 
 > **Fast, Simple, Safe, Intuitive**
 > This document defines the output format of the Fleen compiler (the `codegen`
@@ -18,6 +18,7 @@
 > in `docs/0.0.4/PLAN.md`.
 > **v0.0.5 additions**: pointer / unsafe instructions (0xC8–0xCA) — `AddrOf` / `LoadPtr` / `StorePtr` — and the `.flnc` version bumps to 5 (no layout change — no new tables). Design decisions are in `docs/0.0.5/PLAN.md`.
 > **v0.0.6 additions**: enum instructions (0xCB–0xCD) — `EnumNew` / `EnumIs` / `EnumPayload` — the appended `enum_defs` table, `FieldTypeTag::Enum = 12`, and `Value::Enum` in the value model. The `.flnc` version bumps to 6 (one appended table — the v1–v5 layout stays byte-identical). Design decisions are in `docs/0.0.6/PLAN.md`.
+> **v0.0.7 additions**: bytecode version 7 — the `enum_defs` table gains one descriptive `type_param_count: u32` per enum (§2, §9); **no new opcodes** and no `FieldTypeTag` change, so the only layout difference from v6 is that one field (the v1–v6 byte streams stay byte-identical). Design decisions are in `docs/0.0.7/PLAN.md` (D8).
 
 ---
 
@@ -52,12 +53,12 @@ Rules:
 
 ```rust
 pub struct Module {
-    pub version: u16,          // bytecode version: 0.0.6 writes 6, readers accept {1, 2, 3, 4, 5, 6}
+    pub version: u16,          // bytecode version: 0.0.7 writes 7, readers accept {1, 2, 3, 4, 5, 6, 7}
     pub constants: Vec<Const>, // constant pool
     pub functions: Vec<Func>,  // function table
     pub globals: Vec<Global>,  // global variable table
     pub struct_defs: Vec<StructDef>, // struct field table (0.0.3, present when version >= 3, §2)
-    pub enum_defs: Vec<EnumDef>,     // enum variant table (0.0.6, present when version >= 6, §2)
+    pub enum_defs: Vec<EnumDef>,     // enum variant table (0.0.6, present when version >= 6, §2; v7 adds type_param_count)
     pub entry: FuncId,         // entry function: usually main; synthesized __init__ when globals exist
 }
 ```
@@ -69,6 +70,9 @@ pub struct Module {
 > **`enum_defs` (0.0.6 T06)**: one entry per user enum, giving verify exactly
 > `EnumNew`'s payload count and each variant's payload type tags (see §2 "Enum Definitions"). It is
 > the appended table of bytecode version 6 (§9), so it is present only when `version >= 6`.
+> Bytecode version 7 (0.0.7 T07/D8) extends each entry with a descriptive `type_param_count: u32`
+> — the number of type parameters the enum was declared with; it has no runtime meaning and is
+> not cross-checked.
 
 Rules:
 - **Constant pool deduplication**: identical constants are stored once and referenced by index `ConstId(u32)`
@@ -194,6 +198,7 @@ Rules:
 
 ```rust
 pub struct EnumDef {
+    pub type_param_count: u32,         // 0.0.7: declared type parameters; descriptive, not cross-checked (v7+)
     pub variants: Vec<EnumVariantDef>, // one entry per variant, in declaration order
 }
 
@@ -210,6 +215,11 @@ Rules:
   value stored in `Value::Enum.variant` and compared by `EnumIs` / `EnumPayload`.
 - Payload tags exist only so `fleen-verify` can validate shape without executing; the VM does not
   consult them. Enum values are stored as `Value::Enum { variant, payload }` (§3.2).
+- `type_param_count` (0.0.7 T07/D8) is **descriptive only**: the declared type parameter count of
+  a parameterized enum (`enum Option<T>` → 1, a monomorphic enum → 0). It is serialized so
+  tooling can round-trip the declaration shape; neither verify nor the VM cross-checks it, and
+  it is written/read only when `version >= 7` (a v6 stream decodes it as 0). Type parameters
+  are compile-time only — their names are **not** serialized.
 - The table is **append-only in the module** (after `struct_defs`) and read only when
   `version >= 6` (§9).
 
@@ -1219,13 +1229,18 @@ and no field change is needed.
 (`enum_defs`) after `struct_defs` — the field order and widths of every existing table are
 unchanged, so a v1–v5 file reads unmodified. The enum instructions live inside function
 bodies and `Value::Enum` is not serialized, so nothing else changes.
+0.0.7 writes `version = 7`, readers accept `{1, 2, 3, 4, 5, 6, 7}`; it makes **no new tables**
+and adds no opcodes: the only layout change is one `type_param_count: u32` per `enum_defs`
+entry, written immediately after `variant_count` **only in v7+ modules** (a v6 reader skips
+nothing because the field is simply absent from its stream — the v1–v6 byte layouts are
+unchanged). The field is descriptive (§2), so the v6 → v7 difference is one u32 per enum.
 
 ### File Header
 
 | Field | Width | Value |
 |------|------|-----|
 | magic | 4 B | `"FLNC"` (0x46 0x4C 0x4E 0x43) |
-| version | u16 | bytecode version: the 0.0.6 compiler writes `6`, readers accept `{1, 2, 3, 4, 5, 6}` |
+| version | u16 | bytecode version: the 0.0.7 compiler writes `7`, readers accept `{1, 2, 3, 4, 5, 6, 7}` |
 
 ### Constant Pool
 
@@ -1280,17 +1295,21 @@ The table is present only when `version >= 3`.
 
 ### Enum Definitions (`enum_defs`, 0.0.6 T06, version ≥ 6 only)
 
-`enum_defs_len: u32`, then one entry at a time:
+`enum_defs_len: u32`, then one entry at a time (0.0.7: the entry gains a
+`type_param_count: u32` immediately after `variant_count`, present only when
+`version >= 7`; on v6 the entry starts directly at `variants`):
 
 | Field | Width |
 |------|------|
 | `variant_count` | u32 |
+| `type_param_count` | u32 — **version ≥ 7 only** (0.0.7 T07/D8; descriptive, not cross-checked) |
 | variants | `variant_count` × ( `payload_count: u32`, `payload_types`: `payload_count` × u8 (a `FieldTypeTag`, §2) ) |
 
 The payload tags use the same `FieldTypeTag` byte mapping as `struct_defs` (including
 `Enum=12`, which marks a payload whose type is a user enum). The table is present only when
 `version >= 6`, and it is appended **after** `struct_defs`, so the v1–v5 layout is
-byte-identical.
+byte-identical. The v7 `type_param_count` is version-gated the same way: a v6 entry has no
+arity field at all (it decodes as 0), so the v1–v6 byte streams are unchanged.
 
 Rules:
 - Reading and writing must go through the same implementation (`codegen::flnc::{to_bytes, from_bytes}`); hand-written parsers are not allowed.
@@ -1298,7 +1317,7 @@ Rules:
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2, 3, 4, 5, 6}` (from 0.0.6 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`.
+- `version` accepts `{1, 2, 3, 4, 5, 6, 7}` (from 0.0.7 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`; v7 adds the `type_param_count: u32` per `enum_defs` entry (no new table).
 
 ---
 
@@ -1312,6 +1331,7 @@ Rules:
 | 4 | 0.0.4 | + async / channel instructions: `AsyncStart`/`Suspend`/`Poll`/`Await` (0xC0–0xC3), `ChannelNew`/`ChannelSend`/`ChannelRecv`/`ChannelSplit` (0xC4–0xC7); `Future`/`Channel` runtime values (not serialized); **zero layout changes** — no new table (§5.15) |
 | 5 | 0.0.5 | + pointer / unsafe instructions: `AddrOf`/`LoadPtr`/`StorePtr` (0xC8–0xCA); **zero layout changes** — no new table (§5.16) |
 | 6 | 0.0.6 | + enum instructions: `EnumNew`/`EnumIs`/`EnumPayload` (0xCB–0xCD); the `Enum` runtime value (not serialized); the appended `enum_defs` table and `FieldTypeTag::Enum = 12` (§5.17, §2, §9) |
+| 7 | 0.0.7 | the `enum_defs` table gains one descriptive `type_param_count: u32` per enum, written after `variant_count`, only in v7+ streams (§2, §9); **zero layout changes beyond that field** — no new table, no new opcodes, no `FieldTypeTag` change (D8) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

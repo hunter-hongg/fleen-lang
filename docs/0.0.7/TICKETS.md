@@ -4,10 +4,11 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T09 implemented and green (T07 emits bytecode v7 with the
+> **Status: T01–T11 implemented and green (T07 emits bytecode v7 with the
 > `enum_defs` arity field; T08 confirmed the VM needs no further changes;
 > T09 landed the e2e fixtures/examples and fixed a T06 nested-payload
-> failure-edge over-pop; T10/T11 remain).**
+> failure-edge over-pop; T10 landed the tour example + CHANGELOG; T11 synced
+> the docs — the version bump / release publication is separate and pending).**
 
 ---
 
@@ -565,27 +566,68 @@
 
 ## T11 — Docs sync (F9)
 
-- [ ] `docs/SYNTAX.ebnf`: `type_params`, `type_args`, recursive `pattern`
+- [x] `docs/SYNTAX.ebnf`: `type_params`, `type_args`, recursive `pattern`
       grammar (replaces the 0.0.6 `enum_pattern` / `result_pattern`
       productions; keeps `ResultCtor` as a shortcut documented alongside).
-- [ ] `docs/BYTECODE.md`: §2 `enum_defs` v7 layout (`type_param_count`
+- [x] `docs/BYTECODE.md`: §2 `enum_defs` v7 layout (`type_param_count`
       field); §9 updated layout; §10 v7 row. No §5.x changes (no new
       opcodes).
-- [ ] `docs/DESIGN.md`: §7 pattern matching section (recursive grammar,
+- [x] `docs/DESIGN.md`: §7 pattern matching section (recursive grammar,
       or-patterns, type guards, multi-payload); §9 enum section gains a
       "Parameterized enums" subsection (D1/D2/D3); §17 feature table gains
       "Parameterized enums" and "Nested / or / type-guard patterns" rows;
       §18 roadmap inserts the 0.0.7 row.
-- [ ] `SPEC.md` (symlink target for `AGENTS.md` / `CLAUDE.md`): §13 gains
+- [x] `SPEC.md` (symlink target for `AGENTS.md` / `CLAUDE.md`): §13 gains
       the 0.0.7 goal paragraph; §14 quick-reference gains a "Parameterized
       types" section; §15 table gains columns for 0.0.7.
-- [ ] Cross-check: BYTECODE numbers in this release are `MODULE_VERSION =
+- [x] Cross-check: BYTECODE numbers in this release are `MODULE_VERSION =
       7` / `READ_VERSIONS = {1..7}` / `enum_defs` gains one u32 per enum /
       no new opcodes / no `FieldTypeTag` change (D8). Confirm against
       `fleen-compiler/src/codegen/mod.rs` after T07 lands.
 
 **Depends on**: T01–T09 all green.
 **Refs**: PLAN §10.
+
+**As-built (T11)**:
+- The recursive pattern grammar was **already in `SYNTAX.ebnf`** — T02 had
+  updated `pattern` / `or_pattern` / `typed_pattern` / `result_pattern` /
+  `enum_pattern` in place when it landed, so this card's remaining EBNF work
+  was `type_params` on `enum_decl` and `type_args` on `named_type` (both
+  spellings, trailing comma allowed, at least one param/arg — matching
+  `parse_enum_type_params` / `parse_optional_type_args` exactly) plus the
+  0.0.7 header note.
+- `BYTECODE.md` bumped to v0.0.7: the header note, §2 (Module `version`
+  comment, `enum_defs` callout, the `EnumDef` struct, the rules), §9 (the
+  version paragraph, the header row, the `enum_defs` layout table with the
+  version-gated `type_param_count` row, the rules line), and the §10 v7 row.
+  The docs state the v7 subtlety explicitly: v7 is the first version to add
+  a field **inside** an existing table rather than append a new one — the
+  field is written/read only when `version >= 7`, so the v1–v6 byte streams
+  are unchanged.
+- Cross-check confirmed against the source: `MODULE_VERSION = 7`
+  (`codegen/mod.rs:32`), `READ_VERSIONS = [1..7]` (`codegen/flnc.rs:20`),
+  the arity u32 written immediately after `variant_count` and gated on
+  `version >= 7` on both the writer and reader side (`flnc.rs`), no new
+  opcodes, `FieldTypeTag` untouched.
+- `DESIGN.md`: §7 rewritten from the 0.0.6 state to the 0.0.7 state (full
+  pattern grammar in EBNF form, D4–D7 semantics including the strict
+  `ArityMismatchInPattern` rule and payload-aware exhaustiveness); §9.8's
+  planning blockquote became a real "Parameterized enums (0.0.7, D1–D3)"
+  subsection; the 0.0.6-era "first payload only" wording in the §9.8 example
+  and rules was corrected to the 0.0.7 behavior (`when Rect(w, h)`); §17
+  gained the 0.0.7 column plus the two new rows; the §17 goal paragraphs and
+  the §18 roadmap row moved from "planning" to "implemented".
+- `SPEC.md`: §13's 0.0.7 goal paragraph now records T01–T10 implemented +
+  T11 docs synced; §14 gained the "Parameterized Types (0.0.7)" quick-ref
+  section (with the D9 dual spelling, D2 Copy split, and a scalar
+  or-pattern/type-guard example that keeps its `otherwise` arm — a bare
+  type-guard arm does not cover on a scalar scrutinee) and the Aggregation
+  Types / choose "planning" notes were flipped to implemented; §15 gained
+  the 0.0.7 column, the three new feature rows, and a "Status of 0.0.7"
+  paragraph.
+- No version bump performed (per the T10 as-built note): `Cargo.toml` /
+  `std/VERSION` and the release publication remain a separate release-step
+  decision.
 
 ---
 

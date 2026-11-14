@@ -37,6 +37,14 @@
 (* variants, and the variant pattern in `choose`; *)
 (* `enum` is a reserved word — a 0.0.5 program    *)
 (* using it as an identifier must rename.         *)
+(* New in 0.0.7: parameterized enums — an enum    *)
+(* declaration may carry type parameters          *)
+(* `enum Name<T> { … }`, and a named type may     *)
+(* carry type arguments `Name<int>` / `Name[int]` *)
+(* (both spellings, D9); the `choose` pattern     *)
+(* grammar becomes recursive — multi-payload      *)
+(* destructuring, nested patterns, or-patterns    *)
+(* `p₁ | p₂` and type guards `p : T` (D4–D7).     *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -72,8 +80,17 @@ field_decl      = ident , ":" , type ;
    required (an empty `enum E { }` is a parse error).
    A variant with no payload list is the zero-payload form; the payload types
    are checked against the declaration by typeck (arity and types), and a
-   recursive enum is rejected (D2). *)
-enum_decl       = "enum" , ident , "{" , enum_variant , { "," , enum_variant } , [ "," ] , "}" ;
+   recursive enum is rejected (D2).
+   0.0.7 T01 (D1): optional type parameters in the head — `enum Name<T> { … }`
+   / `enum Name<A, B> { … }`. Parameters are identifiers only (no defaults, no
+   bounds; a base-type name such as `int` is a parse error), at least one is
+   required (an empty `<>` is a parse error), and a trailing comma is allowed.
+   The parameters live in a declaration-local scope (T03) and every use site
+   must be fully applied (T04). *)
+enum_decl       = "enum" , ident , [ type_params ] , "{" , enum_variant , { "," , enum_variant } , [ "," ] , "}" ;
+
+(* 0.0.7 T01: declaration-local type parameters of an enum. *)
+type_params     = "<" , ident , { "," , ident } , [ "," ] , ">" ;
 
 enum_variant    = ident , [ "(" , type , { "," , type } , ")" ] ;
 
@@ -129,8 +146,18 @@ type            = base_type
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
 
 (* 0.0.3: a bare name as a type — a user struct (V02), a user enum (0.0.6) or
-   the builtin Range (V04). Which names are valid types is checked by typeck. *)
-named_type      = ident ;
+   the builtin Range (V04). Which names are valid types is checked by typeck.
+   0.0.7 T01 (D1/D9): a parameterized enum may be applied — `Name<int>` (angle)
+   or `Name[int]` (bracket, matching the existing `Result[T, E]` form). At
+   least one argument is required (an empty `Name<>` / `Name[]` is a parse
+   error), a trailing comma is allowed, and the argument count is checked
+   against the declaration's arity by typeck (T04: too few is
+   `TypeConstructorNeedsArgs`, too many is `ArityMismatch`). *)
+named_type      = ident , [ type_args ] ;
+
+(* 0.0.7 T01: type arguments of a fully-applied parameterized type. *)
+type_args       = ( "<" , type , { "," , type } , [ "," ] , ">" )
+                | ( "[" , type , { "," , type } , [ "," ] , "]" ) ;
 
 array_type      = "[" , type , "]" ;
 

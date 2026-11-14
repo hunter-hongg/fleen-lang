@@ -608,13 +608,13 @@ func halve(n: int): Result<int, string> {
 
 ## 7. Pattern Matching: choose
 
-> **0.0.7 planning (not implemented yet)**: the pattern grammar becomes recursive —
-> full multi-payload destructuring `when Pair(a, b)` (0.0.6's "first payload only"
-> limit is lifted), nested patterns `when Ok(Some(x))`, or-patterns `when 1 | 2`
-> (alternatives must bind the same names with the same types), and type guards
-> `when v: int` (compile-time ascription, NOT a runtime type test). Exhaustiveness
-> treats an or-pattern as the union of its alternatives' coverage. See
-> `docs/0.0.7/PLAN.md` D4–D7; the notes below describe the implemented 0.0.6 state.
+> **0.0.7 (implemented)**: the pattern grammar is **recursive** — full multi-payload
+> destructuring `when Pair(a, b)` (0.0.6's "first payload only" limit is lifted),
+> nested patterns `when Ok(Some(x))`, or-patterns `when 1 | 2` (alternatives must
+> bind the same names with the same types), and type guards `when v: int`
+> (compile-time ascription, NOT a runtime type test). Exhaustiveness treats an
+> or-pattern as the union of its alternatives' coverage. See
+> `docs/0.0.7/PLAN.md` D4–D7. The notes below describe the 0.0.7 state.
 
 ```fleen
 choose value {
@@ -629,15 +629,44 @@ choose value {
 - No `fallthrough`
 - `otherwise` must be present (or the compiler can prove exhaustiveness)
 - Guard conditions with `if` are supported
-- `when` patterns support literals (including negative numbers) and identifier bindings
+- `when` patterns support literals (including negative numbers), identifier bindings, and — from 0.0.7 — constructor patterns (multi-payload enum variants, nested `Ok(Some(x))` shapes, or-patterns, type guards)
 - No `match` / `switch`
 - **Semicolon rules**: `when` clauses and the `otherwise` clause themselves take no semicolon; only when the `choose` expression as a whole is used as a statement does it take a trailing semicolon
 
-**Pattern syntax (P5 addition):**
+**Pattern syntax (P5 addition + 0.0.7 recursive grammar, T02):**
 ```text
-pattern = neg_pattern | literal | ident
-neg_pattern = "-" , (int_lit | float_lit)
+pattern            = or_pattern
+or_pattern         = typed_pattern , { "|" , typed_pattern }
+typed_pattern      = constructor_pattern , [ ":" , type ]
+constructor_pattern
+                   = neg_pattern | literal | ident
+                   | result_pattern | enum_pattern
+neg_pattern        = "-" , (int_lit | float_lit)
+result_pattern     = ( "Ok" | "Err" ) , "(" , pattern , ")"
+enum_pattern       = ident , [ "(" , pattern , { "," , pattern } , ")" ]
 ```
+
+- **Or-patterns (D6)**: `p₁ | p₂` matches when any alternative matches. All
+  alternatives must bind the **same names with the same types**
+  (`OrPatternBindingMismatch` otherwise). Exhaustiveness counts the **union**
+  of the alternatives' variant coverage. `:` binds tighter than `|` —
+  `a: int | b: string` parses as `(a: int) | (b: string)`.
+- **Type guards (D7)**: `pattern : Type` ascribes the scrutinee to `Type`
+  (compile-time only; the type must equal the scrutinee type — there are no
+  supertypes, so a mismatch is `PatternTypeMismatch`). No runtime work is
+  emitted; on a scalar scrutinee a bare-ident guard does not contribute
+  coverage (an `otherwise` arm is then still needed).
+- **Multi-payload + nested patterns (D4/D5)**: every payload of a variant
+  pattern is a full recursive pattern, so `when Rect(w, h)` binds both
+  payloads and `when Ok(Some(x))` lowers as an unwrap → re-park → inner-test
+  chain (BYTECODE §5.17 lowering). A payload count mismatch is
+  `ArityMismatchInPattern` (strict — including `when Point(x)` on a
+  zero-payload variant); exhaustiveness is **payload-aware**: a literal
+  payload pattern never covers its whole payload type (`when P(1, x)` alone
+  does not cover `P`).
+- **Result shortcuts stay**: `Ok(...)` / `Err(...)` win over `Enum` for those
+  two names at the parser level (as in 0.0.6 T02), with the payload now a
+  full pattern.
 
 ---
 
@@ -843,19 +872,36 @@ std.async.run([producer(move ch), consumer(move peer)]);   // move a handle into
 
 ### 9.8 `enum` (0.0.6)
 
-> **0.0.7 planning (not implemented yet) — parameterized enums (D1–D3 of `docs/0.0.7/PLAN.md`)**:
-> an `enum` may declare type parameters in the head (`enum Option<T> { Some(T), None }`,
-> `enum Pair<A, B> { Pair(A, B) }`); parameters live in a declaration-local scope. Every use
-> site must be **fully applied** (`Option<int>`, both `<>` and `[]` spellings — `Result[T, E]`
-> style; bare `Option` in type position is a compile error `TypeConstructorNeedsArgs`).
-> `is_copy(App(T1..Tn))` is computed by substituting the arguments into the payload types and
-> re-evaluating the struct-mirror rule (`Option<int>` Copy, `Option<string>` owned). The
-> `RecursiveEnum` ban carries forward unchanged (`enum List<T> { Cons(T, List<T>) }` is
-> rejected). Full multi-payload destructuring, nested patterns, or-patterns and type guards
-> come with it (§7 note above). Bytecode v7: `enum_defs` gains one `type_param_count: u32`
-> per enum; no new opcodes; no `FieldTypeTag` change. `Result[T, E]` stays builtin; the
-> `Result` → std-enum migration is deferred to 0.1.0 (D9). The rest of this subsection
-> describes the implemented 0.0.6 state.
+#### Parameterized enums (0.0.7, D1–D3)
+
+> **0.0.7 (implemented)** — an `enum` may declare type parameters in the head
+> (`enum Option<T> { Some(T), None }`, `enum Pair<A, B> { Pair(A, B) }`); parameters
+> live in a **declaration-local scope** (they are not bindings and not visible outside
+> the enum body). Every use site must be **fully applied** (`Option<int>`, both `<>`
+> and `[]` spellings — the `Result[T, E]` style, D9; a bare `Option` in type position
+> is a compile error `TypeConstructorNeedsArgs`, too many arguments is
+> `ArityMismatch`).
+> - **Constructor typing**: the argument's type fixes the parameter —
+>   `Option.Some(1)` is `Option<int>`; when the chosen variant's payloads do not
+>   mention the parameter (`enum Weird<T> { Empty(T), Nothing }` and the arm is
+>   `Weird.Nothing`), the surrounding annotation must fix it, otherwise
+>   `TypeParameterAmbiguous`.
+> - **Argument-dependent `is_copy` (D2)**: `is_copy(App(T1..Tn))` substitutes the
+>   arguments into the payload types and re-evaluates the struct-mirror rule —
+>   `Option<int>` is Copy, `Option<string>` is owned (needs `move` / `clone`).
+>   A monomorphic enum behaves exactly as 0.0.6.
+> - **`RecursiveEnum` ban carries forward (D3)**: the cycle check walks through
+>   parameterized payloads, so `enum List<T> { Cons(T, List<T>) }` is rejected.
+> - **Storage rules inherit via substitution**: a `ptr<T>` payload stays rejected;
+>   `Future` / `channel` boundary rules apply to substituted payload types unchanged.
+> - Cross-module: importing a parameterized enum carries the arity; type
+>   arguments still need the module-qualified name (`Result<containers.Option<int>,
+>   string>` — a bare `Option` at an import site is an unknown type).
+>
+> Bytecode v7: `enum_defs` gains one descriptive `type_param_count: u32` per enum
+> (`docs/BYTECODE.md` §2/§9); no new opcodes; no `FieldTypeTag` change (D8).
+> `Result[T, E]` stays builtin; the `Result` → std-enum migration is deferred to
+> 0.1.0 (D9). See `docs/0.0.7/PLAN.md` D1–D3 and `docs/0.0.7/TICKETS.md` T01–T04.
 
 ```fleen
 enum Color {
@@ -883,7 +929,7 @@ func area(s: Shape): float {
     choose s {                                  // an owned enum needs `move`
         when Point { 0.0 }
         when Circle(r) { 3.14159 * r * r }
-        when Rect(w) { w * 0.0 }                // only the FIRST payload is nameable
+        when Rect(w, h) { w * h }               // multi-payload destructuring (0.0.7)
     }
 }
 ```
@@ -905,10 +951,11 @@ func area(s: Shape): float {
   `is_copy`. An enum with a `string` payload is therefore an **owned** type: consuming
   positions need `move` / `clone`, and `choose` over it consumes the scrutinee
   (`choose move s { … }`)
-- A pattern is `when Variant { … }` for a zero-payload variant and `when Variant(binding) { … }`
-  for a payload variant. In 0.0.6 a pattern binds **only the first payload** — `when Rect(w, h)`
-  is a parse error; a multi-payload variant can be *constructed* but not fully destructured
-  (a known limit, T05)
+- A pattern is `when Variant { … }` for a zero-payload variant and `when Variant(p₁, …, pₙ) { … }`
+  for a payload variant — every payload position is a full **recursive pattern** from 0.0.7
+  (multi-payload destructuring, nested patterns, or-patterns, type guards; §7). A payload count
+  mismatch is `ArityMismatchInPattern` (strict — `when Point(x)` on a zero-payload variant and
+  `when Rect(a)` on a 2-payload variant are both rejected)
 - A `choose` over an enum is **exhaustive** when it has one arm per variant (the same rule as
   `Result`, D3); a missing variant is `ChooseNotExhaustive` and names the missing variant
   (`choose is not exhaustive for type \`Color\`: missing Blue`). An `otherwise` arm is allowed
@@ -927,6 +974,9 @@ func area(s: Shape): float {
 > destructuring beyond the first payload — so that the Copy / ownership rules of §10 can be
 > inherited unchanged from structs (D1) and the exhaustiveness rule from `Result` (D3).
 > The bytecode cost is three instructions and one appended table (`docs/BYTECODE.md` §5.17, §9).
+> 0.0.7 lifts the destructuring limit (recursive patterns, §7) and adds parameterization
+> (the subsection above) without changing the instruction set — the only bytecode cost is
+> the descriptive `type_param_count` field of bytecode v7.
 
 ### Function Types
 
@@ -1388,38 +1438,40 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 |
-|---------|-------|-------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ |
-| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) |
-| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ |
-| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ |
-| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) | ✅ | ✅ |
-| Pointers `ptr` / `addr` / `deref_ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §10.7) | ✅ |
-| `unsafe` / `trusted` | ❌ | ❌ | ❌ | ❌ | ✅ (T03, §12) | ✅ |
-| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §9.8) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 |
+|---------|-------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ | ✅ (+ recursive patterns) |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ | ✅ |
+| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ |
+| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) | ✅ | ✅ | ✅ |
+| Pointers `ptr` / `addr` / `deref_ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §10.7) | ✅ | ✅ |
+| `unsafe` / `trusted` | ❌ | ❌ | ❌ | ❌ | ✅ (T03, §12) | ✅ | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §9.8) | ✅ |
+| Parameterized enums (`enum Option<T>`, D1–D3) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§9.8) |
+| Nested / or / type-guard patterns (D4–D7) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§7) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics (function-level) | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **0.0.1 goal: Fibonacci runs.**
 
@@ -1449,6 +1501,14 @@ generalized `choose` exhaustiveness (the `Result` rule applied to enums, D3), by
 (D2); enums are not comparable and patterns bind the first payload only (0.0.6 limits).
 T01–T08 implemented; see `docs/0.0.6/PLAN.md` decisions D1–D6 and `docs/0.0.6/TICKETS.md`.**
 
+**0.0.7 goal: parameterized types + pattern matching completion — user-defined type
+constructors (`enum Option<T>` …, fully applied at every use site; argument-dependent
+`is_copy`; the `RecursiveEnum` ban carries forward), full multi-payload destructuring,
+nested patterns, or-patterns, and type guards; bytecode v7 (`enum_defs` gains one
+`type_param_count: u32` per enum, no new opcodes). `Result[T, E]` retained as a builtin;
+non-breaking additive. T01–T10 implemented (T11 is this docs sync); see
+`docs/0.0.7/PLAN.md` decisions D1–D10 and `docs/0.0.7/TICKETS.md`.**
+
 ---
 
 ## 18. Roadmap
@@ -1460,7 +1520,7 @@ T01–T08 implemented; see `docs/0.0.6/PLAN.md` decisions D1–D6 and `docs/0.0.
 | 0.0.4 | `async` / `await` + `Future<T>` coroutine frames — **implemented (T01–T05)**; cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) — **implemented (T06)**; channels (`channel<T>` / `std.concurrent.split`, message passing D3) — **implemented (T07)**; compatibility & test matrix (T08–T09) and docs & version sync (T10). See `docs/0.0.4/PLAN.md` |
 | 0.0.5 | `unsafe` / `trusted` / `ptr` / `addr` / `deref_ptr` (T01–T06) + toolchain maturity: clap CLI (T07), six-target tag-triggered release pipeline (T09), std distribution with strict version pinning (T08) — **implemented (T01–T10)**; see `docs/0.0.5/PLAN.md` (D1–D8) and `docs/0.0.5/TICKETS.md` |
 | 0.0.6 | `enum` declarations with typed payloads (T01–T04) + generalized `choose` exhaustiveness and lowering (T05) + bytecode v6 `EnumNew`/`EnumIs`/`EnumPayload` and the `enum_defs` table (T06) + array library completion `concat`/`flatten`, `fold`→`foldl` + `foldr` (T07) — **implemented (T01–T08)**; see `docs/0.0.6/PLAN.md` (D1–D6) and `docs/0.0.6/TICKETS.md` |
-| 0.0.7 | parameterized enums — user-defined type constructors (`enum Option<T>`, fully applied at every use, no bare `Option`), argument-dependent `is_copy` — plus pattern matching completion: full multi-payload destructuring, nested patterns, or-patterns `p₁ \| p₂`, type guards `when v: T`; bytecode v7 (`enum_defs` gains one `type_param_count: u32` per enum, no new opcodes). `Result[T, E]` stays builtin — **planning (D1–D10 settled, no code yet)**; see `docs/0.0.7/PLAN.md` and `docs/0.0.7/TICKETS.md` |
+| 0.0.7 | parameterized enums — user-defined type constructors (`enum Option<T>`, fully applied at every use, no bare `Option`), argument-dependent `is_copy` — plus pattern matching completion: full multi-payload destructuring, nested patterns, or-patterns `p₁ \| p₂`, type guards `when v: T`; bytecode v7 (`enum_defs` gains one `type_param_count: u32` per enum, no new opcodes). `Result[T, E]` stays builtin — **implemented (T01–T10; T11 docs sync)**; see `docs/0.0.7/PLAN.md` (D1–D10) and `docs/0.0.7/TICKETS.md` |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks
