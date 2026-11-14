@@ -2,16 +2,17 @@
 //
 // Run: cargo fln examples/0.0.7/option_demo.fln
 //
-// Shows the four pieces 0.0.7 adds on top of 0.0.6 enums:
+// Shows the pieces 0.0.7 adds on top of 0.0.6 enums; the numbers match the
+// in-body section comments below (and the "Where" column of README.md):
 //   1. `enum Option<T>` — a type constructor (D1): every use site is fully
 //      applied (`Option<int>`, never bare `Option`).
 //   2. Argument-dependent Copy (D2): `Option<int>` is Copy (the payload is
 //      Copy) and passes freely; `Option<string>` is owned and travels with
 //      `move`.
-//   3. Nested patterns (D5) and multi-payload destructuring (D4):
-//      `Ok(Some(x))`, `Pair(a, b)`.
-//   4. Or-patterns (D6) and type guards (D7): `Some(v) | Other(v)`,
-//      `v: int`.
+//   3. Nested patterns (D5): `Ok(Some(x))`.
+//   4. Multi-payload destructuring (D4): `Some(P(a, b))`.
+//   5. Or-patterns (D6): `Some(v) | Other(v)`.
+//   6. Type guards (D7): `v: int`.
 //
 // The recursive-enum ban still holds (D3): `enum List<T> { Cons(T, List<T>) }`
 // is a compile error.
@@ -39,7 +40,7 @@ func unwrap_or(o: Option<int>, fallback: int): int {
 }
 
 func main(): int {
-    // 1+2. Constructing fixes the parameter from the payload; `Option<int>`
+    // 1. Constructing fixes the parameter from the payload; `Option<int>`
     // is Copy, so the same value may pass twice.
     a = Option.Some(5);
     print(unwrap_or(a, 0) as string);
@@ -52,7 +53,7 @@ func main(): int {
         when None { print("none"); }
     }
 
-    // 3. Nested pattern inside the builtin Result.
+    // 3. Nested pattern inside the builtin Result (D5).
     r: Result<Option<int>, string> = Ok(Option.Some(7));
     choose move r {
         when Ok(Some(x)) { print(x as string); }
@@ -60,7 +61,7 @@ func main(): int {
         when Err(e) { print(e); }
     }
 
-    // 3. Multi-payload destructuring one level down.
+    // 4. Multi-payload destructuring one level down (D4).
     p = Option.Some(Pair.P(3, "three"));
     choose move p {
         when Some(P(m, n)) {
@@ -70,7 +71,7 @@ func main(): int {
         when None { print("none"); }
     }
 
-    // 4. Or-pattern spanning two variants: both alternatives bind `v` with
+    // 5. Or-pattern spanning two variants: both alternatives bind `v` with
     // the same type.
     q1: Pipe<int> = Pipe.Other(20);
     choose q1 {
@@ -78,7 +79,7 @@ func main(): int {
         when Empty { print("empty"); }
     }
 
-    // 4. Type guard: `v: int` ascribes the binding (compile-time only).
+    // 6. Type guard: `v: int` ascribes the binding (compile-time only).
     n = 5;
     choose n {
         when 0 { print("zero"); }

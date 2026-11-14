@@ -482,7 +482,10 @@
 **Refs**: PLAN §9.
 
 **As-built (0.0.7)**:
-- **Found and fixed a T06 lowering bug** (the card's job to surface it): a
+- **Found a T06 lowering bug (the card's job to surface it); the fix and the
+  red-first regression tests landed in the preceding commit `0ac696b`
+  (`fix(0.0.7): keep the choose scrutinee parked across a payload mismatch`),
+  not in the T09 fixture commit**: a
   payload sub-pattern with a failure edge (nested enum variant, literal,
   nested zero-payload variant) over-popped the `choose`-level scrutinee on
   mismatch, so the next alternative's test block ran `Dup` on an empty stack
@@ -514,8 +517,10 @@
 - `pair_demo.fln` exercises the D9 bracket spelling (`Pair[int, string]`)
   at every use site and the Copy split for `Pair[int, int]` vs
   `Pair[int, string]`.
-- std untouched confirmed: `git status` shows no `std/` changes; the
-  `tests/std/` suite (run inside `cargo test`) is green unchanged.
+- std untouched confirmed: no commit since the 0.0.6 release bump touches
+  `std/` (`git log --oneline -- std/` tops out at the 0.0.6 bump `ff15a2c`,
+  and `git diff ff15a2c --stat -- std/` is empty); the `tests/std/` suite
+  (run inside `cargo test`) is green unchanged.
 - `examples/0.0.7/option_demo.fln` + `README.md`: single-file demo covering
   D1/D2/D4/D5/D6/D7, runnable via `cargo fln examples/0.0.7/option_demo.fln`.
 
