@@ -5,10 +5,12 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.5 · Careful Hedgehog 🦔 · the pointer/unsafe layer** — the
-> `unsafe` / `trusted` / `ptr<T>` / `addr` / `deref_ptr` release plus the first
-> toolchain-maturity pass, complete (T01–T10; built on **0.0.4 · Patient Ants 🐜**,
-> **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚** and **0.0.1 · Swift Fox 🦊**).
+> Current version **0.0.7 · Mantis Shrimp 🦐 · parameterized types + pattern matching** —
+> user-defined type constructors (`enum Option<T>`), argument-dependent `is_copy`, full
+> multi-payload destructuring, nested patterns, or-patterns and type guards, complete
+> (T01–T11; built on **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
+> **0.0.4 · Patient Ants 🐜**, **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚**
+> and **0.0.1 · Swift Fox 🦊**).
 
 ## Language at a Glance
 

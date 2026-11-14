@@ -1,5 +1,7 @@
 ## [0.0.7] - 2026-11-14
 
+Codename: **Mantis Shrimp 🦐** (per `docs/0.0.7/PLAN.md`). Non-breaking additive (D10).
+
 ### Added
 - **Parameterized enums** (D1): an `enum` head may declare type parameters —
   `enum Option<T> { Some(T), None }`, `enum Pair<A, B> { P(A, B) }`. The
