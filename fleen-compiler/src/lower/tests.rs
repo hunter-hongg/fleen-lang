@@ -3034,7 +3034,7 @@ fn t06_nested_pattern_with_arm_guard() {
 }
 
 /// Number of instructions matching `pred` in a flattened function.
-fn count_kind<'a>(ins: &[&'a MirInstr], pred: impl Fn(&MirInstrKind) -> bool) -> usize {
+fn count_kind(ins: &[&MirInstr], pred: impl Fn(&MirInstrKind) -> bool) -> usize {
     ins.iter().filter(|i| pred(&i.kind)).count()
 }
 
