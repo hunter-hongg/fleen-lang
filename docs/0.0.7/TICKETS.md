@@ -147,9 +147,11 @@
 - [x] Storage rules: `ptr<T>` payloads rejected (unchanged);
       `Future` / `channel` payloads inherit boundary rules (unchanged).
       Parameterized payloads inherit the same rules via substitution.
-- [x] **`RecursiveEnum` carries forward (D3)**: the cycle check now walks
-      through parameterized payloads too — `enum List<T> { Cons(T, List<T>)
-      }` is rejected with the full path.
+- [x] **`RecursiveEnum` carries forward (D3)**: the cycle check walks
+      through parameterized payloads (the `collect_named_type_refs`
+      recursion into `Named` args landed with T03 at 30ed027; this card
+      adds the `enum List<T> { Cons(T, List<T>) }` test — rejected with
+      the full path).
 - [x] Tests: typeck valid (`Option<int>` Copy flows free; `Option<string>`
       needs move / clone; `Pair[string, int]` owned; nested `Option<Pair[A,
       B]>`); invalid (bare `Option` as type, `Option<int, string>` too many
