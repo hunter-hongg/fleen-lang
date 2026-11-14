@@ -54,7 +54,7 @@
   bracket `Result[T, E]`, user-defined angle `Option<T>` — both accepted for
   user enums too) as recorded 0.0.x debt.
 
-
+## [0.0.6] - 2026-11-08
 
 ### Added
 - Tagged unions: `enum` declarations with ordered variants and typed payloads

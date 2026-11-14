@@ -38,7 +38,7 @@ randomness.
 | Zero-payload variant needs its parameter fixed by context (`Option.None` alone cannot infer `T`) | D1 | `containers.none_int`; `tour` §3/§6 |
 | Multi-payload destructuring `when P(a, b)` — every payload is bindable | D4 | `option_demo` §4; `tour` §4 |
 | Nested patterns `Ok(Some(x))` / `Some(P(a, b))` | D5 | `option_demo` §3; `tour` §5 (`describe`) |
-| Or-patterns `1 \| 2` and `Some(v) \| Other(v)` (same binding name + type) | D6 | `option_demo` §5; `tour` §6 |
+| Or-patterns `1 \| 2` and `First(v) \| Second(v)` (same binding name + type) | D6 | `option_demo` §5; `tour` §6 |
 | Type guards `when v: int` (compile-time ascription; a scalar scrutinee keeps `otherwise`) | D7 | `option_demo` §6; `tour` §7 |
 | Both use-site spellings: `Option<int>` (angle) and `Pair[int, string]` (bracket) | D9 | `pair_demo.fln`; `containers.fln` signatures |
 

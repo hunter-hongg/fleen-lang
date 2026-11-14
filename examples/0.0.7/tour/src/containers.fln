@@ -23,10 +23,12 @@ pub enum Pair<A, B> {
 }
 
 /// `Pipe<T>` — three variants where two share the same payload type, the
-/// shape an or-pattern needs (`Some(v) | Other(v)`, D6).
+/// shape an or-pattern needs (`First(v) | Second(v)`, D6). The variant
+/// names deliberately avoid `Some`, so a reader never confuses a
+/// `Pipe` payload with the `Option` constructor.
 pub enum Pipe<T> {
-    Some(T),
-    Other(T),
+    First(T),
+    Second(T),
     Empty,
 }
 
@@ -69,7 +71,7 @@ pub func find(xs: [int], target: int): Option<int> {
 /// so the arm body can use whichever one matched.
 pub func pipe_kind(p: Pipe<int>): int {
     choose p {
-        when Some(v) | Other(v) { v }
+        when First(v) | Second(v) { v }
         when Empty { 0 - 1 }
     }
 }

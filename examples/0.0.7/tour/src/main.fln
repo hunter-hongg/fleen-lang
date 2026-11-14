@@ -11,7 +11,7 @@
 //                              and `Pair[int, string]` are owned
 //   multi-payload destructuring (D4)  `when P(a, b)` binds every payload
 //   nested patterns (D5)       `Ok(Some(x))` — a pattern inside a pattern
-//   or-patterns (D6)           `Some(v) | Other(v)` and `1 | 2`
+//   or-patterns (D6)           `First(v) | Second(v)` and `1 | 2`
 //   type guards (D7)           `when v: int` — compile-time ascription
 //   both spellings (D9)        `Option<int>` (angle) and `Pair[int, string]`
 //                              (bracket, the builtin `Result[T, E]` form)
@@ -69,11 +69,11 @@ func main() {
 
     // ── 6. or-patterns (D6): two alternatives, one shared binding ──
     std.io.println("== 6. or-patterns ==");
-    s1 = containers.Pipe.Some(5);
-    s2 = containers.Pipe.Other(6);
+    s1 = containers.Pipe.First(5);
+    s2 = containers.Pipe.Second(6);
     s3: containers.Pipe<int> = containers.Pipe.Empty;    // annotation fixes T (D1)
-    std.io.println("pipe(Some(5))  = ", containers.pipe_kind(s1) as string);
-    std.io.println("pipe(Other(6)) = ", containers.pipe_kind(s2) as string);
+    std.io.println("pipe(First(5))  = ", containers.pipe_kind(s1) as string);
+    std.io.println("pipe(Second(6)) = ", containers.pipe_kind(s2) as string);
     std.io.println("pipe(Empty)    = ", containers.pipe_kind(s3) as string);
     n = 2;
     choose n {

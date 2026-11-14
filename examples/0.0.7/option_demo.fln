@@ -11,7 +11,7 @@
 //      `move`.
 //   3. Nested patterns (D5): `Ok(Some(x))`.
 //   4. Multi-payload destructuring (D4): `Some(P(a, b))`.
-//   5. Or-patterns (D6): `Some(v) | Other(v)`.
+//   5. Or-patterns (D6): `First(v) | Second(v)`.
 //   6. Type guards (D7): `v: int`.
 //
 // The recursive-enum ban still holds (D3): `enum List<T> { Cons(T, List<T>) }`
@@ -23,8 +23,8 @@ enum Option<T> {
 }
 
 enum Pipe<T> {
-    Some(T),
-    Other(T),
+    First(T),
+    Second(T),
     Empty,
 }
 
@@ -73,9 +73,9 @@ func main(): int {
 
     // 5. Or-pattern spanning two variants: both alternatives bind `v` with
     // the same type.
-    q1: Pipe<int> = Pipe.Other(20);
+    q1: Pipe<int> = Pipe.Second(20);
     choose q1 {
-        when Some(v) | Other(v) { print(v as string); }
+        when First(v) | Second(v) { print(v as string); }
         when Empty { print("empty"); }
     }
 
