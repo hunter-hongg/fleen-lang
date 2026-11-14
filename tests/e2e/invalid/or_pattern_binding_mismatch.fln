@@ -1,0 +1,14 @@
+// 0.0.7 T09 e2e: or-pattern alternatives must bind the same names — the
+// `None` alternative does not bind `v`, so the alternatives disagree (D6).
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func unwrap_or(o: Option<int>): int {
+    choose o {
+        when Some(v) | None { v }
+    }
+}
+
+func main(): int = 0

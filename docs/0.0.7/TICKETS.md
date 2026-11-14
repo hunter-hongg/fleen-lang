@@ -4,9 +4,10 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T08 implemented and green (T07 emits bytecode v7 with the
-> `enum_defs` arity field; T08 confirmed the VM needs no further changes; e2e
-> fixtures/examples are T09).**
+> **Status: T01–T09 implemented and green (T07 emits bytecode v7 with the
+> `enum_defs` arity field; T08 confirmed the VM needs no further changes;
+> T09 landed the e2e fixtures/examples and fixed a T06 nested-payload
+> failure-edge over-pop; T10/T11 remain).**
 
 ---
 
@@ -454,31 +455,69 @@
 
 ## T09 — Integration: e2e fixtures + std untouched confirmation (F9; D9)
 
-- [ ] E2E valid fixtures:
+- [x] E2E valid fixtures:
       - `tests/e2e/valid/option_demo.fln` (+ `.expected`) — `Option<int>`
         Copy flow, `Option<string>` owned flow, construct + choose +
         payload use.
       - `tests/e2e/valid/pair_demo.fln` (+ `.expected`) — multi-payload
         `Pair[A, B]` construct + full destructure.
       - `tests/e2e/valid/nested_pattern.fln` (+ `.expected`) —
-        `Ok(Some(x))` / `Some(Pair(a, b))`.
+        `Ok(Some(x))` / `Some(P(a, b))`.
       - `tests/e2e/valid/or_pattern.fln` (+ `.expected`) — `1 | 2`,
         `Some(v) | Other(v)`.
       - `tests/e2e/valid/type_guard.fln` (+ `.expected`) — `v: int` typed
         binding.
-- [ ] E2E invalid fixtures (each `.fln` + `.stderr` + `.exit`):
+- [x] E2E invalid fixtures (each `.fln` + `.stderr` + `.exit`):
       - `option_needs_args` — bare `Option` in type position.
       - `option_arity` — `Option<int, string>` too many args.
       - `recursive_param_enum` — `enum List<T> { Cons(T, List<T>) }`.
       - `or_pattern_binding_mismatch` — `Some(v) | None`.
       - `type_guard_mismatch` — `v: string` on an `int` scrutinee.
-- [ ] Confirm std is untouched: no std source changes; existing std tests
+- [x] Confirm std is untouched: no std source changes; existing std tests
       green unchanged.
-- [ ] Examples: `examples/0.0.7/` — at least one parameterized-enum demo
+- [x] Examples: `examples/0.0.7/` — at least one parameterized-enum demo
       (`option_demo` at minimum) with `README.md`.
 
 **Depends on**: T05, T06.
 **Refs**: PLAN §9.
+
+**As-built (0.0.7)**:
+- **Found and fixed a T06 lowering bug** (the card's job to surface it): a
+  payload sub-pattern with a failure edge (nested enum variant, literal,
+  nested zero-payload variant) over-popped the `choose`-level scrutinee on
+  mismatch, so the next alternative's test block ran `Dup` on an empty stack
+  and the verifier rejected the module ("stack depth mismatch: predecessor
+  expects 1, got 0"). The root cause: `lower_enum_payloads` unconditionally
+  added `+1` to `fail.extra_below` — correct when the parked subject is owned
+  by the enclosing match (nested sub-pattern call site: the subject is popped
+  on success), wrong at the alternative level where the scrutinee is *shared*
+  and must survive. The ownership decision moved to the call sites:
+  `lower_enum_alt_match` passes its `fail` unwrapped (`extra_below: 0`),
+  `lower_subpattern_match`'s `Enum` case wraps `extra_below + 1`. Regression
+  tests (`t09_*_keeps_scrutinee_parked`, written red-first) pin the cleanup
+  counts through `assert_stack_depths_consistent`.
+- **Fixture-shape notes** (deviations from the card's shorthand):
+  - The card's `Some(Pair(a, b))` notation names the *enum*; the actual
+    pattern names the *variant* — `Some(P(a, b))` for `enum Pair<A, B> {
+    P(A, B) }`.
+  - The card's `Some(v) | None` mismatch fixture is
+    `or_pattern_binding_mismatch` on `Option<int>`; the card's
+    `Some(v) | Other(v)` valid case needs both variants in one enum (an
+    or-pattern's alternatives must typecheck against the same scrutinee), so
+    `or_pattern.fln` declares `enum Pipe<T> { Some(T), Other(T), Empty }`.
+  - On a scalar scrutinee a type-guard arm does not cover (a bare ident
+    arm's 0.0.6 behavior), so `type_guard.fln` keeps an `otherwise` arm;
+    `o2 = Option.None` needs an annotation (`o2: Option<int>`) — the
+    zero-payload variant has nothing to infer `T` from.
+  - The Result choose general path and `Result` constructors in argument
+    position need annotations (`r: Result<Option<int>, string> = Ok(...)`).
+- `pair_demo.fln` exercises the D9 bracket spelling (`Pair[int, string]`)
+  at every use site and the Copy split for `Pair[int, int]` vs
+  `Pair[int, string]`.
+- std untouched confirmed: `git status` shows no `std/` changes; the
+  `tests/std/` suite (run inside `cargo test`) is green unchanged.
+- `examples/0.0.7/option_demo.fln` + `README.md`: single-file demo covering
+  D1/D2/D4/D5/D6/D7, runnable via `cargo fln examples/0.0.7/option_demo.fln`.
 
 ---
 

@@ -1,0 +1,9 @@
+// 0.0.7 T09 e2e: a type guard must match the scrutinee type exactly (there
+// are no supertypes in 0.0.7) — `v: string` on an `int` scrutinee is an
+// error (D7).
+func main(): int {
+    n = 5;
+    choose n {
+        when v: string { print(v); }
+    }
+}

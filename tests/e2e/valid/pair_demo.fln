@@ -1,0 +1,56 @@
+// 0.0.7 T09 e2e: `Pair[A, B]` — the bracket spelling at every use site
+// (D9, matching the builtin `Result[T, E]` form) plus a two-parameter
+// declaration, construction, and full multi-payload destructuring (D4).
+//
+// Copy split (D2): `Pair[int, int]` is Copy (both payloads Copy),
+// `Pair[int, string]` is owned (travels with `move`).
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    P(A, B),
+}
+
+func echo(p: Pair[int, int]): Pair[int, int] {
+    // Copy: `p` may return without `move`.
+    p
+}
+
+func main(): int {
+    // Bracket spelling (D9) on the annotation and on the nested use.
+    owned: Pair[int, string] = Pair.P(1, "one");
+    choose move owned {
+        when P(a, b) {
+            print(a as string);
+            print(b);
+        }
+    }
+
+    // Angle spelling also works (D9) and `Pair[int, int]` is Copy.
+    copyable: Pair<int, int> = Pair.P(2, 3);
+    echo(copyable);
+    choose copyable {
+        when P(x, y) {
+            print(x as string);
+            print(y as string);
+        }
+    }
+
+    // Nested application inside another parameterized enum's argument.
+    boxed: Option<Pair[int, string]> = Option.Some(Pair.P(4, "four"));
+    choose move boxed {
+        when Some(inner) {
+            choose move inner {
+                when P(m, n) {
+                    print(m as string);
+                    print(n);
+                }
+            }
+        }
+        when None { print("none"); }
+    }
+    0
+}

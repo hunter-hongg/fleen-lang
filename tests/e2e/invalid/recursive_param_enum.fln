@@ -1,0 +1,9 @@
+// 0.0.7 T09 e2e: a parameterized enum may not be recursive — the payload
+// reaches the enum being declared through the parameter substitution
+// (`List<T>` inside `List<T>`), so its size is not statically known (D3).
+enum List<T> {
+    Cons(T, List<T>),
+    Nil,
+}
+
+func main(): int = 0

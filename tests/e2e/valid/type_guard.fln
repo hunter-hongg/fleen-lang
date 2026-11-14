@@ -1,0 +1,34 @@
+// 0.0.7 T09 e2e: type guards (D7) — `pattern: Type` ascribes a type to the
+// match. The ascription is compile-time only: lowering compiles the arm as
+// its inner pattern, and the guard's inner pattern contributes its coverage
+// to exhaustiveness. On an `int` scrutinee, `v: int` is a typed binding.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func main(): int {
+    // Top-level typed binding: the guard matches the scrutinee type exactly.
+    n = 5;
+    choose n {
+        when 0 { print("zero"); }
+        when v: int { print(v as string); }
+        otherwise { print("negative"); }
+    }
+
+    // A type guard on a payload position: `Some(v: int)` ascribes `v`.
+    o = Option.Some(11);
+    choose o {
+        when Some(v: int) { print(v as string); }
+        when None { print("none"); }
+    }
+
+    // A guard on the empty variant's sibling: the annotation fixes `T`.
+    o2: Option<int> = Option.None;
+    choose o2 {
+        when Some(v: int) { print(v as string); }
+        when None { print("none"); }
+    }
+    0
+}

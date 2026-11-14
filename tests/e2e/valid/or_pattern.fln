@@ -1,0 +1,47 @@
+// 0.0.7 T09 e2e: or-patterns (D6) — `p1 | p2` matches either alternative.
+// Two shapes: literal alternatives on a scalar scrutinee (`1 | 2`), and
+// constructor alternatives on an enum scrutinee (`Some(v) | Other(v)` —
+// the same binding name `v` must have the same type in both alternatives).
+
+enum Pipe<T> {
+    Some(T),
+    Other(T),
+    Empty,
+}
+
+func main(): int {
+    // Literal or-pattern on an int scrutinee.
+    n = 2;
+    choose n {
+        when 1 | 2 { print("small"); }
+        when 3 { print("three"); }
+        otherwise { print("big"); }
+    }
+
+    choose 7 {
+        when 1 | 2 { print("small"); }
+        when 3 { print("three"); }
+        otherwise { print("big"); }
+    }
+
+    // Constructor or-pattern spanning two variants: both alternatives bind
+    // `v` with the same type (`Pipe<int>` is Copy — no move needed).
+    p1: Pipe<int> = Pipe.Some(10);
+    choose p1 {
+        when Some(v) | Other(v) { print(v as string); }
+        when Empty { print("empty"); }
+    }
+
+    p2: Pipe<int> = Pipe.Other(20);
+    choose p2 {
+        when Some(v) | Other(v) { print(v as string); }
+        when Empty { print("empty"); }
+    }
+
+    p3: Pipe<int> = Pipe.Empty;
+    choose p3 {
+        when Some(v) | Other(v) { print(v as string); }
+        when Empty { print("empty"); }
+    }
+    0
+}

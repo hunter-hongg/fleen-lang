@@ -1,0 +1,46 @@
+// 0.0.7 T09 e2e: nested patterns — a payload position holds a full pattern,
+// not just a binding name (D5). `Ok(Some(x))` nests a parameterized enum
+// inside the builtin `Result`; `Some(Pair(a, b))` nests a multi-payload
+// constructor pattern one level deep, binding both payloads.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    P(A, B),
+}
+
+// `Ok(Some(x))`: the outer Result arm unwraps, the inner pattern tests the
+// `Option<int>` payload (Copy — nothing to move). `Result[Option<int>,
+// string>` is owned, so the scrutinee travels with `move`.
+func describe(r: Result<Option<int>, string>): string {
+    choose move r {
+        when Ok(Some(x)) { x as string }
+        when Ok(None) { "nothing" }
+        when Err(e) { e }
+    }
+}
+
+func main(): int {
+    // Result constructors take their types from the annotation.
+    ok_some: Result<Option<int>, string> = Ok(Option.Some(7));
+    ok_none: Result<Option<int>, string> = Ok(Option.None);
+    err: Result<Option<int>, string> = Err("bad input");
+    print(describe(move ok_some));
+    print(describe(move ok_none));
+    print(describe(move err));
+
+    // `Some(P(a, b))`: nested constructor pattern binds both payloads of
+    // the multi-payload variant one level down.
+    p = Option.Some(Pair.P(3, "three"));
+    choose move p {
+        when Some(P(a, b)) {
+            print(a as string);
+            print(b);
+        }
+        when None { print("none"); }
+    }
+    0
+}

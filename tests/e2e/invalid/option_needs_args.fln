@@ -1,0 +1,15 @@
+// 0.0.7 T09 e2e: a bare parameterized enum name in type position is an
+// error — every use site must be fully applied (D1).
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func unwrap_or(o: Option, fallback: int): int {
+    choose o {
+        when Some(v) { v }
+        when None { fallback }
+    }
+}
+
+func main(): int = 0

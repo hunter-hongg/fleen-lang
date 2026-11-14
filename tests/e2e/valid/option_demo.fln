@@ -1,0 +1,40 @@
+// 0.0.7 T09 e2e: `Option<T>` end to end — construct + choose + payload use,
+// with the Copy split (D2): `Option<int>` is Copy (the payload is Copy, the
+// same value passes twice), `Option<string>` is owned (the value travels
+// with `move` and is consumed by the choose).
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func unwrap_or(o: Option<int>, fallback: int): int {
+    choose o {
+        when Some(v) { v }
+        when None { fallback }
+    }
+}
+
+func main(): int {
+    // Construct: the payload argument fixes T = int.
+    a = Option.Some(5);
+    print(unwrap_or(a, 0) as string);
+
+    // Copy flow: `Option<int>` may pass twice with no `move`.
+    b = Option.Some(7);
+    print(unwrap_or(b, 1) as string);
+    print(unwrap_or(b, 2) as string);
+
+    // Owned flow: `Option<string>` moves into the choose; the payload
+    // binding `t` owns the string.
+    s = Option.Some("hello");
+    choose move s {
+        when Some(t) { print(t); }
+        when None { print("none"); }
+    }
+
+    // The empty-payload variant takes its parameter from the annotation.
+    empty: Option<int> = Option.None;
+    print(unwrap_or(empty, 42) as string);
+    0
+}
