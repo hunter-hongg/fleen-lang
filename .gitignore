@@ -5,3 +5,5 @@
 release/**/*.tar.gz
 release/**/*.zip
 .flint-test-cache/
+# Test-run scratch home (flint dep-cache clones created by test sessions).
+.flint-home-tmp/
