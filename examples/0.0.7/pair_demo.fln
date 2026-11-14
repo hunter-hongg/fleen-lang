@@ -1,0 +1,72 @@
+// 0.0.7 demo: multi-parameter type constructors and the two use-site
+// spellings (D9) — the companion to `option_demo.fln`.
+//
+// Run: cargo fln examples/0.0.7/pair_demo.fln
+//
+// The numbers match the in-body section comments below (and the "Where"
+// column of README.md):
+//   1. Bracket spelling (D9): `Pair[int, string]` — the `Result[T, E]` form.
+//   2. Angle spelling (D9): `Pair<int, string>` — same type, either spelling
+//      at every use site.
+//   3. Argument-dependent Copy (D2): `Pair[int, int]` is Copy (both arguments
+//      Copy) and passes twice; `Pair[int, string]` is owned and moves.
+//   4. Multi-payload destructuring (D4): `when P(a, b)` binds both payloads.
+//   5. A parameterized enum nested inside another parameterized enum (D5):
+//      `Pair<Option<int>, Option<int>>`.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    P(A, B),
+}
+
+func sum_pair(p: Pair<int, int>): int {
+    choose p {
+        when P(a, b) { a + b }
+    }
+}
+
+func label(p: Pair<int, string>): string {
+    choose move p {
+        when P(k, v) { v }
+    }
+}
+
+func main(): int {
+    // 1. The bracket spelling fixes both parameters (D9).
+    p1: Pair[int, string] = Pair.P(1, "one");
+    print(label(move p1));
+
+    // 2. The same constructor under the angle spelling — the two spellings
+    // name one type.
+    p2: Pair<int, string> = Pair.P(2, "two");
+    print(label(move p2));
+
+    // 3. `Pair[int, int]` is Copy (both arguments are Copy), so the same
+    // value passes twice; `Pair[int, string]` above needed `move`.
+    p3: Pair[int, int] = Pair.P(3, 7);
+    print(sum_pair(p3) as string);
+    print(sum_pair(p3) as string);
+
+    // 4. Destructuring binds every payload, whatever the spelling was (D4).
+    choose p3 {
+        when P(a, b) { print((a + b) as string); }
+    }
+
+    // 5. Parameterized enums compose: `Pair<Option<int>, Option<int>>`.
+    //    Note: a bare name may appear at most once within ONE pattern —
+    //    `when P(None, None)` is a duplicate-declaration error (a zero-payload
+    //    variant pattern occupies its name), so the last case falls to
+    //    `otherwise`.
+    p4: Pair<Option<int>, Option<int>> = Pair.P(Option.Some(4), Option.None);
+    choose p4 {
+        when P(Some(x), None) { print(x as string); }
+        when P(None, Some(y)) { print(y as string); }
+        when P(Some(z), Some(w)) { print("both"); }
+        otherwise { print("empty"); }
+    }
+    0
+}

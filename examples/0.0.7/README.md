@@ -1,9 +1,13 @@
 # 0.0.7 demos — parameterized enums + pattern-matching completion
 
-Two programs that exercise the 0.0.7 feature set (PLAN D1–D10):
+Three programs that exercise the 0.0.7 feature set (PLAN D1–D10):
 
 - **`option_demo.fln`** — a single-file demo covering D1/D2/D4/D5/D6/D7 end
   to end (TICKETS.md T09).
+- **`pair_demo.fln`** — a single-file demo for the two-parameter constructor
+  `Pair<A, B>`: the bracket (`Pair[int, string]`) and angle (`Pair<int,
+  string>`) use-site spellings (D9), argument-dependent `is_copy` (D2), and
+  a parameterized enum nested inside another (D5).
 - **`tour/`** — a small multi-module **project** (TICKETS.md T10): the
   `containers` module declares the parameterized enums, `main.fln` runs seven
   numbered demos, and `tests/` carries a `flint test` case.
@@ -13,6 +17,9 @@ Two programs that exercise the 0.0.7 feature set (PLAN D1–D10):
 ```bash
 # the single-file demo (module system + std, no manifest needed)
 cargo fln examples/0.0.7/option_demo.fln
+
+# the two-spellings demo (D9)
+cargo fln examples/0.0.7/pair_demo.fln
 
 # the project tour (one-stop driver)
 cargo fln --project examples/0.0.7/tour
@@ -26,7 +33,7 @@ cd examples/0.0.7/tour
 cargo run -q -p flint-cli -- test
 ```
 
-Both outputs are fully deterministic — no timers, no concurrency, no
+All three outputs are fully deterministic — no timers, no concurrency, no
 randomness.
 
 ## Features exercised
@@ -54,6 +61,7 @@ fixtures for the error shapes.
 ```
 0.0.7/
 ├── option_demo.fln              # single-file demo (T09)
+├── pair_demo.fln                # two-spellings / two-parameter demo (D9/D2)
 ├── README.md                    # this file
 └── tour/                        # multi-module project (T10)
     ├── flint.toml               # manifest (flint)
