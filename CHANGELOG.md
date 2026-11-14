@@ -1,4 +1,60 @@
-## [0.0.6] - 2026-11-08
+## [0.0.7] - Unreleased
+
+### Added
+- **Parameterized enums** (D1): an `enum` head may declare type parameters —
+  `enum Option<T> { Some(T), None }`, `enum Pair<A, B> { P(A, B) }`. The
+  parameters live in a declaration-local scope and every use site must be
+  **fully applied** (`Option<int>`; a bare `Option` in type position is
+  `TypeConstructorNeedsArgs`, too many args is `ArityMismatch`). Both use-site
+  spellings are accepted: angle (`Option<int>`) and bracket (`Pair[int, string]`,
+  the builtin `Result[T, E]` form — D9). Constructor sites infer the parameters
+  from the payload arguments; a zero-payload variant fixes none, so
+  `Option.None` needs a context annotation (`TypeParameterAmbiguous` otherwise).
+  Type parameters ride through resolve (module export/import tables carry the
+  arity) and the `RecursiveEnum` ban carries forward unchanged
+  (`enum List<T> { Cons(T, List<T>) }` is rejected, D3).
+- **Argument-dependent `is_copy`** (D2): `is_copy(App(T1..Tn))` substitutes the
+  arguments into the payload types and re-evaluates the payload-Copy rule —
+  `Option<int>` is Copy, `Option<string>` is owned, `Pair[int, string]` is
+  owned. Monomorphic enums keep the 0.0.6 constant rule as the arity-0 case.
+- **Pattern-matching completion** (D4–D7): the pattern grammar is recursive.
+  Multi-payload destructuring — `when P(a, b)` binds every payload, strictly
+  (`ArityMismatchInPattern` on a count mismatch, D4). Nested patterns —
+  `Ok(Some(x))`, `Some(P(a, b))`; bindings from all levels land in the arm
+  scope (D5). Or-patterns — `p₁ | p₂` matches either alternative; all
+  alternatives must bind the same names with the same types
+  (`OrPatternBindingMismatch`), and exhaustiveness takes the union of the
+  alternatives' coverage (D6). Type guards — `pattern: T` ascribes a type to
+  the match; compile-time only, no runtime test (`PatternTypeMismatch` on a
+  mismatch, D7). Lowering chains nested payloads with re-parked subjects and
+  lowers one test chain per or-alternative into a shared body block; typeck's
+  exhaustiveness is payload-aware (a literal sub-pattern never covers its whole
+  payload type).
+- **Bytecode v7** (D8): `enum_defs` gains one `type_param_count: u32` per enum
+  (0 for a monomorphic enum), written after `variant_count`; parameter names
+  are not serialized (declaration-local, no runtime meaning). Writers emit
+  version 7, readers accept `{1, 2, 3, 4, 5, 6, 7}`; no new opcodes, no
+  `FieldTypeTag` change, `Value::Enum` unchanged — the VM needs no source
+  changes (the run gate widened to `1..=7`).
+- E2E fixtures: valid `option_demo` / `pair_demo` / `nested_pattern` /
+  `or_pattern` / `type_guard`; invalid `option_needs_args` / `option_arity` /
+  `recursive_param_enum` / `or_pattern_binding_mismatch` / `type_guard_mismatch`.
+- `examples/0.0.7/` — the single-file `option_demo.fln` (T09) and the
+  multi-module `tour/` project (parameterized enums, nested / or / guarded
+  patterns) with `tests/enum_param_case.{fln,expected}` (T10).
+
+### Non-breaking
+- **This release is additive** (D10) — a first for the 0.0.x line. The only
+  source-visible changes are new syntax (enum type parameters, the extended
+  pattern grammar); no existing program changes meaning, and `is_copy` only
+  becomes argument-dependent for enums that have parameters (none exist before
+  0.0.7). No deprecation aliases, no opt-out flags.
+- **`Result[T, E]` stays builtin** (D9): the `Result` → std enum migration is
+  deferred to 0.1.0; 0.0.7 carries the two parameterized spellings (builtin
+  bracket `Result[T, E]`, user-defined angle `Option<T>` — both accepted for
+  user enums too) as recorded 0.0.x debt.
+
+
 
 ### Added
 - Tagged unions: `enum` declarations with ordered variants and typed payloads

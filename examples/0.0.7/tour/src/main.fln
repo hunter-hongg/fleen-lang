@@ -1,0 +1,106 @@
+// 0.0.7 feature tour — parameterized enums + pattern-matching completion.
+//
+// Run (project mode, one command):
+//     cargo fln --project examples/0.0.7/tour
+//   or flint:   cd examples/0.0.7/tour && cargo run -q -p flint-cli -- run
+//
+// Features loaded by this program:
+//   parameterized enums (D1)   `enum Option<T>` / `enum Pair<A, B>` —
+//                              fully applied at every use site
+//   argument-dependent Copy (D2)  `Option<int>` is Copy, `Option<string>`
+//                              and `Pair[int, string]` are owned
+//   multi-payload destructuring (D4)  `when P(a, b)` binds every payload
+//   nested patterns (D5)       `Ok(Some(x))` — a pattern inside a pattern
+//   or-patterns (D6)           `Some(v) | Other(v)` and `1 | 2`
+//   type guards (D7)           `when v: int` — compile-time ascription
+//   both spellings (D9)        `Option<int>` (angle) and `Pair[int, string]`
+//                              (bracket, the builtin `Result[T, E]` form)
+//
+// The recursive-parameter ban (D3) and the bare-name error
+// (`TypeConstructorNeedsArgs`) are pinned by the e2e fixtures under
+// `tests/e2e/invalid/` instead — they are compile errors, not runnable.
+
+import containers;
+import std.io;
+
+func main() {
+    // ── 1. a parameterized enum with a Copy argument (D1/D2) ──
+    std.io.println("== 1. Option<int> is Copy ==");
+    oi = containers.Option.Some(41);
+    std.io.println("unwrap_or(Some(41)) = ", containers.unwrap_or(oi, 0) as string);
+    oj = oi;    // Copy: the assignment duplicates; `oi` stays usable
+    std.io.println("after the copy, oi  = ", containers.unwrap_or(oj, 0) as string);
+
+    // ── 2. the same enum with an owned argument moves instead (D2) ──
+    std.io.println("== 2. Option<string> is owned ==");
+    os = containers.Option.Some("hi");
+    os2 = move os;    // owned: the transfer consumes `os`
+    std.io.println("moved Some(\"hi\") ok");
+
+    // ── 3. `Option` as a return type; the empty variant needs its
+    //       parameter fixed by a context (here: a typed helper, D1) ──
+    std.io.println("== 3. find returns Option<int> ==");
+    xs = [4, 8, 15];
+    hit = containers.find(move xs, 15);
+    miss = containers.none_int();
+    std.io.println("find(xs, 15) = ", containers.unwrap_or(hit, 0 - 1) as string);
+    std.io.println("find(xs, 99) = ", containers.unwrap_or(miss, 0 - 1) as string);
+
+    // ── 4. multi-payload destructuring + the Copy split (D2/D4/D9) ──
+    std.io.println("== 4. Pair[A, B] destructures fully ==");
+    p = containers.Pair.P(7, "seven");    // the payload argument fixes A=int, B=string
+    std.io.println("render(P(7, ...)) = ", containers.render(move p));
+    q = containers.Pair.P(2, 3);          // Pair<int, int> — Copy
+    rq = containers.echo(q);
+    choose rq {
+        when P(a, b) {
+            std.io.println("echo(P(2, 3)) = ", a as string, " and ", b as string);
+        }
+    }
+
+    // ── 5. nested patterns (D5): `Ok(Some(x))` over the builtin Result.
+    //       `Result[Option<int>, string]` is owned, so it travels with
+    //       `move`; the annotation fixes the Result parameters. ──
+    std.io.println("== 5. nested patterns ==");
+    ok_some: Result<containers.Option<int>, string> = Ok(containers.Option.Some(21));
+    describe(move ok_some);
+    ok_none: Result<containers.Option<int>, string> = Ok(containers.none_int());
+    describe(move ok_none);
+
+    // ── 6. or-patterns (D6): two alternatives, one shared binding ──
+    std.io.println("== 6. or-patterns ==");
+    s1 = containers.Pipe.Some(5);
+    s2 = containers.Pipe.Other(6);
+    s3: containers.Pipe<int> = containers.Pipe.Empty;    // annotation fixes T (D1)
+    std.io.println("pipe(Some(5))  = ", containers.pipe_kind(s1) as string);
+    std.io.println("pipe(Other(6)) = ", containers.pipe_kind(s2) as string);
+    std.io.println("pipe(Empty)    = ", containers.pipe_kind(s3) as string);
+    n = 2;
+    choose n {
+        when 1 | 2 { std.io.println("n is 1 or 2"); }
+        otherwise { std.io.println("n is other"); }
+    }
+
+    // ── 7. type guards (D7): `v: int` ascribes the binding — compile-time
+    //       only, no runtime test. On a scalar scrutinee the guard does not
+    //       count toward exhaustiveness, so the `otherwise` stays. ──
+    std.io.println("== 7. type guards ==");
+    m = 5;
+    choose m {
+        when 0 { std.io.println("zero"); }
+        when v: int { std.io.println("int ", v as string); }
+        otherwise { std.io.println("other"); }
+    }
+
+    std.io.println("tour done");
+}
+
+/// The D5 showcase as a function: the outer Result arm unwraps and the
+/// nested pattern tests the `Option<int>` payload in the same arm.
+func describe(r: Result<containers.Option<int>, string>) {
+    choose move r {
+        when Ok(Some(x)) { std.io.println("Ok(Some(", x as string, "))"); }
+        when Ok(None) { std.io.println("Ok(None)"); }
+        when Err(e) { std.io.println("Err = ", e); }
+    }
+}

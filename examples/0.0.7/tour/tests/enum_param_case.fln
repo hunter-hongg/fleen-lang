@@ -1,0 +1,22 @@
+// `flint test` fixture (0.0.7): a parameterized-enum case.
+// Standalone by contract — `flint test` compiles each `tests/*.fln` as a
+// single file, so the enum is declared here rather than imported.
+import std.io;
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+func pick(o: Option<int>): int {
+    choose o {
+        when Some(v) { v }
+        when None { 0 - 1 }
+    }
+}
+
+func main() {
+    std.io.println(pick(Option.Some(7)) as string);
+    empty: Option<int> = Option.None;
+    std.io.println(pick(empty) as string);
+}

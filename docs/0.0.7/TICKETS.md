@@ -528,11 +528,11 @@
 
 ## T10 — Examples project + CHANGELOG (F9; D10)
 
-- [ ] `examples/0.0.7/tour` — a small multi-module project exercising
+- [x] `examples/0.0.7/tour` — a small multi-module project exercising
       parameterized enums (`Option<T>`, `Pair[A, B]`), nested patterns,
       or-patterns, and type guards; with `tests/enum_param_case.{fln,
       expected}` and `examples/0.0.7/README.md`.
-- [ ] `CHANGELOG.md` gains the `0.0.7` entry under "Unreleased" (the
+- [x] `CHANGELOG.md` gains the `0.0.7` entry under "Unreleased" (the
       version bump to `0.0.7` is a T11 decision when the release is cut,
       not now). The entry records: parameterized enums (D1/D2/D3),
       pattern enhancements (D4–D7), bytecode v7 (D8), `Result` retention
@@ -540,6 +540,26 @@
 
 **Depends on**: T09.
 **Refs**: PLAN §10, D9, D10.
+
+**As-built (0.0.7)**:
+- The tour declares the parameterized enums in `src/containers.fln`
+  (`Option<T>`, `Pair<A, B>`, plus a `Pipe<T>` shaped for or-patterns) and
+  drives seven numbered demos from `src/main.fln`. Cross-module notes the
+  example records in `examples/0.0.7/README.md`: a type argument still needs
+  the module-qualified name (`Result<containers.Option<int>, string>`, a bare
+  `Option` there is "unknown type"), and `[int]` arrays are owned, so
+  `containers.find(move xs, 15)` transfers.
+- `tests/enum_param_case.fln` is standalone by contract — `flint test`
+  compiles each `tests/*.fln` as a single file (`fleen_compiler::compile`,
+  no project imports), so the fixture re-declares its own `Option<T>`
+  (same shape as the 0.0.6 tour's `enum_case`).
+- Verified through all three paths: `cargo fln --project
+  examples/0.0.7/tour`, `flint run`, and `flint test` (1 passed, 0 failed);
+  the full `cargo test` suite stays green (no source changes).
+- The CHANGELOG `0.0.7` entry sits at the top of the file above the
+  `# Changelog` title (the 0.0.6 entry's position), marked **Unreleased**;
+  no `Cargo.toml` / `std/VERSION` changes (the version bump is T11's, when
+  the release is cut).
 
 ---
 

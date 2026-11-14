@@ -1,0 +1,75 @@
+// containers.fln — the 0.0.7 parameterized enums of the feature tour.
+//
+// An `enum` head may carry type parameters (D1): `enum Option<T>`,
+// `enum Pair<A, B>`. The parameters are declaration-local — they are not
+// values and not visible outside the declaration — and every use site must
+// be **fully applied** (`Option<int>`; a bare `Option` in type position is
+// a compile error). Both spellings are accepted at use sites: `Option<int>`
+// (angle) and `Pair[int, string]` (bracket, the builtin `Result[T, E]`
+// form — D9).
+
+import std.str;
+
+/// `Option<T>` — the classic two-variant type constructor.
+pub enum Option<T> {
+    Some(T),
+    None,
+}
+
+/// `Pair<A, B>` — a two-parameter enum whose single variant carries both
+/// payloads; a pattern names both (`when P(a, b)`, D4).
+pub enum Pair<A, B> {
+    P(A, B),
+}
+
+/// `Pipe<T>` — three variants where two share the same payload type, the
+/// shape an or-pattern needs (`Some(v) | Other(v)`, D6).
+pub enum Pipe<T> {
+    Some(T),
+    Other(T),
+    Empty,
+}
+
+/// The zero-payload variant fixes no parameter, so `Option.None` alone is
+/// ambiguous (D1) — the return-type annotation is what makes it
+/// `Option<int>`.
+pub func none_int(): Option<int> = Option.None
+
+/// `Option<int>` is Copy (D2): the parameter may be read without `move`.
+pub func unwrap_or(o: Option<int>, fallback: int): int {
+    choose o {
+        when Some(v) { v }
+        when None { fallback }
+    }
+}
+
+/// `Pair[int, int]` is Copy (every payload Copy) — it returns without
+/// `move` and the caller keeps its value.
+pub func echo(p: Pair<int, int>): Pair[int, int] = p
+
+/// `Pair[int, string]` is owned (one owned argument flips `is_copy`, D2) —
+/// the parameter consumes the value, so the caller passes `move p`.
+pub func render(p: Pair[int, string]): string {
+    choose move p {
+        when P(n, s) { std.str.concat(n as string, s) }
+    }
+}
+
+/// `Option` as a return type. The assignment inside the loop body updates
+/// the outer `found` (DESIGN §4.5), not a new binding.
+pub func find(xs: [int], target: int): Option<int> {
+    found: Option<int> = Option.None;
+    for y in xs {
+        if y == target { found = Option.Some(y); }
+    }
+    found
+}
+
+/// Or-pattern (D6): both alternatives bind `v` with the same type (`int`),
+/// so the arm body can use whichever one matched.
+pub func pipe_kind(p: Pipe<int>): int {
+    choose p {
+        when Some(v) | Other(v) { v }
+        when Empty { 0 - 1 }
+    }
+}
