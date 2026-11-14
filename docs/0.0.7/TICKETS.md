@@ -10,6 +10,9 @@
 > failure-edge over-pop; T10 landed the tour example + CHANGELOG; T11 synced
 > the docs; the version bump and the release publication (the `v0.0.7` tag and
 > the six target archives) are done — the milestone is closed).**
+> **Post-release**: two legacy findings are recorded in [BUGS.md](BUGS.md)
+> (BUG-1 choose-arm `if`/`else` verify failure; BUG-2 one-bare-name-per-pattern)
+> — unassigned, for the next milestone.**
 
 ---
 

@@ -857,6 +857,14 @@ choose x {
 > `when v: int` (compile-time ascription). Exhaustiveness treats an or-pattern as
 > the union of its alternatives' coverage. See `docs/DESIGN.md` §7 and
 > `docs/0.0.7/PLAN.md` D4–D7; examples in "Parameterized Types" above.
+>
+> **Known limits (post-release findings, see `docs/0.0.7/BUGS.md`)**:
+> (1) a `choose` arm over an **enum** scrutinee whose block ends in an
+> `if`/`else` expression fails bytecode verification (stack-depth mismatch);
+> the scalar-scrutinee path is unaffected. (2) Within one pattern a bare name
+> may appear at most once — zero-payload variant patterns occupy their name,
+> so `when P(None, None)` is a `DuplicateBinding` resolve error (use
+> `otherwise` or split the arms).
 
 ```fleen
 choose value {
