@@ -4,8 +4,8 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T07 implemented and green (T07 emits bytecode v7 with the
-> `enum_defs` arity field; T08 is the confirmation card; e2e
+> **Status: T01–T08 implemented and green (T07 emits bytecode v7 with the
+> `enum_defs` arity field; T08 confirmed the VM needs no further changes; e2e
 > fixtures/examples are T09).**
 
 ---
@@ -414,17 +414,41 @@
 > with T07 (`Vm::run_inner`) — it was required for any compiled-output
 > module to execute. This card now only runs the confirmations below.
 
-- [ ] Confirm no VM source changes are needed: `Value::Enum` shape
+- [x] Confirm no VM source changes are needed: `Value::Enum` shape
       unchanged; `EnumNew` / `EnumIs` / `EnumPayload` encodings and stack
       effects unchanged; defensive errors unchanged.
-- [ ] Confirm the v7 `.flnc` is decoded by the existing v6 VM reader with
+- [x] Confirm the v7 `.flnc` is decoded by the existing v6 VM reader with
       the one extra u32 per enum skipped (or validated) in the `enum_defs`
       reader.
-- [ ] Test: existing VM enum tests green unchanged; a v7 module with a
+- [x] Test: existing VM enum tests green unchanged; a v7 module with a
       parameterized enum runs correctly through the full toolchain.
 
 **Depends on**: T07.
 **Refs**: PLAN §6, D8.
+
+**As-built (0.0.7)**:
+- Zero VM source changes beyond the T07 run gate: `Value::Enum { variant,
+  payload: Box<[Value]> }` is unchanged (`value.rs`), the
+  `EnumNew`/`EnumIs`/`EnumPayload` dispatch and their defensive errors
+  (`EnumIndexOutOfRange` / `EnumVariantOutOfRange` / `EnumPayloadMismatch`)
+  are untouched, and the existing hand-built-bytecode VM enum tests pass
+  unmodified (full `fleen-vm` suite green).
+- **Card wording correction**: the `.flnc` reader is *not* in the VM —
+  decoding lives in the shared `fleen_compiler::codegen::flnc`
+  (`from_bytes`, `READ_VERSIONS = {1..7}`); the VM only consumes the decoded
+  `Module`. The confirmation is therefore that the v7 stream decodes with
+  the per-enum arity u32 consumed and executes.
+- Three new VM tests pin the confirmations (all reusing the T05-era
+  `run_src` full-pipeline helper, which asserts `module.version ==
+  MODULE_VERSION`): `v7_parameterized_enum_runs_through_the_full_toolchain`
+  (`Option<int>` Copy flow, construct + choose + payload),
+  `v7_parameterized_enum_entry_value_keeps_the_enum_shape` (the entry
+  returns the enum itself and the test asserts the `Value::Enum { variant,
+  payload }` shape structurally — D8's "the parameter is compile-time only"
+  as a pinned test, not a claim), and
+  `v7_flnc_round_trip_runs_an_owned_parameterized_enum`
+  (compile → `to_bytes` → `from_bytes` → `Vm::run`, the
+  owned `Option<string>` flow).
 
 ---
 

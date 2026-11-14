@@ -4163,3 +4163,85 @@ mod scheduler_tests {
         assert!(s.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.7 T08: VM confirmation card — bytecode v7 parameterized enums (D8).
+//
+// The v7 `enum_defs` arity field is descriptive (D8): `Value::Enum`,
+// `EnumNew`/`EnumIs`/`EnumPayload`, and the defensive errors are unchanged,
+// so there is no VM support code to add. These tests pin the confirmations
+// the card asks for: a parameterized enum compiles, decodes, and executes
+// through the full toolchain. (The decoder is the shared
+// `fleen_compiler::codegen::flnc` reader — the VM has no reader of its own;
+// the run gate `1..=7` landed with T07 in `Vm::run_inner`.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v7_parameterized_enum_runs_through_the_full_toolchain() {
+    let src = "\
+enum Option<T> {
+    Some(T),
+    None,
+}
+func find(x: int): Option<int> {
+    if x > 0 { Option.Some(x) } else { Option.None }
+}
+func main(): int {
+    choose find(3) {
+        when Some(v) { v }
+        when None { 0 - 1 }
+    }
+}
+";
+    let v = run_src(src).expect("runs");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn v7_parameterized_enum_entry_value_keeps_the_enum_shape() {
+    // D8: `Value::Enum` shape unchanged — the type parameter is a
+    // compile-time fact, only the variant id and payload values ride.
+    let src = "\
+enum Option<T> {
+    Some(T),
+    None,
+}
+func main(): Option<int> = Option.Some(42)
+";
+    let v = run_src(src).expect("runs");
+    let Value::Enum { variant, payload } = v else {
+        panic!("expected an enum value, got {v:?}");
+    };
+    assert_eq!(variant, 0); // 0 = Some
+    assert_eq!(payload.as_ref(), &[Value::Int(42)]);
+}
+
+#[test]
+fn v7_flnc_round_trip_runs_an_owned_parameterized_enum() {
+    // The v7 `.flnc` gains one u32 per `enum_defs` entry (D8); the shared
+    // decoder consumes it and the VM executes the result unchanged. An
+    // owned parameter (`Option<string>`) exercises the owned payload flow.
+    let src = "\
+enum Option<T> {
+    Some(T),
+    None,
+}
+func main(): string {
+    s = Option.Some(\"hi\");
+    choose move s {
+        when Some(t) { t }
+        when None { \"none\" }
+    }
+}
+";
+    let module = fleen_compiler::compile(src).expect("compile");
+    assert_eq!(module.version, MODULE_VERSION, "current output is v7");
+    let bytes = fleen_compiler::codegen::to_bytes(&module);
+    let decoded = fleen_compiler::codegen::from_bytes(&bytes).expect("decode");
+    assert_eq!(
+        decoded.version, MODULE_VERSION,
+        "the v7 stream decodes as v7, arity field consumed"
+    );
+    let v = Vm::new(decoded).run().expect("runs");
+    assert_eq!(v, Value::Str("hi".into()));
+}
