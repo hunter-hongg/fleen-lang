@@ -1,0 +1,94 @@
+// raw.fln — the 0.0.5 pointer/unsafe operations of the feature tour.
+//
+// 0.0.5 adds raw pointers (`ptr<T>` / `addr` / `deref_ptr`) gated behind the
+// `unsafe` / `trusted` function modifiers (D1–D3). `ptr<T>` is non-Copy and
+// move-only; `addr` takes the address of a place (local, global, direct
+// struct field, array element, or box interior). `deref_ptr` reads and writes
+// through the pointer (the settled spelling — `deref` stays box-only).
+// Every pointer use is an unsafe operation because Fleen has no borrow
+// checker (D2).
+//
+// `unsafe func` bodies may do unsafe ops but are callable only from
+// unsafe/trusted bodies. `trusted func` bodies may also do them and are
+// callable from anywhere — the author attests the wrapper is safe (D3).
+
+g = 41;
+
+// §1/§6: an `unsafe func` takes a pointer parameter and writes through it.
+unsafe func bump(p: ptr<int>) {
+    deref_ptr p = deref_ptr p + 1;
+}
+
+// §1: read a value through a pointer (unsafe op).
+unsafe func read_ptr(p: ptr<int>): int {
+    deref_ptr p
+}
+
+// §1: `ptr<T>` is move-only and can be a return value — hand it off explicitly.
+unsafe func make_ptr(seed: int): ptr<int> {
+    slot = seed;
+    addr slot
+}
+
+unsafe func take_ownership(p: ptr<int>): int {
+    deref_ptr p
+}
+
+// §1: `trusted` wraps the unsafe dance; safe code may call `hedgehog`.
+pub trusted func hedgehog(seed: int): int {
+    x = seed;
+    p = addr x;                    // addr of a local
+    bump(move p);                  // ptr<T> moves (non-Copy)
+    x
+}
+
+// §2: `addr` of a global place — a global is a writable place.
+unsafe func raw_global(): int {
+    p = addr g;
+    deref_ptr p = deref_ptr p + 1;
+    deref_ptr p
+}
+
+pub trusted func touch_global(): int {
+    raw_global()
+}
+
+pub struct S {
+    v: int,
+}
+
+// §3: `addr` of other place forms. 0.0.5 defines `addr` over locals,
+// globals, direct struct fields, array elements, and box interiors; this
+// demo uses a local and a global (place-form support can vary by build).
+// (`deref b` still reads a box value — `deref` stays box-only.)
+pub trusted func touch_places(): int {
+    x = 10;
+    px = addr x;
+    deref_ptr px = 11;
+
+    pg = addr g;                   // global place
+    deref_ptr pg = deref_ptr pg + 1;
+
+    deref_ptr px + deref_ptr pg
+}
+
+// §4: `ptr<T>` is move-only and travels as a parameter/return value.
+pub trusted func move_roundtrip(seed: int): int {
+    p = make_ptr(seed);            // unsafe body reachable from trusted
+    bump(move p);
+    // `p` moved; make a fresh one to show explicit hand-off/return.
+    q = make_ptr(seed + 10);
+    take_ownership(move q)
+}
+
+// §5: `async unsafe func` composes `async` with `unsafe` (D4). Calling and
+// awaiting it requires an unsafe/trusted context, same as a sync unsafe fn.
+// (A `ptr<T>` may not cross an await/task/channel boundary — PtrAcrossBoundary
+// — so pointer work stays in the synchronous unsafe world.)
+async unsafe func risky_step(x: int): int {
+    x + 1
+}
+
+pub trusted func run_risky(seed: int): int {
+    risky_step(seed) await
+}

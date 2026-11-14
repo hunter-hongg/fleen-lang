@@ -1,0 +1,46 @@
+// 0.0.5 feature tour — `unsafe` / `trusted` / `ptr<T>` / `addr` / `deref_ptr`.
+//
+// Run (module system + std, one command):
+//     fleen-vm --project examples/0.0.5/tour
+//   or flint:   cd examples/0.0.5/tour && flint run
+//
+// Features loaded by this program (0.0.5 PLAN F1–F4):
+//   ptr<T> (F1)     non-Copy, move-only raw pointer type
+//   addr / deref_ptr (F2)  take a place's address; read+write through it
+//                   (unsafe ops — Fleen has no borrow checker)
+//   unsafe / trusted (F3)   func modifiers gating unsafe ops
+//   unsafe async (F4)       `async unsafe func`, awaited from trusted context
+//                           (ptrs never cross await/task/channel - PtrAcrossBoundary)
+//
+// The static rejections (PtrAcrossBoundary, UnsafeOpOutsideUnsafe,
+// UnsafeCallOutsideUnsafe, CloneOfPointer, PtrNotStorable, and the reserved
+// words `ptr`/`addr`/`deref_ptr`/`unsafe`/`trusted`) have no runtime demo;
+// see docs/0.0.5/TICKETS.md and tests/*/invalid/*ptr*/*unsafe* fixtures.
+
+import raw;
+import std.io;
+
+func main() {
+    // ── 1. addr of a local, deref_ptr read/write, ptr parameter move ──
+    std.io.println("== 1. local pointer ==");
+    std.io.println("hedgehog(41) = ", raw.hedgehog(41) as string);
+
+    // ── 2. addr of a global place ──
+    std.io.println("== 2. global pointer ==");
+    std.io.println("touch_global() = ", raw.touch_global() as string);
+    std.io.println("touch_global() = ", raw.touch_global() as string);
+
+    // ── 3. addr of other place forms (local + global) ──
+    std.io.println("== 3. other place forms ==");
+    std.io.println("touch_places() = ", raw.touch_places() as string);
+
+    // ── 4. ptr<T> is move-only and travels as parameter/return value ──
+    std.io.println("== 4. move-only hand-off ==");
+    std.io.println("move_roundtrip(5) = ", raw.move_roundtrip(5) as string);
+
+    // ── 5. async unsafe func, awaited from a trusted context ──
+    std.io.println("== 5. async unsafe ==");
+    std.io.println("run_risky(41) = ", raw.run_risky(41) as string);
+
+    std.io.println("tour done");
+}

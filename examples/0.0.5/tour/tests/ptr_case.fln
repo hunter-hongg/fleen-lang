@@ -1,0 +1,14 @@
+// `flint test` fixture (0.0.5): a pointer/unsafe case — exercises
+// `unsafe`/`trusted`, `addr` of a local, and `deref_ptr` read+write.
+import std.io;
+
+trusted func bump_local(seed: int): int {
+    x = seed;
+    p = addr x;
+    deref_ptr p = deref_ptr p + 1;
+    x
+}
+
+func main() {
+    std.io.println(bump_local(41) as string);
+}
