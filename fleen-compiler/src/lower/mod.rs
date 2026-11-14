@@ -2943,6 +2943,10 @@ impl<'a> FnBodyCx<'a> {
         fb.start(matched_blk);
 
         if let Some(payloads) = payloads_opt {
+            // The parked scrutinee is shared by every alternative: a payload
+            // sub-pattern mismatch cleans up only the extracted payload, and
+            // the scrutinee stays parked for `next_fail` (hence `extra_below:
+            // 0` — the scrutinee is not part of the cleanup).
             let fail = FailEdge {
                 on_fail: next_fail,
                 extra_below: 0,
@@ -2976,12 +2980,14 @@ impl<'a> FnBodyCx<'a> {
     }
 
     /// Extract and match every payload of a matched enum variant against the
-    /// value on top of the stack (the parked subject copy, described by
+    /// value on top of the stack (the parked
     /// `scr`). Each extraction is `dup; EnumPayload(v, i)`, and the
-    /// sub-pattern recursion runs with `fail.extra_below + 1`: the extracted
-    /// payload sits above the caller's parked values, so its failure edge
-    /// must clean it up on the way to `fail.on_fail` (a nested extraction
-    /// passes its own count through).
+    /// sub-pattern recursion runs with `fail` as given: `fail.extra_below`
+    /// must already account for whether the parked subject is consumed by
+    /// this match (popped on success — then a payload mismatch has to clean
+    /// it up on the way to `fail.on_fail`) or *shared* — the `choose`-level
+    /// scrutinee every alternative tests against, which must survive a
+    /// payload mismatch. The two call sites below wrap `fail` accordingly.
     fn lower_enum_payloads(
         &mut self,
         fb: &mut FnBuilder,
@@ -2998,11 +3004,7 @@ impl<'a> FnBodyCx<'a> {
                 MirInstrKind::EnumPayload(variant_index, i as u16),
                 span,
             ));
-            let inner = FailEdge {
-                on_fail: fail.on_fail,
-                extra_below: fail.extra_below + 1,
-            };
-            self.lower_subpattern_match(fb, subpat, &pty, &inner, span)?;
+            self.lower_subpattern_match(fb, subpat, &pty, fail, span)?;
         }
         Ok(())
     }
@@ -3071,7 +3073,23 @@ impl<'a> FnBodyCx<'a> {
                     span: *pspan,
                     dup: dup_kind(subject_ty),
                 };
-                self.lower_enum_payloads(fb, &inner_scr, *pspan, *variant_index, payloads, fail)?;
+                // The parked subject is this match's own value (popped on
+                // success below), so a payload sub-pattern mismatch must
+                // clean it up too — hence `extra_below + 1`. (The choose-level
+                // call site passes its `fail` unwrapped: its scrutinee is
+                // shared and survives.)
+                let owned_fail = FailEdge {
+                    on_fail: fail.on_fail,
+                    extra_below: fail.extra_below + 1,
+                };
+                self.lower_enum_payloads(
+                    fb,
+                    &inner_scr,
+                    *pspan,
+                    *variant_index,
+                    payloads,
+                    &owned_fail,
+                )?;
                 fb.emit(MirInstr::new(MirInstrKind::Pop, *pspan));
                 let cont = fb.new_block();
                 fb.jump(cont);

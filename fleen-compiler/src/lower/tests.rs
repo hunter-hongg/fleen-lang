@@ -3071,3 +3071,63 @@ fn store_after_payload(ins: &[&MirInstr], variant: u32, idx: u16) -> Option<u16>
         _ => None,
     }
 }
+
+// T09 regression (found by the `nested_pattern` e2e fixture): a payload
+// sub-pattern with a failure edge (nested enum variant, literal, nested
+// zero-payload variant) must NOT clean up the parked scrutinee on mismatch —
+// the scrutinee is shared by all alternatives, and the next alternative's
+// test block does `Dup` on it. The over-pop made the verifier reject the
+// module ("stack depth mismatch: predecessor expects 1, got 0").
+#[test]
+fn t09_nested_enum_payload_failure_keeps_scrutinee_parked() {
+    assert_stack_depths_consistent(
+        r#"
+enum Option<T> { Some(T), None }
+enum Inner { V(int) }
+func main(): int {
+    o = Option.Some(Inner.V(1));
+    choose o {
+        when Some(V(x)) { print(x as string); }
+        when None { print("none"); }
+    }
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn t09_nested_multi_payload_failure_keeps_scrutinee_parked() {
+    assert_stack_depths_consistent(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair2<A, B> { P(A, B) }
+func main(): int {
+    p = Option.Some(Pair2.P(1, 2));
+    choose p {
+        when Some(P(a, b)) { print(a as string); }
+        when None { print("none"); }
+    }
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn t09_literal_payload_failure_keeps_scrutinee_parked() {
+    assert_stack_depths_consistent(
+        r#"
+enum Pipe<T> { Some(T), Other(T), Empty }
+func main(): int {
+    p: Pipe<int> = Pipe.Some(1);
+    choose p {
+        when Some(1) | Other(1) { print("one"); }
+        when Some(v) | Other(v) { print("other"); }
+        when Empty { print("empty"); }
+    }
+    0
+}
+"#,
+    );
+}
