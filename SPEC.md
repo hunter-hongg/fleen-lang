@@ -565,8 +565,8 @@ decisions D1–D10 settled, tickets in `docs/0.0.7/TICKETS.md`). T01–T10 are i
 green (keywords, parameterized-enum frontend, resolution, typeck + argument-dependent
 `is_copy` + `RecursiveEnum` + exhaustiveness, recursive-pattern typeck, choose lowering,
 bytecode v7 + verify/VM, e2e fixtures/examples, the tour example + CHANGELOG entry); T11
-synced the docs (the version bump to `0.0.7` and release publication — tag/archives — are
-separate and not yet performed).**
+synced the docs and the version was bumped to `0.0.7` (`Cargo.toml` / `std/VERSION`;
+release publication — tag/archives — is separate and pending).**
 
 ---
 
@@ -980,9 +980,9 @@ with binding consistency, type guards as compile-time ascriptions, payload-aware
 exhaustiveness), bytecode v7 (writers emit version 7, readers accept `{1, 2, 3, 4, 5, 6,
 7}`; `enum_defs` gains one descriptive `type_param_count: u32` per enum; no new opcodes, no
 `FieldTypeTag` change), e2e fixtures/examples, the tour project, and the CHANGELOG entry
-are implemented and green. T11 synced the documentation; the version bump to 0.0.7
-(`Cargo.toml` / `std/VERSION`) and release publication — tag and archives — are separate
-and not yet performed. Breaking set: none (non-breaking additive, D10).
+are implemented and green. T11 synced the documentation; the version was bumped to 0.0.7
+(`Cargo.toml` / `std/VERSION`); release publication — tag and archives — is separate and
+pending. Breaking set: none (non-breaking additive, D10).
 See `docs/0.0.7/PLAN.md` and `docs/0.0.7/TICKETS.md`.
 
 ---

@@ -1,4 +1,4 @@
-## [0.0.7] - Unreleased
+## [0.0.7] - 2026-11-14
 
 ### Added
 - **Parameterized enums** (D1): an `enum` head may declare type parameters —
