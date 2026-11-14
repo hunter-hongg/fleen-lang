@@ -1,7 +1,9 @@
 # 0.0.7 — Parameterized Types + Pattern Matching Completion
 
-> **Codename**: Mantis Shrimp 🦐 (0.0.1 Swift Fox 🦊, 0.0.4 Patient Ants 🐜,
-> 0.0.5 Careful Hedgehog 🦔, 0.0.6 Busy Beaver 🦫).
+> **Codename**: Mantis Shrimp 🦐 (0.0.1 Swift Fox 🦊, 0.0.2 Hermit Crab 🐚,
+> 0.0.3 Busy Beaver 🦫, 0.0.4 Patient Ants 🐜, 0.0.5 Careful Hedgehog 🦔;
+> 0.0.6 was released without a codename — its PLAN mistakenly carried 0.0.3's
+> "Busy Beaver", per the CHANGELOG / release-notes record).
 >
 > **Goal**: let Fleen users declare **parameterized enums** — a type constructor
 > that takes type arguments and must be fully applied at every use site

@@ -8,7 +8,8 @@
 > `enum_defs` arity field; T08 confirmed the VM needs no further changes;
 > T09 landed the e2e fixtures/examples and fixed a T06 nested-payload
 > failure-edge over-pop; T10 landed the tour example + CHANGELOG; T11 synced
-> the docs — the version bump / release publication is separate and pending).**
+> the docs; the version bump and the release publication (the `v0.0.7` tag and
+> the six target archives) are done — the milestone is closed).**
 
 ---
 
