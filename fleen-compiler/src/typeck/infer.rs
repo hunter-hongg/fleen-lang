@@ -233,6 +233,68 @@ struct FieldPlace {
     field: String,
 }
 
+/// Every binding a typed pattern produces, in source order: `(name, type)`.
+/// Recurses through all nesting levels (0.0.7 D5) and through
+/// or-alternatives (D6 — by the time this runs on an `Or`, the alternatives
+/// already passed the same-bindings check, so their bindings agree).
+fn collect_pattern_bindings(p: &TypedPatternHir) -> Vec<(String, Type)> {
+    let mut out = Vec::new();
+    collect_pattern_bindings_into(p, &mut out);
+    out
+}
+
+/// Accumulate a typed pattern's bindings (see [`collect_pattern_bindings`]).
+fn collect_pattern_bindings_into(p: &TypedPatternHir, out: &mut Vec<(String, Type)>) {
+    match p {
+        TypedPatternHir::Ident { name, ty, .. } => out.push((name.clone(), ty.clone())),
+        TypedPatternHir::ResultCtor { payload, .. } => collect_pattern_bindings_into(payload, out),
+        TypedPatternHir::Enum { payloads, .. } => {
+            for sub in payloads {
+                collect_pattern_bindings_into(sub, out);
+            }
+        }
+        // Zero-payload bare variant: no bindings.
+        TypedPatternHir::EnumVariant { .. } => {}
+        TypedPatternHir::Or(alts, _) => {
+            for alt in alts {
+                collect_pattern_bindings_into(alt, out);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => collect_pattern_bindings_into(pattern, out),
+        TypedPatternHir::Literal(_) | TypedPatternHir::Error => {}
+    }
+}
+
+/// Whether a typed pattern covers enum variant `idx` for exhaustiveness
+/// (0.0.7 T05 / F7): an or-pattern contributes the union of its
+/// alternatives' coverage; a type guard contributes its inner pattern's
+/// coverage (the ascription is compile-time only, D7). A zero-payload
+/// variant pattern and a payload-carrying one cover equally.
+fn pattern_covers_variant(p: &TypedPatternHir, idx: usize) -> bool {
+    match p {
+        TypedPatternHir::Enum { variant_index, .. }
+        | TypedPatternHir::EnumVariant { variant_index, .. } => *variant_index as usize == idx,
+        TypedPatternHir::Or(alts, _) => alts.iter().any(|a| pattern_covers_variant(a, idx)),
+        TypedPatternHir::TypeGuard { pattern, .. } => pattern_covers_variant(pattern, idx),
+        _ => false,
+    }
+}
+
+/// Whether a typed pattern covers the `Ok` (`ok = true`) or `Err` (`ok =
+/// false`) side of a `Result` scrutinee (0.0.7 T05: or-patterns contribute
+/// the union of their alternatives).
+fn pattern_covers_result_ctor(p: &TypedPatternHir, ok: bool) -> bool {
+    match p {
+        TypedPatternHir::ResultCtor { ctor, .. } => matches!(
+            (ctor, ok),
+            (ast::ResultCtor::Ok, true) | (ast::ResultCtor::Err, false)
+        ),
+        TypedPatternHir::Or(alts, _) => alts.iter().any(|a| pattern_covers_result_ctor(a, ok)),
+        TypedPatternHir::TypeGuard { pattern, .. } => pattern_covers_result_ctor(pattern, ok),
+        _ => false,
+    }
+}
+
 /// Type inference context.
 pub struct TypeChecker {
     /// Scope stack for type lookup.
@@ -2233,32 +2295,24 @@ impl TypeChecker {
                     .iter()
                     .map(|p| substitute_params(p, scrutinee_args))
                     .collect();
-                // T02 staging: `when Variant(a)` still binds the single
-                // payload (the 0.0.6 exhaustiveness tests depend on it);
-                // full multi-payload patterns land in T05/T06, so reject them
-                // here rather than let lower store only payload 0 while extra
-                // bindings read an uninitialized slot (review finding).
-                if payloads.len() > 1 {
+                // 0.0.7 T05 (D4): the pattern must name exactly as many
+                // sub-patterns as the variant declares payloads — the 0.0.6
+                // "first payload only" leniency is lifted. Zero-payload
+                // variants match bare (`Point`, no parentheses).
+                if payloads.len() != decl_payloads.len() {
                     self.add_error(
-                        TypeckErrorKind::UnsupportedFeature {
-                            feature: "multi-payload enum pattern (0.0.7 T05)".to_string(),
+                        TypeckErrorKind::ArityMismatchInPattern {
+                            variant: name.clone(),
+                            expected: decl_payloads.len(),
+                            found: payloads.len(),
                         },
                         *span,
                     );
                     return Err(());
                 }
-                if payloads.len() != decl_payloads.len()
-                    && !(payloads.len() == 1 && !decl_payloads.is_empty())
-                {
-                    mismatch(self);
-                    return Err(());
-                }
-                // SAFETY: `len > 1` is rejected above, so either the variant
-                // declares payloads (index 0 exists) or `payloads` is empty
-                // and this loop body never runs.
                 let mut typed_payloads = Vec::with_capacity(payloads.len());
                 for (i, p) in payloads.iter().enumerate() {
-                    let pty = decl_payloads.get(i).unwrap_or(&decl_payloads[0]).clone();
+                    let pty = decl_payloads[i].clone();
                     typed_payloads.push(self.typeck_pattern_inner(p, &pty)?);
                 }
                 Ok(TypedPatternHir::Enum {
@@ -2271,12 +2325,64 @@ impl TypeChecker {
                 })
             }
             PatternHir::Or(alts, span) => {
-                // T02 staging: every alternative is typechecked so its inner
-                // bindings land in the arm scope; the cross-alternative
-                // "same bindings, same types" rule is D6 / T05.
+                // 0.0.7 T05 (D6): every alternative is typechecked so its
+                // inner bindings land in the arm scope, then the
+                // alternatives must bind the same set of names with the
+                // same types (`OrPatternBindingMismatch` otherwise). Types
+                // are fully concrete here (each alternative was checked
+                // against the scrutinee), so equality suffices.
                 let mut typed_alts = Vec::with_capacity(alts.len());
                 for alt in alts {
                     typed_alts.push(self.typeck_pattern_inner(alt, scrutinee_type)?);
+                }
+                if !typed_alts.is_empty() {
+                    let first = collect_pattern_bindings(&typed_alts[0]);
+                    for alt in typed_alts.iter() {
+                        let other = collect_pattern_bindings(alt);
+                        for (name, ty) in &first {
+                            match other.iter().find(|(n, _)| n == name) {
+                                Some((_, other_ty)) if other_ty == ty => {}
+                                Some((_, other_ty)) => {
+                                    self.add_error(
+                                        TypeckErrorKind::OrPatternBindingMismatch {
+                                            name: name.clone(),
+                                            first_type: Box::new(ty.clone()),
+                                            second_type: Box::new(other_ty.clone()),
+                                            span: alt.span(),
+                                        },
+                                        alt.span(),
+                                    );
+                                }
+                                // Bound by the first alternative but not this
+                                // one: report with `unit` as the missing
+                                // side's type (D6 rule is "same names").
+                                None => {
+                                    self.add_error(
+                                        TypeckErrorKind::OrPatternBindingMismatch {
+                                            name: name.clone(),
+                                            first_type: Box::new(ty.clone()),
+                                            second_type: Box::new(Type::Unit),
+                                            span: alt.span(),
+                                        },
+                                        alt.span(),
+                                    );
+                                }
+                            }
+                        }
+                        for (name, other_ty) in &other {
+                            if !first.iter().any(|(n, _)| n == name) {
+                                self.add_error(
+                                    TypeckErrorKind::OrPatternBindingMismatch {
+                                        name: name.clone(),
+                                        first_type: Box::new(Type::Unit),
+                                        second_type: Box::new(other_ty.clone()),
+                                        span: alt.span(),
+                                    },
+                                    alt.span(),
+                                );
+                            }
+                        }
+                    }
                 }
                 Ok(TypedPatternHir::Or(typed_alts, *span))
             }
@@ -2285,14 +2391,27 @@ impl TypeChecker {
                 ty: ascribed,
                 ..
             } => {
-                // T02 staging: keep the ascribed type so the guard is not
-                // silently widened to the scrutinee type; unification with
-                // the scrutinee is D7 / T05.
+                // 0.0.7 T05 (D7): the ascription must name the scrutinee's
+                // type exactly (no supertypes exist in 0.0.7); bindings
+                // inside the pattern keep the types they already carry —
+                // the guard ascribes to the overall match, and is a
+                // compile-time fact with no runtime test.
                 let typed_inner = self.typeck_pattern_inner(pattern.as_ref(), scrutinee_type)?;
                 let guard_span = pattern.as_ref().span();
+                let ty = self.convert_type(ascribed, guard_span);
+                if let Err(e) = unify(scrutinee_type, &ty, guard_span) {
+                    self.add_error(
+                        TypeckErrorKind::PatternTypeMismatch {
+                            pattern: "type-guard",
+                            found: ty,
+                        },
+                        e.span,
+                    );
+                    return Err(());
+                }
                 Ok(TypedPatternHir::TypeGuard {
                     pattern: Box::new(typed_inner),
-                    ty: self.convert_type(ascribed, guard_span),
+                    ty,
                     span: guard_span,
                 })
             }
@@ -2362,26 +2481,19 @@ impl TypeChecker {
             return Ok(());
         }
 
-        // 0.0.6 T05 (D3): an enum scrutinee is exhaustive when every
-        // declared variant is covered by a guard-free arm (or an
-        // `otherwise` fallback, handled above). Zero-payload variants
-        // arrive as `EnumVariant`, payload variants as `Enum`; a variant
-        // is covered by either form (the binding is irrelevant to
-        // exhaustiveness).
+        // 0.0.6 T05 (D3) / 0.0.7 T05 (F7): an enum scrutinee is exhaustive
+        // when every declared variant is covered by a guard-free arm (or an
+        // `otherwise` fallback, handled above). Zero-payload variants arrive
+        // as `EnumVariant`, payload variants as `Enum`; a variant is covered
+        // by either form (the binding is irrelevant to exhaustiveness). An
+        // or-pattern covers the union of its alternatives (D6).
         if let Some(info) = scrutinee_type.as_enum() {
             let variants = &self.enums.entries[info.id.0 as usize].variants;
             let mut missing: Vec<String> = Vec::new();
             for (idx, variant) in variants.iter().enumerate() {
-                let is_covered = arms.iter().any(|arm| {
-                    arm.guard.is_none()
-                        && match &arm.pattern {
-                            TypedPatternHir::Enum { variant_index, .. }
-                            | TypedPatternHir::EnumVariant { variant_index, .. } => {
-                                *variant_index as usize == idx
-                            }
-                            _ => false,
-                        }
-                });
+                let is_covered = arms
+                    .iter()
+                    .any(|arm| arm.guard.is_none() && pattern_covers_variant(&arm.pattern, idx));
                 if !is_covered {
                     missing.push(variant.name.clone());
                 }
@@ -2401,25 +2513,11 @@ impl TypeChecker {
 
         // `Result<T, E>`: `Ok` + `Err` arms together are exhaustive; each
         // alone is not (guarded arms never count, per the Bool case above).
+        // 0.0.7 T05 (F7): an or-pattern covers the union of its
+        // alternatives, so `when Ok(1) | Ok(2)` covers the `Ok` side.
         if matches!(scrutinee_type, Type::Result(_, _)) {
-            let has_ok = count(&|arm| {
-                matches!(
-                    &arm.pattern,
-                    TypedPatternHir::ResultCtor {
-                        ctor: ast::ResultCtor::Ok,
-                        ..
-                    }
-                )
-            });
-            let has_err = count(&|arm| {
-                matches!(
-                    &arm.pattern,
-                    TypedPatternHir::ResultCtor {
-                        ctor: ast::ResultCtor::Err,
-                        ..
-                    }
-                )
-            });
+            let has_ok = count(&|arm| pattern_covers_result_ctor(&arm.pattern, true));
+            let has_err = count(&|arm| pattern_covers_result_ctor(&arm.pattern, false));
             if !has_ok || !has_err {
                 let mut missing = Vec::new();
                 if !has_ok {

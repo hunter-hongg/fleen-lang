@@ -2116,15 +2116,28 @@ impl Resolver {
                 })
             }
             Pattern::Or(alts, span) => {
-                // 0.0.7 D6: all alternatives must bind the same names/types
-                // (checked in typeck T05). Resolver declares each alternative's
-                // bindings into the arm scope — the resolver `declare` overwrites
-                // only builtins, so a same-name re-declaration surfaces as
-                // `DuplicateBinding` here, which is the failure we want to
-                // report until typeck's union-typing pass (T05) owns it.
+                // 0.0.7 T05 (D6): alternatives may share binding names
+                // (`Some(v) | Other(v)`), so each alternative is resolved in
+                // its own child scope and its bindings are then merged into
+                // the arm scope — the first alternative to bind a name wins
+                // the `BindingId`, later same-name declarations are skipped
+                // (cross-alternative duplicates are expected, not an error;
+                // the same-names/same-types rule is typeck's
+                // `OrPatternBindingMismatch`). Duplicates *within* one
+                // alternative (`Pair(a, a)`) still surface as
+                // `DuplicateBinding` inside the child scope.
                 let mut alts_hir = Vec::with_capacity(alts.len());
                 for alt in alts {
-                    alts_hir.push(self.resolve_pattern(alt)?);
+                    self.scopes.enter_block_scope();
+                    let alt_hir = self.resolve_pattern(alt)?;
+                    let alt_bindings = self.scopes.current_bindings();
+                    self.scopes.exit_scope();
+                    for (name, binding) in alt_bindings {
+                        // Ignore the re-declaration error: a name bound by an
+                        // earlier alternative is already in the arm scope.
+                        let _ = self.scopes.declare(name, binding);
+                    }
+                    alts_hir.push(alt_hir);
                 }
                 Ok(PatternHir::Or(alts_hir, span))
             }

@@ -82,6 +82,25 @@ pub enum TypeckErrorKind {
     /// the scrutinee — either the scrutinee is not an enum, or it names a
     /// variant the scrutinee's enum does not declare.
     EnumPatternMismatch { variant: String, found: Type },
+    /// 0.0.7 T05 (D4): a variant pattern names a different number of
+    /// sub-patterns than the variant declares payloads. Distinct from the
+    /// constructor-site `ArityMismatch`. (The span is the diagnostic-level
+    /// `TypeckError::span`, like the other pattern diagnostics.)
+    ArityMismatchInPattern {
+        variant: String,
+        expected: usize,
+        found: usize,
+    },
+    /// 0.0.7 T05 (D6): the alternatives of an or-pattern do not bind the
+    /// same set of names with the same types. A binding that one alternative
+    /// lacks is reported with `unit` as its type on that side. The types are
+    /// boxed to keep `TypeckError` small (clippy `result_large_err`).
+    OrPatternBindingMismatch {
+        name: String,
+        first_type: Box<Type>,
+        second_type: Box<Type>,
+        span: Span,
+    },
     // ---- 0.0.2 U05: ownership error family ----
     /// Use of a binding whose owned value was definitely moved earlier.
     UseAfterMove {
@@ -430,7 +449,7 @@ impl fmt::Display for TypeckErrorKind {
             TypeckErrorKind::PatternTypeMismatch { pattern, found } => {
                 write!(
                     f,
-                    "`{pattern}` pattern requires a `Result<T, E>` scrutinee, \
+                    "`{pattern}` pattern requires a matching scrutinee, \
                      found `{}`",
                     found.name()
                 )
@@ -441,6 +460,36 @@ impl fmt::Display for TypeckErrorKind {
                     "`{variant}` pattern requires a matching enum scrutinee, \
                      found `{}`",
                     found.name()
+                )
+            }
+            TypeckErrorKind::ArityMismatchInPattern {
+                variant,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "variant `{variant}` declares {expected} payload(s), \
+                     but the pattern names {found} sub-pattern(s); help: \
+                     match every payload positionally — zero-payload \
+                     variants match bare (no parentheses)"
+                )
+            }
+            TypeckErrorKind::OrPatternBindingMismatch {
+                name,
+                first_type,
+                second_type,
+                ..
+            } => {
+                write!(
+                    f,
+                    "or-pattern alternatives bind `{name}` with different \
+                     types: `{}` in one alternative but `{}` in another \
+                     (a missing binding shows as `unit`); help: all `|` \
+                     alternatives must bind the same names with the same \
+                     types",
+                    first_type.name(),
+                    second_type.name()
                 )
             }
             TypeckErrorKind::UseAfterMove { name, .. } => {

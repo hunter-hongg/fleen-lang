@@ -506,7 +506,7 @@ pub struct TypedEnumDef {
     /// Declared type parameters in declaration order (0.0.7 T04/D1).
     pub type_params: Vec<String>,
     /// Payload *skeletons* per variant, in declaration order (0.0.7 T04):
-    /// the declaration's own types, with [`Type::Param(i)`] where a
+    /// the declaration's own types, with `Type::Param(i)` where a
     /// parameter is named. `is_copy` / `is_owned` on a [`Type::App`]
     /// substitute the use-site arguments into these and re-run the rule.
     /// A `Param` cannot reach codegen: MIR keeps only the per-variant
@@ -1056,4 +1056,20 @@ pub enum TypedPatternHir {
         span: Span,
     },
     Error,
+}
+
+impl TypedPatternHir {
+    /// The source span of this pattern (mirrors `resolver::hir::PatternHir::span`).
+    pub fn span(&self) -> Span {
+        match self {
+            TypedPatternHir::Literal(e) => e.span(),
+            TypedPatternHir::Ident { span, .. }
+            | TypedPatternHir::ResultCtor { span, .. }
+            | TypedPatternHir::Enum { span, .. }
+            | TypedPatternHir::EnumVariant { span, .. }
+            | TypedPatternHir::Or(_, span)
+            | TypedPatternHir::TypeGuard { span, .. } => *span,
+            TypedPatternHir::Error => Span::SYNTHETIC,
+        }
+    }
 }

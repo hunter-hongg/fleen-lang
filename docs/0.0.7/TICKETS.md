@@ -4,7 +4,8 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: planning. No ticket started.**
+> **Status: T01–T05 implemented and green (T05 lands full typeck semantics;
+> lowering of the new pattern shapes is T06).**
 
 ---
 
@@ -165,7 +166,7 @@
 
 ## T05 — Typeck: recursive pattern typecheck + exhaustiveness (F3–F7; D4–D7)
 
-- [ ] Pattern typecheck walks the scrutinee type alongside the pattern
+- [x] Pattern typecheck walks the scrutinee type alongside the pattern
       recursively:
       - `Enum { name, payloads }` on scrutinee `App(E, args)`: substitute
         args into variant payload types; each `payloads[i]` typechecks
@@ -184,17 +185,17 @@
         mismatch → `PatternTypeMismatch`. Bindings inside `pattern` carry
         the types they had; the guard ascribes `ty` to the overall match,
         not to individual bindings.
-- [ ] Bindings from all nesting levels and all or-alternatives (after
+- [x] Bindings from all nesting levels and all or-alternatives (after
       consistency check) are declared in the arm scope with their
       substituted types. Duplicate binding name across levels →
       `DuplicateBinding`.
-- [ ] **Exhaustiveness (F7)**: generalize the 0.0.6 T05 algorithm to handle
+- [x] **Exhaustiveness (F7)**: generalize the 0.0.6 T05 algorithm to handle
       or-patterns — an or-pattern contributes the **union** of its
       alternatives' variant coverage. Multi-binding arms contribute the
       variant they name (same as 0.0.6). Guard-free arms covering all
       variants are exhaustive; `ChooseNotExhaustive` names the missing
       variants (uncovered variants listed by name).
-- [ ] Tests: typeck valid (nested `Ok(Some(x))`, multi-binding `Pair(a,
+- [x] Tests: typeck valid (nested `Ok(Some(x))`, multi-binding `Pair(a,
       b)`, or-pattern with same binding `Some(v) | Other(v)`, type guard on
       ident binding); invalid (nested constructor mismatch, arity mismatch
       in pattern, or-pattern with mismatched bindings, or-pattern with
@@ -204,6 +205,46 @@
 
 **Depends on**: T02, T04.
 **Refs**: PLAN §3.4, D4–D7.
+
+**As-built (0.0.7)**:
+- **Strict arity supersedes the 0.0.6 leniency (D4)**: a count mismatch is
+  now always `ArityMismatchInPattern` — including the 0.0.6 forms
+  `when Rect(a)` on a 2-payload variant and `when Point(x)` on a zero-payload
+  variant (both previously `EnumPatternMismatch`). The 0.0.6-era tests were
+  updated to the D4 forms, and the T04 e2e fixture `param_enum_demo.fln`
+  changed `when P(first)` → `when P(first, second)`.
+- **Resolver edit** (card is typeck-only, but T02's staging comment reserved
+  this for T05): `Pattern::Or` resolution now resolves each alternative in a
+  child block scope and merges its bindings into the arm scope — the first
+  alternative to bind a name wins the `BindingId`, later same-name
+  declarations are skipped (`ScopeStack::current_bindings` accessor added).
+  Duplicates *within* one alternative still report `DuplicateBinding`; the
+  cross-alternative same-names/same-types rule is typeck's.
+- `OrPatternBindingMismatch` boxes its two `Type` fields
+  (`result_large_err`); a binding missing from one alternative is reported
+  with `unit` as that side's type (documented in the diagnostic text).
+- Type-guard mismatch reuses `PatternTypeMismatch` with the label
+  `"type-guard"`; its Display text was generalized from "requires a
+  `Result<T, E>` scrutinee" to "requires a matching scrutinee" (no fixture
+  asserted the old wording; e2e stderr matching is substring-based).
+- **Lower staging gate (T06)**: typeck now accepts or-pattern / type-guard /
+  multi-payload / nested patterns, so lower explicitly rejects what it
+  cannot yet lower rather than miscompile (the T02 review hazard):
+  `lower_choose_enum` rejects a top-level `Or` / `TypeGuard` arm (previously
+  it silently became the `otherwise` fallback with unstored bindings);
+  nested/multi-payload enum payloads keep the `first_payload_binding`
+  `0.0.7 T06` error; nested Result payloads and non-Ok/Err arms keep their
+  gates. Full-pipeline support lands in T06.
+- Type guards contribute their inner pattern's coverage to exhaustiveness
+  (the ascription is compile-time only, D7); a bare ident guard never
+  covers an enum variant (conservative, matching 0.0.6 ident behavior).
+- Review pass: `ArityMismatchInPattern` carries no kind-level `span` (the
+  diagnostic-level `TypeckError::span` suffices, like the sibling pattern
+  diagnostics); lower's `choose_arm_span` delegates to
+  `TypedPatternHir::span` instead of duplicating the match; new lower tests
+  pin the or-pattern / type-guard staging gates, and a typeck test pins the
+  reverse-order or-pattern mismatch (binding missing from the first
+  alternative).
 
 ---
 

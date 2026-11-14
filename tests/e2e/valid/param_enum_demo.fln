@@ -40,12 +40,13 @@ func main(): int {
     }
 
     // Nested application: owned because Pair carries a string. Multi-payload
-    // destructuring is T05; 0.0.7 T04 keeps the single-binding form.
+    // destructuring (0.0.7 D4) names every payload positionally; the body
+    // reads the first.
     p = Option.Some(Pair.P(1, "a"));
     choose move p {
         when Some(inner) {
             choose move inner {
-                when P(first) {
+                when P(first, second) {
                     print(first as string);
                 }
             }

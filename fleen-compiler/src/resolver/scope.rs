@@ -193,6 +193,20 @@ impl ScopeStack {
             .get(name)
     }
 
+    /// Snapshot every binding of the innermost scope, in arbitrary order.
+    /// Used by or-pattern resolution (0.0.7 T05/D6): each alternative is
+    /// resolved in its own child scope, then its bindings are merged into
+    /// the enclosing arm scope.
+    pub fn current_bindings(&self) -> Vec<(String, Binding)> {
+        self.scopes
+            .last()
+            .expect("global scope always exists")
+            .bindings
+            .iter()
+            .map(|(name, b)| (name.clone(), b.clone()))
+            .collect()
+    }
+
     /// Look up a binding starting from the current scope, walking up parents.
     /// This crosses function boundaries — used for identifier resolution.
     pub fn get(&self, name: &str) -> Option<&Binding> {

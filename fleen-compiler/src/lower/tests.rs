@@ -2876,3 +2876,41 @@ fn t05_choose_enum_block_order_matches_template() {
         );
     }
 }
+
+// ---- 0.0.7 T05: staging gates for the new pattern shapes ----
+
+#[test]
+fn lower_enum_choose_or_pattern_arm_is_unsupported_until_t06() {
+    // Typeck accepts or-patterns (T05), but the enum lowering chain cannot
+    // run them yet — the gate must reject the arm, not silently treat it as
+    // the fallback with unstored bindings (the T02 review hazard).
+    let src = "enum Two { Some(int), Other(int), None2, }\n\
+               func f(t: Two): int {\n    choose t {\n        when Some(v) | Other(v) { v }\n        when None2 { 0 - 1 }\n    }\n}";
+    let err = lower_err(src);
+    match err.kind {
+        super::LowerErrorKind::UnsupportedFeature { feature } => {
+            assert!(
+                feature.contains("or-pattern"),
+                "expected an or-pattern gate, got: {feature}"
+            );
+        }
+        other => panic!("expected UnsupportedFeature, got {other:?}"),
+    }
+}
+
+#[test]
+fn lower_enum_choose_type_guard_arm_is_unsupported_until_t06() {
+    // Same staging for type-guard arms (T05 typeck is done; T06 lowers).
+    let src = "enum Opt { Some(int), None2, }\n\
+               func f(o: Opt): int {\n    choose o {\n        when Some(v): Opt { v }\n        when None2 { 0 - 1 }\n    }\n}";
+    let err = lower_err(src);
+    match err.kind {
+        super::LowerErrorKind::UnsupportedFeature { feature } => {
+            assert!(
+                feature.contains("type-guard"),
+                "expected a type-guard gate, got: {feature}"
+            );
+        }
+        other => panic!("expected UnsupportedFeature, got {other:?}"),
+    }
+}

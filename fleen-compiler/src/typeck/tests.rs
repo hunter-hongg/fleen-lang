@@ -2668,31 +2668,306 @@ fn unsafe_async_call_from_safe_is_error() {
     );
 }
 
-// ---- 0.0.7 T02: recursive pattern grammar staging ----
+// ---- 0.0.7 T05: recursive pattern typecheck + exhaustiveness ----
 
 #[test]
-fn t02_multi_payload_enum_pattern_is_rejected() {
-    // The parser accepts `when Pair(a, b)` (T02 grammar), but typeck rejects
-    // it until T05/T06 land the full semantics — otherwise the arm body
-    // would read `b` from an uninitialized slot.
-    let errs = compile_err(
+fn t05_multi_payload_enum_pattern_binds_every_payload() {
+    // T05 lifts the T02 staging gate (D4): `when Pair(a, b)` names every
+    // payload in declaration order, and each binding carries the type of
+    // its payload position — `a` is int, `b` is string.
+    compile_ok(
         "enum Pair3 { Pair(int, string), }\n\
-         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(a, b) { 0 }\n    }\n}",
+         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(a, b) { a + 1 }\n    }\n}",
+    );
+    // Using payload 0's binding as a string is a type error, proving the
+    // positional typing landed.
+    let errs = compile_err(
+        "enum Pair4 { Pair(int, string), }\n\
+         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(a, b) { a + \"s\" }\n    }\n}",
     );
     assert!(
         errs.iter()
-            .any(|e| matches!(e.kind, TypeckErrorKind::UnsupportedFeature { .. })),
-        "expected UnsupportedFeature for multi-payload pattern, got {errs:?}"
+            .any(|e| matches!(e.kind, TypeckErrorKind::TypeMismatch { .. })),
+        "expected payload 0 binding to be int, got {errs:?}"
     );
 }
 
 #[test]
-fn t02_single_payload_enum_pattern_still_compiles() {
-    // T02 staging keeps the 0.0.6 legacy form: `when Variant(a)` binds the
-    // single payload so the existing exhaustive tests keep passing.
+fn t05_single_payload_enum_pattern_still_compiles() {
+    // The 0.0.6 single-payload form keeps working; a two-payload variant
+    // now requires every payload named (D4 strict arity).
     compile_ok(
         "enum Shape2 { Point, Circle(float), Rect(float, float), }\n\
-         func f(s: Shape2): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a) { 2 }\n    }\n}",
+         func f(s: Shape2): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a, b) { 2 }\n    }\n}",
+    );
+}
+
+#[test]
+fn t05_pattern_arity_mismatch_is_reported() {
+    // D4: a variant pattern must name exactly as many sub-patterns as the
+    // variant declares payloads — the 0.0.6 "first payload only" leniency
+    // (`when Rect(a)`) is now `ArityMismatchInPattern`.
+    let errs = compile_err(
+        "enum Rect1 { Rect(float, float), }\n\
+         func f(s: Rect1): int {\n    choose s {\n        when Rect(a) { 0 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ArityMismatchInPattern {
+                expected: 2,
+                found: 1,
+                ..
+            }
+        )),
+        "expected ArityMismatchInPattern 2 vs 1, got {errs:?}"
+    );
+    // Zero-payload variant given a sub-pattern position is also an arity
+    // mismatch (`Point` matches bare — D4).
+    let errs = compile_err(
+        "enum Shape { Point, Circle(float), }\n\
+         func f(s: Shape): int {\n    choose s {\n        when Point(x) { 0 }\n        when Circle(r) { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ArityMismatchInPattern {
+                expected: 0,
+                found: 1,
+                ..
+            }
+        )),
+        "expected ArityMismatchInPattern 0 vs 1 for `Point(x)`, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_nested_pattern_ok_some_binds_inner_type() {
+    // D5: `Ok(Some(x))` on `Result[Option<int>, string]` — the ResultCtor
+    // payload is itself a full pattern, and the inner binding `x` takes the
+    // *substituted* payload type `int`.
+    compile_ok(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(r: Result[Option<int>, string]): int {\n    choose move r {\n        when Ok(Some(x)) { x }\n        when Ok(None) { 0 - 1 }\n        when Err(e) { 0 - 2 }\n    }\n}",
+    );
+    // The inner binding is `int`: using it as a string fails.
+    let errs = compile_err(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(r: Result[Option<int>, string]): int {\n    choose move r {\n        when Ok(Some(x)) { x + \"s\" }\n        when Ok(None) { 0 - 1 }\n        when Err(e) { 0 - 2 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::TypeMismatch { .. })),
+        "expected nested binding x to be int, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_nested_pattern_constructor_mismatch() {
+    // D5: the inner pattern's constructor must match the payload type at
+    // that position — the payload here is `Option<int>` and `Ok` is a
+    // Result constructor, so the nested mismatch is `PatternTypeMismatch`
+    // (an inner pattern naming a foreign *enum* variant is
+    // `EnumPatternMismatch`; D5 names both diagnostics).
+    let errs = compile_err(
+        "enum Option<T> { Some(T), None, }\n\
+         func f(r: Result[Option<int>, string]): int {\n    choose move r {\n        when Ok(Ok(x)) { x }\n        when Ok(None) { 0 - 1 }\n        when Err(e) { 0 - 2 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::PatternTypeMismatch { pattern: "Ok", .. }
+        )),
+        "expected PatternTypeMismatch for the nested constructor, got {errs:?}"
+    );
+    // The enum-variant flavor: `Some(D(a, b))` on an `Option<int>`
+    // scrutinee — the inner constructor pattern names a variant, but the
+    // payload type `int` is not that enum.
+    let errs = compile_err(
+        "enum Option<T> { Some(T), None, }\n\
+         enum Dup { D(int, int), }\n\
+         func f(o: Option<int>): int {\n    choose o {\n        when Some(D(a, b)) { 0 }\n        when None { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(&e.kind, TypeckErrorKind::EnumPatternMismatch { .. })),
+        "expected EnumPatternMismatch for the foreign inner variant, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_multi_binding_pattern_payloads_are_positional() {
+    // D4: `when Pair(a, b)` binds both payloads in declaration order; the
+    // second binding is the `string` payload.
+    compile_ok(
+        "enum Pair5 { Pair(int, string), }\n\
+         func f(): int {\n    choose Pair(7, \"x\") {\n        when Pair(a, b) { a + 1 }\n    }\n}",
+    );
+    let errs = compile_err(
+        "enum Pair6 { Pair(int, string), }\n\
+         func f(): int {\n    choose Pair(7, \"x\") {\n        when Pair(a, b) { b + 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::TypeMismatch { .. })),
+        "expected payload 1 binding to be string, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_or_pattern_same_binding_types_is_ok() {
+    // D6: `Some(v) | Other(v)` — both alternatives bind `v` with the same
+    // type; the arm body may use it.
+    compile_ok(
+        "enum Two { Some(int), Other(int), None2, }\n\
+         func f(t: Two): int {\n    choose t {\n        when Some(v) | Other(v) { v }\n        when None2 { 0 - 1 }\n    }\n}",
+    );
+    // A literal or-pattern is also legal (it just never helps enum
+    // exhaustiveness on its own).
+    compile_ok(
+        "func f(x: int): int {\n    choose x {\n        when 1 | 2 { 0 }\n        otherwise { 1 }\n    }\n}",
+    );
+}
+
+#[test]
+fn t05_or_pattern_missing_binding_is_mismatch() {
+    // D6: `Some(v) | None` — the second alternative does not bind `v`;
+    // reported as `OrPatternBindingMismatch` (missing side shows as unit).
+    let errs = compile_err(
+        "enum Opt { Some(int), None2, }\n\
+         func f(o: Opt): int {\n    choose o {\n        when Some(v) | None2 { v }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::OrPatternBindingMismatch { name, .. } if name == "v"
+        )),
+        "expected OrPatternBindingMismatch for v, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_or_pattern_binding_type_mismatch() {
+    // D6: same names but different types across alternatives is also a
+    // mismatch (`Some(v)` binds int, `Other(v)` binds string).
+    let errs = compile_err(
+        "enum Two2 { Some(int), Other(string), None2, }\n\
+         func f(t: Two2): int {\n    choose move t {\n        when Some(v) | Other(v) { 0 }\n        when None2 { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::OrPatternBindingMismatch { name, .. } if name == "v"
+        )),
+        "expected OrPatternBindingMismatch for v, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_or_pattern_missing_binding_in_first_alternative_is_mismatch() {
+    // D6, symmetric direction: the binding is missing from the FIRST
+    // alternative — the mismatch must still be reported (the check walks
+    // every alternative against the first in both directions).
+    let errs = compile_err(
+        "enum Opt2b { Some(int), None2, }\n\
+         func f(o: Opt2b): int {\n    choose o {\n        when None2 | Some(v) { v }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::OrPatternBindingMismatch { name, .. } if name == "v"
+        )),
+        "expected OrPatternBindingMismatch for v, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_or_pattern_union_covers_exhaustively() {
+    // F7: an or-pattern covers the union of its alternatives' variants —
+    // `Some(v) | Other(v)` + `None2` covers all three, so no `otherwise`.
+    // (Every alternative must bind the same names — D6 — so the union arm
+    // cannot pair `Some(v)` with the binding-free `None2`.)
+    compile_ok(
+        "enum Two3 { Some(int), Other(int), None2, }\n\
+         func f(t: Two3): int {\n    choose t {\n        when Some(v) | Other(v) { v }\n        when None2 { 0 }\n    }\n}",
+    );
+    // But a partial union still names what is missing: `Some(v) | Other(v)`
+    // alone leaves `None2` uncovered.
+    let errs = compile_err(
+        "enum Two4 { Some(int), Other(int), None2, }\n\
+         func f(t: Two4): int {\n    choose t {\n        when Some(v) | Other(v) { v }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["None2".to_string()]
+        )),
+        "expected ChooseNotExhaustive missing None2, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_type_guard_on_ident_binding() {
+    // D7: `when v: int` — a typed binding; the ascription must equal the
+    // scrutinee type and the binding carries that type.
+    compile_ok(
+        "func f(x: int): int {\n    choose x {\n        when v: int { v }\n        otherwise { 0 - 1 }\n    }\n}",
+    );
+    // A type guard ascribing the wrong type is a compile-time mismatch —
+    // no runtime type test exists (D7).
+    let errs = compile_err(
+        "func f(x: int): int {\n    choose x {\n        when v: string { 0 }\n        otherwise { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::PatternTypeMismatch {
+                pattern: "type-guard",
+                ..
+            }
+        )),
+        "expected PatternTypeMismatch for the wrong ascription, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_type_guard_on_constructor_pattern() {
+    // D7: an ascription on a constructor pattern must name the scrutinee's
+    // type (mostly a documentation / exhaustiveness aid).
+    compile_ok(
+        "enum Opt2 { Some(int), None2, }\n\
+         func f(o: Opt2): int {\n    choose o {\n        when Some(v): Opt2 { v }\n        when None2 { 0 - 1 }\n    }\n}",
+    );
+    let errs = compile_err(
+        "enum Opt3 { Some(int), None2, }\n\
+         func f(o: Opt3): int {\n    choose o {\n        when Some(v): int { 0 }\n        when None2 { 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::PatternTypeMismatch {
+                pattern: "type-guard",
+                ..
+            }
+        )),
+        "expected PatternTypeMismatch for the constructor ascription, got {errs:?}"
+    );
+}
+
+#[test]
+fn t05_result_or_pattern_covers_one_side() {
+    // F7 on Result: `Ok(1) | Ok(2)` covers the Ok side; Err is still missing.
+    let errs = compile_err(
+        "func f(r: Result[int, string]): int {\n    choose move r {\n        when Ok(v) | Ok(v) { v }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["Err".to_string()]
+        )),
+        "expected ChooseNotExhaustive missing Err, got {errs:?}"
     );
 }
 
@@ -2703,7 +2978,7 @@ fn t05_choose_enum_exhaustive_is_ok() {
     // Guard-free arms covering every variant are exhaustive; no `otherwise`.
     compile_ok(
         "enum Shape { Point, Circle(float), Rect(float, float), }\n\
-         func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a) { 2 }\n    }\n}",
+         func f(s: Shape): int {\n    choose s {\n        when Point { 0 }\n        when Circle(r) { 1 }\n        when Rect(a, b) { 2 }\n    }\n}",
     );
 }
 
@@ -2778,31 +3053,23 @@ fn t05_enum_pattern_mismatch_on_foreign_variant() {
 
 #[test]
 fn t05_enum_zero_payload_variant_with_binding_is_mismatch() {
-    // The third EnumPatternMismatch trigger (beside a non-enum scrutinee and
-    // a foreign variant): `Point` declares no payload, so `when Point(x)`
-    // has nothing to bind.
+    // `Point` declares no payload, so `when Point(x)` has nothing to bind:
+    // 0.0.7 D4 strict arity reports `ArityMismatchInPattern` (0 vs 1), which
+    // supersedes the 0.0.6 `EnumPatternMismatch` for this shape.
     let errs = compile_err(
         "enum Shape { Point, Circle(float), }\n\
          func f(s: Shape): int {\n    choose s {\n        when Point(x) { 0 }\n        when Circle(r) { 1 }\n    }\n}",
     );
     assert!(
-        errs.iter()
-            .any(|e| matches!(e.kind, TypeckErrorKind::EnumPatternMismatch { .. })),
-        "expected EnumPatternMismatch for a zero-payload variant binding, got {errs:?}"
-    );
-}
-
-#[test]
-fn t05_enum_two_payload_variant_binds_first_payload() {
-    // `Pair(int, string)` declares two payloads; the pattern grammar binds
-    // the FIRST one (PLAN §3.2), so `x` is an int and the arm type-checks —
-    // binding payload 1 (string) or the whole enum would be a type error.
-    // The scrutinee is a fresh constructor value: a bare non-Copy owned
-    // local would demand an explicit `move` in the consuming scrutinee
-    // position (the U05 rule), which is not what this test pins.
-    compile_ok(
-        "enum Pair2 { Pair(int, string), }\n\
-         func f(): int {\n    choose Pair(1, \"x\") {\n        when Pair(x) { x }\n    }\n}",
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ArityMismatchInPattern {
+                expected: 0,
+                found: 1,
+                ..
+            }
+        )),
+        "expected ArityMismatchInPattern for a zero-payload variant binding, got {errs:?}"
     );
 }
 

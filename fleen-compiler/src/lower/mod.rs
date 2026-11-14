@@ -569,14 +569,8 @@ fn arr_len_u16(n: usize, span: Span) -> Result<u16, LowerError> {
 /// and that only appears in error-recovery trees).
 fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
     match &arm.pattern {
-        TypedPatternHir::Literal(lit) => lit.span(),
-        TypedPatternHir::Ident { span, .. }
-        | TypedPatternHir::ResultCtor { span, .. }
-        | TypedPatternHir::Enum { span, .. }
-        | TypedPatternHir::EnumVariant { span, .. }
-        | TypedPatternHir::Or(_, span)
-        | TypedPatternHir::TypeGuard { span, .. } => *span,
         TypedPatternHir::Error => arm.body.span,
+        p => p.span(),
     }
 }
 
@@ -2352,13 +2346,23 @@ impl<'a> FnBodyCx<'a> {
 
         // Partition arms in source order: variant arms build the test chain
         // (guarded or not); an optional `otherwise` / `_` arm is the
-        // fallback.
+        // fallback. A top-level or-pattern / type-guard arm is rejected
+        // outright: silently treating it as the fallback would run its body
+        // without storing any of its bindings (the T05 review hazard).
         let mut variant_arms: Vec<&TypedChooseArmHir> = Vec::new();
         let mut fallback: Option<&TypedChooseArmHir> = None;
         for arm in &e.arms {
             match &arm.pattern {
                 TypedPatternHir::Enum { .. } | TypedPatternHir::EnumVariant { .. } => {
                     variant_arms.push(arm)
+                }
+                TypedPatternHir::Or(_, span) | TypedPatternHir::TypeGuard { span, .. } => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "or-pattern / type-guard arm in an enum choose (0.0.7 T06)",
+                        },
+                        *span,
+                    ));
                 }
                 _ => fallback = Some(arm),
             }
