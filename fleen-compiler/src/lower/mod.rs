@@ -574,21 +574,156 @@ fn choose_arm_span(arm: &TypedChooseArmHir) -> Span {
     }
 }
 
-/// T02 legacy-compat: the single `Ident` binding from a first enum payload.
-/// Returns the binding id or a `0.0.7 T06` error for nested/complex payloads.
-fn first_payload_binding(
-    payloads: &[TypedPatternHir],
-    span: Span,
-) -> Result<BindingId, LowerError> {
-    if let Some(TypedPatternHir::Ident { binding_id, .. }) = payloads.first() {
-        Ok(*binding_id)
+/// Return the `Dup` or `DupDeep` instruction kind for a value of type `ty`.
+fn dup_kind(ty: &Type) -> MirInstrKind {
+    if ty.is_owned() {
+        MirInstrKind::DupDeep
     } else {
-        Err(LowerError::new(
-            LowerErrorKind::UnsupportedFeature {
-                feature: "nested/multi-payload enum pattern (0.0.7 T06)",
-            },
-            span,
-        ))
+        MirInstrKind::Dup
+    }
+}
+
+/// Concrete payload type of enum `variant_index`, payload `payload_index`,
+/// for a scrutinee of type `scrutinee_ty` (substituting type parameters for
+/// `Type::App`).
+///
+/// # Panics
+/// Panics when `scrutinee_ty` is not the enum type the pattern was checked
+/// against, or the indices are out of range — typeck guarantees a
+/// well-formed, arity-checked pattern tree, so either is a compiler bug and
+/// must not be papered over with a wrong-type lowering.
+fn enum_payload_ty(scrutinee_ty: &Type, variant_index: u32, payload_index: usize) -> Type {
+    match scrutinee_ty {
+        Type::Enum(info) => info
+            .payloads
+            .get(variant_index as usize)
+            .and_then(|v| v.get(payload_index))
+            .cloned()
+            .unwrap_or_else(|| unreachable!("pattern payload indices are arity-checked by typeck")),
+        Type::App(info, args) => {
+            let skel = info
+                .payloads
+                .get(variant_index as usize)
+                .and_then(|v| v.get(payload_index))
+                .unwrap_or_else(|| {
+                    unreachable!("pattern payload indices are arity-checked by typeck")
+                });
+            crate::typeck::typed_hir::substitute_params(skel, args)
+        }
+        _ => unreachable!("enum pattern lowering only runs on a typeck-approved enum scrutinee"),
+    }
+}
+
+/// Concrete Ok/Err payload type of a `Result<T, E>` scrutinee.
+///
+/// # Panics
+/// Panics when `scrutinee_ty` is not a `Result` — the choose dispatch sends
+/// only `Result` scrutinees to the `Ok`/`Err` lowering paths, so anything
+/// else is a compiler bug.
+fn result_payload_ty(scrutinee_ty: &Type, ctor: ResultCtor) -> Type {
+    match scrutinee_ty {
+        Type::Result(t, e) => match ctor {
+            ResultCtor::Ok => (**t).clone(),
+            ResultCtor::Err => (**e).clone(),
+        },
+        _ => {
+            unreachable!("Ok/Err pattern lowering only runs on a typeck-approved Result scrutinee")
+        }
+    }
+}
+
+/// Strip type guards (D7: compile-time only) to reach the underlying pattern.
+fn strip_type_guard(pat: &TypedPatternHir) -> &TypedPatternHir {
+    let mut cur = pat;
+    while let TypedPatternHir::TypeGuard { pattern, .. } = cur {
+        cur = pattern;
+    }
+    cur
+}
+
+/// A flattened choose alternative (0.0.7 T06): one match path, possibly
+/// expanded from an or-pattern arm. `arm_index` is the alternative's owning
+/// arm's position in `arms` (body blocks are shared per arm).
+struct Alt<'a> {
+    pat: &'a TypedPatternHir,
+    guard: Option<&'a TypedExprHir>,
+    arm_index: usize,
+}
+
+/// Scrutinee context for the enum `choose` lowering helpers: the parked
+/// value's type, its source span, and the copy instruction its type needs.
+struct EnumScr<'a> {
+    ty: &'a Type,
+    span: Span,
+    dup: MirInstrKind,
+}
+
+/// Failure edge threaded through recursive sub-pattern matching (0.0.7 T06):
+/// where control goes on a mismatch and how many re-parked values sit above
+/// the caller's base and must be cleaned before jumping there.
+struct FailEdge {
+    on_fail: BlockId,
+    extra_below: u32,
+}
+
+/// Emit the failure-cleanup block a mismatched subject copy jumps to: pop
+/// the subject copy, pop the caller's `extra_below` re-parked values, then
+/// jump to `fail.on_fail`. Returns the block id (the caller resolves its
+/// conditional jump to it, or fallthrough lands on it directly).
+fn fail_cleanup_block(fb: &mut FnBuilder, span: Span, fail: &FailEdge) -> BlockId {
+    let fblk = fb.new_block();
+    fb.start(fblk);
+    fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+    pop_parked(fb, fail.extra_below, span);
+    fb.jump(fail.on_fail);
+    fblk
+}
+
+/// Pop `n` re-parked values (failure cleanup — see [`FailEdge`]).
+fn pop_parked(fb: &mut FnBuilder, n: u32, span: Span) {
+    for _ in 0..n {
+        fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+    }
+}
+
+/// Shared shape of a leaf sub-pattern test (literal equality, enum variant
+/// discriminant): `test` emits the subject copy plus the comparison and
+/// returns its pending conditional jump; the helper then lays out the
+/// matched continuation and the failure-cleanup block so the conditional's
+/// untaken edge falls through into the matched block and the taken edge
+/// lands on cleanup. On return, the current block is the continuation.
+fn emit_leaf_test(
+    fb: &mut FnBuilder,
+    span: Span,
+    fail: &FailEdge,
+    test: impl FnOnce(&mut FnBuilder) -> Result<BlockId, LowerError>,
+) -> Result<(), LowerError> {
+    fb.spill_for_fallthrough();
+    let fail_jmp = test(fb)?;
+    // match falls through: the jump pops the bool, the Pop consumes the subject
+    let matched = fb.new_block();
+    fb.start(matched);
+    fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+    let cont = fb.new_block();
+    fb.jump(cont);
+    let fblk = fail_cleanup_block(fb, span, fail);
+    fb.resolve(fail_jmp, fblk);
+    fb.start(cont);
+    Ok(())
+}
+
+/// Start the block every pending failure jump of the generic choose chain
+/// resolves to (the next alternative's test point). A no-op when `pending`
+/// is empty: the previous block already ended in an explicit jump, so the
+/// current block stays the continuation point.
+fn start_pending_block(fb: &mut FnBuilder, pending: &mut Vec<BlockId>) {
+    if pending.is_empty() {
+        return;
+    }
+    let next = fb.new_block();
+    fb.start(next);
+    for cond_block in pending.drain(..) {
+        fb.resolve(cond_block, next);
     }
 }
 
@@ -2025,19 +2160,16 @@ impl<'a> FnBodyCx<'a> {
         fb: &mut FnBuilder,
         e: &TypedExprChooseHir,
     ) -> Result<(), LowerError> {
-        // Special case: Result scrutinee (0.0.2 U06).
         if matches!(e.scrutinee.ty(), Type::Result(_, _)) {
             return self.lower_choose_result(fb, e);
         }
-
-        // Special case: enum scrutinee (0.0.6 T05; 0.0.7 T04 adds the fully
-        // applied parameterized form — same runtime representation).
         if matches!(e.scrutinee.ty(), Type::Enum(_) | Type::App(_, _)) {
             return self.lower_choose_enum(fb, e);
         }
 
-        // Generic choose (0.0.1 algorithm, updated with MirInstr struct).
+        // Generic choose (literals/idents, 0.0.7: or-patterns/type guards).
         self.lower_expr_into(fb, &e.scrutinee)?;
+        let scr_span = e.scrutinee.span();
 
         let mut body_jumps: Vec<BlockId> = Vec::new();
         let mut pending: Vec<BlockId> = Vec::new();
@@ -2047,103 +2179,115 @@ impl<'a> FnBodyCx<'a> {
             if chain_done {
                 break;
             }
-            match &arm.pattern {
-                TypedPatternHir::Literal(lit) => {
-                    fb.emit(MirInstr::new(MirInstrKind::Dup, e.scrutinee.span()));
-                    self.lower_expr_into(fb, lit)?;
-                    fb.emit(MirInstr::new(MirInstrKind::Eq, e.scrutinee.span()));
-                    pending.push(fb.jump_if_false_later());
-                    if let Some(guard) = &arm.guard {
-                        let g = fb.new_block();
-                        fb.start(g);
-                        self.lower_expr_into(fb, guard)?;
+            // Expand arm pattern into alternatives (D6/D7).
+            let pat = strip_type_guard(&arm.pattern);
+            let alts: Vec<&TypedPatternHir> = match pat {
+                TypedPatternHir::Or(parts, _) => parts.iter().map(strip_type_guard).collect(),
+                other => vec![strip_type_guard(other)],
+            };
+            for alt_pat in &alts {
+                match alt_pat {
+                    TypedPatternHir::Literal(lit) => {
+                        fb.emit(MirInstr::new(MirInstrKind::Dup, scr_span));
+                        self.lower_expr_into(fb, lit)?;
+                        fb.emit(MirInstr::new(MirInstrKind::Eq, scr_span));
                         pending.push(fb.jump_if_false_later());
-                    }
-                    let ok = fb.new_block();
-                    fb.start(ok);
-                    fb.emit(MirInstr::new(MirInstrKind::Pop, e.scrutinee.span()));
-                    self.lower_block(fb, &arm.body)?;
-                    body_jumps.push(fb.jump_later());
-                }
-                TypedPatternHir::Ident { binding_id, .. } => {
-                    self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
-                    fb.emit(MirInstr::new(
-                        MirInstrKind::BindMatch(slot),
-                        e.scrutinee.span(),
-                    ));
-                    match &arm.guard {
-                        None => {
-                            fb.emit(MirInstr::new(MirInstrKind::Pop, e.scrutinee.span()));
-                            self.lower_block(fb, &arm.body)?;
-                            body_jumps.push(fb.jump_later());
-                            chain_done = true;
-                        }
-                        Some(guard) => {
+                        if let Some(guard) = &arm.guard {
+                            let g = fb.new_block();
+                            fb.start(g);
                             self.lower_expr_into(fb, guard)?;
                             pending.push(fb.jump_if_false_later());
-                            let ok = fb.new_block();
-                            fb.start(ok);
-                            fb.emit(MirInstr::new(MirInstrKind::Pop, e.scrutinee.span()));
-                            self.lower_block(fb, &arm.body)?;
-                            body_jumps.push(fb.jump_later());
+                        }
+                        let ok = fb.new_block();
+                        fb.start(ok);
+                        fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+                        self.lower_block(fb, &arm.body)?;
+                        body_jumps.push(fb.jump_later());
+                        // The equality and guard failures both retry at the
+                        // next alternative's test point.
+                        start_pending_block(fb, &mut pending);
+                        // Next alternative of same or different arm starts at
+                        // a new test point fed by pending failures.
+                    }
+                    TypedPatternHir::Ident { binding_id, .. } => {
+                        let slot = self.slots.slot_for(*binding_id);
+                        fb.emit(MirInstr::new(MirInstrKind::BindMatch(slot), scr_span));
+                        match &arm.guard {
+                            None => {
+                                fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+                                self.lower_block(fb, &arm.body)?;
+                                body_jumps.push(fb.jump_later());
+                                chain_done = true;
+                            }
+                            Some(guard) => {
+                                self.lower_expr_into(fb, guard)?;
+                                pending.push(fb.jump_if_false_later());
+                                let ok = fb.new_block();
+                                fb.start(ok);
+                                fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+                                self.lower_block(fb, &arm.body)?;
+                                body_jumps.push(fb.jump_later());
+                                // The guard failure retries at the next
+                                // alternative's test point.
+                                start_pending_block(fb, &mut pending);
+                            }
+                        }
+                        if chain_done {
+                            break;
                         }
                     }
-                }
-                TypedPatternHir::ResultCtor { span, .. } => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::ChooseResultNeedsOkErrArms,
-                        *span,
-                    ));
-                }
-                TypedPatternHir::Or(_, span) | TypedPatternHir::TypeGuard { span, .. } => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "or-pattern / type-guard in non-enum choose (0.0.7 T06)",
-                        },
-                        *span,
-                    ));
-                }
-                // 0.0.6 T05: variant patterns only reach the dedicated
-                // `lower_choose_enum` path; encountering one here means the
-                // typeck invariant is broken -- fail loudly (the T02 lesson).
-                TypedPatternHir::Enum { span, .. } | TypedPatternHir::EnumVariant { span, .. } => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "enum variant pattern on a non-enum choose",
-                        },
-                        *span,
-                    ));
-                }
-                TypedPatternHir::Error => {
-                    // 0.0.6 T02: `Error` patterns only appear in
-                    // error-recovery trees — typeck rejects enum patterns
-                    // before lowering, so this arm is defensive. A silent
-                    // fall-through here left the arm's block unterminated
-                    // (placeholder `Return`) and the function returned
-                    // early with no diagnostic; fail loudly instead.
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "error-recovery pattern in choose",
-                        },
-                        arm.body.span,
-                    ));
-                }
-            }
-
-            if !chain_done {
-                let this = std::mem::take(&mut pending);
-                let next = fb.new_block();
-                fb.start(next);
-                for cond_block in this {
-                    fb.resolve(cond_block, next);
+                    TypedPatternHir::ResultCtor { span, .. } => {
+                        return Err(LowerError::new(
+                            LowerErrorKind::ChooseResultNeedsOkErrArms,
+                            *span,
+                        ));
+                    }
+                    TypedPatternHir::Enum { span, .. }
+                    | TypedPatternHir::EnumVariant { span, .. } => {
+                        return Err(LowerError::new(
+                            LowerErrorKind::UnsupportedFeature {
+                                feature: "enum variant pattern on a non-enum choose",
+                            },
+                            *span,
+                        ));
+                    }
+                    TypedPatternHir::Or(..) | TypedPatternHir::TypeGuard { .. } => {
+                        // Top-level or-patterns are flattened above and type
+                        // guards stripped, so an `Or`/`TypeGuard` here is one
+                        // nested directly inside a literal/ident alternative.
+                        // The enum/Result payload paths lower that (the
+                        // sub-pattern machinery is recursive); the generic
+                        // chain does not, so it stays a defensive error.
+                        return Err(LowerError::new(
+                            LowerErrorKind::UnsupportedFeature {
+                                feature: "nested or/type-guard in generic choose (0.0.7 T06)",
+                            },
+                            scr_span,
+                        ));
+                    }
+                    TypedPatternHir::Error => {
+                        return Err(LowerError::new(
+                            LowerErrorKind::UnsupportedFeature {
+                                feature: "error-recovery pattern in choose",
+                            },
+                            arm.body.span,
+                        ));
+                    }
                 }
             }
         }
 
+        // Every alternative resolved its own failure jumps into the next
+        // test point, so nothing is pending here — a taken ident arm ends
+        // the chain without failure edges.
+        debug_assert!(
+            pending.is_empty(),
+            "each alternative resolves the failure jumps it creates"
+        );
         if !chain_done {
-            fb.emit(MirInstr::new(MirInstrKind::Pop, e.scrutinee.span()));
-            fb.emit(MirInstr::new(MirInstrKind::Unit, e.scrutinee.span()));
+            // All alternatives failed: pop the scrutinee, yield unit.
+            fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
+            fb.emit(MirInstr::new(MirInstrKind::Unit, scr_span));
             body_jumps.push(fb.jump_later());
         }
 
@@ -2155,22 +2299,12 @@ impl<'a> FnBodyCx<'a> {
         Ok(())
     }
 
-    /// Lower a `choose` on a Result scrutinee (0.0.2 U06).
-    ///
-    /// Layout follows BYTECODE.md §6.8.
-    /// Only `when Ok(..)` and `when Err(..)` arms are supported: the lowering is
-    /// the `IsErr`-then-branch shape with no fallback block, so `otherwise`
-    /// (parsed as a wildcard `Ident` pattern) or any literal pattern cannot be
-    /// represented and is rejected up front rather than silently dropped.
-    /// Guards on Ok/Err arms are deferred to U07/U09.
+    /// Lower a `choose` on a Result scrutinee (0.0.2 U06, generalized in 0.0.7 T06).
     fn lower_choose_result(
         &mut self,
         fb: &mut FnBuilder,
         e: &TypedExprChooseHir,
     ) -> Result<(), LowerError> {
-        // Reject arms the branch shape cannot express. typeck lets `otherwise`
-        // through (it short-circuits the exhaustivity check), so without this
-        // guard the arm's body would be dropped on the floor.
         for arm in &e.arms {
             if !matches!(&arm.pattern, TypedPatternHir::ResultCtor { .. }) {
                 return Err(LowerError::new(
@@ -2182,194 +2316,308 @@ impl<'a> FnBodyCx<'a> {
             }
         }
 
-        self.lower_expr_into(fb, &e.scrutinee)?;
-        // Dup/DupDeep based on scrutinee type (owned → DupDeep).
-        let dup_kind = if e.scrutinee.ty().is_owned() {
-            MirInstrKind::DupDeep
-        } else {
-            MirInstrKind::Dup
-        };
-        fb.emit(MirInstr::new(dup_kind, e.scrutinee.span()));
-        fb.emit(MirInstr::new(MirInstrKind::IsErr, e.scrutinee.span()));
+        // Simple fast path: all arms are unguarded Ok/Err with plain Ident payloads.
+        let simple = e.arms.iter().all(|arm| {
+            arm.guard.is_none()
+                && matches!(
+                    &arm.pattern,
+                    TypedPatternHir::ResultCtor { payload, .. }
+                        if matches!(payload.as_ref(), TypedPatternHir::Ident { .. })
+                )
+        });
 
-        // Branch: Err side (all Err arms in source order).
+        self.lower_expr_into(fb, &e.scrutinee)?;
+        let dk = dup_kind(&e.scrutinee.ty());
+        fb.emit(MirInstr::new(dk.clone(), e.scrutinee.span()));
+        fb.emit(MirInstr::new(MirInstrKind::IsErr, e.scrutinee.span()));
         let jump_err = fb.jump_if_true_later();
 
-        // Ok side: walk Ok arms in source order (no guards in U06).
-        let mut ok_jumps: Vec<BlockId> = Vec::new();
-        let mut has_ok_arm = false;
-
-        for arm in &e.arms {
-            if let TypedPatternHir::ResultCtor {
-                ctor: ResultCtor::Ok,
-                payload,
-                span,
-                ..
-            } = &arm.pattern
-            {
-                has_ok_arm = true;
-                if arm.guard.is_some() {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "Result choose with guards (deferred to U07)",
-                        },
-                        *span,
-                    ));
-                }
-                // T02 compat: legacy single ident payload.
-                if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
-                    self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
-                    let arm_ok = fb.new_block();
-                    fb.start(arm_ok);
-                    fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
-                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                    self.lower_block(fb, &arm.body)?;
-                    ok_jumps.push(fb.jump_later());
-                } else {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "nested/complex Result pattern payload (0.0.7 T06)",
-                        },
-                        *span,
-                    ));
-                }
-            }
-        }
-
-        // Err side: walk Err arms in source order (no guards in U06).
-        // The IsErr `jump_err` is patched to the *first* Err arm block once we
-        // know it, so there is no empty forwarder block (which would otherwise
-        // hit a placeholder `Return`).
-        let mut err_jumps: Vec<BlockId> = Vec::new();
-        let mut first_err: Option<BlockId> = None;
-        let mut has_err_arm = false;
-
-        for arm in &e.arms {
-            if let TypedPatternHir::ResultCtor {
-                ctor: ResultCtor::Err,
-                payload,
-                span,
-                ..
-            } = &arm.pattern
-            {
-                has_err_arm = true;
-                if arm.guard.is_some() {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "Result choose with guards (deferred to U07)",
-                        },
-                        *span,
-                    ));
-                }
-                // T02 compat: legacy single ident payload.
-                if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
-                    self.slots.slot_for(*binding_id);
-                    let slot = self.slots.get(*binding_id).expect("slot just allocated");
-                    let arm_err = fb.new_block();
-                    if first_err.is_none() {
-                        first_err = Some(arm_err);
+        if simple {
+            // Preserve 0.0.6/U06 structure for compatibility.
+            let mut ok_jumps: Vec<BlockId> = Vec::new();
+            let mut has_ok_arm = false;
+            for arm in &e.arms {
+                if let TypedPatternHir::ResultCtor {
+                    ctor: ResultCtor::Ok,
+                    payload,
+                    span,
+                    ..
+                } = &arm.pattern
+                {
+                    has_ok_arm = true;
+                    if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
+                        let slot = self.slots.slot_for(*binding_id);
+                        let arm_ok = fb.new_block();
+                        fb.start(arm_ok);
+                        fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
+                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                        self.lower_block(fb, &arm.body)?;
+                        ok_jumps.push(fb.jump_later());
                     }
-                    fb.start(arm_err);
-                    fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
-                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                    self.lower_block(fb, &arm.body)?;
-                    err_jumps.push(fb.jump_later());
-                } else {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "nested/complex Result pattern payload (0.0.7 T06)",
-                        },
-                        *span,
-                    ));
                 }
             }
+
+            let mut err_jumps: Vec<BlockId> = Vec::new();
+            let mut first_err: Option<BlockId> = None;
+            let mut has_err_arm = false;
+            for arm in &e.arms {
+                if let TypedPatternHir::ResultCtor {
+                    ctor: ResultCtor::Err,
+                    payload,
+                    span,
+                    ..
+                } = &arm.pattern
+                {
+                    has_err_arm = true;
+                    if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
+                        let slot = self.slots.slot_for(*binding_id);
+                        let arm_err = fb.new_block();
+                        if first_err.is_none() {
+                            first_err = Some(arm_err);
+                        }
+                        fb.start(arm_err);
+                        fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
+                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                        self.lower_block(fb, &arm.body)?;
+                        err_jumps.push(fb.jump_later());
+                    }
+                }
+            }
+
+            if !has_ok_arm || !has_err_arm {
+                return Err(LowerError::new(
+                    LowerErrorKind::ChooseResultNeedsOkErrArms,
+                    e.span,
+                ));
+            }
+
+            let merge = fb.new_block();
+            fb.start(merge);
+            for j in ok_jumps {
+                fb.resolve(j, merge);
+            }
+            for j in err_jumps {
+                fb.resolve(j, merge);
+            }
+            let Some(first_err) = first_err else {
+                // The `!has_err_arm` check above guarantees an Err arm was
+                // visited and set `first_err`.
+                unreachable!("Err arm visited, so first_err is set");
+            };
+            fb.resolve(jump_err, first_err);
+            return Ok(());
         }
 
-        // Defensive: typeck guarantees an unguarded Ok and an unguarded Err arm.
-        if !has_ok_arm || !has_err_arm {
+        // General path: nested payloads / guards / multiple arms per ctor.
+        // Fallthrough (IsErr false) goes to ok_entry (must be physically next).
+        let scr_ty = e.scrutinee.ty();
+        let ok_arms: Vec<&TypedChooseArmHir> = e
+            .arms
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &a.pattern,
+                    TypedPatternHir::ResultCtor {
+                        ctor: ResultCtor::Ok,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        if ok_arms.is_empty() {
+            return Err(LowerError::new(
+                LowerErrorKind::ChooseResultNeedsOkErrArms,
+                e.span,
+            ));
+        }
+        let err_arms: Vec<&TypedChooseArmHir> = e
+            .arms
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &a.pattern,
+                    TypedPatternHir::ResultCtor {
+                        ctor: ResultCtor::Err,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        if err_arms.is_empty() {
             return Err(LowerError::new(
                 LowerErrorKind::ChooseResultNeedsOkErrArms,
                 e.span,
             ));
         }
 
-        // Merge Ok and Err branches.
-        let merge = fb.new_block();
-        fb.start(merge);
-        for j in ok_jumps {
-            fb.resolve(j, merge);
-        }
-        for j in err_jumps {
-            fb.resolve(j, merge);
-        }
-        // The IsErr (taken) branch targets the first Err arm. The ok
-        // fall-through lands on the first Ok arm (emitted right after the
-        // scrutinee block).
-        fb.resolve(jump_err, first_err.expect("has Err arm (checked above)"));
+        // ok_entry must be physically next after the IsErr conditional: its
+        // untaken (Ok) edge falls through. The attempt chains and merge are
+        // pre-created afterwards (entered only via explicit edges).
+        let ok_entry = fb.new_block();
 
+        // Pre-create the attempt chains and merge so failure edges have targets.
+        // Each chain is `arms.len()` attempt blocks plus the defensive tail.
+        let ok_attempts: Vec<BlockId> = (0..=ok_arms.len()).map(|_| fb.new_block()).collect();
+        let err_attempts: Vec<BlockId> = (0..=err_arms.len()).map(|_| fb.new_block()).collect();
+        let merge = fb.new_block();
+
+        fb.start(ok_entry);
+        let ok_inner_ty = result_payload_ty(&scr_ty, ResultCtor::Ok);
+        fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, e.scrutinee.span()));
+        fb.jump(ok_attempts[0]);
+        self.lower_result_ctor_arms(
+            fb,
+            &ok_arms,
+            &ok_inner_ty,
+            &ok_attempts,
+            merge,
+            e.scrutinee.span(),
+        )?;
+
+        // Err side
+        let err_entry = fb.new_block();
+        fb.resolve(jump_err, err_entry);
+        fb.start(err_entry);
+        let err_inner_ty = result_payload_ty(&scr_ty, ResultCtor::Err);
+        fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, e.scrutinee.span()));
+        fb.jump(err_attempts[0]);
+        self.lower_result_ctor_arms(
+            fb,
+            &err_arms,
+            &err_inner_ty,
+            &err_attempts,
+            merge,
+            e.scrutinee.span(),
+        )?;
+
+        fb.start(merge);
         Ok(())
     }
 
-    /// Lower a `choose` on an enum scrutinee (0.0.6 T05).
-    ///
-    /// Shape (TICKETS T05): the scrutinee is **parked** on the stack for the
-    /// whole `choose`. Each variant gets a test block —
-    /// `Dup/DupDeep ; EnumIs v ; JumpIfTrue body` — chained by explicit
-    /// jumps in source order, with the `otherwise` fallback (typeck
-    /// guarantees one for a guard-ful choose) at the end. A matched body
-    /// `Pop`s the parked scrutinee (consumed — §6.8) and runs.
-    ///
-    /// **Guard arms**: a guard may fail, so the payload must not be moved
-    /// out of the parked scrutinee before the guard runs (later arms still
-    /// test it). A guarded `Variant(b)` therefore stages its payload into a
-    /// hidden temp slot — `Dup/DupDeep ; EnumPayload ; StoreLocal tmp` —
-    /// evaluates the guard, and on success `LoadLocal tmp ; StoreLocal b`
-    /// moves it into the variable's own slot for the body (the
-    /// `for`-over-`Range` staging precedent). On guard failure the arm
-    /// jumps straight to the next test / fallback with the parked scrutinee
-    /// still on the stack.
+    /// Try arms for one Result constructor in order against the unwrapped
+    /// payload parked on the stack. Each attempt works on a `Dup`/`DupDeep`
+    /// copy so a pattern or guard failure leaves the payload parked for the
+    /// next arm; the parked payload is popped only when an arm is taken.
+    /// `attempts` holds one block per arm plus the defensive tail (index
+    /// `arms.len()`): if every attempt fails — typeck guarantees
+    /// exhaustiveness, so this is defensive — the tail pops the payload and
+    /// yields unit.
+    fn lower_result_ctor_arms(
+        &mut self,
+        fb: &mut FnBuilder,
+        arms: &[&TypedChooseArmHir],
+        payload_ty: &Type,
+        attempts: &[BlockId],
+        merge: BlockId,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        for (i, arm) in arms.iter().enumerate() {
+            let on_fail = attempts[i + 1];
+            fb.start(attempts[i]);
+            self.lower_result_single_arm(fb, arm, payload_ty, merge, on_fail)?;
+        }
+        fb.start(attempts[arms.len()]);
+        fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+        fb.emit(MirInstr::new(MirInstrKind::Unit, span));
+        fb.jump(merge);
+        Ok(())
+    }
+
+    /// One attempt of a Result ctor arm. Entry: the payload parked on the
+    /// stack. A taken arm pops it before the body; a failed attempt leaves it
+    /// parked and jumps to `on_fail` (the next attempt).
+    fn lower_result_single_arm(
+        &mut self,
+        fb: &mut FnBuilder,
+        arm: &TypedChooseArmHir,
+        payload_ty: &Type,
+        merge: BlockId,
+        on_fail: BlockId,
+    ) -> Result<(), LowerError> {
+        let (payload_pat, span) = match &arm.pattern {
+            TypedPatternHir::ResultCtor { payload, span, .. } => (payload.as_ref(), *span),
+            _ => unreachable!("result ctor arms are pre-filtered"),
+        };
+        let pat = strip_type_guard(payload_pat);
+        if arm.guard.is_none()
+            && let TypedPatternHir::Ident { binding_id, .. } = pat
+        {
+            // Fast path: an unguarded ident always matches — bind the
+            // parked payload (consumed) and run the body.
+            let slot = self.slots.slot_for(*binding_id);
+            fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), span));
+            self.lower_block(fb, &arm.body)?;
+            fb.jump(merge);
+            return Ok(());
+        }
+
+        // General attempt: match a copy of the payload; `lower_subpattern_match`
+        // consumes the copy on both of its exits, leaving the payload parked.
+        fb.emit(MirInstr::new(dup_kind(payload_ty), span));
+        let pattern_fail = fb.new_block();
+        let fail = FailEdge {
+            on_fail: pattern_fail,
+            extra_below: 0,
+        };
+        self.lower_subpattern_match(fb, payload_pat, payload_ty, &fail, span)?;
+        if let Some(guard) = &arm.guard {
+            fb.spill_for_fallthrough();
+            self.lower_expr_into(fb, guard)?;
+            let guard_fail = fb.jump_if_false_later();
+            fb.resolve(guard_fail, on_fail);
+            let guard_pass = fb.new_block();
+            fb.start(guard_pass);
+            fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+        } else {
+            fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+        }
+        self.lower_block(fb, &arm.body)?;
+        fb.jump(merge);
+        // Pattern mismatch: the copy is cleaned up, the payload is still parked.
+        fb.start(pattern_fail);
+        fb.jump(on_fail);
+        Ok(())
+    }
+
+    /// Lower a `choose` on an enum scrutinee (0.0.6 T05, generalized in 0.0.7 T06).
     fn lower_choose_enum(
         &mut self,
         fb: &mut FnBuilder,
         e: &TypedExprChooseHir,
     ) -> Result<(), LowerError> {
-        let scr_span = e.scrutinee.span();
-        let deep = e.scrutinee.ty().is_owned();
-        let dup = || {
-            if deep {
-                MirInstrKind::DupDeep
-            } else {
-                MirInstrKind::Dup
-            }
+        let scr_ty = e.scrutinee.ty();
+        let scr = EnumScr {
+            ty: &scr_ty,
+            span: e.scrutinee.span(),
+            dup: dup_kind(&scr_ty),
         };
 
-        // Partition arms in source order: variant arms build the test chain
-        // (guarded or not); an optional `otherwise` / `_` arm is the
-        // fallback. A top-level or-pattern / type-guard arm is rejected
-        // outright: silently treating it as the fallback would run its body
-        // without storing any of its bindings (the T05 review hazard).
-        let mut variant_arms: Vec<&TypedChooseArmHir> = Vec::new();
+        let mut alts: Vec<Alt<'_>> = Vec::new();
         let mut fallback: Option<&TypedChooseArmHir> = None;
-        for arm in &e.arms {
-            match &arm.pattern {
+        for (arm_index, arm) in e.arms.iter().enumerate() {
+            let p = strip_type_guard(&arm.pattern);
+            match p {
                 TypedPatternHir::Enum { .. } | TypedPatternHir::EnumVariant { .. } => {
-                    variant_arms.push(arm)
+                    alts.push(Alt {
+                        pat: &arm.pattern,
+                        guard: arm.guard.as_deref(),
+                        arm_index,
+                    });
                 }
-                TypedPatternHir::Or(_, span) | TypedPatternHir::TypeGuard { span, .. } => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "or-pattern / type-guard arm in an enum choose (0.0.7 T06)",
-                        },
-                        *span,
-                    ));
+                TypedPatternHir::Or(parts, _) => {
+                    for part in parts {
+                        alts.push(Alt {
+                            pat: part,
+                            guard: arm.guard.as_deref(),
+                            arm_index,
+                        });
+                    }
                 }
                 _ => fallback = Some(arm),
             }
         }
-        let n = variant_arms.len();
-        if n == 0 {
-            // Defensive: typeck's exhaustiveness check rejects an empty choose.
+
+        if alts.is_empty() {
             return Err(LowerError::new(
                 LowerErrorKind::UnsupportedFeature {
                     feature: "enum choose with no variant arms",
@@ -2378,35 +2626,79 @@ impl<'a> FnBodyCx<'a> {
             ));
         }
 
-        // `JumpIfTrue(t)` / `JumpIfFalse(t)` take the branch on `t` and
-        // **fall through to the physically next block** otherwise (BYTECODE
-        // §6.3). Block allocation order therefore encodes the CFG:
-        //
-        //   [current]   : lower + park the scrutinee ; Jump test[0]
-        //   test[0..n]  : Dup/DupDeep ; EnumIs v_i ; JumpIfTrue body[i]
-        //                 (untaken falls through to test[i+1] / `fallback`)
-        //   fallback    : Pop ; <otherwise | defensive Unit> ; Jump merge
-        //   body[i]     : unguarded -> (EnumPayload | Pop) ; <body> ;
-        //                 Jump merge
-        //                 guarded   -> stage payload into its binding slot
-        //                 from a Dup copy, eval guard, JumpIfFalse next_test
-        //   guard_ok[i] : (guarded only, physically after body[i]) Pop ;
-        //                 <body> ; Jump merge
-        //   merge       : join
-        //
-        // A guarded arm must not consume the parked scrutinee before the
-        // guard runs (a failed guard still needs later tests to see it), so
-        // the payload is moved out of a Dup copy into the binding slot; both
-        // the guard and the body read that slot. The parked enum is only
-        // consumed (`Pop`) on the guard-pass path.
+        // Simple 0.0.6-compatible mode preserves the existing test block
+        // layout: it applies when every non-fallback arm is a single variant
+        // alternative (no or-expansion) with flat ident payloads.
+        let simple_mode = {
+            let variant_arm_count = e
+                .arms
+                .iter()
+                .filter(|a| {
+                    matches!(
+                        strip_type_guard(&a.pattern),
+                        TypedPatternHir::Enum { .. } | TypedPatternHir::EnumVariant { .. }
+                    )
+                })
+                .count();
+            let mut simple = alts.len() == variant_arm_count;
+            if simple {
+                for alt in &alts {
+                    let p = strip_type_guard(alt.pat);
+                    match p {
+                        TypedPatternHir::EnumVariant { .. } => {}
+                        TypedPatternHir::Enum { payloads, .. } => {
+                            if !payloads.iter().all(|sp| {
+                                matches!(strip_type_guard(sp), TypedPatternHir::Ident { .. })
+                            }) {
+                                simple = false;
+                                break;
+                            }
+                        }
+                        _ => {
+                            simple = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            simple
+        };
+
+        if simple_mode {
+            return self.lower_choose_enum_simple(fb, e, scr.span, scr.dup);
+        }
+        self.lower_choose_enum_general(fb, e, &alts, fallback, &scr)
+    }
+
+    /// 0.0.6-compatible simple enum choose lowering (flat ident payloads, no
+    /// or-patterns). Preserves the block layout expected by existing tests.
+    fn lower_choose_enum_simple(
+        &mut self,
+        fb: &mut FnBuilder,
+        e: &TypedExprChooseHir,
+        scr_span: Span,
+        dk: MirInstrKind,
+    ) -> Result<(), LowerError> {
+        let mut variant_arms: Vec<&TypedChooseArmHir> = Vec::new();
+        let mut fallback: Option<&TypedChooseArmHir> = None;
+        for arm in &e.arms {
+            let p = strip_type_guard(&arm.pattern);
+            match p {
+                TypedPatternHir::Enum { .. } | TypedPatternHir::EnumVariant { .. } => {
+                    variant_arms.push(arm)
+                }
+                _ => fallback = Some(arm),
+            }
+        }
+        let n = variant_arms.len();
+        let dup = || dk.clone();
+
         let test_blocks: Vec<BlockId> = (0..n).map(|_| fb.new_block()).collect();
         let fallback_blk = fb.new_block();
         let mut body_blocks: Vec<BlockId> = Vec::with_capacity(n);
         let mut guard_ok: Vec<Option<BlockId>> = Vec::with_capacity(n);
         for arm in &variant_arms {
             body_blocks.push(fb.new_block());
-            // A guarded arm's success block must be physically next (the
-            // untaken edge of `JumpIfFalse` falls through to it).
             guard_ok.push(if arm.guard.is_some() {
                 Some(fb.new_block())
             } else {
@@ -2415,30 +2707,25 @@ impl<'a> FnBodyCx<'a> {
         }
         let merge = fb.new_block();
 
-        // Park the scrutinee in the current block, then enter the test chain.
         self.lower_expr_into(fb, &e.scrutinee)?;
         fb.jump(test_blocks[0]);
 
-        // Emit the test chain in declaration order.
         for i in 0..n {
-            let arm = variant_arms[i];
-            let v = match &arm.pattern {
+            let pat = strip_type_guard(&variant_arms[i].pattern);
+            let v = match pat {
                 TypedPatternHir::Enum { variant_index, .. }
                 | TypedPatternHir::EnumVariant { variant_index, .. } => *variant_index,
-                _ => unreachable!("variant_arms holds only enum patterns"),
+                // `variant_arms` holds only Enum/EnumVariant patterns (the
+                // pre-filter above pushed exactly those).
+                _ => unreachable!("variant arm patterns are pre-filtered to Enum/EnumVariant"),
             };
             fb.start(test_blocks[i]);
             fb.emit(MirInstr::new(dup(), scr_span));
             fb.emit(MirInstr::new(MirInstrKind::EnumIs(v), scr_span));
             let j = fb.jump_if_true_later();
             fb.resolve(j, body_blocks[i]);
-            // untaken: fall through to test[i+1] (or `fallback` after the last)
         }
 
-        // Fallback: consume the parked scrutinee and run `otherwise`. With a
-        // guard-free exhaustive choose there is no `otherwise`; the block is
-        // unreachable but must still be terminated, so emit a defensive
-        // `Unit` value (the generic `choose` no-match precedent).
         fb.start(fallback_blk);
         fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
         match fallback {
@@ -2447,7 +2734,6 @@ impl<'a> FnBodyCx<'a> {
         }
         fb.jump(merge);
 
-        // Emit each matched arm's body.
         for i in 0..n {
             let arm = variant_arms[i];
             fb.start(body_blocks[i]);
@@ -2456,7 +2742,8 @@ impl<'a> FnBodyCx<'a> {
             } else {
                 fallback_blk
             };
-            match (&arm.pattern, &arm.guard) {
+            let pat = strip_type_guard(&arm.pattern);
+            match (pat, &arm.guard) {
                 (
                     TypedPatternHir::Enum {
                         payloads,
@@ -2466,23 +2753,17 @@ impl<'a> FnBodyCx<'a> {
                     },
                     Some(guard),
                 ) => {
-                    // T02 compat: legacy single-ident first payload.
-                    let binding_id = first_payload_binding(payloads, *span)?;
-                    self.slots.slot_for(binding_id);
-                    let slot = self.slots.get(binding_id).expect("slot just allocated");
-                    // Move the payload out of a Dup copy into the binding
-                    // slot; the parked scrutinee stays for later tests. Both
-                    // the guard and the body read this slot.
-                    fb.emit(MirInstr::new(dup(), scr_span));
-                    fb.emit(MirInstr::new(
-                        MirInstrKind::EnumPayload(*variant_index, 0),
+                    self.emit_enum_payload_stores(
+                        fb,
+                        *variant_index,
+                        payloads,
                         *span,
-                    ));
-                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                        dk.clone(),
+                        true,
+                    );
                     self.lower_expr_into(fb, guard)?;
                     let j = fb.jump_if_false_later();
                     fb.resolve(j, next_test);
-                    // guard passed: fall through to guard_ok[i]
                 }
                 (
                     TypedPatternHir::Enum {
@@ -2493,51 +2774,389 @@ impl<'a> FnBodyCx<'a> {
                     },
                     None,
                 ) => {
-                    // T02 compat: legacy single-ident first payload.
-                    let binding_id = first_payload_binding(payloads, *span)?;
-                    self.slots.slot_for(binding_id);
-                    let slot = self.slots.get(binding_id).expect("slot just allocated");
-                    // `EnumPayload` consumes the parked enum (e -> p, like
-                    // `UnwrapOk`); no `Pop` before it.
-                    fb.emit(MirInstr::new(
-                        MirInstrKind::EnumPayload(*variant_index, 0),
+                    self.emit_enum_payload_stores(
+                        fb,
+                        *variant_index,
+                        payloads,
                         *span,
-                    ));
-                    fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                        dk.clone(),
+                        false,
+                    );
                     self.lower_block(fb, &arm.body)?;
                     fb.jump(merge);
                 }
                 (TypedPatternHir::EnumVariant { .. }, Some(guard)) => {
-                    // Zero-payload: nothing to stage, so evaluate the guard
-                    // directly (the parked scrutinee stays for later arms).
                     self.lower_expr_into(fb, guard)?;
                     let j = fb.jump_if_false_later();
                     fb.resolve(j, next_test);
                 }
                 (TypedPatternHir::EnumVariant { .. }, None) => {
-                    // Zero-payload variant: no binding, just consume the
-                    // parked enum and run the body.
                     fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
                     self.lower_block(fb, &arm.body)?;
                     fb.jump(merge);
                 }
-                _ => unreachable!("variant_arms holds only enum patterns"),
+                // `variant_arms` holds only Enum/EnumVariant patterns (the
+                // pre-filter at the top of this function pushed exactly
+                // those), so the (pattern, guard) matrix is exhaustive.
+                _ => unreachable!("variant arm patterns are pre-filtered to Enum/EnumVariant"),
             }
         }
 
-        // Guarded arms' success path (physically after body[i]): consume the
-        // parked scrutinee and run the body.
         for i in 0..n {
             if let Some(gb) = guard_ok[i] {
-                let arm = variant_arms[i];
                 fb.start(gb);
                 fb.emit(MirInstr::new(MirInstrKind::Pop, scr_span));
-                self.lower_block(fb, &arm.body)?;
+                self.lower_block(fb, &variant_arms[i].body)?;
                 fb.jump(merge);
             }
         }
 
         fb.start(merge);
         Ok(())
+    }
+
+    fn emit_enum_payload_stores(
+        &mut self,
+        fb: &mut FnBuilder,
+        variant_index: u32,
+        payloads: &[TypedPatternHir],
+        span: Span,
+        dk: MirInstrKind,
+        staged: bool,
+    ) {
+        let n = payloads.len();
+        for (i, p) in payloads.iter().enumerate() {
+            let p = strip_type_guard(p);
+            let binding_id = match p {
+                TypedPatternHir::Ident { binding_id, .. } => *binding_id,
+                _ => unreachable!("simple mode requires ident payloads"),
+            };
+            let slot = self.slots.slot_for(binding_id);
+            let last = i + 1 == n;
+            if staged || !last {
+                fb.emit(MirInstr::new(dk.clone(), span));
+            }
+            fb.emit(MirInstr::new(
+                MirInstrKind::EnumPayload(variant_index, i as u16),
+                span,
+            ));
+            fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), span));
+        }
+    }
+
+    fn lower_choose_enum_general<'b>(
+        &mut self,
+        fb: &mut FnBuilder,
+        e: &TypedExprChooseHir,
+        alts: &[Alt<'b>],
+        fallback: Option<&TypedChooseArmHir>,
+        scr: &EnumScr,
+    ) -> Result<(), LowerError> {
+        use std::collections::HashMap;
+        // Body blocks are shared by all alternatives of one arm (or-pattern).
+        let mut arm_body_blk: HashMap<usize, BlockId> = HashMap::new();
+        let mut seen_arms: Vec<usize> = Vec::new();
+        for alt in alts {
+            let idx = alt.arm_index;
+            if !seen_arms.contains(&idx) {
+                seen_arms.push(idx);
+                arm_body_blk.insert(idx, fb.new_block());
+            }
+        }
+        let fallback_blk = fb.new_block();
+        let merge = fb.new_block();
+
+        self.lower_expr_into(fb, &e.scrutinee)?;
+        let alt_test_blks: Vec<BlockId> = alts.iter().map(|_| fb.new_block()).collect();
+        fb.jump(alt_test_blks[0]);
+
+        for (i, alt) in alts.iter().enumerate() {
+            fb.start(alt_test_blks[i]);
+            let next_fail = if i + 1 < alts.len() {
+                alt_test_blks[i + 1]
+            } else {
+                fallback_blk
+            };
+            let pat = strip_type_guard(alt.pat);
+            self.lower_enum_alt_match(fb, pat, alt, scr, &arm_body_blk, next_fail)?;
+        }
+
+        fb.start(fallback_blk);
+        fb.emit(MirInstr::new(MirInstrKind::Pop, scr.span));
+        match fallback {
+            Some(arm) => self.lower_block(fb, &arm.body)?,
+            None => fb.emit(MirInstr::new(MirInstrKind::Unit, scr.span)),
+        }
+        fb.jump(merge);
+
+        for &idx in &seen_arms {
+            let bblk = arm_body_blk[&idx];
+            fb.start(bblk);
+            self.lower_block(fb, &e.arms[idx].body)?;
+            fb.jump(merge);
+        }
+
+        fb.start(merge);
+        Ok(())
+    }
+
+    /// One flattened enum alternative: test the variant on a copy of the parked
+    /// scrutinee (`Dup; EnumIs`, both edges pop the bool), extract payloads on
+    /// match, evaluate the arm guard (if any) with the scrutinee still parked,
+    /// and only pop the scrutinee once the arm is definitely taken. Every
+    /// failure edge (variant mismatch, payload sub-pattern mismatch, guard
+    /// failure) lands on `next_fail` with the parked scrutinee intact.
+    fn lower_enum_alt_match<'b>(
+        &mut self,
+        fb: &mut FnBuilder,
+        pat: &TypedPatternHir,
+        alt: &Alt<'b>,
+        scr: &EnumScr,
+        arm_body_blk: &std::collections::HashMap<usize, BlockId>,
+        next_fail: BlockId,
+    ) -> Result<(), LowerError> {
+        let aidx = alt.arm_index;
+        let (variant_index, payloads_opt, pspan) = match pat {
+            TypedPatternHir::Enum {
+                variant_index,
+                payloads,
+                span,
+                ..
+            } => (*variant_index, Some(payloads.as_slice()), *span),
+            TypedPatternHir::EnumVariant {
+                variant_index,
+                span,
+                ..
+            } => (*variant_index, None, *span),
+            _ => unreachable!("enum alt must be Enum/EnumVariant"),
+        };
+
+        fb.spill_for_fallthrough();
+        fb.emit(MirInstr::new(scr.dup.clone(), scr.span));
+        fb.emit(MirInstr::new(MirInstrKind::EnumIs(variant_index), pspan));
+        let fail_jmp = fb.jump_if_false_later();
+
+        let matched_blk = fb.new_block();
+        fb.start(matched_blk);
+
+        if let Some(payloads) = payloads_opt {
+            let fail = FailEdge {
+                on_fail: next_fail,
+                extra_below: 0,
+            };
+            self.lower_enum_payloads(fb, scr, pspan, variant_index, payloads, &fail)?;
+        }
+
+        // The pre-pass created one shared body block per arm with variant
+        // alternatives, and every alternative carries a valid `arm_index`.
+        let Some(&bblk) = arm_body_blk.get(&aidx) else {
+            unreachable!("arm body block is pre-created for every alternative's arm index");
+        };
+        if let Some(guard) = alt.guard {
+            // Guard failure retries the next alternative with the scrutinee
+            // parked; guard success pops it and runs the shared arm body.
+            fb.spill_for_fallthrough();
+            self.lower_expr_into(fb, guard)?;
+            let gf = fb.jump_if_false_later();
+            fb.resolve(gf, next_fail);
+            let guard_pass = fb.new_block();
+            fb.start(guard_pass);
+            fb.emit(MirInstr::new(MirInstrKind::Pop, scr.span));
+            fb.jump(bblk);
+        } else {
+            fb.emit(MirInstr::new(MirInstrKind::Pop, scr.span));
+            fb.jump(bblk);
+        }
+
+        fb.resolve(fail_jmp, next_fail);
+        Ok(())
+    }
+
+    /// Extract and match every payload of a matched enum variant against the
+    /// value on top of the stack (the parked subject copy, described by
+    /// `scr`). Each extraction is `dup; EnumPayload(v, i)`, and the
+    /// sub-pattern recursion runs with `fail.extra_below + 1`: the extracted
+    /// payload sits above the caller's parked values, so its failure edge
+    /// must clean it up on the way to `fail.on_fail` (a nested extraction
+    /// passes its own count through).
+    fn lower_enum_payloads(
+        &mut self,
+        fb: &mut FnBuilder,
+        scr: &EnumScr,
+        span: Span,
+        variant_index: u32,
+        payloads: &[TypedPatternHir],
+        fail: &FailEdge,
+    ) -> Result<(), LowerError> {
+        for (i, subpat) in payloads.iter().enumerate() {
+            fb.emit(MirInstr::new(scr.dup.clone(), span));
+            let pty = enum_payload_ty(scr.ty, variant_index, i);
+            fb.emit(MirInstr::new(
+                MirInstrKind::EnumPayload(variant_index, i as u16),
+                span,
+            ));
+            let inner = FailEdge {
+                on_fail: fail.on_fail,
+                extra_below: fail.extra_below + 1,
+            };
+            self.lower_subpattern_match(fb, subpat, &pty, &inner, span)?;
+        }
+        Ok(())
+    }
+
+    /// Match `pat` against the value on top of the stack (the subject).
+    ///
+    /// Contract (0.0.7 T06): on **success** the subject is consumed (bindings
+    /// stored into their slots) and emission continues in the current block;
+    /// on **failure** control jumps to `fail.on_fail` with the subject and its
+    /// temporary copies popped, plus `fail.extra_below` re-parked values
+    /// (nested extraction subjects) above the caller's base cleaned up — so
+    /// the failure target always sees exactly the stack it expects.
+    ///
+    /// Every conditional here is preceded by [`FnBuilder::spill_for_fallthrough`]
+    /// so its untaken edge lands on the continuation block created right after
+    /// it, regardless of blocks the caller pre-created.
+    fn lower_subpattern_match(
+        &mut self,
+        fb: &mut FnBuilder,
+        pat: &TypedPatternHir,
+        subject_ty: &Type,
+        fail: &FailEdge,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let on_fail = fail.on_fail;
+        let pat = strip_type_guard(pat);
+        match pat {
+            TypedPatternHir::Ident { binding_id, .. } => {
+                let slot = self.slots.slot_for(*binding_id);
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), span));
+                Ok(())
+            }
+            TypedPatternHir::Literal(lit) => emit_leaf_test(fb, span, fail, |fb| {
+                fb.emit(MirInstr::new(dup_kind(subject_ty), span));
+                self.lower_expr_into(fb, lit)?;
+                fb.emit(MirInstr::new(MirInstrKind::Eq, span));
+                Ok(fb.jump_if_false_later())
+            }),
+            TypedPatternHir::EnumVariant {
+                variant_index,
+                span: pspan,
+                ..
+            } => emit_leaf_test(fb, span, fail, |fb| {
+                fb.emit(MirInstr::new(dup_kind(subject_ty), span));
+                fb.emit(MirInstr::new(MirInstrKind::EnumIs(*variant_index), *pspan));
+                Ok(fb.jump_if_false_later())
+            }),
+            TypedPatternHir::Enum {
+                variant_index,
+                payloads,
+                span: pspan,
+                ..
+            } => {
+                fb.spill_for_fallthrough();
+                fb.emit(MirInstr::new(dup_kind(subject_ty), span));
+                fb.emit(MirInstr::new(MirInstrKind::EnumIs(*variant_index), *pspan));
+                let fail_jmp = fb.jump_if_false_later();
+                // match falls through: extract each payload from the parked
+                // subject and match it. Failure of a payload sub-pattern pops
+                // the payload, the parked subject, and everything below it
+                // (`extra_below + 1`), landing on `on_fail` directly.
+                let mblk = fb.new_block();
+                fb.start(mblk);
+                let inner_scr = EnumScr {
+                    ty: subject_ty,
+                    span: *pspan,
+                    dup: dup_kind(subject_ty),
+                };
+                self.lower_enum_payloads(fb, &inner_scr, *pspan, *variant_index, payloads, fail)?;
+                fb.emit(MirInstr::new(MirInstrKind::Pop, *pspan));
+                let cont = fb.new_block();
+                fb.jump(cont);
+                // fail
+                let fblk = fail_cleanup_block(fb, *pspan, fail);
+                fb.resolve(fail_jmp, fblk);
+                fb.start(cont);
+                Ok(())
+            }
+            TypedPatternHir::ResultCtor {
+                ctor,
+                payload,
+                span: pspan,
+                ..
+            } => {
+                // Test Ok/Err on a copy of the subject and unwrap it; the
+                // unwrap consumes the copy, so the payload's failure edge
+                // keeps the same cleanup count. `IsErr`-true jumps: to the
+                // matched block for `Err`, to the failure block for `Ok` —
+                // so the conditional's untaken edge (fallthrough) lands on
+                // the failure block for `Err` and on the matched block for
+                // `Ok`, which fixes the physical block order.
+                let is_err = matches!(ctor, ResultCtor::Err);
+                let inner_ty = result_payload_ty(subject_ty, *ctor);
+                let cont = fb.new_block();
+                fb.spill_for_fallthrough();
+                fb.emit(MirInstr::new(dup_kind(subject_ty), span));
+                fb.emit(MirInstr::new(MirInstrKind::IsErr, span));
+                let is_err_jmp = fb.jump_if_true_later();
+                let (mblk, fblk) = if is_err {
+                    let fblk = fail_cleanup_block(fb, span, fail);
+                    let mblk = fb.new_block();
+                    fb.start(mblk);
+                    fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *pspan));
+                    self.lower_subpattern_match(fb, payload, &inner_ty, fail, *pspan)?;
+                    (mblk, fblk)
+                } else {
+                    let mblk = fb.new_block();
+                    fb.start(mblk);
+                    fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *pspan));
+                    self.lower_subpattern_match(fb, payload, &inner_ty, fail, *pspan)?;
+                    let fblk = fail_cleanup_block(fb, span, fail);
+                    (mblk, fblk)
+                };
+                fb.jump(cont);
+                if is_err {
+                    fb.resolve(is_err_jmp, mblk);
+                } else {
+                    fb.resolve(is_err_jmp, fblk);
+                }
+                fb.start(cont);
+                Ok(())
+            }
+            TypedPatternHir::Or(alts, _) => {
+                // Each alternative is tested against its own copy of the subject;
+                // a non-last alternative's failure retries with the subject intact,
+                // the last one's failure propagates to `on_fail` (subject + parked
+                // values cleaned). Success of any alternative converges on `cont`
+                // with the subject still on top, popped there (consumed).
+                let cont = fb.new_block();
+                let n = alts.len();
+                for (i, alt) in alts.iter().enumerate() {
+                    let last = i + 1 == n;
+                    let next_alt = if last { on_fail } else { fb.new_block() };
+                    fb.emit(MirInstr::new(dup_kind(subject_ty), span));
+                    let alt_fail = FailEdge {
+                        on_fail: next_alt,
+                        extra_below: if last { fail.extra_below + 1 } else { 0 },
+                    };
+                    self.lower_subpattern_match(fb, alt, subject_ty, &alt_fail, span)?;
+                    fb.jump(cont);
+                    if !last {
+                        fb.start(next_alt);
+                    }
+                }
+                fb.start(cont);
+                fb.emit(MirInstr::new(MirInstrKind::Pop, span));
+                Ok(())
+            }
+            TypedPatternHir::Error => Err(LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "error-recovery pattern in choose",
+                },
+                span,
+            )),
+            // The function entry strips every type guard before this match
+            // (D7: the ascription is compile-time only).
+            TypedPatternHir::TypeGuard { .. } => unreachable!("type guards are stripped at entry"),
+        }
     }
 }

@@ -921,7 +921,11 @@ func total_all(xs: [int]): int {
                 }
             };
             match block.terminator {
-                Terminator::Return => assert_eq!(d, 1, "{} must return 1 value", func.name),
+                Terminator::Return => assert_eq!(
+                    d, 1,
+                    "{} must return 1 value at block {:?}",
+                    func.name, block.id
+                ),
                 Terminator::Jump(t) => set(t, d),
                 Terminator::JumpIfFalse(t) | Terminator::JumpIfTrue(t) => {
                     set(t, d - 1);
@@ -1482,7 +1486,11 @@ fn assert_stack_depths_consistent(src: &str) {
                 }
             };
             match block.terminator {
-                Terminator::Return => assert_eq!(d, 1, "{} must return 1 value", func.name),
+                Terminator::Return => assert_eq!(
+                    d, 1,
+                    "{} must return 1 value at block {:?}",
+                    func.name, block.id
+                ),
                 Terminator::Jump(t) => set(t, d),
                 Terminator::JumpIfFalse(t) | Terminator::JumpIfTrue(t) => {
                     set(t, d - 1);
@@ -2877,40 +2885,189 @@ fn t05_choose_enum_block_order_matches_template() {
     }
 }
 
-// ---- 0.0.7 T05: staging gates for the new pattern shapes ----
+// ---- 0.0.7 T06: or-pattern / type-guard arms in enum choose ----
 
 #[test]
-fn lower_enum_choose_or_pattern_arm_is_unsupported_until_t06() {
-    // Typeck accepts or-patterns (T05), but the enum lowering chain cannot
-    // run them yet — the gate must reject the arm, not silently treat it as
-    // the fallback with unstored bindings (the T02 review hazard).
+fn lower_enum_choose_or_pattern_arm_lowers() {
     let src = "enum Two { Some(int), Other(int), None2, }\n\
                func f(t: Two): int {\n    choose t {\n        when Some(v) | Other(v) { v }\n        when None2 { 0 - 1 }\n    }\n}";
-    let err = lower_err(src);
-    match err.kind {
-        super::LowerErrorKind::UnsupportedFeature { feature } => {
-            assert!(
-                feature.contains("or-pattern"),
-                "expected an or-pattern gate, got: {feature}"
-            );
-        }
-        other => panic!("expected UnsupportedFeature, got {other:?}"),
-    }
+    lower_src(src);
+    assert_stack_depths_consistent(src);
 }
 
 #[test]
-fn lower_enum_choose_type_guard_arm_is_unsupported_until_t06() {
-    // Same staging for type-guard arms (T05 typeck is done; T06 lowers).
+fn lower_enum_choose_type_guard_arm_lowers() {
     let src = "enum Opt { Some(int), None2, }\n\
                func f(o: Opt): int {\n    choose o {\n        when Some(v): Opt { v }\n        when None2 { 0 - 1 }\n    }\n}";
-    let err = lower_err(src);
-    match err.kind {
-        super::LowerErrorKind::UnsupportedFeature { feature } => {
-            assert!(
-                feature.contains("type-guard"),
-                "expected a type-guard gate, got: {feature}"
-            );
-        }
-        other => panic!("expected UnsupportedFeature, got {other:?}"),
+    lower_src(src);
+    assert_stack_depths_consistent(src);
+}
+
+// ---- 0.0.7 T06: hand-checked fixtures (D4–D7) ----
+
+#[test]
+fn t06_multi_binding_arm_extracts_all_payloads() {
+    // D4: multi-binding — `Pair(a, b)` binds every payload.
+    let src = "enum Pair { P(int, int), }\n\
+               func f(p: Pair): int {\n    choose p {\n        when P(a, b) { a + b }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    let payloads: Vec<_> = ins
+        .iter()
+        .filter_map(|i| match i.kind {
+            MirInstrKind::EnumPayload(v, idx) => Some((v, idx)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        payloads,
+        vec![(0, 0), (0, 1)],
+        "both payloads extracted in order"
+    );
+    // Each extraction binds its slot immediately (D4: every binding payload
+    // stores, in extraction order).
+    assert_payload_store_pairs(&ins, 2);
+    assert_stack_depths_consistent(src);
+}
+
+#[test]
+fn t06_nested_pattern_two_level_chain() {
+    // D5: `Ok(Some(x))` — nested chain over Result then enum.
+    let src = "enum Opt { Some(int), None2, }\n\
+               func f(r: Result<Opt, int>): int {\n    choose r {\n        when Ok(Some(x)) { x }\n        when Ok(None2) { 0 }\n        when Err(e) { e }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    // The Ok/Err split unwraps once per side (ok_entry / err_entry); each
+    // attempt then works on a copy of the unwrapped payload.
+    let unwrap_ok = count_kind(&ins, |k| matches!(k, MirInstrKind::UnwrapOk));
+    let unwrap_err = count_kind(&ins, |k| matches!(k, MirInstrKind::UnwrapErr));
+    assert_eq!(unwrap_ok, 1, "one UnwrapOk for the whole Ok side");
+    assert_eq!(unwrap_err, 1, "one UnwrapErr for the whole Err side");
+    // Inner tests run on the re-parked payload: one `EnumIs` per Ok arm
+    // (Some for `Ok(Some(x))`, None2 for `Ok(None2)`).
+    let is_some = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(0)));
+    let is_none = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(1)));
+    assert_eq!(is_some, 1, "inner Some test for the Ok(Some(x)) arm");
+    assert_eq!(is_none, 1, "inner None2 test for the Ok(None2) arm");
+    // Chain order: outer unwrap → inner test → payload extraction.
+    let first_unwrap_ok = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::UnwrapOk));
+    let first_is_some = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::EnumIs(0)));
+    let first_payload = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::EnumPayload(0, 0)));
+    let (u, s, p) = (
+        first_unwrap_ok.expect("an UnwrapOk exists"),
+        first_is_some.expect("an EnumIs(0) exists"),
+        first_payload.expect("an EnumPayload(0,0) exists"),
+    );
+    assert!(
+        u < s && s < p,
+        "outer unwrap, then re-parked inner test, then extraction"
+    );
+    // The Ok(Some) arm extracts its `x` binding right after EnumPayload;
+    // `Ok(None2)` has no payload to extract.
+    assert_payload_store_pairs(&ins, 1);
+    assert_stack_depths_consistent(src);
+}
+
+#[test]
+fn t06_or_pattern_two_alternatives_share_body() {
+    // D6: two alternatives, same binding, shared body.
+    let src = "enum E { A(int), B(int), C, }\n\
+               func f(e: E): int {\n    choose e {\n        when A(v) | B(v) { v }\n        when C { 0 }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    // One test chain per alternative (D6): A and B each get exactly one
+    // EnumIs, C keeps its own.
+    let is_a = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(0)));
+    let is_b = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(1)));
+    let is_c = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(2)));
+    assert_eq!(is_a, 1, "one test for alternative A");
+    assert_eq!(is_b, 1, "one test for alternative B");
+    assert_eq!(is_c, 1, "one test for the C arm");
+    // Each alternative independently extracts its binding…
+    let store_a = store_after_payload(&ins, 0, 0).expect("A extracts payload 0");
+    let store_b = store_after_payload(&ins, 1, 0).expect("B extracts payload 0");
+    // …into the SAME slot: the first alternative's BindingId (D6 unification),
+    // so the shared body reads one slot and only one alternative runs.
+    assert_eq!(
+        store_a, store_b,
+        "both alternatives store into the first alternative's slot"
+    );
+    assert_stack_depths_consistent(src);
+}
+
+#[test]
+fn t06_nested_pattern_with_arm_guard() {
+    // Guard on an arm that carries a nested pattern (guard is arm-level).
+    let src = "enum Opt { Some(int), None2, }\n\
+               func f(r: Result<Opt, int>): int {\n    choose r {\n        when Ok(Some(x)) if x > 0 { x }\n        when Ok(Some(x)) { 0 - x }\n        when Ok(None2) { 0 }\n        when Err(e) { e }\n    }\n}";
+    let mir = lower_src(src);
+    let ins = flat(find_func(&mir, "f"));
+    // Two Ok(Some) arms test Some on the re-parked payload, Ok(None2) tests
+    // None2.
+    let is_some = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(0)));
+    let is_none = count_kind(&ins, |k| matches!(k, MirInstrKind::EnumIs(1)));
+    assert_eq!(is_some, 2, "inner Some test per Ok(Some…) arm");
+    assert_eq!(is_none, 1, "inner None2 test for the Ok(None2) arm");
+    // Every Ok(Some) arm stages its `x` payload before anything else reads it.
+    assert_payload_store_pairs(&ins, 2);
+    // The guarded arm evaluates the guard only after staging its payload:
+    // the first Gt (x > 0) comes after the first extraction.
+    let first_payload = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::EnumPayload(0, 0)))
+        .expect("an EnumPayload(0,0) exists");
+    let first_gt = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::Gt))
+        .expect("the guard's Gt exists");
+    assert!(
+        first_payload < first_gt,
+        "the guard is evaluated after the payload is staged"
+    );
+    assert_stack_depths_consistent(src);
+}
+
+/// Number of instructions matching `pred` in a flattened function.
+fn count_kind<'a>(ins: &[&'a MirInstr], pred: impl Fn(&MirInstrKind) -> bool) -> usize {
+    ins.iter().filter(|i| pred(&i.kind)).count()
+}
+
+/// Assert that exactly `expected` `EnumPayload` extractions exist, each
+/// immediately followed by a `StoreLocal` (the binding lands in its slot
+/// before anything else runs — §6.8 payload discipline).
+fn assert_payload_store_pairs(ins: &[&MirInstr], expected: usize) {
+    let payloads: Vec<usize> = ins
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i.kind, MirInstrKind::EnumPayload(..)))
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(
+        payloads.len(),
+        expected,
+        "one extraction per payload binding"
+    );
+    for &p in &payloads {
+        assert!(
+            matches!(ins[p + 1].kind, MirInstrKind::StoreLocal(_)),
+            "EnumPayload must be immediately followed by StoreLocal (§6.8)"
+        );
+    }
+}
+
+/// The slot of the `StoreLocal` right after `EnumPayload(variant, idx)`.
+fn store_after_payload(ins: &[&MirInstr], variant: u32, idx: u16) -> Option<u16> {
+    let p = ins.iter().position(
+        |i| matches!(i.kind, MirInstrKind::EnumPayload(v, j) if v == variant && j == idx),
+    )?;
+    match ins[p + 1].kind {
+        MirInstrKind::StoreLocal(slot) => Some(slot),
+        _ => None,
     }
 }

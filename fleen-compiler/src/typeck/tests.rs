@@ -2957,7 +2957,8 @@ fn t05_type_guard_on_constructor_pattern() {
 
 #[test]
 fn t05_result_or_pattern_covers_one_side() {
-    // F7 on Result: `Ok(1) | Ok(2)` covers the Ok side; Err is still missing.
+    // F7 on Result: ident-payload alternatives cover the Ok side; Err is
+    // still missing.
     let errs = compile_err(
         "func f(r: Result[int, string]): int {\n    choose move r {\n        when Ok(v) | Ok(v) { v }\n    }\n}",
     );
@@ -2968,6 +2969,73 @@ fn t05_result_or_pattern_covers_one_side() {
                 if missing_patterns == &["Err".to_string()]
         )),
         "expected ChooseNotExhaustive missing Err, got {errs:?}"
+    );
+}
+
+// ---- 0.0.7 T06: payload-aware exhaustiveness ----
+
+#[test]
+fn t06_literal_payload_arm_does_not_cover_variant() {
+    // Payload-aware exhaustiveness: `P(1, x)` matches one value of the
+    // payload, so `P` is not covered — a `P(2, 9)` value would otherwise
+    // fall into lower's defensive tail at runtime (the crash this
+    // tightening prevents).
+    let errs = compile_err(
+        "enum Pair { P(int, int), Single(int), }\n\
+         func f(p: Pair): int {\n    choose p {\n        when P(1, x) { x }\n        when Single(x) { x }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["P".to_string()]
+        )),
+        "expected ChooseNotExhaustive missing P, got {errs:?}"
+    );
+}
+
+#[test]
+fn t06_result_literal_or_alternatives_do_not_cover_ok() {
+    // `Ok(1) | Ok(2)` no longer covers the Ok side — `Ok(3)` would fall
+    // through — while ident payloads (`Ok(v)`) still do.
+    let errs = compile_err(
+        "func f(r: Result[int, string]): int {\n    choose move r {\n        when Ok(1) | Ok(2) { 0 }\n        when Err(e) { 0 - 1 }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["Ok".to_string()]
+        )),
+        "expected ChooseNotExhaustive missing Ok, got {errs:?}"
+    );
+}
+
+#[test]
+fn t06_nested_ctor_payloads_cover_ctor_side_jointly() {
+    // `Ok(Some(x))` + `Ok(None2)` jointly cover the Ok side: coverage is
+    // per-variant across the group of guard-free Ok-arm payloads.
+    compile_ok(
+        "enum Opt { Some(int), None2, }\n\
+         func f(r: Result<Opt, int>): int {\n    choose r {\n        when Ok(Some(x)) { x }\n        when Ok(None2) { 0 }\n        when Err(e) { e }\n    }\n}",
+    );
+}
+
+#[test]
+fn t06_nested_ctor_payload_partially_covered_is_not_exhaustive() {
+    // `Ok(Some(x))` alone leaves the `None2` side of the Ok payload
+    // uncovered, so the Result scrutinee is not exhaustive without it.
+    let errs = compile_err(
+        "enum Opt { Some(int), None2, }\n\
+         func f(r: Result<Opt, int>): int {\n    choose r {\n        when Ok(Some(x)) { x }\n        when Err(e) { e }\n    }\n}",
+    );
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            TypeckErrorKind::ChooseNotExhaustive { missing_patterns, .. }
+                if missing_patterns == &["Ok".to_string()]
+        )),
+        "expected ChooseNotExhaustive missing Ok, got {errs:?}"
     );
 }
 

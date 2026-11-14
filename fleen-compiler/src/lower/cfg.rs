@@ -71,6 +71,21 @@ impl FnBuilder {
         self.cur = id;
     }
 
+    /// Make the current block the physically last one when it is not, so a
+    /// conditional emitted next has its untaken (fallthrough) edge land on
+    /// the continuation block created immediately after it (§6.3).
+    ///
+    /// Precondition: the current block has no terminator yet (a conditional
+    /// is about to be emitted); callers spill **before** emitting one.
+    /// Spilling is a plain `Jump`, so it preserves the stack depth exactly.
+    pub fn spill_for_fallthrough(&mut self) {
+        if self.cur.0 as usize + 1 != self.blocks.len() {
+            let tail = self.new_block();
+            self.jump(tail);
+            self.start(tail);
+        }
+    }
+
     /// Terminate the current block.
     pub fn end(&mut self, terminator: Terminator) {
         let cur = self.cur;

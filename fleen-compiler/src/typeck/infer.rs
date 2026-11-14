@@ -265,32 +265,156 @@ fn collect_pattern_bindings_into(p: &TypedPatternHir, out: &mut Vec<(String, Typ
     }
 }
 
-/// Whether a typed pattern covers enum variant `idx` for exhaustiveness
-/// (0.0.7 T05 / F7): an or-pattern contributes the union of its
-/// alternatives' coverage; a type guard contributes its inner pattern's
-/// coverage (the ascription is compile-time only, D7). A zero-payload
-/// variant pattern and a payload-carrying one cover equally.
-fn pattern_covers_variant(p: &TypedPatternHir, idx: usize) -> bool {
+/// Visit every binding of a typed pattern in source order, handing the
+/// caller its name and `BindingId` (the id by mutable reference).
+///
+/// One walker serves both or-pattern needs (D6): collecting the first
+/// alternative's `(name, id)` pairs and re-pointing the later alternatives'
+/// same-named bindings at the first alternative's `BindingId` — the
+/// resolver gives each or-alternative its own child-scope binding, but the
+/// alternatives bind the same names, so lowering must write one slot per
+/// name and the shared arm body reads exactly that binding. Types were
+/// already checked equal (`OrPatternBindingMismatch`).
+fn for_each_binding_mut(p: &mut TypedPatternHir, f: &mut impl FnMut(&str, &mut BindingId)) {
     match p {
-        TypedPatternHir::Enum { variant_index, .. }
-        | TypedPatternHir::EnumVariant { variant_index, .. } => *variant_index as usize == idx,
-        TypedPatternHir::Or(alts, _) => alts.iter().any(|a| pattern_covers_variant(a, idx)),
-        TypedPatternHir::TypeGuard { pattern, .. } => pattern_covers_variant(pattern, idx),
+        TypedPatternHir::Ident {
+            name, binding_id, ..
+        } => f(name, binding_id),
+        TypedPatternHir::ResultCtor { payload, .. } => for_each_binding_mut(payload, f),
+        TypedPatternHir::Enum { payloads, .. } => {
+            for sub in payloads {
+                for_each_binding_mut(sub, f);
+            }
+        }
+        TypedPatternHir::EnumVariant { .. } => {}
+        TypedPatternHir::Or(alts, _) => {
+            for alt in alts {
+                for_each_binding_mut(alt, f);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => for_each_binding_mut(pattern, f),
+        TypedPatternHir::Literal(_) | TypedPatternHir::Error => {}
+    }
+}
+
+/// Whether a group of typed patterns jointly matches *every* value of `ty`
+/// (0.0.7 T06, payload-aware exhaustiveness): a binding covers its whole
+/// type (whatever the type), a literal never does (ints/floats/strings
+/// cannot be enumerated), and a constructor pattern covers a composite type
+/// only if it covers every declared variant with total payloads.
+/// Conservative: anything not provably total counts as not total.
+fn patterns_are_total(ps: &[&TypedPatternHir], ty: &Type) -> bool {
+    match ty {
+        Type::Enum(info) => enum_group_covers(ps, info, &[]),
+        Type::App(info, args) => enum_group_covers(ps, info, args),
+        Type::Result(t, e) => {
+            let mut ok_payloads: Vec<&TypedPatternHir> = Vec::new();
+            let mut err_payloads: Vec<&TypedPatternHir> = Vec::new();
+            for p in ps {
+                collect_result_side_payloads(p, true, &mut ok_payloads);
+                collect_result_side_payloads(p, false, &mut err_payloads);
+            }
+            patterns_are_total(&ok_payloads, t) && patterns_are_total(&err_payloads, e)
+        }
+        _ => ps.iter().any(|p| match p {
+            TypedPatternHir::Ident { .. } => true,
+            TypedPatternHir::Or(alts, _) => alts.iter().any(|a| patterns_are_total(&[a], ty)),
+            TypedPatternHir::TypeGuard { pattern, .. } => patterns_are_total(&[pattern], ty),
+            // A literal matches one value; a constructor pattern on a
+            // non-constructor type is rejected before lowering.
+            _ => false,
+        }),
+    }
+}
+
+/// Whether a group of patterns jointly covers every declared variant of an
+/// enum type. A binding (via or/type-guard) covers the whole type — e.g.
+/// `Some(inner)` binds the entire `Pair<int, string>` payload — otherwise
+/// each variant must be matched by some pattern with total payloads.
+fn enum_group_covers(ps: &[&TypedPatternHir], info: &EnumInfo, args: &[Type]) -> bool {
+    if ps.iter().any(|p| is_binding_pattern(p)) {
+        return true;
+    }
+    (0..info.payloads.len()).all(|idx| {
+        ps.iter()
+            .any(|p| pattern_covers_variant(p, info, args, idx))
+    })
+}
+
+/// Whether `p` is (or contains, via or/type-guard) a binding pattern — the
+/// only shape that matches every value of a type outright.
+fn is_binding_pattern(p: &TypedPatternHir) -> bool {
+    match p {
+        TypedPatternHir::Ident { .. } => true,
+        TypedPatternHir::Or(alts, _) => alts.iter().any(is_binding_pattern),
+        TypedPatternHir::TypeGuard { pattern, .. } => is_binding_pattern(pattern),
         _ => false,
     }
 }
 
-/// Whether a typed pattern covers the `Ok` (`ok = true`) or `Err` (`ok =
-/// false`) side of a `Result` scrutinee (0.0.7 T05: or-patterns contribute
-/// the union of their alternatives).
-fn pattern_covers_result_ctor(p: &TypedPatternHir, ok: bool) -> bool {
+/// Guard-free contribution to the `Ok` (`ok = true`) or `Err` (`ok = false`)
+/// side of a `Result` scrutinee: the ctor's payload pattern joins that
+/// side's coverage group; or-patterns contribute each alternative, type
+/// guards their inner pattern (the ascription is compile-time only, D7).
+/// Whether the group covers the side is [`patterns_are_total`]'s verdict —
+/// `Ok(1) | Ok(2)` alone does not cover `Ok` (`Ok(3)` would fall through).
+fn collect_result_side_payloads<'a>(
+    p: &'a TypedPatternHir,
+    ok: bool,
+    out: &mut Vec<&'a TypedPatternHir>,
+) {
     match p {
-        TypedPatternHir::ResultCtor { ctor, .. } => matches!(
-            (ctor, ok),
-            (ast::ResultCtor::Ok, true) | (ast::ResultCtor::Err, false)
-        ),
-        TypedPatternHir::Or(alts, _) => alts.iter().any(|a| pattern_covers_result_ctor(a, ok)),
-        TypedPatternHir::TypeGuard { pattern, .. } => pattern_covers_result_ctor(pattern, ok),
+        TypedPatternHir::ResultCtor { ctor, payload, .. } => {
+            if matches!(
+                (ctor, ok),
+                (ast::ResultCtor::Ok, true) | (ast::ResultCtor::Err, false)
+            ) {
+                out.push(payload);
+            }
+        }
+        TypedPatternHir::Or(alts, _) => {
+            for alt in alts {
+                collect_result_side_payloads(alt, ok, out);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => {
+            collect_result_side_payloads(pattern, ok, out)
+        }
+        _ => {}
+    }
+}
+
+/// Whether a typed pattern covers enum variant `idx` for exhaustiveness
+/// (0.0.7 T05 / F7, payload-aware since T06): an or-pattern contributes the
+/// union of its alternatives' coverage; a type guard contributes its inner
+/// pattern's coverage (D7). A variant arm covers only when every payload
+/// sub-pattern is itself total over its payload type — `when Pair(1, x)`
+/// does not cover `Pair`, because a `Pair(2, _)` value would fall through
+/// to lower's defensive tail at runtime.
+fn pattern_covers_variant(p: &TypedPatternHir, info: &EnumInfo, args: &[Type], idx: usize) -> bool {
+    match p {
+        TypedPatternHir::Enum {
+            variant_index,
+            payloads,
+            ..
+        } => {
+            *variant_index as usize == idx
+                && payloads.iter().enumerate().all(|(i, sub)| {
+                    match info.payloads.get(idx).and_then(|v| v.get(i)) {
+                        Some(skel) => patterns_are_total(&[sub], &substitute_params(skel, args)),
+                        // Arity is checked before exhaustiveness; a missing
+                        // skeleton entry is a malformed tree.
+                        None => false,
+                    }
+                })
+        }
+        TypedPatternHir::EnumVariant { variant_index, .. } => *variant_index as usize == idx,
+        TypedPatternHir::Or(alts, _) => alts
+            .iter()
+            .any(|a| pattern_covers_variant(a, info, args, idx)),
+        TypedPatternHir::TypeGuard { pattern, .. } => {
+            pattern_covers_variant(pattern, info, args, idx)
+        }
         _ => false,
     }
 }
@@ -2384,6 +2508,22 @@ impl TypeChecker {
                         }
                     }
                 }
+                // D6 (as-built): the first alternative to bind a name wins the
+                // `BindingId` (resolver comment above) — unify the later
+                // alternatives onto it so lowering stores one slot per name.
+                if !typed_alts.is_empty() {
+                    let mut first_ids: Vec<(String, BindingId)> = Vec::new();
+                    for_each_binding_mut(&mut typed_alts[0], &mut |name, id| {
+                        first_ids.push((name.to_string(), *id));
+                    });
+                    for alt in typed_alts.iter_mut().skip(1) {
+                        for_each_binding_mut(alt, &mut |name, id| {
+                            if let Some((_, first_id)) = first_ids.iter().find(|(n, _)| n == name) {
+                                *id = *first_id;
+                            }
+                        });
+                    }
+                }
                 Ok(TypedPatternHir::Or(typed_alts, *span))
             }
             PatternHir::TypeGuard {
@@ -2481,19 +2621,26 @@ impl TypeChecker {
             return Ok(());
         }
 
-        // 0.0.6 T05 (D3) / 0.0.7 T05 (F7): an enum scrutinee is exhaustive
-        // when every declared variant is covered by a guard-free arm (or an
-        // `otherwise` fallback, handled above). Zero-payload variants arrive
-        // as `EnumVariant`, payload variants as `Enum`; a variant is covered
-        // by either form (the binding is irrelevant to exhaustiveness). An
-        // or-pattern covers the union of its alternatives (D6).
+        // 0.0.6 T05 (D3) / 0.0.7 T06 (F7, payload-aware): an enum scrutinee
+        // is exhaustive when every declared variant is covered by a
+        // guard-free arm whose payload sub-patterns are themselves total —
+        // `when Pair(1, x)` alone does not cover `Pair`, because a
+        // `Pair(2, _)` value would otherwise fall through to lower's
+        // defensive tail at runtime. Zero-payload variants arrive as
+        // `EnumVariant`, payload variants as `Enum`; a variant is covered
+        // by either form. An or-pattern covers the union of its
+        // alternatives (D6).
         if let Some(info) = scrutinee_type.as_enum() {
+            let args: &[Type] = match scrutinee_type {
+                Type::App(_, args) => args,
+                _ => &[],
+            };
             let variants = &self.enums.entries[info.id.0 as usize].variants;
             let mut missing: Vec<String> = Vec::new();
             for (idx, variant) in variants.iter().enumerate() {
-                let is_covered = arms
-                    .iter()
-                    .any(|arm| arm.guard.is_none() && pattern_covers_variant(&arm.pattern, idx));
+                let is_covered = arms.iter().any(|arm| {
+                    arm.guard.is_none() && pattern_covers_variant(&arm.pattern, info, args, idx)
+                });
                 if !is_covered {
                     missing.push(variant.name.clone());
                 }
@@ -2511,19 +2658,27 @@ impl TypeChecker {
             return Ok(());
         }
 
-        // `Result<T, E>`: `Ok` + `Err` arms together are exhaustive; each
-        // alone is not (guarded arms never count, per the Bool case above).
-        // 0.0.7 T05 (F7): an or-pattern covers the union of its
-        // alternatives, so `when Ok(1) | Ok(2)` covers the `Ok` side.
-        if matches!(scrutinee_type, Type::Result(_, _)) {
-            let has_ok = count(&|arm| pattern_covers_result_ctor(&arm.pattern, true));
-            let has_err = count(&|arm| pattern_covers_result_ctor(&arm.pattern, false));
-            if !has_ok || !has_err {
+        // `Result<T, E>`: exhaustive when the guard-free `Ok`-arm payloads
+        // jointly cover `T` and the guard-free `Err`-arm payloads jointly
+        // cover `E` (0.0.7 T06, payload-aware): `Ok(Some(x))` + `Ok(None2)`
+        // still cover `Ok` together, but `Ok(1) | Ok(2)` alone does not —
+        // `Ok(3)` would fall through to lower's defensive tail. Guarded
+        // arms never count, per the Bool case above.
+        if let Type::Result(t, e) = scrutinee_type {
+            let mut ok_payloads: Vec<&TypedPatternHir> = Vec::new();
+            let mut err_payloads: Vec<&TypedPatternHir> = Vec::new();
+            for arm in arms.iter().filter(|arm| arm.guard.is_none()) {
+                collect_result_side_payloads(&arm.pattern, true, &mut ok_payloads);
+                collect_result_side_payloads(&arm.pattern, false, &mut err_payloads);
+            }
+            let ok_covered = patterns_are_total(&ok_payloads, t);
+            let err_covered = patterns_are_total(&err_payloads, e);
+            if !ok_covered || !err_covered {
                 let mut missing = Vec::new();
-                if !has_ok {
+                if !ok_covered {
                     missing.push("Ok".to_string());
                 }
-                if !has_err {
+                if !err_covered {
                     missing.push("Err".to_string());
                 }
                 self.add_error(

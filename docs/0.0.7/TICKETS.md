@@ -4,8 +4,8 @@
 > tests.  Decisions D1–D10 referenced here are **settled at planning level**
 > (see PLAN §1); a card may reopen one only by adding a new decision entry,
 > not by editing it silently.
-> **Status: T01–T05 implemented and green (T05 lands full typeck semantics;
-> lowering of the new pattern shapes is T06).**
+> **Status: T01–T06 implemented and green (T06 lowers the new pattern shapes;
+> e2e fixtures/examples are T09).**
 
 ---
 
@@ -250,13 +250,13 @@
 
 ## T06 — Lower: multi-binding arms, nested-pattern chains, or-pattern alternative tests (F3–F6; D4–D6)
 
-- [ ] **Multi-binding arms (D4)**: a `Variant(p₁, …, pₙ)` arm lowers as
+- [x] **Multi-binding arms (D4)**: a `Variant(p₁, …, pₙ)` arm lowers as
       the 0.0.6 T05 chain (park scrutinee, `Dup; EnumIs v; JumpIfTrue
       body`), and the body block opens with `EnumPayload v i; StoreLocal
       xᵢ` for each binding `xᵢ` extracted from `pᵢ` (only for sub-patterns
       that are `Ident` bindings or that contain bindings — a literal or
       wildcard sub-pattern skips the store).
-- [ ] **Nested-pattern chains (D5)**: for `Ok(Some(x))` (or any nesting),
+- [x] **Nested-pattern chains (D5)**: for `Ok(Some(x))` (or any nesting),
       the outer test succeeds and the outer payload is extracted and
       **re-parked**; the inner pattern becomes a new `EnumIs` / `EnumPayload`
       chain on the re-parked value. The chain terminates when the innermost
@@ -264,21 +264,74 @@
       0.0.6 T05 (move out of a `Dup` copy before the guard; jump to the
       next test on failure). Every edge is resolved immediately (no
       deferred jumps).
-- [ ] **Or-pattern alternative tests (D6)**: a `p₁ | p₂` arm lowers as
+- [x] **Or-pattern alternative tests (D6)**: a `p₁ | p₂` arm lowers as
       **multiple** test chains — one per alternative — all jumping to the
       same body block on success. Each alternative independently extracts
       its bindings before the jump (they are the same names with the same
       types; only one alternative's extraction runs at runtime). The body
       block is the shared successor of all alternative test blocks.
-- [ ] **Type guards lower as their inner pattern (D7)** — no runtime work;
+- [x] **Type guards lower as their inner pattern (D7)** — no runtime work;
       the ascription is compile-time only. `when v: int { … }` lowers as
       `when v { … }` (a binding).
-- [ ] Stack-depth validation: the `assert_stack_depths_consistent`
+- [x] Stack-depth validation: the `assert_stack_depths_consistent`
       validator (introduced in 0.0.6 T05 review) must accept the new arm
       shapes — or-pattern chains, nested chains, multi-binding bodies.
-- [ ] Tests: lower unit tests on hand-checked fixtures (multi-binding arm
+- [x] Tests: lower unit tests on hand-checked fixtures (multi-binding arm
       shape; nested chain for a 2-level pattern; or-pattern with two
       alternatives; guard inside a nested pattern).
+
+**As-built (T06)**:
+- Uniform sub-pattern contract (`lower_subpattern_match`, `FailEdge`): on
+  success the subject is consumed (bindings stored); on failure the subject,
+  its temps, and `extra_below` re-parked values are popped and control jumps
+  to `on_fail` — failures propagate directly, no cleanup edges. Nested
+  extraction passes `extra_below + 1` per parked level; `UnwrapOk/UnwrapErr`
+  consumes the copy, so the count survives a Result unwrap. The leaf test
+  shape (subject copy + conditional + matched/fail blocks) is shared by the
+  literal and zero-payload variant arms (`emit_leaf_test`), and every
+  failure-cleanup block is built by one `fail_cleanup_block` helper.
+- Fallthrough discipline: every conditional is preceded by
+  `FnBuilder::spill_for_fallthrough`, so the untaken edge always lands on the
+  continuation block created right after it, regardless of pre-created
+  blocks. Conditionals pop the bool on both edges (BYTECODE.md §5.6/§6.8/VM).
+- Result choose general path: one `UnwrapOk`/`UnwrapErr` per side, then one
+  attempt block per arm + defensive tail (typeck-guaranteed unreachable —
+  see the exhaustiveness note below); each attempt matches a `Dup`/`DupDeep`
+  copy so failures retry the next arm with the payload parked; guard failure
+  resolves directly to the next attempt.
+- Enum choose general path: one test block per flattened alternative, shared
+  body block per arm, guard evaluated with the scrutinee parked and popped
+  only when the arm is taken; payload bindings of one or-arm are unified onto
+  the first alternative's `BindingId` in typeck (`unify_or_alt_bindings`) so
+  all alternatives store the same slot.
+- **D4 deviation**: in the general path, payload extraction moved out of the
+  body block into the test chain (each alternative extracts its own bindings
+  before jumping to the shared body — required for D6 stack-depth
+  normalization), so the body block no longer opens with
+  `EnumPayload; StoreLocal`. Literal sub-patterns still skip the store; a
+  wildcard `_` payload is a resolver binding and does store (harmless).
+- **Nested or-patterns in payloads are lowered, not rejected**: the parser
+  accepts e.g. `Pair(1 | 2, x)` (payloads parse as patterns), and the
+  recursive sub-pattern machinery lowers a nested `Or`/`TypeGuard` on the
+  enum and Result paths. The only remaining defensive error is a nested
+  or/type-guard directly inside a *generic* choose alternative (the
+  literal/ident chain is not recursive).
+- **Exhaustiveness is payload-aware (tightens F7/D3)**: a variant arm covers
+  its variant only when every payload sub-pattern is total over its payload
+  type (`patterns_are_total`), and a Result side is covered only when its
+  guard-free payload patterns jointly cover the payload type. A literal
+  never covers a whole type, so `when P(1, x)` alone does not cover `P` and
+  `Ok(1) | Ok(2)` alone does not cover `Ok` — both are now
+  `ChooseNotExhaustive` (previously they compiled and fell into lower's
+  defensive tail at runtime). `Ok(Some(x))` + `Ok(None2)` still cover `Ok`
+  jointly; ident/wildcard payloads keep covering.
+- The three T05 staging gates are removed: `first_payload_binding` deleted;
+  enum and generic choose accept or-pattern / type-guard arms.
+- Verified beyond stack-depth: runtime smoke of all four shapes plus generic
+  `1 | 2` / guarded / wildcard arms executes with correct results; the four
+  hand-checked lower fixtures pin the instruction shapes (nested-chain
+  unwrap→re-park→inner-test ordering, per-alternative extraction into the
+  shared first-alternative slot, guard-after-staging, payload store pairs).
 
 **Depends on**: T05.
 **Refs**: PLAN §3.4, D4, D5, D6, D7.

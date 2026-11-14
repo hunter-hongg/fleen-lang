@@ -1,0 +1,12 @@
+// expect-typeck: ChooseNotExhaustive
+// 0.0.7 T06: exhaustiveness is payload-aware — `P(1, x)` matches one value
+// of the payload, so `P` is not covered; a `P(2, 9)` value would otherwise
+// fall into lower's defensive tail at runtime.
+enum Pair { P(int, int), Single(int), }
+
+func f(p: Pair): int {
+    choose p {
+        when P(1, x) { x }
+        when Single(x) { x }
+    }
+}
