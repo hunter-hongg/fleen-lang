@@ -166,8 +166,17 @@ pub enum TypeckErrorKind {
     },
     /// A type parameter could not be determined at an enum-constructor site
     /// (0.0.7 D1: neither the surrounding annotation nor the constructor
-    /// arguments fix it).
-    TypeParameterAmbiguous { name: String },
+    /// arguments fix it). `names` holds every parameter still undetermined,
+    /// in declaration order — a zero-payload variant of a multi-parameter
+    /// enum (`enum W<A, B> { W(A), N }` used as bare `W.N`) leaves all of
+    /// them open, and naming only the first would send the reader to the
+    /// wrong annotation.
+    TypeParameterAmbiguous { names: Vec<String> },
+    /// A declaration-local type parameter applied to type arguments
+    /// (0.0.7 D1: a parameter is a placeholder, not a type constructor, so
+    /// `T<int>` is not a type). Reported instead of the generic
+    /// `ArityMismatch` so the message can say what a parameter actually is.
+    TypeParameterTakesNoArgs { name: String, found: usize },
     /// Two struct declarations share one name.
     DuplicateStructName { name: String },
     // ---- 0.0.3 V03: array error family ----
@@ -656,11 +665,31 @@ impl fmt::Display for TypeckErrorKind {
                      e.g. `{name}<int>` (0.0.7 D1)"
                 )
             }
-            TypeckErrorKind::TypeParameterAmbiguous { name } => {
+            TypeckErrorKind::TypeParameterAmbiguous { names } => {
+                // `names` is never empty: it is built from the parameters a
+                // constructor site left open. Fall back to a plural-neutral
+                // phrasing rather than `unreachable!` (SPEC §11).
+                let listed = if names.is_empty() {
+                    "the type parameter".to_string()
+                } else {
+                    names
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 write!(
                     f,
-                    "cannot infer type parameter `{name}` — help: annotate the binding with the \
+                    "cannot infer type parameter {listed} — help: annotate the binding with the \
                      full type, e.g. `x: Option<int> = Option.None;`"
+                )
+            }
+            TypeckErrorKind::TypeParameterTakesNoArgs { name, found } => {
+                write!(
+                    f,
+                    "type parameter `{name}` takes no type arguments, found {found} — \
+                     help: `{name}` is a placeholder declared by the enum, not a type \
+                     constructor; name the parameter itself"
                 )
             }
             TypeckErrorKind::DuplicateStructName { name } => {

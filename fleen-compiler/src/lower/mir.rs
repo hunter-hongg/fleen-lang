@@ -65,6 +65,10 @@ pub struct MirEnumDef {
 /// order; codegen derives the `enum_defs` type tags from them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirEnumVariantDef {
+    /// Payload kinds in declaration order. A variant declares its own
+    /// arity (0.0.6 T06); 0.0.7 T04 parameterized enums keep it — a
+    /// parameterized payload is spelled `Param(i)` at the declaration site
+    /// and the *count* is what the runtime shape needs.
     pub payload_types: Vec<Type>,
 }
 

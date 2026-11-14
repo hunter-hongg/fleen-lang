@@ -136,7 +136,9 @@ pub struct EnumDefMeta {
 }
 
 /// One variant inside an `enum_defs` entry (0.0.6 T06): the payload type
-/// tags in declaration order.
+/// tags in declaration order. 0.0.7 T04: a parameterized payload is tagged
+/// `Unit` here — the declaration site has no concrete kind to record, while
+/// the payload *count* (a runtime fact) is preserved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumVariantDefMeta {
     pub payload_types: Box<[FieldTypeTag]>,
@@ -186,13 +188,13 @@ impl FieldTypeTag {
             // 0.0.7 T04/D8: a fully applied enum keeps the enum tag — the
             // runtime representation is identical to the bare form.
             Type::App(_, _) => FieldTypeTag::Enum,
-            // 0.0.7 T04: a `Param` slot appears only in an `enum_defs`
-            // payload skeleton (the concrete argument is per-instantiation
-            // and lives in the values). No reader consumes the tag today;
-            // T07 adds `type_param_count` to `enum_defs`, making this
-            // column shape-only. Enum is the honest shape (the slot holds
-            // some instantiation-dependent value).
-            Type::Param(_) => FieldTypeTag::Enum,
+            // 0.0.7 T04: `Param` names a declaration-local type parameter, so
+            // the declaration site has no concrete kind to record. The payload
+            // *count* is the only shape fact the format carries (D8 keeps the
+            // `enum_defs` schema unchanged), and the VM/verify read the count,
+            // never this column, for a parameterized slot. `Unit` is the honest
+            // placeholder: it says "a slot exists here", not "this is unit".
+            Type::Param(_) => FieldTypeTag::Unit,
             Type::Range => FieldTypeTag::Range,
             // `Future` / `channel` / `ptr` are not storable (0.0.4/0.0.5
             // T07d/PtrNotStorable); struct fields cannot name them in 0.0.6

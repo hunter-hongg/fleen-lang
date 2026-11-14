@@ -22,7 +22,7 @@
 //! `std.str.from_int`, ...) are *not* here — they live in the `std/` Fleen
 //! sources and typecheck as ordinary user functions (D8).
 
-use crate::typeck::typed_hir::Type;
+use crate::typeck::typed_hir::{Type, rewrite_type};
 
 /// Parameter shape of a builtin.
 #[derive(Clone)]
@@ -505,46 +505,14 @@ fn collect_bindings(
 
 /// Substitute all `Var(n)` occurrences in `ty` using `subst`.
 fn substitute(ty: &Type, subst: &[(u32, Type)]) -> Type {
-    match ty {
-        Type::Var(n) => subst
+    // One walk for the schematic rules: `Var` is the only leaf that binds
+    // (0.0.7 T04 routes the enum rules through the same shape) and the
+    // composite rebuild is shared with `typed_hir::rewrite_type`.
+    rewrite_type(ty, &|i| Type::Param(i), &|n| {
+        subst
             .iter()
-            .find(|(id, _)| *id == *n)
+            .find(|(id, _)| *id == n)
             .map(|(_, t)| t.clone())
-            .unwrap_or_else(|| Type::Var(*n)),
-        // 0.0.7 T04: a fully applied enum substitutes into its arguments
-        // like any composite (the `EnumInfo` identity is unchanged).
-        Type::App(info, args) => Type::App(
-            info.clone(),
-            args.iter().map(|t| substitute(t, subst)).collect(),
-        ),
-        // 0.0.7 T04: a declaration-local `Param` never reaches schematic
-        // substitution (it is substituted away at the use site first);
-        // kept as-is to stay total.
-        Type::Param(i) => Type::Param(*i),
-        Type::Func(params, ret) => Type::Func(
-            params.iter().map(|t| substitute(t, subst)).collect(),
-            Box::new(substitute(ret, subst)),
-        ),
-        Type::Result(ok, err) => Type::Result(
-            Box::new(substitute(ok, subst)),
-            Box::new(substitute(err, subst)),
-        ),
-        Type::Array(elem) => Type::Array(Box::new(substitute(elem, subst))),
-        Type::Box(inner) => Type::Box(Box::new(substitute(inner, subst))),
-        Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
-        Type::Future(inner) => Type::Future(Box::new(substitute(inner, subst))),
-        Type::Channel(inner) => Type::Channel(Box::new(substitute(inner, subst))),
-        Type::Ptr(inner) => Type::Ptr(Box::new(substitute(inner, subst))),
-        Type::Struct(info) => Type::Struct(info.clone()),
-        // An enum is a nominal leaf — no schematic `Var` inside it to
-        // substitute (0.0.6 T04).
-        Type::Enum(info) => Type::Enum(info.clone()),
-        Type::Int
-        | Type::Float
-        | Type::Bool
-        | Type::String
-        | Type::Unit
-        | Type::Range
-        | Type::Unsupported(_) => ty.clone(),
-    }
+            .unwrap_or_else(|| Type::Var(n))
+    })
 }

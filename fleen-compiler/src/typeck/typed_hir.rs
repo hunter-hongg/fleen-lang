@@ -172,17 +172,7 @@ impl Type {
     /// cells and globals cannot hold a future at all (rejected at
     /// declaration, `FutureNotStorable`).
     pub fn contains_future(&self) -> bool {
-        match self {
-            Type::Future(_) => true,
-            Type::Array(elem) => elem.contains_future(),
-            Type::Result(t, e) => t.contains_future() || e.contains_future(),
-            // 0.0.7 T04: walk the use-site arguments too — an `Option` whose
-            // argument mentions a future forks exactly like a bare future
-            // would (the declaration-level check runs on skeletons, where a
-            // `Param` placeholder is invisible).
-            Type::App(_, args) => args.iter().any(|a| a.contains_future()),
-            _ => false,
-        }
+        contains_in_value_position(self, &ContainsKind::Future)
     }
 
     /// Check if this type holds a `channel<T>` anywhere inside a
@@ -194,14 +184,7 @@ impl Type {
     /// (`ChannelNotStorable` — channels have no wholesale array consumer),
     /// and struct fields, box cells and globals are rejected at declaration.
     pub fn contains_channel(&self) -> bool {
-        match self {
-            Type::Channel(_) => true,
-            Type::Array(elem) => elem.contains_channel(),
-            Type::Result(t, e) => t.contains_channel() || e.contains_channel(),
-            // 0.0.7 T04: walk the use-site arguments (see `contains_future`).
-            Type::App(_, args) => args.iter().any(|a| a.contains_channel()),
-            _ => false,
-        }
+        contains_in_value_position(self, &ContainsKind::Channel)
     }
 
     /// Check if this type holds a `ptr<T>` anywhere inside a value-carrying
@@ -223,17 +206,30 @@ impl Type {
     /// 0.0.5 T04/D4) — a `channel<ptr<_>>` handle itself never carries a
     /// pointer into the async world, so it is not flagged by this walk.
     pub fn contains_ptr(&self) -> bool {
+        contains_in_value_position(self, &ContainsKind::Ptr)
+    }
+
+    /// The declaration's [`EnumInfo`] behind either enum-shaped type
+    /// (0.0.7 T04): `Enum(info)` for a monomorphic enum, `App(info, args)`
+    /// for a fully applied parameterized one. `None` for every other type.
+    ///
+    /// Every enum rule (copy verdict, variant lookup, exhaustiveness,
+    /// lowering's scrutinee check) is about the *declaration*, which both
+    /// forms carry identically — the use-site arguments never change it.
+    /// Routing those sites through one accessor keeps the two forms from
+    /// drifting apart, and keeps the arms that must see the arguments
+    /// (substitution, arity) visibly separate.
+    pub fn as_enum(&self) -> Option<&EnumInfo> {
         match self {
-            Type::Ptr(_) => true,
-            Type::Array(elem) => elem.contains_ptr(),
-            Type::Result(t, e) => t.contains_ptr() || e.contains_ptr(),
-            // 0.0.7 T04: `Option<ptr<int>>` must be sealed exactly like a
-            // bare `ptr` — the use-site argument substitution can place a
-            // pointer into a payload that the declaration-level skeleton
-            // walk could not see (a `Param` placeholder carries no pointee).
-            Type::App(_, args) => args.iter().any(|a| a.contains_ptr()),
-            _ => false,
+            Type::Enum(info) | Type::App(info, _) => Some(info),
+            _ => None,
         }
+    }
+
+    /// Whether this type is a parameterized enum applied to at least one
+    /// use-site argument (0.0.7 T04/D1).
+    pub fn is_enum_app(&self) -> bool {
+        matches!(self, Type::App(_, _))
     }
 
     /// Check if this type is a numeric type (Int or Float).
@@ -324,31 +320,15 @@ impl Type {
 /// (arity is checked before any `Type::App` is built), so the `get` fallback
 /// only fires for malformed trees and keeps the function total.
 pub(crate) fn substitute_params(ty: &Type, args: &[Type]) -> Type {
-    match ty {
-        Type::Param(i) => args
-            .get(*i)
-            .cloned()
-            .unwrap_or_else(|| Type::Unsupported(format!("?P{}", i))),
-        Type::Func(params, ret) => Type::Func(
-            params.iter().map(|p| substitute_params(p, args)).collect(),
-            Box::new(substitute_params(ret, args)),
-        ),
-        Type::Result(ok, err) => Type::Result(
-            Box::new(substitute_params(ok, args)),
-            Box::new(substitute_params(err, args)),
-        ),
-        Type::Array(elem) => Type::Array(Box::new(substitute_params(elem, args))),
-        Type::Box(inner) => Type::Box(Box::new(substitute_params(inner, args))),
-        Type::Ref(inner) => Type::Ref(Box::new(substitute_params(inner, args))),
-        Type::Future(inner) => Type::Future(Box::new(substitute_params(inner, args))),
-        Type::Channel(inner) => Type::Channel(Box::new(substitute_params(inner, args))),
-        Type::Ptr(inner) => Type::Ptr(Box::new(substitute_params(inner, args))),
-        Type::App(info, inner) => Type::App(
-            info.clone(),
-            inner.iter().map(|a| substitute_params(a, args)).collect(),
-        ),
-        other => other.clone(),
-    }
+    rewrite_type(
+        ty,
+        &|i| {
+            args.get(i)
+                .cloned()
+                .unwrap_or_else(|| Type::Unsupported(format!("?P{}", i)))
+        },
+        &|v| Type::Var(v),
+    )
 }
 
 /// D2 verdict for a fully applied enum type: Copy iff every
@@ -357,6 +337,110 @@ fn app_is_copy(info: &EnumInfo, args: &[Type]) -> bool {
     info.payloads
         .iter()
         .all(|payload| payload.iter().all(|p| substitute_params(p, args).is_copy()))
+}
+
+/// Which handle family [`contains_in_value_position`] looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainsKind {
+    Future,
+    Channel,
+    Ptr,
+}
+
+/// The one traversal behind [`Type::contains_future`] /
+/// [`Type::contains_channel`] / [`Type::contains_ptr`]. The three rules
+/// agree on the whole walk — the matching leaf, the `Array` / `Result`
+/// descent, the `App` use-site-argument descent (0.0.7 T04), and stopping
+/// at opaque handles — and differ only in which variant counts as a hit,
+/// so the shape lives here once and each public predicate is one line.
+fn contains_in_value_position(ty: &Type, kind: &ContainsKind) -> bool {
+    match ty {
+        Type::Future(_) => *kind == ContainsKind::Future,
+        Type::Channel(_) => *kind == ContainsKind::Channel,
+        Type::Ptr(_) => *kind == ContainsKind::Ptr,
+        Type::Array(elem) => contains_in_value_position(elem, kind),
+        Type::Result(t, e) => {
+            contains_in_value_position(t, kind) || contains_in_value_position(e, kind)
+        }
+        Type::App(_, args) => args.iter().any(|a| contains_in_value_position(a, kind)),
+        _ => false,
+    }
+}
+
+/// Visit every [`Type::Param`] slot in `ty` (0.0.7 T04), left to right.
+/// The single traversal that both `Param`-related rules share — deciding
+/// whether a skeleton is fully determined ([`substitute_params`] callers)
+/// and collecting the parameters a constructor site left open — so the
+/// composite-type arm list lives in one place instead of three.
+pub(crate) fn visit_params(ty: &Type, f: &mut impl FnMut(usize)) {
+    match ty {
+        Type::Param(i) => f(*i),
+        Type::Func(ps, r) => {
+            for p in ps {
+                visit_params(p, f);
+            }
+            visit_params(r, f);
+        }
+        Type::Result(a, b) => {
+            visit_params(a, f);
+            visit_params(b, f);
+        }
+        Type::Array(e)
+        | Type::Box(e)
+        | Type::Ref(e)
+        | Type::Future(e)
+        | Type::Channel(e)
+        | Type::Ptr(e) => visit_params(e, f),
+        Type::App(_, args) => {
+            for a in args {
+                visit_params(a, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rewrite a type as seen from a use site (0.0.7 T04): every composite
+/// arm rebuilds with the same shape, so the "recurse into the children"
+/// pattern is expressed once instead of once per rule. `Param` and `Var`
+/// are leaves the caller handles (`substitute_params` binds them,
+/// `collect_free_vars` records them).
+///
+/// Free-variable collection (used to decide which parameters a
+/// constructor site left undetermined) is expressed with it rather than as
+/// a fourth hand-written `Type` match.
+pub(crate) fn rewrite_type(
+    ty: &Type,
+    on_param: &impl Fn(usize) -> Type,
+    on_var: &impl Fn(u32) -> Type,
+) -> Type {
+    match ty {
+        Type::Param(i) => on_param(*i),
+        Type::Var(v) => on_var(*v),
+        Type::Func(ps, r) => Type::Func(
+            ps.iter()
+                .map(|p| rewrite_type(p, on_param, on_var))
+                .collect(),
+            Box::new(rewrite_type(r, on_param, on_var)),
+        ),
+        Type::Result(a, b) => Type::Result(
+            Box::new(rewrite_type(a, on_param, on_var)),
+            Box::new(rewrite_type(b, on_param, on_var)),
+        ),
+        Type::Array(e) => Type::Array(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Box(e) => Type::Box(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Ref(e) => Type::Ref(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Future(e) => Type::Future(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Channel(e) => Type::Channel(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Ptr(e) => Type::Ptr(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::App(info, args) => Type::App(
+            info.clone(),
+            args.iter()
+                .map(|a| rewrite_type(a, on_param, on_var))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// The ownership access form of a single `Ident` use (0.0.2 U05).
@@ -412,13 +496,33 @@ pub struct TypedStructDef {
 
 /// One entry of the enum table (0.0.6 T06): the variants in declaration
 /// order, with their payload types.
+///
+/// 0.0.7 T04: `type_params` / `payloads` (the declaration's own
+/// payload skeletons, `Param(i)` placeholders intact) are the type-checker's
+/// view and are dropped before codegen (`MirEnumDef` carries only what the
+/// emitted table holds: the payload *shape*, one tag per variant slot).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedEnumDef {
+    /// Declared type parameters in declaration order (0.0.7 T04/D1).
+    pub type_params: Vec<String>,
+    /// Payload *skeletons* per variant, in declaration order (0.0.7 T04):
+    /// the declaration's own types, with [`Type::Param(i)`] where a
+    /// parameter is named. `is_copy` / `is_owned` on a [`Type::App`]
+    /// substitute the use-site arguments into these and re-run the rule.
+    /// A `Param` cannot reach codegen: MIR keeps only the per-variant
+    /// shape.
+    pub payloads: Vec<Vec<Type>>,
+    /// The emitted shape, one entry per variant in declaration order. Each
+    /// entry carries the variant's payload list (the runtime representation
+    /// is one `Value::Enum` per variant with a payload *per declared slot*,
+    /// 0.0.6 T06; 0.0.7 T04 keeps the declared count).
     pub variants: Vec<TypedEnumVariantDef>,
 }
 
-/// One variant of a typed enum (0.0.6 T06): payload types in declaration
-/// order; codegen derives the `enum_defs` type tags from them.
+/// One emitted enum-variant entry (0.0.6 T06): the payload kinds in
+/// declaration order. 0.0.7 T04: a parameterized payload stays `Param(i)`
+/// here — the declaration site has no concrete kind to record; codegen
+/// maps it to the shape-only `FieldTypeTag::Unit` placeholder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedEnumVariantDef {
     pub payload_types: Vec<Type>,
