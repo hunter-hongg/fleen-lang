@@ -9,11 +9,33 @@ use crate::source_map::FileId;
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    /// True only for the terminators the ASI pass *inserts* (0.0.8 T01).
+    /// The inserted `Semi` is zero-width, but telling source and inserted
+    /// apart by that span invariant leaks ASI's representation into the
+    /// parser — this flag carries the distinction explicitly (e.g. the
+    /// `#feature` directive accepts only the inserted terminator, never a
+    /// source `;`).
+    pub inserted_by_asi: bool,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            inserted_by_asi: false,
+        }
+    }
+
+    /// A terminator the ASI pass inserted (0.0.8 T01): same shape as a
+    /// source token, marked so the parser can tell it from the source's
+    /// own `;`.
+    pub fn asi_inserted(kind: TokenKind, span: Span) -> Self {
+        Self {
+            kind,
+            span,
+            inserted_by_asi: true,
+        }
     }
 }
 
@@ -257,6 +279,10 @@ pub enum TokenKind {
     RBracket,
     /// `->`
     Arrow,
+    /// `#` (0.0.8 T01: `#feature` directive introducer). Punctuation, not a
+    /// keyword — `feature` itself lexes as an ordinary identifier, and the
+    /// comment syntax (`//`, `/* */`) is untouched.
+    Hash,
     /// `<`
     // (handled by Lt)
     /// `>`
@@ -397,6 +423,7 @@ impl fmt::Display for TokenKind {
             TokenKind::LBracket => write!(f, "["),
             TokenKind::RBracket => write!(f, "]"),
             TokenKind::Arrow => write!(f, "->"),
+            TokenKind::Hash => write!(f, "#"),
             TokenKind::Eof => write!(f, "EOF"),
             // Keyword spellings are maintained only in keyword_str(); all
             // non-keyword variants are matched exhaustively above, so any

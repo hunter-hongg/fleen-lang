@@ -611,6 +611,20 @@ impl Resolver {
             // (they feed the typeck enum table, not `items`), and the parser
             // rejects enum declarations inside blocks, so this arm cannot run.
             Decl::Enum(_) => unreachable!("enum declarations never reach resolve_decl"),
+            // 0.0.8 T02 (interim): the parser emits the two-part curried
+            // declarations, but signature/body matching and function-table
+            // registration are T04's card. Until it lands, a curry file that
+            // got past the parser is rejected here rather than silently
+            // dropped — no test today reaches this arm (the T02 fixtures are
+            // parser-level only), and T04 replaces it with real resolution.
+            Decl::CurriedSignature(sig) => {
+                self.add_error(ResolveErrorKind::CurriedDeclNotYetResolved, sig.span);
+                Err(())
+            }
+            Decl::CurriedBody(body) => {
+                self.add_error(ResolveErrorKind::CurriedDeclNotYetResolved, body.span);
+                Err(())
+            }
         }
     }
 

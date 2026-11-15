@@ -86,6 +86,12 @@ pub enum ResolveErrorKind {
     /// read-only (DESIGN §10.4); a pointer would extend the write path
     /// past the borrow's lifetime and read-only guarantee.
     AddrOfRefParam { name: String },
+    /// 0.0.8 T02 (interim): the parser emits the two-part curried
+    /// declarations, but signature/body matching and function-table
+    /// registration are T04's card — until then a curry file that got past
+    /// the parser is rejected here. T04 replaces this kind with the real
+    /// signature/body resolution (and its own diagnostics).
+    CurriedDeclNotYetResolved,
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -208,6 +214,13 @@ impl fmt::Display for ResolveErrorKind {
                     "cannot take the address of `ref` parameter `{name}` — \
                      a borrow is read-only and a pointer would outlive the \
                      write protection it provides"
+                )
+            }
+            ResolveErrorKind::CurriedDeclNotYetResolved => {
+                write!(
+                    f,
+                    "two-part curried declarations are not resolved yet — \
+                     signature/body matching lands with 0.0.8 T04"
                 )
             }
         }

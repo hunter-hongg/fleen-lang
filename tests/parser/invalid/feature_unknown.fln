@@ -1,0 +1,2 @@
+#feature currying
+func main(): int = 0

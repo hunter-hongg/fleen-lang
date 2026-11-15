@@ -1,0 +1,3 @@
+#feature curry
+add: (int, int) -> int
+pub add(a, b) { a + b }

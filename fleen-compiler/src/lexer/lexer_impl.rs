@@ -124,6 +124,10 @@ impl<'a> Lexer<'a> {
             }
             '?' => return Ok(self.make_token(TokenKind::Question, 1)),
             '|' => return Ok(self.make_token(TokenKind::Pipe, 1)),
+            // 0.0.8 T01: `#` introduces a `#feature` directive. It is a
+            // token, never a comment (the comment syntax is `//` / `/* */`
+            // only, unchanged) — recognized unconditionally in every file.
+            '#' => return Ok(self.make_token(TokenKind::Hash, 1)),
             '=' => {
                 if self.next_char == Some('=') {
                     return Ok(self.make_token(TokenKind::Eq, 2));
@@ -666,6 +670,45 @@ mod tests {
         let tokens = tokenize("?").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Question);
         assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tokenize_hash() {
+        // 0.0.8 T01: `#` is a token, unconditionally, in every file.
+        let tokens = tokenize("#").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Hash);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tokenize_feature_directive_tokens() {
+        // `#feature curry` lexes as Hash + two identifiers: `feature` is NOT
+        // a keyword (it stays a legal binding name elsewhere), and `curry`
+        // is a feature *name*, not a reserved word.
+        let tokens = tokenize("#feature curry").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Hash);
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "feature"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "curry"));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn hash_is_not_a_comment_and_comments_are_unchanged() {
+        // `#` never starts a comment; the `//` / `/* */` syntax is untouched.
+        let tokens = tokenize("x = 1 // note\n#feature curry\ny = 2 /* mid */ + 3").unwrap();
+        // The line comment ends at the newline (preserved for ASI); the `#`
+        // line lexes as Hash + idents; the block comment vanishes.
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Hash));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Newline));
+        let kinds: Vec<&TokenKind> = tokens.iter().map(|t| &t.kind).collect();
+        assert!(kinds.contains(&&TokenKind::Plus));
+    }
+
+    #[test]
+    fn hash_is_not_a_keyword() {
+        assert!(!TokenKind::Hash.is_keyword());
+        assert_eq!(TokenKind::Hash.keyword_str(), None);
+        assert_eq!(TokenKind::Hash.to_string(), "#");
     }
 
     #[test]

@@ -48,7 +48,14 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::DerefPtr
             | TokenKind::Unsafe
             | TokenKind::Trusted
+            // 0.0.8 T01: `#` opens a `#feature` directive. Statement-starting
+            // so (a) consecutive directives in the header region insert a
+            // `Semi` at the newline between them instead of tripping rule 6,
+            // and (b) a `#` seen after the first item reaches the parser's
+            // dedicated `FeatureDirectiveMisplaced` check (same route as
+            // `pub`) instead of the generic statement-separator error.
             | TokenKind::Ident(_)
+            | TokenKind::Hash
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
             | TokenKind::StringLit(_)
@@ -197,7 +204,10 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
                 Boundary::Drop => {}
                 Boundary::InsertSemi => {
                     let end = out.last().map_or(0, |t| t.span.end);
-                    out.push(Token::new(TokenKind::Semi, Span::new(file, end, end)));
+                    out.push(Token::asi_inserted(
+                        TokenKind::Semi,
+                        Span::new(file, end, end),
+                    ));
                 }
             }
             continue;
@@ -226,7 +236,10 @@ pub(crate) fn insert_semis(tokens: Vec<Token>) -> Result<Vec<Token>, ParseError>
                     Boundary::Drop => {}
                     Boundary::InsertSemi => {
                         let end = out.last().map_or(0, |t| t.span.end);
-                        out.push(Token::new(TokenKind::Semi, Span::new(file, end, end)));
+                        out.push(Token::asi_inserted(
+                            TokenKind::Semi,
+                            Span::new(file, end, end),
+                        ));
                     }
                 }
             }
@@ -351,6 +364,9 @@ mod tests {
             // 0.0.4 F1: `async` opens an `async func` declaration.
             TokenKind::Async,
             TokenKind::Ident(String::new()),
+            // 0.0.8 T01: `#` opens a `#feature` directive (see the
+            // can_start_stmt note).
+            TokenKind::Hash,
             TokenKind::IntLit(0),
             TokenKind::FloatLit(0.0),
             TokenKind::StringLit(String::new()),
@@ -439,6 +455,9 @@ mod tests {
         // (continuation wins).
         assert!(implies_stmt_end(&TokenKind::Func));
         assert!(implies_stmt_end(&TokenKind::Ident(String::new())));
+        // 0.0.8 T01: `#` starts a declaration-like directive (never a
+        // continuation), so it implies an end too.
+        assert!(implies_stmt_end(&TokenKind::Hash));
         assert!(implies_stmt_end(&TokenKind::IntLit(0)));
         assert!(implies_stmt_end(&TokenKind::Bang));
         assert!(implies_stmt_end(&TokenKind::Not));

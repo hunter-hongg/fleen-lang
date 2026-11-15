@@ -49,6 +49,22 @@ fn parser_invalid_files() {
                 path.display(),
                 result.ok()
             );
+            // Pin the error kind: an optional `<stem>.err` companion holds a
+            // distinctive substring of the expected error's Display output
+            // (mirrors the e2e invalid fixtures' `.exit`/`.stderr` pattern),
+            // so a fixture only passes with the *intended* error.
+            let err = result.err().unwrap();
+            let err_path = path.with_extension("err");
+            if err_path.exists() {
+                let expected = fs::read_to_string(&err_path).unwrap();
+                assert!(
+                    format!("{err}").contains(expected.trim()),
+                    "Error for {} does not match {}: got {}",
+                    path.display(),
+                    err_path.display(),
+                    err
+                );
+            }
         }
     }
 }

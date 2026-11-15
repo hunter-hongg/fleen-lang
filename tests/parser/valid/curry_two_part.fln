@@ -1,0 +1,8 @@
+#feature curry
+add: (int, int) -> int
+add(a, b) { a + b }
+add2(a, b) = a * 2 + b
+ping: () -> int
+ping() { 42 }
+main: () -> int
+main() { add(1, 2) }

@@ -1,0 +1,9 @@
+// leading comment
+
+/* block
+   comment */
+#feature curry
+
+// still the header region
+import std.io;
+x = 1;

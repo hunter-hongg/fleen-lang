@@ -2,6 +2,7 @@
 
 use super::{CompileError, FileId, Session, compile};
 use crate::codegen;
+use crate::parser::ParseErrorKind;
 use crate::resolver::error::ResolveErrorKind;
 use crate::typeck::error::TypeckErrorKind;
 
@@ -605,4 +606,37 @@ fn compile_project_rejects_private_enum_access() {
         session.compile_project(root),
         Err(CompileError::Resolve(_))
     ));
+}
+
+#[test]
+fn feature_sets_table_reflects_directives() {
+    // 0.0.8 T01: the `FileId → FeatureSet` table lives on the compilation
+    // config (`Session::feature_table`) — a directive in the header enables
+    // `curry` for that file only; files without one stay the default
+    // (flag-off) set.
+    let mut session = Session::new();
+    // The flag-on file's content stays outside the function-form switch
+    // (bindings only) — the legacy `func` form is forbidden there since T02.
+    let on = session.add_file("on.fln", "#feature curry\nx = 1;");
+    let off = session.add_file("off.fln", "func main(): int = 42");
+    let table = session.feature_table().unwrap();
+    assert!(table.get(on).curry);
+    assert!(!table.get(off).curry);
+}
+
+#[test]
+fn directive_file_rejects_legacy_form() {
+    // 0.0.8 T02 (D2): the strictness switch landed — in a flag-on file the
+    // legacy `func` form is a parse error (`FuncFormForbiddenInCurryFile`).
+    // A flag-on file cannot compile end-to-end here yet: its `main` must
+    // use the two-part form, and the resolver wiring for that is T04's
+    // card — so only the rejection half is pinned at this stage.
+    assert!(matches!(
+        compile("#feature curry\nfunc main(): int = 42"),
+        Err(CompileError::Parse(e))
+            if e.kind == ParseErrorKind::FuncFormForbiddenInCurryFile
+    ));
+    // Flag-off behavior is untouched: the legacy form still compiles.
+    let module = compile("func main(): int = 42").unwrap();
+    assert_eq!(module.version, codegen::MODULE_VERSION);
 }

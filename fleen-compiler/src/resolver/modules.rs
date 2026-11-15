@@ -237,6 +237,14 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
                     ast::Decl::Func(f) => {
                         ExportDef::simple(f.name.clone(), f.is_pub, f.span, ExportKind::Func)
                     }
+                    // 0.0.8 T02 (interim): the two-part curried halves do
+                    // not export yet — signature/body matching and
+                    // cross-module export are T04's card, and resolve
+                    // rejects the declarations first
+                    // (`CurriedDeclNotYetResolved`), so this arm only keeps
+                    // the match exhaustive. T04 gives the signature half
+                    // (the interface, D3) its `Func` export.
+                    ast::Decl::CurriedSignature(_) | ast::Decl::CurriedBody(_) => continue,
                     ast::Decl::Const(c) => {
                         ExportDef::simple(c.name.clone(), c.is_pub, c.span, ExportKind::Const)
                     }

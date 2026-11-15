@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::lexer::tokenize;
+    use crate::lexer::{TokenKind, tokenize};
     use crate::parser::ast::*;
     use crate::parser::{ParseError, ParseErrorKind, parse};
 
@@ -2573,5 +2573,362 @@ func main() {
     #[test]
     fn parse_orphan_gt_in_type_position_is_error() {
         parse_err("func f(x: Option<int>>): int { 0 }");
+    }
+    // ========== Feature directives (0.0.8 T01, D1) ==========
+
+    #[test]
+    fn feature_directive_first_enables_curry() {
+        let ast = parse_str("#feature curry\nx = 1;\n");
+        assert!(ast.features.curry);
+        assert_eq!(ast.items.len(), 1);
+    }
+
+    #[test]
+    fn feature_directive_after_comments_and_blank_lines() {
+        // Comments and blank lines do not end the header region — only an
+        // item does.
+        let src =
+            "// leading comment\n\n/* block\ncomment */\n#feature curry\n\n// another\nx = 1;\n";
+        let ast = parse_str(src);
+        assert!(ast.features.curry);
+        assert_eq!(ast.items.len(), 1);
+    }
+
+    #[test]
+    fn no_directive_means_default_feature_set() {
+        let ast = parse_str("func main(): int = 42");
+        assert!(!ast.features.curry);
+        assert_eq!(ast.features, FeatureSet::default());
+    }
+
+    #[test]
+    fn feature_directive_is_whole_line() {
+        // A directive joined on one line with another statement is a parse
+        // error: the ASI pass inserts no `Semi` mid-line, so the directive
+        // parser's newline requirement fires.
+        let err = parse_err("#feature curry import std.io;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn feature_directive_after_import_is_misplaced() {
+        let err = parse_err("import std.io;\n#feature curry\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FeatureDirectiveMisplaced
+        ));
+    }
+
+    #[test]
+    fn feature_directive_mid_file_is_misplaced() {
+        let err = parse_err("x = 1;\n#feature curry\ny = 2;\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FeatureDirectiveMisplaced
+        ));
+    }
+
+    #[test]
+    fn feature_directive_inside_body_is_misplaced() {
+        // The block-statement parser rejects `#` like it rejects `pub`.
+        let err = parse_err("func main(): int {\n#feature curry\n42\n}");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FeatureDirectiveMisplaced
+        ));
+    }
+
+    #[test]
+    fn unknown_feature_name_is_a_hard_error() {
+        let err = parse_err("#feature currying\nx = 1;");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::UnknownFeature { ref name } if name == "currying"
+        ));
+    }
+
+    #[test]
+    fn duplicate_feature_name_is_an_error() {
+        let err = parse_err("#feature curry\n#feature curry\nx = 1;\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::DuplicateFeature { ref name } if name == "curry"
+        ));
+    }
+
+    #[test]
+    fn malformed_directive_word_is_an_error() {
+        // `#` followed by anything but `feature` is a grammar error.
+        let err = parse_err("#pragma curry\nx = 1;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn feature_stays_a_legal_binding_name() {
+        // `feature` is not a keyword: only the `#`-directive position gives
+        // it meaning.
+        let ast = parse_str("feature = 1;");
+        assert!(!ast.features.curry);
+        assert_eq!(ast.items.len(), 1);
+    }
+
+    #[test]
+    fn explicit_semicolon_on_a_directive_line_is_rejected() {
+        // "Directive lines take no semicolon": the ASI-inserted zero-width
+        // `Semi` is the only accepted terminator; an explicit `;` in the
+        // source is an error, not an alternative spelling.
+        let err = parse_err("#feature curry;\nx = 1;\n");
+        match err.kind {
+            ParseErrorKind::Expected { expected, found } => {
+                assert!(expected.contains("takes no semicolon"));
+                assert_eq!(found, TokenKind::Semi);
+            }
+            other => panic!("expected Expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directive_at_eof_without_trailing_newline_parses() {
+        // ASI inserts the terminating `Semi` at EOF too, so a last line
+        // without a trailing newline is still a whole directive line.
+        let ast = parse_str("#feature curry");
+        assert!(ast.features.curry);
+        assert_eq!(ast.items.len(), 0);
+    }
+
+    // ---- 0.0.8 T02: two-part curried declarations (flag-on files) ----
+
+    #[test]
+    fn curried_two_part_declaration_parses() {
+        // Signature line + body line; the body may be a block or `= expr`.
+        let ast = parse_str(
+            "#feature curry\n\
+             add: (int, int) -> int\n\
+             add(a, b) { a + b }\n\
+             add2(a, b) = a * 2 + b\n",
+        );
+        // Three items: the `add` signature, the `add` block body, and the
+        // `add2` single-expression body (an orphan half — resolve reports
+        // it in T04; here the parse shape is what is under test).
+        assert_eq!(ast.items.len(), 3);
+        let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[0] else {
+            panic!("expected a curried signature, got {:?}", ast.items[0]);
+        };
+        assert_eq!(sig.name, "add");
+        assert!(matches!(sig.ty, Type::Func(..)));
+        let Item::Decl(Decl::CurriedBody(body)) = &ast.items[1] else {
+            panic!("expected a curried body, got {:?}", ast.items[1]);
+        };
+        assert_eq!(body.name, "add");
+        assert_eq!(body.params.len(), 2);
+        assert!(matches!(body.body, FuncBody::Block(_)));
+        let Item::Decl(Decl::CurriedBody(body)) = &ast.items[2] else {
+            panic!("expected a curried body, got {:?}", ast.items[2]);
+        };
+        assert_eq!(body.name, "add2");
+        assert!(matches!(body.body, FuncBody::SingleExpr(_)));
+    }
+
+    #[test]
+    fn curried_zero_param_declaration_parses() {
+        // `() -> int` is the empty parameter list (today's function-type
+        // grammar already accepts it); the zero-param body has `()`.
+        let ast = parse_str("#feature curry\nping: () -> int\nping() { 42 }\n");
+        assert_eq!(ast.items.len(), 2);
+        let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[0] else {
+            panic!("expected a curried signature");
+        };
+        let Type::Func(params, _) = &sig.ty else {
+            panic!("expected a function type");
+        };
+        assert!(params.is_empty());
+        let Item::Decl(Decl::CurriedBody(body)) = &ast.items[1] else {
+            panic!("expected a curried body");
+        };
+        assert!(body.params.is_empty());
+    }
+
+    #[test]
+    fn curried_pub_and_modifiers_on_signature() {
+        let ast = parse_str(
+            "#feature curry\n\
+             pub unsafe double: (int) -> int\n\
+             double(n) { n * 2 }\n\
+             async half: (int) -> int\n\
+             half(n) = n / 2\n",
+        );
+        assert_eq!(ast.items.len(), 4);
+        let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[0] else {
+            panic!("expected a curried signature");
+        };
+        assert!(sig.is_pub && sig.is_unsafe);
+        assert!(!sig.is_async && !sig.is_trusted);
+        let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[2] else {
+            panic!("expected a curried signature");
+        };
+        assert!(sig.is_async);
+    }
+
+    #[test]
+    fn curried_main_uses_two_part_form() {
+        // The entry function in a flag-on file uses the two-part form; the
+        // name is ordinary — the entry wiring finds it after T04 registers
+        // the signature in the function table.
+        let ast = parse_str("#feature curry\nmain: () -> int\nmain() { 42 }\n");
+        let Item::Decl(Decl::CurriedBody(body)) = &ast.items[1] else {
+            panic!("expected a curried body");
+        };
+        assert_eq!(body.name, "main");
+    }
+
+    #[test]
+    fn flag_on_file_keeps_bindings_and_calls() {
+        // D2 switches only the *function* form: bindings (`x = 1`,
+        // `x: int = 42`) and top-level call statements stay legal, and the
+        // scan-ahead must not mistake them for body lines.
+        let ast = parse_str(
+            "#feature curry\n\
+             g: (int) -> int\n\
+             g(n) { n }\n\
+             x = g(1);\n\
+             x = x + 1;\n",
+        );
+        assert_eq!(ast.items.len(), 4);
+        // Top-level `x = g(1)` is a binding whose init is the call — not a
+        // body line (the scan-ahead sees `)` followed by `;`).
+        assert!(matches!(&ast.items[2], Item::Decl(Decl::Var(_))));
+        assert!(matches!(&ast.items[3], Item::Decl(Decl::Var(_))));
+    }
+
+    #[test]
+    fn annotated_binding_still_parses_in_flag_on_file() {
+        // `x: int = 42` — the type parses, then `=` branches to the binding,
+        // not the signature.
+        let ast = parse_str("#feature curry\nx: int = 42\n");
+        assert!(matches!(&ast.items[0], Item::Decl(Decl::Var(_))));
+    }
+
+    #[test]
+    fn func_form_forbidden_in_flag_on_file() {
+        let err = parse_err("#feature curry\nfunc add(a: int, b: int): int = a + b\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FuncFormForbiddenInCurryFile
+        ));
+    }
+
+    #[test]
+    fn modifier_func_form_forbidden_in_flag_on_file() {
+        let err = parse_err("#feature curry\nasync func go(): int = 1\n");
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FuncFormForbiddenInCurryFile
+        ));
+    }
+
+    #[test]
+    fn nested_func_forbidden_in_flag_on_file() {
+        let err = parse_err(
+            "#feature curry\n\
+             g: (int) -> int\n\
+             g(n) {\n\
+             func inner(): int = 1\n\
+             n\n\
+             }\n",
+        );
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::FuncFormForbiddenInCurryFile
+        ));
+    }
+
+    #[test]
+    fn two_part_form_forbidden_in_flag_off_file() {
+        // No directive: the signature production does not exist — bare
+        // `name : type` with no `=` stays today's syntax error.
+        let err = parse_err("add: (int, int) -> int\nadd(a, b) { a + b }\n");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn pub_on_body_line_is_rejected() {
+        let err = parse_err(
+            "#feature curry\n\
+             add: (int, int) -> int\n\
+             pub add(a, b) { a + b }\n",
+        );
+        assert!(matches!(err.kind, ParseErrorKind::PubOnCurriedBody));
+    }
+
+    #[test]
+    fn modifier_on_body_line_is_rejected() {
+        let err = parse_err(
+            "#feature curry\n\
+             add: (int, int) -> int\n\
+             unsafe add(a, b) { a + b }\n",
+        );
+        match err.kind {
+            ParseErrorKind::ModifierOnCurriedBody { modifier } => {
+                assert_eq!(modifier, "unsafe");
+            }
+            other => panic!("expected ModifierOnCurriedBody, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_line_signature_is_a_syntax_error() {
+        // Single-line only (D3): `->` cannot start a statement, so the ASI
+        // pass inserts a `Semi` at the newline and the type parse breaks.
+        let err = parse_err(
+            "#feature curry\n\
+             add: (int, int)\n\
+             -> int\n\
+             add(a, b) { a + b }\n",
+        );
+        // The ASI statement-boundary rule fires (`->` cannot start a
+        // statement), so the statement-entry guard reports it — no
+        // carve-out, no new ASI rule (D3).
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn signature_needs_function_type() {
+        let err = parse_err("#feature curry\nx: int\n");
+        match err.kind {
+            ParseErrorKind::SignatureNeedsFunctionType { found } => {
+                assert_eq!(found, "int");
+            }
+            other => panic!("expected SignatureNeedsFunctionType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_body_param_is_rejected() {
+        let err = parse_err(
+            "#feature curry\n\
+             add: (int, int) -> int\n\
+             add(a, a) { a + a }\n",
+        );
+        match err.kind {
+            ParseErrorKind::DuplicateParam { name } => {
+                assert_eq!(name, "a");
+            }
+            other => panic!("expected DuplicateParam, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keyword_body_param_is_rejected() {
+        // Body parameter names are keyword-protected, as with `func`
+        // parameters (`parse_ident` carries the check).
+        let err = parse_err(
+            "#feature curry\n\
+             add: (int, int) -> int\n\
+             add(func, b) { b }\n",
+        );
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
 }

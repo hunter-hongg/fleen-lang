@@ -1,0 +1,7 @@
+#feature curry
+g: (int) -> int
+g(n) { n }
+x = g(1);
+x = x + 1;
+y: int = 42;
+g(y);

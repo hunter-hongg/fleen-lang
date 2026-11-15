@@ -1,0 +1,3 @@
+#feature curry
+#feature curry
+func main(): int = 0

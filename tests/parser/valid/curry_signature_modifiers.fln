@@ -1,0 +1,7 @@
+#feature curry
+pub unsafe double: (int) -> int
+double(n) { n * 2 }
+async half: (int) -> int
+half(n) = n / 2
+trusted widen: (int) -> int
+widen(n) = n + 0

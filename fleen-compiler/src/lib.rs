@@ -177,6 +177,18 @@ impl Session {
         &self.dependencies
     }
 
+    /// The per-file `FileId → FeatureSet` table for the registered files
+    /// (0.0.8 T01, D1): parse the session's files and map each `FileId` to
+    /// the `#feature` set its header region declared. Later cards (T02–T06)
+    /// consult the current file's set here when gating feature effects.
+    ///
+    /// # Errors
+    /// [`CompileError::Parse`] if any registered file does not parse.
+    pub fn feature_table(&self) -> Result<FeatureTable, CompileError> {
+        let asts = parse_all(&self.sources)?;
+        Ok(FeatureTable::from_asts(&asts))
+    }
+
     /// Compile the file registered under `root`, running every stage in
     /// order. Each stage remains an independent, separately testable step;
     /// this only chains them and stops at the first failing stage.
@@ -333,6 +345,38 @@ fn parse_all(sources: &source_map::SourceMap) -> Result<Vec<parser::ast::Ast>, C
         asts.push(ast);
     }
     Ok(asts)
+}
+
+/// The `FileId → FeatureSet` table (0.0.8 T01, D1): the per-file feature
+/// sets derived from the parse results, indexed by `FileId` in the same
+/// order the ASTs are (`asts[i]` is `FileId(i)`).
+///
+/// The directive is parsed at the head of each file's token stream, so the
+/// set is complete before any item is parsed — no pre-scan of later stages
+/// is needed. Later cards (T02–T06) consult the *current file's* set here
+/// when gating the curried productions and the partial-application rule.
+pub struct FeatureTable {
+    sets: Vec<parser::ast::FeatureSet>,
+}
+
+impl FeatureTable {
+    /// Build the table from parse results. `asts` must be indexed by
+    /// `FileId` — the order [`Session::compile`], [`Session::compile_project`]
+    /// and the internal `parse_all` all produce.
+    pub fn from_asts(asts: &[parser::ast::Ast]) -> Self {
+        Self {
+            sets: asts.iter().map(|a| a.features).collect(),
+        }
+    }
+
+    /// The feature set of `file`.
+    ///
+    /// # Panics
+    /// If `file` was never registered in the source map the ASTs were parsed
+    /// from (every `FileId` a caller holds comes from that same map).
+    pub fn get(&self, file: FileId) -> parser::ast::FeatureSet {
+        self.sets[file.0 as usize]
+    }
 }
 
 /// Compile an already-parsed whole program (0.0.3 V05) — the shared tail of

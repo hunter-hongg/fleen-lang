@@ -1,0 +1,3 @@
+#feature curry
+main: () -> int
+main() { 42 }

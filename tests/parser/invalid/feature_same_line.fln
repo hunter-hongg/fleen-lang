@@ -1,0 +1,2 @@
+#feature curry import std.io;
+func main(): int = 0

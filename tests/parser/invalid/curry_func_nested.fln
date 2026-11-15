@@ -1,0 +1,6 @@
+#feature curry
+g: (int) -> int
+g(n) {
+func inner(): int = 1
+n
+}

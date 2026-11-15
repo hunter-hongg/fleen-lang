@@ -1,0 +1,3 @@
+#feature curry
+add: (int, int) -> int
+unsafe add(a, b) { a + b }

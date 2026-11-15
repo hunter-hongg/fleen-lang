@@ -10,11 +10,48 @@ pub mod expr;
 #[path = "tests.rs"]
 pub mod tests_mod;
 
+pub use ast::{Feature, FeatureSet};
 pub use error::{ParseError, ParseErrorKind};
 
 use crate::lexer::{Span, Token};
 use crate::source_map::FileId;
 use ast::{Ast, Expr};
+
+/// One parsed `#feature` directive: the feature it names and the span of the
+/// name token (for the `DuplicateFeature` diagnostic).
+struct FeatureDirective {
+    feature: Feature,
+    name_span: Span,
+}
+
+/// The `async`/`unsafe`/`trusted` modifier run (0.0.4 F1, 0.0.5 T02) —
+/// shared by `parse_func_decl` and the curried signature line (0.0.8 T02).
+/// The order is free (`unsafe async func` == `async unsafe func`) and
+/// repeats are rejected by the guard patterns in [`Parser::parse_modifiers`].
+struct SignatureModifiers {
+    is_async: bool,
+    is_unsafe: bool,
+    is_trusted: bool,
+    /// The first modifier spelled in the source, for diagnostics that name
+    /// the offending modifier (`ModifierOnCurriedBody`). `None` only when no
+    /// modifier was consumed — the curried-body diagnostic is unreachable
+    /// on that path (its caller dispatched on a modifier in the first
+    /// place), but the parser never asserts that, so the caller falls back.
+    first: Option<&'static str>,
+}
+
+impl SignatureModifiers {
+    /// The empty run (`parse_curried_sig_or_binding`'s path — no modifier
+    /// reached the signature line).
+    fn none() -> Self {
+        Self {
+            is_async: false,
+            is_unsafe: false,
+            is_trusted: false,
+            first: None,
+        }
+    }
+}
 
 /// Keywords that cannot be used as identifiers.
 const KEYWORDS: &[&str] = &[
@@ -87,6 +124,11 @@ pub struct Parser {
     /// the construct's block, never a literal — the Rust-2020 ambiguity.
     /// Block bodies always re-enable it.
     allow_struct_lit: bool,
+    /// The file's `#feature` set (0.0.8 T01, D1), recorded while parsing the
+    /// header region and consulted by the flag-gated productions (T02's
+    /// two-part curried declarations; T03's arrow types). `default` until
+    /// the header is parsed — every pre-0.0.8 file stays `default`.
+    features: FeatureSet,
 }
 
 impl Parser {
@@ -100,6 +142,7 @@ impl Parser {
             file,
             pos: 0,
             allow_struct_lit: true,
+            features: FeatureSet::default(),
         }
     }
 
@@ -294,11 +337,36 @@ impl Parser {
         if self.tokens.is_empty() || (self.tokens.len() == 1 && self.is_at_end()) {
             return Ok(Ast {
                 items: vec![],
+                features: FeatureSet::default(),
                 span: self.span(0, 0),
             });
         }
 
         let start = self.current().span.start;
+
+        // 0.0.8 T01 (D1): the header region — `#feature` directives before
+        // the first item. Comments and blank lines do not end the region
+        // (they produce no item); any item does. A `Hash` seen later is
+        // rejected by `parse_item` / `parse_block` as `FeatureDirectiveMisplaced`.
+        let mut features = FeatureSet::default();
+        while self.check(&crate::lexer::TokenKind::Hash) {
+            let directive = self.parse_feature_directive()?;
+            // The set itself records what was seen — no parallel "seen"
+            // list: `contains` before `enable` is the duplicate check.
+            if features.contains(directive.feature) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::DuplicateFeature {
+                        name: directive.feature.name().to_string(),
+                    },
+                    span: directive.name_span,
+                });
+            }
+            features.enable(directive.feature);
+        }
+        // The header precedes every item, so from here on the flag-gated
+        // productions (T02/T03) can consult the file's set.
+        self.features = features;
+
         let mut items = Vec::new();
 
         while !self.is_at_end() {
@@ -316,12 +384,92 @@ impl Parser {
         let end = self.tokens.last().map(|t| t.span.end).unwrap_or(start);
         Ok(Ast {
             items,
+            features,
             span: self.span(start, end),
         })
     }
 
+    /// Parse a `#feature` directive (0.0.8 T01, D1): `# , "feature" , ident`,
+    /// newline-terminated. The ASI pass inserts a *zero-width* `Semi` at the
+    /// end of the directive line (the name is a statement-ender and the next
+    /// line's token a statement-starter), and at EOF; the parser requires it.
+    /// A `Semi` with a real span comes from an explicit `;` in the source —
+    /// rejected, because "directive lines take no semicolon": only the
+    /// newline terminates a directive. A directive joined onto one line with
+    /// anything else also fails here. Returns the resolved feature and the
+    /// span of its name token (for the `DuplicateFeature` diagnostic).
+    fn parse_feature_directive(&mut self) -> Result<FeatureDirective, ParseError> {
+        self.advance(); // consume `#`
+        // `feature` is not a keyword, and `Parser::check` matches any
+        // `Ident` against any `Ident`, so the word must be compared by text.
+        let word = self.parse_ident()?;
+        if word != "feature" {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "`feature` after `#`".to_string(),
+                    found: crate::lexer::TokenKind::Ident(word),
+                },
+                span: self.prev_span(),
+            });
+        }
+        let name = self.parse_ident()?;
+        let name_span = self.prev_span();
+        if self.check(&crate::lexer::TokenKind::Semi) {
+            // The ASI pass inserts the line's terminator (`Semi` marked
+            // `inserted_by_asi`); a source `;` is never marked — rejected,
+            // because "directive lines take no semicolon": only the newline
+            // terminates a directive.
+            let current = self.current();
+            if !current.inserted_by_asi {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Expected {
+                        expected: "a newline after the `#feature` directive \
+                                   (a directive takes no semicolon)"
+                            .to_string(),
+                        found: crate::lexer::TokenKind::Semi,
+                    },
+                    span: current.span,
+                });
+            }
+            self.advance();
+        } else {
+            let found = self.current().kind.clone();
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "a newline after the `#feature` directive (a \
+                               directive is a whole line)"
+                        .to_string(),
+                    found,
+                },
+                span: self.current().span,
+            });
+        }
+        let feature = Feature::from_name(&name).ok_or_else(|| ParseError {
+            kind: ParseErrorKind::UnknownFeature { name: name.clone() },
+            span: name_span,
+        })?;
+        Ok(FeatureDirective { feature, name_span })
+    }
+
+    /// A `Hash` in item position or inside a block body is a misplaced
+    /// `#feature` directive (0.0.8 T01, D1) — shared by `parse_item` and the
+    /// block-statement parser, which reject it like they reject `pub`.
+    fn err_feature_misplaced(&self) -> ParseError {
+        ParseError {
+            kind: ParseErrorKind::FeatureDirectiveMisplaced,
+            span: self.current().span,
+        }
+    }
+
     /// Parse a top-level item: import, declaration, or expression statement.
     fn parse_item(&mut self) -> Result<ast::Item, ParseError> {
+        // 0.0.8 T01 (D1): a `#` after the first item is a hard error, never
+        // a comment, never a no-op — the "magic statement" rule. The header
+        // region (before the first item) is the only legal placement.
+        if self.check(&crate::lexer::TokenKind::Hash) {
+            return Err(self.err_feature_misplaced());
+        }
+
         // 0.0.3 V05: `pub` is a top-level visibility modifier. It is parsed
         // here, never inside block statements (the block parser rejects it).
         let is_pub = self.matches(&crate::lexer::TokenKind::Pub);
@@ -337,6 +485,12 @@ impl Parser {
         }
 
         if self.check(&crate::lexer::TokenKind::Func) {
+            // 0.0.8 T02 (D2): in a `#feature curry` file the legacy
+            // `func`-keyword form is rejected — the two-part form is the
+            // only function declaration form there.
+            if self.features.curry {
+                return Err(self.err_func_form_forbidden());
+            }
             let mut decl = self.parse_func_decl()?;
             decl.is_pub = is_pub;
             return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
@@ -349,6 +503,13 @@ impl Parser {
             || self.check(&crate::lexer::TokenKind::Unsafe)
             || self.check(&crate::lexer::TokenKind::Trusted)
         {
+            // 0.0.8 T02 (D3): in a `#feature curry` file the modifiers
+            // prefix the *signature* line (`async half: ...`), never the
+            // legacy form — the signature parser rejects `modifier func`
+            // and `modifier name(...)` with the dedicated diagnostics.
+            if self.features.curry {
+                return self.parse_curried_signature(is_pub);
+            }
             let mut decl = self.parse_func_decl()?;
             decl.is_pub = is_pub;
             return Ok(ast::Item::Decl(ast::Decl::Func(decl)));
@@ -375,10 +536,40 @@ impl Parser {
         // Check for variable binding: ident followed by : or =
         if self.check(&crate::lexer::TokenKind::Ident(String::new())) {
             let next_kind = self.peek_kind(1);
+
+            // 0.0.8 T02 (D2): in a `#feature curry` file, `ident (` whose
+            // matching `)` is followed by `{` or `=` is the *body line* of a
+            // two-part declaration. Top-level call statements (`f(1);`) stay
+            // legal — the scan-ahead in `curried_body_ahead` keeps the two
+            // apart. `pub` on the body line is rejected (D3): visibility
+            // lives on the signature line.
+            if self.features.curry
+                && matches!(next_kind, Some(crate::lexer::TokenKind::LParen))
+                && self.curried_body_ahead()
+            {
+                if is_pub {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::PubOnCurriedBody,
+                        span: self.prev_span(),
+                    });
+                }
+                let decl = self.parse_curried_body()?;
+                return Ok(ast::Item::Decl(ast::Decl::CurriedBody(decl)));
+            }
+
             let is_binding = matches!(
                 next_kind,
                 Some(crate::lexer::TokenKind::Colon) | Some(crate::lexer::TokenKind::Assign)
             );
+            // 0.0.8 T02 (D2): in a `#feature curry` file a top-level
+            // `ident :` is the *signature line* — unless an `=` follows the
+            // type, which keeps it an annotated variable binding. The
+            // signature parser reports `SignatureNeedsFunctionType` for a
+            // non-function type (D3's strictness: in a flag-on file the
+            // bare `name : type` production *is* the signature).
+            if self.features.curry && matches!(next_kind, Some(crate::lexer::TokenKind::Colon)) {
+                return self.parse_curried_sig_or_binding(is_pub);
+            }
             if is_binding {
                 // P3: Check if identifier is a keyword
                 if let crate::lexer::TokenKind::Ident(name) = self.current_kind()
@@ -746,6 +937,19 @@ impl Parser {
             None
         };
 
+        self.finish_var_binding(name, ty, start)
+    }
+
+    /// The `= expr` tail of a variable binding, shared by `parse_var_binding`
+    /// and the curry-file path (0.0.8 T02): a top-level `name : type` in a
+    /// flag-on file parses its type first, then branches on `=` — binding
+    /// here, signature line otherwise.
+    fn finish_var_binding(
+        &mut self,
+        name: String,
+        ty: Option<ast::Type>,
+        start: u32,
+    ) -> Result<ast::VarBinding, ParseError> {
         self.expect(&crate::lexer::TokenKind::Assign, "`=` in variable binding")?;
 
         let init = self.parse_expr()?;
@@ -768,6 +972,258 @@ impl Parser {
         })
     }
 
+    /// 0.0.8 T02 (D2/D3): the two-part curried declaration, flag-on files
+    /// only. The signature line `[pub] [modifier] ident : type` is the
+    /// interface half; the body line `ident ( params ) ( block | = expr )`
+    /// is the implementation half.
+    ///
+    /// Modifiers live on the signature line (D3): in a flag-on file the
+    /// `async`/`unsafe`/`trusted` run prefixes the signature. `modifier
+    /// func` is the legacy form, rejected (`FuncFormForbiddenInCurryFile`);
+    /// `modifier name(...)` is a body line carrying a modifier, rejected
+    /// (`ModifierOnCurriedBody`). `pub` is handled by the caller (it is a
+    /// top-level item modifier, consumed before dispatch).
+    /// The `async`/`unsafe`/`trusted` modifier run (free order, no repeats)
+    /// — shared by `parse_func_decl` and `parse_curried_signature`.
+    fn parse_modifiers(&mut self) -> SignatureModifiers {
+        let mut mods = SignatureModifiers {
+            is_async: false,
+            is_unsafe: false,
+            is_trusted: false,
+            first: None,
+        };
+        loop {
+            match self.current_kind() {
+                crate::lexer::TokenKind::Async if !mods.is_async => {
+                    mods.is_async = true;
+                    mods.first.get_or_insert("async");
+                }
+                crate::lexer::TokenKind::Unsafe if !mods.is_unsafe => {
+                    mods.is_unsafe = true;
+                    mods.first.get_or_insert("unsafe");
+                }
+                crate::lexer::TokenKind::Trusted if !mods.is_trusted => {
+                    mods.is_trusted = true;
+                    mods.first.get_or_insert("trusted");
+                }
+                _ => break,
+            }
+            self.advance();
+        }
+        mods
+    }
+
+    /// The legacy `func`-keyword form in a `#feature curry` file (0.0.8 T02,
+    /// D2) — one emission point for the discovery sites (top-level `func`,
+    /// a modifier run followed by `func`, and a nested declaration in a
+    /// block body), so the diagnostic stays identical wherever the form is
+    /// found.
+    fn err_func_form_forbidden(&self) -> ParseError {
+        ParseError {
+            kind: ParseErrorKind::FuncFormForbiddenInCurryFile,
+            span: self.current().span,
+        }
+    }
+
+    /// The `: type` tail of a signature line — the caller consumed the `:`;
+    /// this parses the type and returns it with its span (which the
+    /// `SignatureNeedsFunctionType` diagnostic points at). Shared by the
+    /// modifier path and the plain path (0.0.8 T02).
+    fn parse_signature_type(&mut self) -> Result<(ast::Type, Span), ParseError> {
+        let ty_start = self.current().span.start;
+        let ty = self.parse_type()?;
+        let ty_span = self.span(ty_start, self.prev_span_end());
+        Ok((ty, ty_span))
+    }
+
+    fn parse_curried_signature(&mut self, is_pub: bool) -> Result<ast::Item, ParseError> {
+        let start = self.current().span.start;
+
+        let mods = self.parse_modifiers();
+
+        if self.check(&crate::lexer::TokenKind::Func) {
+            return Err(self.err_func_form_forbidden());
+        }
+
+        let name = self.parse_ident()?;
+
+        if !self.check(&crate::lexer::TokenKind::Colon) {
+            // `unsafe add(a, b) { ... }` — a modifier on the body line (D3).
+            if self.check(&crate::lexer::TokenKind::LParen) {
+                // This path is only reached from a modifier-dispatched item,
+                // so `mods.first` is always `Some` — the fallback keeps the
+                // parser assert-free.
+                return Err(ParseError {
+                    kind: ParseErrorKind::ModifierOnCurriedBody {
+                        modifier: mods.first.unwrap_or("async").to_string(),
+                    },
+                    span: self.current().span,
+                });
+            }
+            let found = self.current().kind.clone();
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "`:` after the signature name".to_string(),
+                    found,
+                },
+                span: self.current().span,
+            });
+        }
+        self.advance();
+
+        let (ty, ty_span) = self.parse_signature_type()?;
+        self.finish_curried_signature(name, ty, ty_span, is_pub, mods, start)
+    }
+
+    /// 0.0.8 T02 (D2): a top-level `ident :` in a flag-on file — either the
+    /// signature line or (when an `=` follows the type) an annotated
+    /// variable binding. The type must be parsed before the two can be told
+    /// apart, so the binding tail is shared with `parse_var_binding`.
+    fn parse_curried_sig_or_binding(&mut self, is_pub: bool) -> Result<ast::Item, ParseError> {
+        let start = self.current().span.start;
+        let name = self.parse_ident()?;
+        self.expect(&crate::lexer::TokenKind::Colon, "`:` after the name")?;
+        let (ty, ty_span) = self.parse_signature_type()?;
+
+        if self.check(&crate::lexer::TokenKind::Assign) {
+            // `x: int = 42` — variable bindings keep their flag-off shape
+            // in flag-on files (D2 switches only the *function* form).
+            let mut binding = self.finish_var_binding(name, Some(ty), start)?;
+            binding.is_pub = is_pub;
+            return Ok(ast::Item::Decl(ast::Decl::Var(binding)));
+        }
+
+        // Signature line (no modifiers reached this path — plain `pub` at
+        // most). `finish_curried_signature` rejects a non-function type
+        // (D3): in a flag-on file the bare `name : type` production *is*
+        // the signature, so there is no other reading of the line.
+        self.finish_curried_signature(name, ty, ty_span, is_pub, SignatureModifiers::none(), start)
+    }
+
+    /// Complete a signature whose modifiers were already consumed (by
+    /// `parse_curried_signature` for the `modifier name : type` shape, by
+    /// `parse_curried_sig_or_binding` for the plain shape) — split out so
+    /// the node construction stays in one place.
+    fn finish_curried_signature(
+        &mut self,
+        name: String,
+        ty: ast::Type,
+        ty_span: crate::lexer::Span,
+        is_pub: bool,
+        mods: SignatureModifiers,
+        start: u32,
+    ) -> Result<ast::Item, ParseError> {
+        if !matches!(ty, ast::Type::Func(..)) {
+            return Err(ParseError {
+                kind: ParseErrorKind::SignatureNeedsFunctionType {
+                    found: ty.to_string(),
+                },
+                span: ty_span,
+            });
+        }
+        let sig = ast::CurriedSignature {
+            name,
+            ty,
+            is_pub,
+            is_async: mods.is_async,
+            is_unsafe: mods.is_unsafe,
+            is_trusted: mods.is_trusted,
+            span: self.span(start, self.prev_span_end()),
+        };
+        // Single-line only (D3): the ASI pass inserts the zero-width `Semi`
+        // at the newline (or EOF); a trailing `;` is tolerated, as with
+        // `func` declarations' optional trailing semicolon.
+        let _ = self.matches(&crate::lexer::TokenKind::Semi);
+        Ok(ast::Item::Decl(ast::Decl::CurriedSignature(sig)))
+    }
+
+    /// 0.0.8 T02 (D2): the body line `ident ( params ) ( block | = expr )`.
+    /// Parameter names are bare identifiers (keyword-protected, as with
+    /// `func` parameters); duplicates are rejected here (the card's choice —
+    /// parse, not resolve). The body is a normal function body.
+    fn parse_curried_body(&mut self) -> Result<ast::CurriedBody, ParseError> {
+        let start = self.current().span.start;
+        let name = self.parse_ident()?;
+
+        self.expect(&crate::lexer::TokenKind::LParen, "`(` after the body name")?;
+
+        let mut params: Vec<ast::CurriedParam> = Vec::new();
+        if !self.check(&crate::lexer::TokenKind::RParen) {
+            loop {
+                let param_start = self.current().span.start;
+                let param_name = self.parse_ident()?;
+                let param_span = self.span(param_start, self.prev_span_end());
+                if params.iter().any(|p| p.name == param_name) {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::DuplicateParam { name: param_name },
+                        span: param_span,
+                    });
+                }
+                params.push(ast::CurriedParam {
+                    name: param_name,
+                    span: param_span,
+                });
+                if !self.matches(&crate::lexer::TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(
+            &crate::lexer::TokenKind::RParen,
+            "`)` after the body parameters",
+        )?;
+
+        let body = if self.matches(&crate::lexer::TokenKind::Assign) {
+            // Single-expression body: `add(a, b) = a + b` — same shape as
+            // the `func` single-line form (no trailing semicolon required).
+            let expr = self.parse_expr()?;
+            let _ = self.matches(&crate::lexer::TokenKind::Semi);
+            ast::FuncBody::SingleExpr(Box::new(expr))
+        } else {
+            ast::FuncBody::Block(self.parse_block()?)
+        };
+        // The ASI pass may insert a `Semi` after the closing `}` when
+        // another statement follows (or at EOF); optional, as with `func`.
+        let _ = self.matches(&crate::lexer::TokenKind::Semi);
+
+        let end = self.prev_span_end();
+        Ok(ast::CurriedBody {
+            name,
+            params,
+            body,
+            span: self.span(start, end),
+        })
+    }
+
+    /// Lookahead for the curried body line (0.0.8 T02, D2): the current
+    /// `ident`'s next token is `(`. A body line is `ident ( params )` whose
+    /// *matching* `)` is followed by `{` or `=` — a top-level call
+    /// statement (`f(1);`) or a call assignment is not. Scans to the
+    /// matching close paren (nesting-aware: call args may nest calls and
+    /// parenthesized expressions); EOF before it closes means no.
+    fn curried_body_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.pos + 1; // at the `(` after the name
+        while let Some(token) = self.tokens.get(i) {
+            match &token.kind {
+                crate::lexer::TokenKind::LParen => depth += 1,
+                crate::lexer::TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(i + 1).map(|t| &t.kind),
+                            Some(crate::lexer::TokenKind::LBrace)
+                                | Some(crate::lexer::TokenKind::Assign)
+                        );
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Parse a function declaration.
     fn parse_func_decl(&mut self) -> Result<ast::FuncDecl, ParseError> {
         let start = self.current().span.start;
@@ -780,18 +1236,9 @@ impl Parser {
         // `async`/`unsafe`/`trusted` order is free (`async unsafe func` and
         // `unsafe async func` are the same declaration state — D3/T04); the
         // flags are consumed by typeck's unsafe-context tracking (T03).
-        let mut is_async = false;
-        let mut is_unsafe = false;
-        let mut is_trusted = false;
-        loop {
-            match self.current_kind() {
-                crate::lexer::TokenKind::Async if !is_async => is_async = true,
-                crate::lexer::TokenKind::Unsafe if !is_unsafe => is_unsafe = true,
-                crate::lexer::TokenKind::Trusted if !is_trusted => is_trusted = true,
-                _ => break,
-            }
-            self.advance();
-        }
+        // 0.0.8 T02: the same run (extracted) serves the curried signature
+        // line — `parse_modifiers` keeps the order/repeat rules in one place.
+        let mods = self.parse_modifiers();
 
         self.expect(&crate::lexer::TokenKind::Func, "`func`")?;
 
@@ -841,9 +1288,9 @@ impl Parser {
             body,
             span: self.span(start, end),
             is_pub: false,
-            is_async,
-            is_unsafe,
-            is_trusted,
+            is_async: mods.is_async,
+            is_unsafe: mods.is_unsafe,
+            is_trusted: mods.is_trusted,
         })
     }
 
@@ -1129,12 +1576,54 @@ impl Parser {
                 return Err(self.err_expected_stmt_end());
             }
 
+            // 0.0.8 T01 (D1): `#` inside a block body is the same misplaced
+            // directive as at top level after the first item — rejected like
+            // `pub` below, with the dedicated diagnostic.
+            if self.check(&crate::lexer::TokenKind::Hash) {
+                return Err(self.err_feature_misplaced());
+            }
+
             // `pub` is a top-level-only modifier (0.0.3 V05, PLAN D6).
             if self.check(&crate::lexer::TokenKind::Pub) {
                 return Err(ParseError {
                     kind: ParseErrorKind::PubNotAllowedHere,
                     span: self.current().span,
                 });
+            }
+
+            // 0.0.8 T02 (D2): in a `#feature curry` file the legacy `func`
+            // form is forbidden everywhere — nested declarations included —
+            // and the two-part form is top-level only (declarations inside
+            // blocks are top-level-only anyway, as with `struct`/`enum`).
+            if self.features.curry {
+                if self.check(&crate::lexer::TokenKind::Func) {
+                    return Err(self.err_func_form_forbidden());
+                }
+                if self.check(&crate::lexer::TokenKind::Async)
+                    || self.check(&crate::lexer::TokenKind::Unsafe)
+                    || self.check(&crate::lexer::TokenKind::Trusted)
+                {
+                    if matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Func)) {
+                        return Err(self.err_func_form_forbidden());
+                    }
+                    if matches!(self.peek_kind(1), Some(crate::lexer::TokenKind::Ident(_)))
+                        && matches!(self.peek_kind(2), Some(crate::lexer::TokenKind::Colon))
+                    {
+                        // A two-part *signature* line inside a block —
+                        // declarations are top-level only (D2), as with
+                        // `struct`/`enum` above.
+                        return Err(ParseError {
+                            kind: ParseErrorKind::Expected {
+                                expected: "statement (two-part curried \
+                                           declarations are only allowed at \
+                                           the top level)"
+                                    .to_string(),
+                                found: self.current().kind.clone(),
+                            },
+                            span: self.current().span,
+                        });
+                    }
+                }
             }
 
             // Check for declaration

@@ -6,10 +6,93 @@
 use crate::lexer::{Span, TokenKind};
 use std::fmt;
 
+/// A feature name a `#feature` directive may name (0.0.8 T01, D1).
+///
+/// `curry` is the only registered feature in 0.0.8; adding a second feature
+/// later is additive — a new variant here, an arm in
+/// [`FeatureSet::enable`], new gates where its effects live — and never a
+/// syntax change to the directive itself. The enum (not a bare `&str`) keeps
+/// the registered set, the spellings, and the per-feature effects from
+/// drifting apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// `#feature curry` (0.0.8): the curried two-part declaration form and
+    /// implicit partial application.
+    Curry,
+}
+
+impl Feature {
+    /// Every registered feature, in registration order (drives the
+    /// `UnknownFeature` diagnostic's registered-features list).
+    pub const KNOWN: &'static [Feature] = &[Feature::Curry];
+
+    /// The feature named by `name`, or `None` if it is not registered. The
+    /// parser rejects an unknown name as a hard error (`UnknownFeature`) —
+    /// a typoed feature must fail loudly, never be ignored.
+    pub fn from_name(name: &str) -> Option<Feature> {
+        match name {
+            "curry" => Some(Feature::Curry),
+            _ => None,
+        }
+    }
+
+    /// The source spelling of the feature.
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::Curry => "curry",
+        }
+    }
+}
+
+impl fmt::Display for Feature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Per-file feature set (0.0.8 T01, D1): which `#feature` directives the
+/// file's header region declared.
+///
+/// The directive is unconditional grammar — the *effects* of a feature are
+/// gated per file. The parser collects the set while parsing the header
+/// region (the directive always precedes every item, so no pre-scan is
+/// needed) and records it on [`Ast::features`]; later compiler stages consult
+/// the current file's set through the `FileId → FeatureSet` table built from
+/// the parse results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FeatureSet {
+    /// `#feature curry` (0.0.8): the file opted into the curried two-part
+    /// declaration form and implicit partial application.
+    pub curry: bool,
+}
+
+impl FeatureSet {
+    /// Record the feature into the set. The parser only calls this with a
+    /// [`Feature`] it resolved from a directive; the exhaustive match makes
+    /// adding a feature a compile error until its storage is added, so the
+    /// registered names and the recorded effects cannot drift apart.
+    pub fn enable(&mut self, feature: Feature) {
+        match feature {
+            Feature::Curry => self.curry = true,
+        }
+    }
+
+    /// Whether `feature` was recorded in the set — the duplicate-directive
+    /// check in the header region queries this before enabling.
+    pub fn contains(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::Curry => self.curry,
+        }
+    }
+}
+
 /// Top-level program.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ast {
     pub items: Vec<Item>,
+    /// The file's `#feature` set (0.0.8 T01, D1) — empty (`default`) when
+    /// the file carries no directive (every pre-0.0.8 file).
+    pub features: FeatureSet,
     pub span: Span,
 }
 
@@ -36,6 +119,12 @@ pub struct ImportDecl {
 pub enum Decl {
     /// `func add(a: int, b: int): int = a + b`
     Func(FuncDecl),
+    /// Signature half of the two-part curried declaration (0.0.8 T02, D2):
+    /// `add: (int, int) -> int` — recognized only in a `#feature curry` file.
+    CurriedSignature(CurriedSignature),
+    /// Body half of the two-part curried declaration (0.0.8 T02, D2):
+    /// `add(a, b) { a + b }` — recognized only in a `#feature curry` file.
+    CurriedBody(CurriedBody),
     /// `x: int = 42;` or `x = 42;`
     Var(VarBinding),
     /// `const y: int = 42;`
@@ -121,6 +210,52 @@ pub struct FuncDecl {
 pub struct Param {
     pub name: String,
     pub ty: Type,
+    pub span: Span,
+}
+
+/// Signature half of a two-part curried declaration (0.0.8 T02, D2):
+/// `[pub] [modifier] name : type` — the interface half. The type must be a
+/// function type (`SignatureNeedsFunctionType` otherwise); the arrow-chain
+/// notation itself lands with T03, so today the function type is spelled in
+/// the legacy tuple form `(int, int) -> int` (and `() -> int` for zero
+/// parameters).
+///
+/// The modifiers and `pub` are interface properties, so they live on this
+/// half (D3); the parser rejects them on the body line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurriedSignature {
+    pub name: String,
+    /// The declared type — always `Type::Func` (enforced at parse time).
+    pub ty: Type,
+    pub span: Span,
+    /// Whether the signature was prefixed with `pub` (0.0.3 V05 shape).
+    pub is_pub: bool,
+    /// `async` modifier (D3): the caller sees `Future<T>`, as with `func`.
+    pub is_async: bool,
+    /// `unsafe` modifier (D3), as with `func`.
+    pub is_unsafe: bool,
+    /// `trusted` modifier (D3), as with `func`.
+    pub is_trusted: bool,
+}
+
+/// One parameter name on the body half of a two-part curried declaration
+/// (0.0.8 T02). The T02 card sketched `Vec<String>`; the span is carried so
+/// the duplicate-parameter diagnostic can point at the second occurrence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurriedParam {
+    pub name: String,
+    pub span: Span,
+}
+
+/// Body half of a two-part curried declaration (0.0.8 T02, D2):
+/// `name ( params ) ( block | = expr )` — the parameter names live here, the
+/// types live on the signature half. The body is a normal function body in
+/// every other respect (ASI, last-expression return, `?`, `await`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurriedBody {
+    pub name: String,
+    pub params: Vec<CurriedParam>,
+    pub body: FuncBody,
     pub span: Span,
 }
 
