@@ -3339,3 +3339,21 @@ fn param_annotation_resolves_ambiguous_none_t04() {
          func f(): int {\n    y: Option<int> = Option.None;\n    0\n}",
     );
 }
+
+#[test]
+fn func_type_name_with_curry_spelling_renders_chains_t03() {
+    // 0.0.8 T03 (D4): `name_with(true)` renders function types as
+    // right-associative arrow chains; `name_with(false)` is `name()` — the
+    // tuple spelling every existing error text uses.
+    use crate::typeck::typed_hir::Type as T;
+    let int = || T::Int;
+    let two_arg = T::Func(vec![int(), int()], Box::new(int()));
+    assert_eq!(two_arg.name_with(true), "int -> int -> int");
+    assert_eq!(two_arg.name_with(false), two_arg.name());
+
+    let zero_arg = T::Func(Vec::new(), Box::new(int()));
+    assert_eq!(zero_arg.name_with(true), "() -> int");
+
+    let higher_order = T::Func(vec![T::Func(vec![int()], Box::new(int()))], Box::new(int()));
+    assert_eq!(higher_order.name_with(true), "(int -> int) -> int");
+}

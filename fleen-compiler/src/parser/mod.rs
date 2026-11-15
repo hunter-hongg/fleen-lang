@@ -110,6 +110,23 @@ pub fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
     parser.parse_program()
 }
 
+/// Canonicalize the return side of an arrow into a parameter chain
+/// (0.0.8 T03, D4): `a -> (b -> c)` becomes `Func([a, b], c)` — the arrow
+/// chain is parse sugar over one flat `Type::Func`, never representational
+/// currying. The merge only takes a return-side `Func` that itself carries
+/// parameters: a zero-parameter function `() -> T` is a genuine function
+/// *value* (`f: int -> (() -> int)` is a unary function over functions),
+/// never a segment of the enclosing chain, so it stays nested.
+fn merge_arrow_return(mut params: Vec<ast::Type>, ret: ast::Type) -> ast::Type {
+    match ret {
+        ast::Type::Func(mut rest, r) if !rest.is_empty() => {
+            params.append(&mut rest);
+            ast::Type::Func(params, r)
+        }
+        other => ast::Type::Func(params, Box::new(other)),
+    }
+}
+
 /// Recursive descent parser with precedence climbing for expressions.
 pub struct Parser {
     tokens: Vec<Token>,
@@ -1116,7 +1133,9 @@ impl Parser {
         if !matches!(ty, ast::Type::Func(..)) {
             return Err(ParseError {
                 kind: ParseErrorKind::SignatureNeedsFunctionType {
-                    found: ty.to_string(),
+                    // 0.0.8 T03 (D4): render in the file's spelling — a
+                    // flag-on file sees the arrow-chain form.
+                    found: ty.render(self.features.curry),
                 },
                 span: ty_span,
             });
@@ -1396,6 +1415,12 @@ impl Parser {
     }
 
     /// Parse a type annotation.
+    ///
+    /// Type positions are shared: signature lines, parameter types, return
+    /// types, binding annotations, `as` casts, type-guard patterns, and type
+    /// arguments all route here. The 0.0.8 T03 arrow chain therefore covers
+    /// every type position of a flag-on file — intentional, and ambiguity-
+    /// free, because `->` has no expression-level meaning.
     fn parse_type(&mut self) -> Result<ast::Type, ParseError> {
         // 0.0.4 F3: `Future<T>` — the async coroutine type. `Future` is *not*
         // a reserved word (0.0.4 reserves only `async`/`await`/`channel`), so
@@ -1410,7 +1435,10 @@ impl Parser {
             self.expect(&crate::lexer::TokenKind::Lt, "`<` in Future type")?;
             let inner = self.parse_type()?;
             self.expect(&crate::lexer::TokenKind::Gt, "`>` in Future type")?;
-            return Ok(ast::Type::Future(Box::new(inner)));
+            // T03: the Future branch must run the arrow-chain tail too —
+            // `Future<int> -> int` (a unary function taking a future) is
+            // otherwise left with an unconsumed `->`.
+            return self.finish_arrow_chain(ast::Type::Future(Box::new(inner)));
         }
 
         let ty = match self.current_kind() {
@@ -1470,7 +1498,22 @@ impl Parser {
                 self.expect(&crate::lexer::TokenKind::RParen, "`)` in function type")?;
                 self.expect(&crate::lexer::TokenKind::Arrow, "`->` in function type")?;
                 let ret = self.parse_type()?;
-                ast::Type::Func(params, Box::new(ret))
+                // 0.0.8 T03 (D4): a flag-on file canonicalizes the arrow's
+                // return side into the param chain — `(int, int) -> (int) ->
+                // int` is the same type as `(int, int) -> int -> int` (D4:
+                // two spellings, one canonical form, so the legacy sugar
+                // merges its return side exactly like the chain tail does).
+                // A flag-off file keeps the pre-0.0.8 nesting byte-identical
+                // (D16: shared path, no flag-off behavior change). An empty
+                // param list never absorbs the return function (`() -> unit
+                // -> int` is a zero-arg function returning a unary
+                // function), and the merge itself skips zero-parameter
+                // return functions — see `merge_arrow_return`.
+                if !self.features.curry || params.is_empty() {
+                    ast::Type::Func(params, Box::new(ret))
+                } else {
+                    merge_arrow_return(params, ret)
+                }
             }
             crate::lexer::TokenKind::LBracket => {
                 // Array type: [T]
@@ -1540,7 +1583,23 @@ impl Parser {
             }
         };
 
-        Ok(ty)
+        self.finish_arrow_chain(ty)
+    }
+
+    /// 0.0.8 T03 (D4): the arrow chain tail of a type —
+    /// `arrow_type = func_atom , "->" , arrow_type`, right-associative,
+    /// accepted only in a `#feature curry` file. `int -> int -> int` parses
+    /// as `int -> (int -> int)` and both spellings canonicalize to the same
+    /// flat `Type::Func([int, int], int)` (the chain is parse sugar over one
+    /// `Type::Func` — no representational currying, D4). A flag-off file
+    /// never enters the branch, so a stray `->` keeps today's parse error.
+    fn finish_arrow_chain(&mut self, atom: ast::Type) -> Result<ast::Type, ParseError> {
+        if !self.features.curry || !self.check(&crate::lexer::TokenKind::Arrow) {
+            return Ok(atom);
+        }
+        self.advance();
+        let ret = self.parse_type()?;
+        Ok(merge_arrow_return(vec![atom], ret))
     }
 
     /// Parse a block: `{ stmt* expr? }`

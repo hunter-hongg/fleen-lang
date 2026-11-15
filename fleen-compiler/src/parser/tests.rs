@@ -2931,4 +2931,282 @@ func main() {
         );
         assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
+
+    // ---- 0.0.8 T03 (D4): curried arrow function types in type positions ----
+
+    /// Helper: parse a flag-on file and return the type of the curried
+    /// signature named `name`.
+    fn curried_sig_type(src: &str, name: &str) -> Type {
+        let ast = parse_str(src);
+        for item in &ast.items {
+            if let Item::Decl(Decl::CurriedSignature(sig)) = item
+                && sig.name == name
+            {
+                return sig.ty.clone();
+            }
+        }
+        panic!("no curried signature named `{name}`");
+    }
+
+    #[test]
+    fn arrow_chain_right_associates_and_flattens() {
+        // `int -> int -> int` parses as `int -> (int -> int)`; both spellings
+        // canonicalize to one flat `Type::Func([int, int], int)` (D4 — parse
+        // sugar, no representational currying).
+        let ty = curried_sig_type("#feature curry\nadd: int -> int -> int\n", "add");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Base(BaseType::Int), Type::Base(BaseType::Int)],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+    }
+
+    #[test]
+    fn single_arrow_type_canonicalizes() {
+        let ty = curried_sig_type("#feature curry\ninc: int -> int\n", "inc");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Base(BaseType::Int)],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+    }
+
+    #[test]
+    fn three_deep_arrow_chain_flattens() {
+        let ty = curried_sig_type("#feature curry\nf: int -> int -> int -> int\n", "f");
+        let int = || Type::Base(BaseType::Int);
+        assert_eq!(ty, Type::Func(vec![int(), int(), int()], Box::new(int())));
+    }
+
+    #[test]
+    fn tuple_sugar_and_arrow_chain_agree() {
+        // `(int, int) -> int` (sugar) and `int -> int -> int` (chain) are the
+        // same canonical type (D4 — the 0.0.7 dual-spelling precedent).
+        let sugar = curried_sig_type("#feature curry\na: (int, int) -> int\n", "a");
+        let chain = curried_sig_type("#feature curry\nb: int -> int -> int\n", "b");
+        assert_eq!(sugar, chain);
+    }
+
+    #[test]
+    fn zero_param_arrow_type_is_empty_param_list() {
+        let ty = curried_sig_type("#feature curry\nping: () -> int\n", "ping");
+        assert_eq!(
+            ty,
+            Type::Func(Vec::new(), Box::new(Type::Base(BaseType::Int)))
+        );
+    }
+
+    #[test]
+    fn unit_arrow_type_is_unary_over_unit() {
+        let ty = curried_sig_type("#feature curry\nwrap: unit -> int\n", "wrap");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Base(BaseType::Unit)],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+    }
+
+    #[test]
+    fn grouped_arrow_param_stays_nested() {
+        // `(int -> int) -> int` is a genuine higher-order type — a param-side
+        // function never merges into the chain.
+        let ty = curried_sig_type("#feature curry\napply: (int -> int) -> int\n", "apply");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Func(
+                    vec![Type::Base(BaseType::Int)],
+                    Box::new(Type::Base(BaseType::Int))
+                )],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+    }
+
+    #[test]
+    fn grouped_zero_param_return_stays_nested() {
+        // `int -> () -> int` is a unary function over zero-arg functions —
+        // a zero-parameter return function never merges into the chain.
+        // (Ret-side grouping parens stay reserved: a `(` group still demands
+        // its `->`, per the no-carve-out posture — the chain spelling is the
+        // way to write it.)
+        let ty = curried_sig_type("#feature curry\nf: int -> () -> int\n", "f");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Base(BaseType::Int)],
+                Box::new(Type::Func(Vec::new(), Box::new(Type::Base(BaseType::Int))))
+            )
+        );
+    }
+
+    #[test]
+    fn zero_param_head_does_not_absorb_the_return_chain() {
+        // `() -> unit -> int` is a zero-arg function returning a unary
+        // function — the empty head never absorbs the return side.
+        let ty = curried_sig_type("#feature curry\nf: () -> unit -> int\n", "f");
+        assert_eq!(
+            ty,
+            Type::Func(
+                Vec::new(),
+                Box::new(Type::Func(
+                    vec![Type::Base(BaseType::Unit)],
+                    Box::new(Type::Base(BaseType::Int))
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn future_return_type_chains() {
+        // `Future<int> -> int` — a unary function taking a future (the
+        // `Future<T>` constructor path must run the chain tail too).
+        let ty = curried_sig_type("#feature curry\npoll: Future<int> -> int\n", "poll");
+        assert_eq!(
+            ty,
+            Type::Func(
+                vec![Type::Future(Box::new(Type::Base(BaseType::Int)))],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+    }
+
+    #[test]
+    fn arrow_chain_in_binding_annotation() {
+        // Binding annotations are a type position: `f: int -> int = inc` in
+        // a flag-on file binds a function value with the chain spelling.
+        let ast = parse_str(
+            "#feature curry\n\
+             inc: int -> int\n\
+             inc(n) { n + 1 }\n\
+             f: int -> int = inc;\n",
+        );
+        let Item::Decl(Decl::Var(binding)) = &ast.items[2] else {
+            panic!("expected a variable binding, got {:?}", ast.items[2]);
+        };
+        assert_eq!(
+            binding.ty,
+            Some(Type::Func(
+                vec![Type::Base(BaseType::Int)],
+                Box::new(Type::Base(BaseType::Int))
+            ))
+        );
+    }
+
+    #[test]
+    fn arrow_chain_in_func_param_type_is_flag_off_error() {
+        // Flag-off: the arrow chain is not a type production — the stray
+        // `->` after the param type breaks the parameter list.
+        let err = parse_err("func g(f: int -> int): int = 1\n");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn orphan_arrow_in_type_position_is_rejected() {
+        // A chain needs at least one atom before the first arrow.
+        let err = parse_err("#feature curry\nadd: -> int\n");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn empty_chain_tail_is_rejected() {
+        // `int ->` with nothing after the arrow: the return-side parse hits
+        // the ASI-inserted `Semi` and fails.
+        let err = parse_err("#feature curry\nadd: int ->\nadd(a) { a }\n");
+        // No ASI carve-out (D3): `->` cannot end a statement, so the tokens
+        // join across the newline (`int -> add`) and the statement-boundary
+        // guard reports the leftover `{`.
+        assert!(matches!(
+            err.kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn bare_unit_parens_without_arrow_are_rejected() {
+        // `()` is the empty parameter list *only* when immediately followed
+        // by `->` (D4); as a standalone type it stays an error — the unit
+        // type is spelled `unit`.
+        let err = parse_err("#feature curry\nx: () = 1\n");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn legacy_sugar_merges_function_typed_return_only_in_flag_on_files() {
+        // D4: two spellings, one canonical form — in a flag-on file the
+        // legacy tuple spelling is sugar for the chain, so a function-typed
+        // return side merges too: `(int, int) -> (int) -> int` and
+        // `(int, int) -> int -> int` both canonicalize to the same flat
+        // `Type::Func([int, int, int], int)`.
+        let nested_sugar = curried_sig_type("#feature curry\nf: (int, int) -> (int) -> int\n", "f");
+        let sugar_chain = curried_sig_type("#feature curry\nf: (int, int) -> int -> int\n", "f");
+        assert_eq!(
+            nested_sugar,
+            Type::Func(
+                vec![
+                    Type::Base(BaseType::Int),
+                    Type::Base(BaseType::Int),
+                    Type::Base(BaseType::Int),
+                ],
+                Box::new(Type::Base(BaseType::Int))
+            )
+        );
+        assert_eq!(nested_sugar, sugar_chain);
+    }
+
+    #[test]
+    fn flag_off_keeps_pre_0_0_8_nested_function_typed_return() {
+        // D16 regression: in a flag-off file the legacy tuple spelling must
+        // keep today's nesting — `(int) -> (int) -> int` is a 1-arg function
+        // returning a 1-arg function, never flattened into a 2-arg chain.
+        let ast = parse_str("func apply(f: (int) -> (int) -> int): int = 1\n");
+        let Item::Decl(Decl::Func(f)) = &ast.items[0] else {
+            panic!("expected Func decl, got {:?}", ast.items[0]);
+        };
+        assert_eq!(
+            f.params[0].ty,
+            Type::Func(
+                vec![Type::Base(BaseType::Int)],
+                Box::new(Type::Func(
+                    vec![Type::Base(BaseType::Int)],
+                    Box::new(Type::Base(BaseType::Int))
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn type_rendering_follows_the_file_flag() {
+        use crate::parser::ast::Type as T;
+        let b = |t: BaseType| T::Base(t);
+        let two_arg = T::Func(
+            vec![b(BaseType::Int), b(BaseType::Int)],
+            Box::new(b(BaseType::Int)),
+        );
+        // Flag-off keeps the tuple spelling (Display — existing error text).
+        assert_eq!(two_arg.render(false), two_arg.to_string());
+        // Flag-on renders the right-associative chain (D4).
+        assert_eq!(two_arg.render(true), "int -> int -> int");
+
+        let zero_arg = T::Func(Vec::new(), Box::new(b(BaseType::Int)));
+        assert_eq!(zero_arg.render(true), "() -> int");
+
+        let higher_order = T::Func(
+            vec![T::Func(vec![b(BaseType::Int)], Box::new(b(BaseType::Int)))],
+            Box::new(b(BaseType::Int)),
+        );
+        assert_eq!(higher_order.render(true), "(int -> int) -> int");
+
+        let nested_return = T::Func(
+            vec![b(BaseType::Int)],
+            Box::new(T::Func(Vec::new(), Box::new(b(BaseType::Int)))),
+        );
+        assert_eq!(nested_return.render(true), "int -> (() -> int)");
+    }
 }

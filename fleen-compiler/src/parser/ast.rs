@@ -329,6 +329,75 @@ pub enum Type {
     },
 }
 
+impl Type {
+    /// Render this type with the spelling the file's feature flag selects
+    /// (0.0.8 T03, D4): a `#feature curry` file renders function types as
+    /// right-associative arrow chains (`int -> int -> int`), a flag-off file
+    /// keeps the tuple spelling (`Display`, `(int, int) -> int`). Only the
+    /// spelling differs — both canonicalize to the same `Type::Func` (D4).
+    ///
+    /// `curry = false` is byte-identical to `Display`, so every existing
+    /// error text is unchanged; the curry spelling is opt-in at each
+    /// rendering site.
+    ///
+    /// Mirrors `typeck::Type::name_with` (typeck/typed_hir.rs) — the parser
+    /// and typeck carry distinct IR types, so the two spellings are kept in
+    /// step by hand; change both together.
+    pub fn render(&self, curry: bool) -> String {
+        if !curry {
+            return self.to_string();
+        }
+        match self {
+            Type::Func(params, ret) => {
+                let ret_atom = ret.render_func_atom();
+                if params.is_empty() {
+                    // Zero-parameter function: the explicit empty parameter
+                    // list is the only spelling (D4) — never `unit -> int`,
+                    // which is a unary function *over* `unit`.
+                    format!("() -> {}", ret_atom)
+                } else {
+                    let ps: Vec<String> = params.iter().map(|p| p.render_func_atom()).collect();
+                    format!("{} -> {}", ps.join(" -> "), ret_atom)
+                }
+            }
+            // Containers render their inner types with the same spelling so
+            // a nested chain reads uniformly (`Result[int -> int, string]`).
+            // The hardcoded `true` is safe: this arm is only reachable when
+            // the `curry = false` early return above did not fire, so the
+            // curry spelling is already the selected one.
+            Type::Array(t) => format!("[{}]", t.render(true)),
+            Type::Box(t) => format!("box<{}>", t.render(true)),
+            Type::Ref(t) => format!("ref {}", t.render(true)),
+            Type::Result(ok, err) => {
+                format!("Result[{}, {}]", ok.render(true), err.render(true))
+            }
+            Type::Future(t) => format!("Future<{}>", t.render(true)),
+            Type::Channel(t) => format!("channel<{}>", t.render(true)),
+            Type::Ptr(t) => format!("ptr<{}>", t.render(true)),
+            Type::Named { name, args, .. } => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let a: Vec<String> = args.iter().map(|t| t.render(true)).collect();
+                    format!("{name}<{}>", a.join(", "))
+                }
+            }
+            // `Base` / `Range` have one spelling either way.
+            other => other.to_string(),
+        }
+    }
+
+    /// Render as an atom of an arrow chain: a function type needs
+    /// parentheses in parameter/return position (`(int -> int) -> int`),
+    /// every other type renders bare.
+    fn render_func_atom(&self) -> String {
+        match self {
+            Type::Func(..) => format!("({})", self.render(true)),
+            _ => self.render(true),
+        }
+    }
+}
+
 /// Base types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BaseType {

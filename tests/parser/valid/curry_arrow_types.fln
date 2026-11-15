@@ -1,0 +1,18 @@
+#feature curry
+add: int -> int -> int
+add(a, b) { a + b }
+inc: int -> int
+inc(n) { n + 1 }
+ping: () -> int
+ping() { 42 }
+wrap: unit -> int
+wrap(u) { 7 }
+apply: (int -> int) -> int -> int
+apply(f, x) { f(x) }
+sugar: (int, int) -> int
+sugar(a, b) { a + b }
+poll: Future<int> -> int
+poll(f) { 1 }
+f: int -> int = inc;
+g: int -> () -> int
+g(n) { ping() }

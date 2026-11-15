@@ -4,8 +4,9 @@
 > with tests.  Decisions D1–D16 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T02 implemented and green (parser-level; T02's entry-wiring
-> verification carried into T04); T03–T11 open.**
+> **Status: T01–T03 implemented and green (parser-level; T02's entry-wiring
+> verification carried into T04; T03's typeck rendering wiring carried into
+> T05); T04–T11 open.**
 > **Posture reminder**: this release must stay non-breaking additive (PLAN
 > D16).  Every card that touches a shared path (parser, typeck, lower,
 > codegen) must keep flag-off behavior byte-identical; the e2e suite runs
@@ -90,26 +91,69 @@
 
 ## T03 — Parser: curried arrow function types in type positions (F3; D4)
 
-- [ ] `arrow_type = func_atom , "->" , arrow_type` — right-associative,
+- [x] `arrow_type = func_atom , "->" , arrow_type` — right-associative,
       ≥ 1 arrow, accepted in type positions (signature lines, parameter
       types, return types, binding annotations) only in flag-on files.
       `int -> int -> int` parses as `int -> (int -> int)`; both
       canonicalize to `Type::Func([int, int], int)`.
-- [ ] Zero-parameter form: `() -> int` — the `()` atom immediately
+      **Implementation**: `parse_type` ends in `finish_arrow_chain` (the
+      flag-gated chain tail; `parse_type` is the shared type-position
+      parser, so every type position — signature lines, param types,
+      return types, binding annotations, type guards, type args — accepts
+      the chain; `->` has no expression-level meaning, so this is
+      ambiguity-free). Canonicalization is `merge_arrow_return`: the
+      return-side `Func` merges into the param chain only when it carries
+      ≥ 1 parameters — a zero-parameter return function is a genuine
+      function value and stays nested (`int -> () -> int` is unary over
+      zero-arg functions), and an empty head never absorbs the return side
+      (`() -> unit -> int` stays a zero-arg function returning a unary
+      function). Param-side functions never merge (`(int -> int) -> int`
+      stays higher-order). The `Future<T>` constructor branch runs the
+      chain tail too (`Future<int> -> int`). The legacy `(`-branch applies
+      the same merge **only in flag-on files** — flag-off keeps the
+      pre-0.0.8 nesting byte-identical (D16).
+- [x] Zero-parameter form: `() -> int` — the `()` atom immediately
       followed by `->` is the empty parameter list; `unit -> int` is a
       unary function over `unit`. Grouping parens: `(int -> int) -> int`.
-- [ ] Legacy tuple spelling `(int, int) -> int` stays legal in flag-on
+      (Ret-side grouping parens stay reserved — a `(` group still demands
+      its `->`, per the no-carve-out posture; the chain spelling is the way
+      to write `int -> () -> int`.)
+- [x] Legacy tuple spelling `(int, int) -> int` stays legal in flag-on
       files (sugar, same canonical type — D4); in flag-off files the arrow
       chain is not a type production (a stray `->` remains today's parse
-      error).
-- [ ] Diagnostics: type rendering picks the spelling per the *file's* flag
-      — flag-on renders `int -> int -> int`, flag-off keeps
-      `(int, int) -> int`. Error-text fixtures are per-mode (T09).
-- [ ] Tests: parser valid (1/2/3-deep chains, right-assoc, `() -> int`,
+      error). In a flag-on file the sugar's function-typed *return* side
+      merges too — `(int, int) -> (int) -> int` ≡ `(int, int) -> int -> int`
+      ≡ `Type::Func([int, int, int], int)` (D4: two spellings, one
+      canonical form); in flag-off files the legacy nesting is unchanged
+      (`(int) -> (int) -> int` stays a 1-arg function returning a 1-arg
+      function).
+- [x] Diagnostics: type rendering picks the spelling per the *file's* flag
+      — flag-on renders `int -> int -> int`, flag-off keeps the tuple
+      spelling (the pre-0.0.8 `Display` text — note `Display` emits a
+      trailing comma: `(int, int,) -> int`; `render(false)` is
+      byte-identical to it, which is what the posture requires).
+      Error-text fixtures are per-mode (T09).
+      **Implementation**: `ast::Type::render(curry)` and
+      `typeck::Type::name_with(curry)` (flag-off byte-identical to
+      `Display` / `name()`); the parser's `SignatureNeedsFunctionType`
+      already renders in the file's spelling. The typeck call-site wiring
+      (consulting the per-file feature table when building diagnostics)
+      lands with T05, whose card references this renderer.
+- [x] Tests: parser valid (1/2/3-deep chains, right-assoc, `() -> int`,
       `unit -> int`, grouped arrows, tuple sugar alongside); invalid
       (orphan `->`, `->` in a flag-off file's type position, empty chain,
       `()` not followed by `->` used as unit where a parameter list is
       required).
+      Unit tests: chain flatten/right-assoc, sugar ≡ chain, zero-param,
+      `unit ->`, grouped param nested, zero-param return nested,
+      zero-param head not absorbing the return chain, `Future<int> ->
+      int`, arrow in a binding annotation, flag-off stray `->`, orphan
+      `->`, empty chain tail (`ExpectedSemiOrNewStmt` — no ASI carve-out,
+      D3), bare `()`, render spellings (parser + typeck), flag-on legacy
+      sugar merges its function-typed return side, flag-off legacy nesting
+      unchanged (D16 regression). Fixtures:
+      `curry_arrow_types.fln` (valid), `curry_arrow_{flagoff,orphan,
+      empty_chain,unit_parens}.fln` + `.err` (invalid).
 
 **Depends on**: T01.
 **Refs**: PLAN §3.2, D4.

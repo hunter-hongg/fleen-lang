@@ -1,0 +1,3 @@
+#feature curry
+add: -> int
+add() { 1 }
