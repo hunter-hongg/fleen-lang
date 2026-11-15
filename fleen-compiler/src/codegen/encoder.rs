@@ -209,7 +209,7 @@ impl ConstPool {
 
 /// Single source of truth: MIR instruction → its bytecode opcode.
 fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
-    Ok(match kind {
+    let op = match kind {
         MirInstrKind::ConstInt(..) | MirInstrKind::ConstFloat(..) | MirInstrKind::ConstStr(..) => {
             Opcode::Const
         }
@@ -292,7 +292,16 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::EnumNew(..) => Opcode::EnumNew,
         MirInstrKind::EnumIs(_) => Opcode::EnumIs,
         MirInstrKind::EnumPayload(..) => Opcode::EnumPayload,
-    })
+        // 0.0.8 T06: partial application reaches MIR now; its bytecode
+        // encoding (`PartialApply` 0xCE, u8 operand) lands with T07 —
+        // reject loudly here instead of encoding an invented opcode.
+        MirInstrKind::PartialApply(_) => {
+            return Err(CodegenError {
+                message: "PartialApply bytecode encoding lands with 0.0.8 T07".to_string(),
+            });
+        }
+    };
+    Ok(op)
 }
 
 /// Opcode size of a MIR instruction (for offset pre-computation).

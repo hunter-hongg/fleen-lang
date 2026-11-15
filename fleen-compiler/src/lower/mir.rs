@@ -323,4 +323,12 @@ pub enum MirInstrKind {
     /// 0, min 1). Consumes the enum, like `UnwrapOk`. u32 = variant
     /// reference, u16 = payload index within the variant.
     EnumPayload(u32, u16),
+    // 0.0.8 T06: partial application (D13). Its bytecode encoding
+    // (`PartialApply` 0xCE, u8 operand) lands with T07 — codegen rejects
+    // the instruction loudly until then.
+    /// Capture the function value on top of the stack together with the
+    /// `k` argument values beneath it into a captured function value.
+    /// Stack effect: f a₁…aₖ → f' (delta −k, min k + 1). u8 = number of
+    /// arguments applied at this site.
+    PartialApply(u8),
 }

@@ -4,9 +4,10 @@
 > with tests.  Decisions D1–D16 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T05 implemented and green (parser-level for T01–T03; T02's
+> **Status: T01–T06 implemented and green (parser-level for T01–T03; T02's
 > entry-wiring verification done in T04; T03's typeck rendering wiring
-> landed with T05); T06–T11 open.**
+> landed with T05; T06's codegen gate errors loudly until T07);
+> T07–T11 open.**
 > **Posture reminder**: this release must stay non-breaking additive (PLAN
 > D16).  Every card that touches a shared path (parser, typeck, lower,
 > codegen) must keep flag-off behavior byte-identical; the e2e suite runs
@@ -313,23 +314,46 @@
 
 ## T06 — Lower: partial call reroute + inline-lowering exemption (F5; D8/D13)
 
-- [ ] A partial call (direct callee or function value) lowers to
+- [x] A partial call (direct callee or function value) lowers to
       `LoadFunc` (direct callee) / the callee expression (indirect) + the
       `k` arguments + `PartialApply k`. Full-arity calls lower exactly as
       today (`Call` / `CallValue`) — byte-identical for flag-off paths.
-- [ ] Inline-lowering reroute (D8): `range` / `range_from` (`MakeRange`)
+      **Implementation**: the T05 `UnsupportedFeature` guards (function
+      body + global init) are replaced by `lower_partial_call` and a
+      partial arm on the flat global-init path. The partial path never
+      consults the builtin lowering table (D8 falls out structurally), and
+      skips `prepare_args`'s ref handling (D9 exempts `ref`/`ptr`
+      parameters). Direct builtins take `LoadFunc(fid)` like user
+      functions (the D8 reroute is exactly *not* special-casing them);
+      the `stack_delta` test helper grew the `PartialApply(k) => -k` arm.
+- [x] Inline-lowering reroute (D8): `range` / `range_from` (`MakeRange`)
       and the `std.collection.iter` helpers (`InlineIter`) take their
       inline path only on full-arity calls; a partial call emits the
       generic sequence above. `BuiltinLowering::Intrinsic` variadics never
       reach a partial call (typeck rejects, T05).
-- [ ] MIR: new instruction kind `PartialApply(u8)` with the documented
-      stack effect; `MirFunc` tables unchanged (no per-arity synthesis —
-      the runtime captures, unlike variadic builtins which instantiate per
-      argc).
-- [ ] Tests: lower shapes for direct/indirect partial calls; `range_from(0)`
+- [x] MIR: new instruction kind `PartialApply(u8)` with the documented
+      stack effect (`f a₁…aₖ → f'`, Δ−k); `MirFunc` tables unchanged (no
+      per-arity synthesis — the runtime captures, unlike variadic builtins
+      which instantiate per argc). **Codegen note**: `mir_opcode` (an
+      exhaustive match) rejects `PartialApply` with a `CodegenError` — the
+      0xCE encoding is T07's; a partial program fails loudly there instead
+      of encoding an invented opcode.
+- [x] Tests: lower shapes for direct/indirect partial calls; `range_from(0)`
       does not fold to `MakeRange`; full-arity `range_from(a, b)` still
       folds; snapshot tests that flag-off modules emit zero new
-      instructions.
+      instructions. **Implementation**: 7 inline lower tests
+      (`t06_partial_*`, `t06_flag_*`) — direct shape (`LoadFunc` + arg +
+      `PartialApply(1)`, no `Call`), indirect shape (callee slot load +
+      arg + `PartialApply(1)` + `CallValue(1)`), degenerate
+      `PartialApply(0)`, partial-in-global-init reroute, full-arity
+      `MakeRange` fold retained, flag-off zero-`PartialApply`, flag-on
+      full-arity zero-`PartialApply` (D13's v7 premise). Spelling notes
+      baked into the tests: `Range` as a type name needs the std import
+      machinery (unannotated bindings used instead), and a chain's return
+      side always merges in a flag-on file, so the indirect test observes
+      the partial through a local binding, not a returned value.
+      Schematic-builtin (`map`/`filter`) partial shapes are T09's to pin
+      end-to-end (they need the import machinery — same note as T05).
 
 **Depends on**: T05.
 **Refs**: PLAN §5, D8, D13.

@@ -466,19 +466,38 @@ fn lower_global_init(
                 expr.span(),
             ));
         }
-        // 0.0.8 T05: same loud failure as in function bodies — a partial
-        // application's lowering (T06) is not implemented, and the full-call
-        // path below would miscompile the node.
+        // 0.0.8 T06: a partial application in a global initializer — the
+        // same generic captured-function sequence as in function bodies
+        // (D13), on the flat global-init path. Direct callees only (the
+        // flat path has no frame to evaluate a callee expression in);
+        // the builtin lowering table is not consulted (D8, as in
+        // `lower_partial_call`).
         TypedExprHir::Call {
-            partial: Some(_), ..
-        } => {
-            return Err(LowerError::new(
-                LowerErrorKind::UnsupportedFeature {
-                    feature: "partial application lowering (lands with 0.0.8 T06)",
-                },
-                expr.span(),
-            ));
-        }
+            partial: Some(_),
+            callee,
+            args,
+            ..
+        } => match callee.as_ref() {
+            TypedExprHir::Ident { name, .. } if lcx.func_ids.contains_key(name) => {
+                out.push(MirInstr::new(
+                    MirInstrKind::LoadFunc(lcx.func_ids[name]),
+                    expr.span(),
+                ));
+                for a in args {
+                    lower_global_init(lcx, a, out)?;
+                }
+                out.push(MirInstr::new(
+                    MirInstrKind::PartialApply(args.len() as u8),
+                    expr.span(),
+                ));
+            }
+            _ => {
+                return Err(LowerError::new(
+                    LowerErrorKind::IndirectCallInGlobalInit,
+                    expr.span(),
+                ));
+            }
+        },
         TypedExprHir::Call { callee, args, .. } => match callee.as_ref() {
             TypedExprHir::Ident { name, .. } if lcx.func_ids.contains_key(name) => {
                 // 0.0.2 U06: check for Ref arguments in global init calls.
@@ -1207,20 +1226,17 @@ impl<'a> FnBodyCx<'a> {
             // emits a real `ExprFor` node, so no phase is skipped).
             TypedExprHir::For(e) => self.lower_for(fb, e)?,
             TypedExprHir::Choose(e) => self.lower_choose(fb, e)?,
-            // 0.0.8 T05: a partial application node *does* reach lowering
-            // (flag-on files are compiled end-to-end since T05), so fail
-            // loudly instead of silently miscompiling it as a full call (a
-            // runtime arity failure). T06 lowers it (LoadFunc/callee + args
-            // + `PartialApply k`).
+            // 0.0.8 T06: a partial application node lowers to the generic
+            // captured-function sequence (D13) — the callee value plus the
+            // `k` applied arguments, then `PartialApply k`. Full-arity calls
+            // fall through to `lower_call` below, unchanged (D16).
             TypedExprHir::Call {
-                partial: Some(_), ..
+                partial: Some(_),
+                callee,
+                args,
+                ..
             } => {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "partial application lowering (lands with 0.0.8 T06)",
-                    },
-                    expr.span(),
-                ));
+                self.lower_partial_call(fb, callee, args, expr.span())?;
             }
             TypedExprHir::Call { callee, args, .. } => {
                 self.lower_call(fb, callee, args, expr.span())?;
@@ -1653,6 +1669,55 @@ impl<'a> FnBodyCx<'a> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Lower a partial application (0.0.8 T06, D5/D13): the callee value
+    /// plus the `k` applied arguments, then `PartialApply k` —
+    /// `f a₁…aₖ → f'`. `k < n` is a typeck guarantee (T05); the result's
+    /// type `Func(remaining, ret)` lives in the typed HIR, not here.
+    ///
+    /// The builtin lowering table is deliberately **not** consulted (D8):
+    /// `range` / `range_from` and the `std.collection.iter` helpers take
+    /// their inline paths (`MakeRange` / `InlineIter`) only on full-arity
+    /// calls — a partial call must emit the generic captured-function
+    /// sequence, or e.g. `range_from(0)` would fold with one argument still
+    /// missing. Variadic builtins never reach a partial (typeck rejects,
+    /// T05) and `ref`/`ptr` parameters are exempt (D9), so plain argument
+    /// lowering suffices — `prepare_args`'s ref-place handling is
+    /// unreachable here.
+    fn lower_partial_call(
+        &mut self,
+        fb: &mut FnBuilder,
+        callee: &TypedExprHir,
+        args: &[TypedExprHir],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        match callee {
+            TypedExprHir::Ident {
+                name, binding_id, ..
+            } if self.is_function_binding(*binding_id, name) => {
+                // Direct callee: push the function value itself — unlike a
+                // full call's `Call(fid)`, the callee stays on the stack as
+                // the capture target. Builtins included (D8): a builtin's
+                // fid is an ordinary function-table entry for `LoadFunc`;
+                // the VM decides how to execute it (T08).
+                let fid = self.lcx.func_ids[name];
+                fb.emit(MirInstr::new(MirInstrKind::LoadFunc(fid), span));
+            }
+            _ => {
+                // Indirect callee: lower the callee expression to the
+                // function value on the stack (the `CallValue` shape).
+                self.lower_expr_into(fb, callee)?;
+            }
+        }
+        for arg in args {
+            self.lower_expr_into(fb, arg)?;
+        }
+        fb.emit(MirInstr::new(
+            MirInstrKind::PartialApply(args.len() as u8),
+            span,
+        ));
         Ok(())
     }
 

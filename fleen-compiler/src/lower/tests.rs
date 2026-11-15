@@ -824,6 +824,9 @@ fn stack_delta(
                 .copied()
                 .unwrap_or(0) as i64
         }
+        // 0.0.8 T06: `PartialApply` keeps the function value and pops the k
+        // applied arguments into its capture list (f a₁…aₖ → f', Δ−k).
+        MirInstrKind::PartialApply(k) => -(*k as i64),
     }
 }
 
@@ -3130,5 +3133,202 @@ func main(): int {
     0
 }
 "#,
+    );
+}
+
+// ---- 0.0.8 T06: partial application lowering (D8/D13, MIR shape) ----
+
+/// Compile `source` with its own `#feature` table (the `Session::compile`
+/// wiring; a single file is the whole table, `FileId(0)`) and lower it.
+fn lower_src_flagged(source: &str) -> Mir {
+    let tokens = tokenize(source).unwrap();
+    let ast = parse(tokens).unwrap();
+    let features = crate::FeatureTable::from_asts(std::slice::from_ref(&ast));
+    let hir = resolve(ast).unwrap();
+    let typed = crate::typeck::typeck_with_features(hir, &features).expect("typeck should succeed");
+    super::lower(typed).expect("lower should succeed")
+}
+
+/// The flag-on declarations shared by the partial lowering tests.
+const T06_ADD_DECL: &str = "add: int -> int -> int\nadd(a, b) { a + b }\n";
+
+#[test]
+fn t06_partial_direct_call_lowers_load_func_args_partial_apply() {
+    // A direct-callee partial: `LoadFunc(add)` + the k applied args +
+    // `PartialApply k` — NOT a `Call(add)`.
+    let src = format!(
+        "#feature curry\n{T06_ADD_DECL}\
+         main: () -> int\n\
+         main() {{ f: int -> int = add(1); f(2) }}\n"
+    );
+    let mir = lower_src_flagged(&src);
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+    let load_pos = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::LoadFunc(_)))
+        .expect("LoadFunc of the callee");
+    assert!(matches!(ins[load_pos + 1].kind, MirInstrKind::ConstInt(1)));
+    assert!(
+        matches!(ins[load_pos + 2].kind, MirInstrKind::PartialApply(1)),
+        "expected PartialApply(1), got {:?}",
+        ins[load_pos + 2].kind
+    );
+    // The partial is then called as a function value at full remaining arity.
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CallValue(1)))
+    );
+    assert!(!ins.iter().any(|i| matches!(i.kind, MirInstrKind::Call(_))));
+}
+
+#[test]
+fn t06_partial_indirect_call_lowers_callee_expr_args_partial_apply() {
+    // An indirect-callee partial: `g(x)` inside the body — `g` is a
+    // parameter (a function value in a slot), so the callee expression is
+    // lowered (`LoadLocal`), then the argument, then `PartialApply 1`.
+    // (Spelling note: every `(` in a type position is a function type, and
+    // a chain's return side always merges — so `apply1` declares plain
+    // `int` as its return and observes the partial through a local
+    // binding, called at full remaining arity.)
+    let src = format!(
+        "#feature curry\n\
+         apply1: (int -> int -> int, int) -> int\n\
+         apply1(g, x) {{ p: int -> int = g(x); p(x) }}\n\
+         main: () -> int\n\
+         main() {{ apply1(add, 1) }}\n\
+         {T06_ADD_DECL}"
+    );
+    let mir = lower_src_flagged(&src);
+    let apply1 = find_func(&mir, "apply1");
+    let ins = flat(apply1);
+    let load_pos = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::LoadLocal(_)))
+        .expect("LoadLocal of the callee slot");
+    assert!(matches!(ins[load_pos + 1].kind, MirInstrKind::LoadLocal(_)));
+    assert!(
+        matches!(ins[load_pos + 2].kind, MirInstrKind::PartialApply(1)),
+        "expected PartialApply(1) after callee + arg, got {:?}",
+        ins[load_pos + 2].kind
+    );
+    // The partial is then called as a function value at full remaining arity.
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::CallValue(1)))
+    );
+}
+
+#[test]
+fn t06_degenerate_zero_arg_partial_is_partial_apply_zero() {
+    // k = 0 (D5): `add()` yields the function itself — `PartialApply(0)`,
+    // stack `f -> f'`.
+    let src = format!(
+        "#feature curry\n{T06_ADD_DECL}\
+         main: () -> int -> int -> int\n\
+         main() {{ add() }}\n"
+    );
+    let mir = lower_src_flagged(&src);
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+    let load_pos = ins
+        .iter()
+        .position(|i| matches!(i.kind, MirInstrKind::LoadFunc(_)))
+        .expect("LoadFunc of the callee");
+    assert!(
+        matches!(ins[load_pos + 1].kind, MirInstrKind::PartialApply(0)),
+        "expected PartialApply(0), got {:?}",
+        ins[load_pos + 1].kind
+    );
+}
+
+#[test]
+fn t06_partial_range_from_does_not_fold_to_make_range() {
+    // D8: a partial call to an inline-lowering builtin skips the inline
+    // path — `range_from(0)` emits the generic captured-function sequence,
+    // not `MakeRange` (which would fold with one argument still missing).
+    // The partial is a global initializer here, covering the flat
+    // global-init path too. (The binding is unannotated: `Range` as a type
+    // name needs the std import machinery, which this MIR-level test
+    // deliberately avoids.)
+    let src = "#feature curry\nr = range_from(0);\n";
+    let mir = lower_src_flagged(src);
+    assert!(mir.globals.len() == 1, "one global binding expected");
+    let init = &mir.globals[0].init;
+    assert!(matches!(init[0].kind, MirInstrKind::LoadFunc(_)));
+    assert!(matches!(init[1].kind, MirInstrKind::ConstInt(0)));
+    assert!(
+        matches!(init[2].kind, MirInstrKind::PartialApply(1)),
+        "expected PartialApply(1) in global init, got {:?}",
+        init[2].kind
+    );
+    assert!(
+        !init
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::MakeRange))
+    );
+}
+
+#[test]
+fn t06_full_arity_range_from_still_folds_to_make_range() {
+    // D8's other half: a full-arity call keeps the inline path — in a
+    // flag-on file `range_from(0, 10)` still folds to `MakeRange`.
+    let src = "#feature curry\nmain: () -> int\nmain() { r = range_from(0, 10); 0 }\n";
+    let mir = lower_src_flagged(src);
+    let main = find_func(&mir, "main");
+    let ins = flat(main);
+    assert!(
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::MakeRange)),
+        "full-arity range_from must fold to MakeRange"
+    );
+    assert!(
+        !ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+    );
+}
+
+#[test]
+fn t06_flag_off_module_emits_no_partial_apply() {
+    // D16 snapshot: flag-off lowering is untouched — no `PartialApply`
+    // anywhere in the module (the marker only exists in flag-on files).
+    let src = r#"
+func add(a: int, b: int): int = a + b
+func main(): int {
+    f = add;
+    f(1, 2)
+}
+"#;
+    let mir = lower_src(src);
+    let has_partial = mir.funcs.iter().any(|f| {
+        flat(f)
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+    });
+    assert!(
+        !has_partial,
+        "flag-off module must not contain PartialApply"
+    );
+}
+
+#[test]
+fn t06_flag_on_without_partials_emits_no_partial_apply() {
+    // D13's content-driven premise at the MIR level: a flag-on file that
+    // only uses the two-part declaration form and full-arity calls emits
+    // no new instructions (its module stays a v7 candidate, T07).
+    let src = format!(
+        "#feature curry\n{T06_ADD_DECL}\
+         main: () -> int\n\
+         main() {{ add(1, 2) }}\n"
+    );
+    let mir = lower_src_flagged(&src);
+    let has_partial = mir.funcs.iter().any(|f| {
+        flat(f)
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+    });
+    assert!(
+        !has_partial,
+        "flag-on full-arity module must not contain PartialApply"
     );
 }
