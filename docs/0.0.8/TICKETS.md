@@ -4,9 +4,9 @@
 > with tests.  Decisions D1–D16 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T04 implemented and green (parser-level for T01–T03; T02's
-> entry-wiring verification done in T04; T03's typeck rendering wiring carried
-> into T05); T05–T11 open.**
+> **Status: T01–T05 implemented and green (parser-level for T01–T03; T02's
+> entry-wiring verification done in T04; T03's typeck rendering wiring
+> landed with T05); T06–T11 open.**
 > **Posture reminder**: this release must stay non-breaking additive (PLAN
 > D16).  Every card that touches a shared path (parser, typeck, lower,
 > codegen) must keep flag-off behavior byte-identical; the e2e suite runs
@@ -227,34 +227,84 @@
 
 ## T05 — Typeck: implicit partial application + participation + anti-typo guard (F4–F7; D5–D11)
 
-- [ ] Call-site rule (D5): a call to a participating callee with
+- [x] Call-site rule (D5): a call to a participating callee with
       `k < n` arguments produces `Type::Func(remaining, ret)`; the typed
       call node records `partial: true` and the captured argument types.
       `k = 0` is the degenerate partial; `k > n` stays `ArityMismatch`.
-- [ ] Participation check (D5/D7/D9): callee must be fixed-arity, non-
+      **Implementation**: `TypedExprHir::Call` became a struct variant with a
+      `partial: Option<Vec<Type>>` marker (`None` = full call; `Some` =
+      the applied arguments' types, empty for `k = 0`). The rule lives in
+      the general `typeck_call` path, so direct user calls and indirect
+      (function-value) callees are covered by one code path — an indirect
+      callee's participation is type-level only (`ref`/`ptr` visible in
+      the `Func` type; `unsafe`/`trusted` unknowable, the same documented
+      hole as the static unsafe-call check; pinned by the indirect-callee
+      test).
+- [x] Participation check (D5/D7/D9): callee must be fixed-arity, non-
       variadic (`BuiltinParam::Variadic` excluded), without `ref`/`ptr`
       parameters, without `unsafe`/`trusted` modifiers; otherwise `k < n`
       keeps today's `ArityMismatch`. The check is call-site local — the
       callee's file flag is irrelevant.
-- [ ] Argument ownership is the full-call rule set (unchanged
+      **Implementation**: `call_participates` (D9's three exemptions;
+      `unsafe`/`trusted` via `func_flags`, direct callees only).
+      Variadic builtins never reach a partial — their paths are unchanged.
+      **Fixed builtins participate** (`range_from(0)` is `int -> Range`;
+      T06's reroute test depends on it), and **schematic builtins
+      participate through `resolve_schematic_partial`** (builtins.rs): the
+      `k` applied arguments bind the table's type variables; any variable
+      still unbound in the remaining params or the return type leaves the
+      partial ambiguous and keeps today's `ArityMismatch` (`map` with only
+      the array).
+- [x] Argument ownership is the full-call rule set (unchanged
       `reject_bare_owned_arg` path; owned locals need `move`/`clone`).
-- [ ] Anti-typo guard (D10): an expression statement whose top-level typed
+      The argument loop runs unchanged over the first `k` parameters.
+- [x] Anti-typo guard (D10): an expression statement whose top-level typed
       expression carries `partial: true` → `PartialApplicationDiscarded`.
       A genuine unary function value as a statement stays legal (marker
       absent). Full calls as statements unchanged.
-- [ ] Copy semantics (D11): `is_copy(Type::Func)` stays `true`; no
+      **Implementation**: `check_discarded_partial` in `typeck_stmt` **and**
+      the top-level `HirItem::Expr` arm (a top-level partial is the same
+      discarded value); only the marker decides, so no flag check is
+      needed there.
+- [x] Copy semantics (D11): `is_copy(Type::Func)` stays `true`; no
       type-level change. No coercion: a partial does not satisfy a
-      full-arity `Func` parameter and vice versa (D6).
-- [ ] `async` (D12): async callees participate; a partial has type
+      full-arity `Func` parameter and vice versa (D6) — pinned by the
+      higher-order-parameter test (exact match).
+- [x] `async` (D12): async callees participate; a partial has type
       `(rem) -> Future<T>`; the future exists only at the final call. No
-      new boundary rule.
-- [ ] Diagnostic rendering: per-file spelling (T03's table consulted).
-- [ ] Tests: typeck valid (partial of a 2-param user function, partial of
-      a std function, degenerate `k = 0`, async partial, partial flowing
-      into a flag-off higher-order helper and called there); invalid
-      (too-few-args in flag-off file unchanged, `k > n`, partial of
-      `print`, partial of a `ref`-param/`ptr`-param/`unsafe` function,
-      discarded partial, owned arg without `move`).
+      new boundary rule. **Falls out of the existing shape**: an async fn's
+      caller-visible signature is already `Func(params, Future<T>)`
+      (0.0.4 F1), so the uniform rule produces the D12 type with no
+      async-specific code.
+- [x] Diagnostic rendering: per-file spelling (T03's table consulted).
+      **Implementation**: `TypeckError` records the checked file's `curry`
+      flag at construction (`add_error` consults the table through
+      `span.file`); `TypeckErrorKind::render(curry)` draws function types
+      with `name_with(curry)` — `name_with(false)` ≡ `name()`, so every
+      flag-off error text is byte-identical.
+- [x] Tests: typeck valid (partial of a 2-param user function, partial of
+      an indirect function-value callee, degenerate `k = 0`, async partial,
+      partial flowing into a flag-off higher-order helper and called
+      there); invalid (too-few-args in flag-off file unchanged, `k > n`,
+      partial of `print`, partial of a `ref`-param/`ptr`-param/`unsafe`
+      function, discarded partial, owned arg without `move`).
+      **Implementation**: 17 inline typeck tests. The flag-on sources use
+      the two-part declaration form (T02's strictness) and observe the
+      partial's type through annotated bindings — a top-level partial is
+      itself discarded (D10). **Coverage notes**: (1) the "std function"
+      and cross-flag halves are the *same user-function path* (std is
+      Fleen source, D8) — the higher-order test pins the value flow, and
+      the cross-file e2e fixtures (including a std-function partial) are
+      T09's; the schematic-builtin partial needs the import machinery, so
+      it is likewise T09's to pin end-to-end. (2) `partial of print` is a
+      *valid-behavior* check (D7: a variadic's every call is complete —
+      no marker, type `unit`), since no arity of a variadic call can be a
+      partial. (3) The `unsafe`-callee case is exercised through `trusted`
+      (the D9 exemption is one check); a direct `unsafe`-callee partial
+      attempt reports `UnsafeCallOutsideUnsafe` first outside an unsafe
+      context. **Lowering note**: until T06, a partial node that reaches
+      lowering (function body or global init) fails loudly with
+      `UnsupportedFeature` instead of being miscompiled as a full call.
 
 **Depends on**: T04.
 **Refs**: PLAN §3.3, D5, D6, D7, D9, D10, D11, D12.

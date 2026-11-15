@@ -5,15 +5,30 @@ use crate::typeck::typed_hir::Type;
 use std::fmt;
 
 /// A single type error with span and kind.
+///
+/// 0.0.8 T05: `curry` is the checked file's `#feature` flag, recorded at
+/// construction so `Display` renders function types in the file's spelling
+/// (T03's `name_with`) — flag-off files reproduce the pre-0.0.8 text
+/// byte-for-byte.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeckError {
     pub kind: TypeckErrorKind,
     pub span: Span,
+    pub curry: bool,
 }
 
 impl TypeckError {
     pub fn new(kind: TypeckErrorKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            curry: false,
+        }
+    }
+
+    /// An error rendered in the spelling `file`'s `#feature` flag selects.
+    pub fn with_curry(kind: TypeckErrorKind, span: Span, curry: bool) -> Self {
+        Self { kind, span, curry }
     }
 }
 
@@ -273,17 +288,29 @@ pub enum TypeckErrorKind {
     /// deep copy, which would fork the suspended frame. An array of futures
     /// exists to be moved into `std.async.run` as a whole.
     FutureIndexRead,
+    // ---- 0.0.8 T05: partial-application family (D5/D10) ----
+    /// An expression statement discarded a partial application: the call
+    /// applied fewer arguments than the callee declares and produced a
+    /// function value. A partial is pure — discarding it is always
+    /// meaningless (the classic currying typo `add(a)` for `add(a, b)`).
+    /// A genuine function value as a statement stays legal (the marker is
+    /// absent there); full calls as statements are untouched.
+    PartialApplicationDiscarded { ty: Box<Type> },
 }
 
-impl fmt::Display for TypeckErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl TypeckErrorKind {
+    /// Render this kind with the spelling the checked file's `#feature`
+    /// flag selects (0.0.8 T05, consulting T03's renderer): `curry = true`
+    /// draws function types as arrow chains; `curry = false` reproduces the
+    /// pre-0.0.8 text byte-for-byte (`name_with(false)` ≡ `name()`).
+    fn render(&self, f: &mut fmt::Formatter<'_>, curry: bool) -> fmt::Result {
         match self {
             TypeckErrorKind::TypeMismatch { expected, found } => {
                 write!(
                     f,
                     "type mismatch: expected `{}`, found `{}`",
-                    expected.name(),
-                    found.name()
+                    expected.name_with(curry),
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::ChooseNotExhaustive {
@@ -293,7 +320,7 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "choose is not exhaustive for type `{}`: missing {}",
-                    scrutinee_type.name(),
+                    scrutinee_type.name_with(curry),
                     missing_patterns.join(", ")
                 )
             }
@@ -301,7 +328,7 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "invalid operand type `{}` for operator `{}`",
-                    ty.name(),
+                    ty.name_with(curry),
                     op
                 )
             }
@@ -335,12 +362,16 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "argument {} type mismatch: expected `{}`, found `{}`",
                     index + 1,
-                    expected.name(),
-                    found.name()
+                    expected.name_with(curry),
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::ConditionNotBool { found } => {
-                write!(f, "condition must be `bool`, found `{}`", found.name())
+                write!(
+                    f,
+                    "condition must be `bool`, found `{}`",
+                    found.name_with(curry)
+                )
             }
             TypeckErrorKind::NotIterable { got } => {
                 write!(
@@ -348,22 +379,22 @@ impl fmt::Display for TypeckErrorKind {
                     "cannot iterate type `{}` with `for`: the iterable set is \
                      `[T]` and `Range` (0.0.3); user-defined iterables arrive \
                      with traits (0.1.0)",
-                    got.name()
+                    got.name_with(curry)
                 )
             }
             TypeckErrorKind::AssignTypeMismatch { expected, found } => {
                 write!(
                     f,
                     "cannot assign `{}` to variable of type `{}`",
-                    found.name(),
-                    expected.name()
+                    found.name_with(curry),
+                    expected.name_with(curry)
                 )
             }
             TypeckErrorKind::UndefinedVariable { name } => {
                 write!(f, "undefined variable `{}`", name)
             }
             TypeckErrorKind::NotCallable { ty } => {
-                write!(f, "cannot call value of type `{}`", ty.name())
+                write!(f, "cannot call value of type `{}`", ty.name_with(curry))
             }
             TypeckErrorKind::UnsupportedFeature { feature } => {
                 write!(f, "{} is not supported yet", feature)
@@ -377,8 +408,8 @@ impl fmt::Display for TypeckErrorKind {
                     "unsupported cast: cannot cast `{}` to `{}`; \
                      0.0.2 only supports scalar → string casts, \
                      full conversions arrive with generics (0.1.0)",
-                    from.name(),
-                    to.name()
+                    from.name_with(curry),
+                    to.name_with(curry)
                 )
             }
             TypeckErrorKind::QuestionOutsideResultFn => {
@@ -393,7 +424,7 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "`?` applies to a `Result<T, E>` value, found `{}`",
-                    found.name()
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::AwaitNonFuture { found } => {
@@ -402,7 +433,7 @@ impl fmt::Display for TypeckErrorKind {
                     "`await` applies to a `Future<T>` value, found `{}`; \
                      help: an async function call returns a `Future<T>` — \
                      check the operand is a future you can drive",
-                    found.name()
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::RefInAsync => {
@@ -426,8 +457,8 @@ impl fmt::Display for TypeckErrorKind {
                     "`?` propagates error type `{}` but the function returns \
                      `Result<_, {}>`; help: error types must match exactly \
                      in 0.0.2 (no error-type conversion)",
-                    found.name(),
-                    expected.name()
+                    found.name_with(curry),
+                    expected.name_with(curry)
                 )
             }
             TypeckErrorKind::CannotInferResultType { ctor } => {
@@ -443,7 +474,7 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "Result value `{}` is discarded; help: bind it, handle it \
                      with `choose`, or propagate it with `?`",
-                    ty.name()
+                    ty.name_with(curry)
                 )
             }
             TypeckErrorKind::PatternTypeMismatch { pattern, found } => {
@@ -451,7 +482,7 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "`{pattern}` pattern requires a matching scrutinee, \
                      found `{}`",
-                    found.name()
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::EnumPatternMismatch { variant, found } => {
@@ -459,7 +490,7 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "`{variant}` pattern requires a matching enum scrutinee, \
                      found `{}`",
-                    found.name()
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::ArityMismatchInPattern {
@@ -488,8 +519,8 @@ impl fmt::Display for TypeckErrorKind {
                      (a missing binding shows as `unit`); help: all `|` \
                      alternatives must bind the same names with the same \
                      types",
-                    first_type.name(),
-                    second_type.name()
+                    first_type.name_with(curry),
+                    second_type.name_with(curry)
                 )
             }
             TypeckErrorKind::UseAfterMove { name, .. } => {
@@ -520,7 +551,7 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "`{name}` is `{}` (a Copy type): `move` is meaningless \
                      — help: drop the `move` keyword",
-                    ty.name()
+                    ty.name_with(curry)
                 )
             }
             TypeckErrorKind::MoveOutOfBox => {
@@ -561,7 +592,7 @@ impl fmt::Display for TypeckErrorKind {
                          read would fork the suspended task — help: `move \
                          {name}`, drive it: `{name} await`, or pass it to \
                          `std.async.run`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 } else if matches!(ty, Type::Array(_)) && ty.contains_future() {
                     write!(
@@ -570,7 +601,7 @@ impl fmt::Display for TypeckErrorKind {
                          transferring ownership — copying the array would \
                          duplicate the suspended tasks inside it — help: \
                          `move {name}`, or pass it to `std.async.run`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 } else if ty.contains_future() {
                     // A Future inside a `Result` payload (or another
@@ -583,7 +614,7 @@ impl fmt::Display for TypeckErrorKind {
                          `move {name}`, drive it: `{name} await` after a \
                          `choose ... when Ok(v)` extraction, or pass it to \
                          `std.async.run`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 } else if matches!(ty, Type::Channel(_)) {
                     // Arrays of channels cannot exist (T07d rejects the
@@ -599,7 +630,7 @@ impl fmt::Display for TypeckErrorKind {
                          be duplicated: two handles would alias the same \
                          buffer — help: `move {name}`, or fork it \
                          explicitly: `std.concurrent.split({name})`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 } else if ty.contains_channel() {
                     // A channel inside a `Result` payload: the same aliasing,
@@ -611,7 +642,7 @@ impl fmt::Display for TypeckErrorKind {
                          alias the channel inside it — help: `move {name}`, \
                          or fork the channel explicitly: \
                          `std.concurrent.split`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 } else {
                     write!(
@@ -619,7 +650,7 @@ impl fmt::Display for TypeckErrorKind {
                         "cannot use owned value `{name}` (`{}`) without \
                          transferring ownership — help: transfer it: `move {name}`, \
                          or copy it: `clone {name}`",
-                        ty.name()
+                        ty.name_with(curry)
                     )
                 }
             }
@@ -756,12 +787,16 @@ impl fmt::Display for TypeckErrorKind {
                     f,
                     "array elements must have one uniform type: expected `{}`, \
                      found `{}`",
-                    expected.name(),
-                    found.name()
+                    expected.name_with(curry),
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::IndexNotInt { found } => {
-                write!(f, "array index must be `int`, found `{}`", found.name())
+                write!(
+                    f,
+                    "array index must be `int`, found `{}`",
+                    found.name_with(curry)
+                )
             }
             TypeckErrorKind::MoveOutOfArray { path } => {
                 write!(
@@ -804,7 +839,7 @@ impl fmt::Display for TypeckErrorKind {
                 write!(
                     f,
                     "no member `{member}` on type `{}` — only `channel<T>` has `send`/`recv`",
-                    found.name()
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::ChannelMemberNotCalled { member } => {
@@ -899,12 +934,29 @@ impl fmt::Display for TypeckErrorKind {
                      `std.async.run`"
                 )
             }
+            TypeckErrorKind::PartialApplicationDiscarded { ty } => {
+                write!(
+                    f,
+                    "discarded partial application: this statement produces the \
+                     function value `{}` (the call supplied fewer arguments than \
+                     the callee declares); assign it, pass it on, or supply the \
+                     remaining arguments",
+                    ty.name_with(curry)
+                )
+            }
         }
+    }
+}
+
+impl fmt::Display for TypeckErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.render(f, false)
     }
 }
 
 impl fmt::Display for TypeckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "error: {}", self.kind)
+        f.write_str("error: ")?;
+        self.kind.render(f, self.curry)
     }
 }

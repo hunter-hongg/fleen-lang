@@ -1473,7 +1473,7 @@ fn ownership_access_read_clone_for_owned_local() {
     let TypedStmtHir::Expr(call, _) = &b.stmts[1] else {
         panic!("expected print statement");
     };
-    let TypedExprHir::Call(_, args, _) = &**call else {
+    let TypedExprHir::Call { args, .. } = &**call else {
         panic!("expected call");
     };
     let TypedExprHir::Ident { access, .. } = &args[0] else {
@@ -3356,4 +3356,333 @@ fn func_type_name_with_curry_spelling_renders_chains_t03() {
 
     let higher_order = T::Func(vec![T::Func(vec![int()], Box::new(int()))], Box::new(int()));
     assert_eq!(higher_order.name_with(true), "(int -> int) -> int");
+}
+
+// ========== 0.0.8 T05: implicit partial application (D5–D12) ==========
+
+use crate::typeck::typeck_with_features;
+
+/// Helper: compile source to TypedHir with the file's own `#feature` table
+/// (the same wiring `Session::compile` uses; a single file is the whole
+/// table, `FileId(0)` per the single-file convention).
+fn compile_to_typed_flagged(source: &str) -> Result<TypedHir, Vec<TypeckError>> {
+    let tokens = tokenize(source).unwrap();
+    let ast = parse(tokens).unwrap();
+    let features = crate::FeatureTable::from_asts(std::slice::from_ref(&ast));
+    let hir = resolve(ast).unwrap();
+    typeck_with_features(hir, &features)
+}
+
+fn compile_ok_flagged(source: &str) -> TypedHir {
+    compile_to_typed_flagged(source).expect("typeck should succeed")
+}
+
+fn compile_err_flagged(source: &str) -> Vec<TypeckError> {
+    compile_to_typed_flagged(source).expect_err("typeck should fail")
+}
+
+/// The flag-on declarations shared by the partial tests: a two-part
+/// `add: int -> int -> int`.
+const ADD_DECL: &str = "add: int -> int -> int\nadd(a, b) { a + b }\n";
+
+/// A top-level partial application is itself a discarded value (D10 applies
+/// to the top-level statement list too), so the valid tests observe the
+/// partial's type through an annotated binding — which simultaneously pins
+/// D6's exact-match rule at a use site.
+fn binding_init(hir: &TypedHir) -> &TypedExprHir {
+    match hir.items.last().expect("at least one item") {
+        TypedHirItem::Decl(TypedDeclHir::Var(v)) => &v.init,
+        other => panic!("expected a top-level binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_of_two_param_function_has_the_remaining_type() {
+    // D5: `add(1)` over `add: int -> int -> int` is `int -> int` — literally
+    // the rest of the signature — and the node carries the partial marker.
+    let hir = compile_ok_flagged(&format!(
+        "#feature curry\n{ADD_DECL}x: int -> int = add(1);\n"
+    ));
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(*ty, Type::Func(vec![Type::Int], Box::new(Type::Int)));
+            let captured = partial.as_ref().expect("call must be marked partial");
+            assert_eq!(captured, &vec![Type::Int]);
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_of_function_value_callee_has_the_remaining_type() {
+    // The one-code-path claim: an indirect (function-value) callee
+    // partializes by the same D5 rule — participation is type-level only
+    // (D9's documented hole: `unsafe`/`trusted` is unknowable for a value).
+    let hir = compile_ok_flagged(&format!(
+        "#feature curry\n{ADD_DECL}f: int -> int -> int = add;\nx: int -> int = f(1);\n"
+    ));
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(*ty, Type::Func(vec![Type::Int], Box::new(Type::Int)));
+            let captured = partial.as_ref().expect("call must be marked partial");
+            assert_eq!(captured, &vec![Type::Int]);
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+#[test]
+fn full_call_type_and_marker_unchanged_under_flag() {
+    // D5: `k = n` is a full call — same type, no marker.
+    let hir = compile_ok_flagged(&format!("#feature curry\n{ADD_DECL}x: int = add(1, 2);\n"));
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(*ty, Type::Int);
+            assert!(partial.is_none(), "a full call must not carry the marker");
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+#[test]
+fn degenerate_zero_arg_partial_yields_the_function_itself() {
+    // D5: `k = 0` is the degenerate partial — uniformity, no special case.
+    let hir = compile_ok_flagged(&format!(
+        "#feature curry\n{ADD_DECL}x: int -> int -> int = add();\n"
+    ));
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(
+                *ty,
+                Type::Func(vec![Type::Int, Type::Int], Box::new(Type::Int))
+            );
+            let captured = partial.as_ref().expect("degenerate partial is partial");
+            assert!(captured.is_empty());
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_of_fixed_builtin_is_the_remaining_function() {
+    // D5/D8: `range_from(0)` — a Fixed table builtin — is the remaining
+    // `int -> Range` function (T06 reroutes its lowering).
+    let hir = compile_ok_flagged("#feature curry\nr = range_from(0);\n");
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(*ty, Type::Func(vec![Type::Int], Box::new(Type::Range)));
+            assert!(partial.is_some());
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+// Note: a partial of a *schematic* builtin (`std.arr.get(arr)` binding `T0`
+// from the applied argument) takes the same rule through
+// `resolve_schematic_partial`; it needs the import machinery, so it is
+// pinned end-to-end by T09's cross-flag fixtures rather than this
+// single-file harness.
+
+#[test]
+fn async_partial_keeps_the_future_at_the_final_call() {
+    // D12: `half(5)` is `int -> Future<Result[int, string]>` — the future
+    // exists only at the final call; no new boundary rule. The body line
+    // carries no modifier (T02/D3) — the signature holds it.
+    let hir = compile_ok_flagged(
+        "#feature curry\nasync half: int -> int -> Result[int, string]\nhalf(n, d) {\n    if d == 0 { Err(\"zero\") } else { Ok(n / d) }\n}\nr = half(5);\n",
+    );
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(
+                *ty,
+                Type::Func(
+                    vec![Type::Int],
+                    Box::new(Type::Future(Box::new(Type::Result(
+                        Box::new(Type::Int),
+                        Box::new(Type::String)
+                    ))))
+                )
+            );
+            assert!(partial.is_some());
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_flows_into_a_higher_order_parameter_and_is_called_there() {
+    // D6/D15: a partial value is an ordinary function value — it satisfies
+    // an exact-match `int -> int` parameter and is called at its remaining
+    // arity (the flag-blind cross-file shape, pinned end-to-end by T09).
+    let hir = compile_ok_flagged(&format!(
+        "#feature curry\n{ADD_DECL}apply1: (int -> int, int) -> int\napply1(f, x) {{ f(x) }}\nx: int = apply1(add(1), 10);\n"
+    ));
+    assert_eq!(binding_init(&hir).ty(), Type::Int);
+}
+
+#[test]
+fn flagoff_too_few_args_keeps_the_arity_error() {
+    // D5's lock: the relaxation replaces the error *in flag-on files only*.
+    let errs = compile_err("func add(a: int, b: int): int = a + b\n\nadd(1)\n");
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::ArityMismatch {
+                expected: 2,
+                found: 1
+            }
+        )),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn too_many_args_stays_arity_mismatch_under_flag() {
+    // D5: `k > n` is never a partial.
+    let errs = compile_err_flagged(&format!("#feature curry\n{ADD_DECL}add(1, 2, 3)\n"));
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::ArityMismatch {
+                expected: 2,
+                found: 3
+            }
+        )),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn partial_of_trusted_function_is_rejected() {
+    // D9: `trusted` functions are exempt — the short-arity call keeps
+    // today's `ArityMismatch` (the static unsafe-context check stays total).
+    let errs = compile_err_flagged(
+        "#feature curry\ntrusted add: int -> int -> int\nadd(a, b) { a + b }\nmain: () -> int\nmain() { add(1); 0 }\n",
+    );
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::ArityMismatch {
+                expected: 2,
+                found: 1
+            }
+        )),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn partial_of_ref_param_function_is_rejected() {
+    // D9: a partially-applied borrow would have to outlive arbitrary
+    // control flow — `shout()` (k = 0 < n = 1) keeps the arity error.
+    let errs = compile_err_flagged(
+        "#feature curry\nshout: (ref string) -> int\nshout(s) { 42 }\nmain: () -> int\nmain() { shout(); 0 }\n",
+    );
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::ArityMismatch {
+                expected: 1,
+                found: 0
+            }
+        )),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn partial_of_ptr_param_function_is_rejected() {
+    // D9: the capture list would be a new pointer storage location —
+    // `PtrNotStorable`'s ban list grows it. The arity error fires before
+    // the arguments are typed, so the argument here is a plain int.
+    let errs = compile_err_flagged(
+        "#feature curry\nread_at: ptr<int> -> int -> int\nread_at(p, i) { 42 }\nread_at(1)\n",
+    );
+    assert!(
+        err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::ArityMismatch {
+                expected: 2,
+                found: 1
+            }
+        )),
+        "expected ArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn discarded_partial_is_an_error() {
+    // D10: the anti-typo guard — `add(1);` as a statement is the classic
+    // currying typo and is rejected.
+    let errs = compile_err_flagged(&format!(
+        "#feature curry\n{ADD_DECL}main: () -> int\nmain() {{\n    add(1);\n    0\n}}\n"
+    ));
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PartialApplicationDiscarded { .. })),
+        "expected PartialApplicationDiscarded, got {errs:?}"
+    );
+}
+
+#[test]
+fn discarded_partial_error_renders_the_arrow_spelling() {
+    // T05's rendering wire-up: in a flag-on file the error's function type
+    // is drawn as an arrow chain (T03's renderer); flag-off text is
+    // byte-identical to the pre-0.0.8 output.
+    let errs = compile_err_flagged(&format!(
+        "#feature curry\n{ADD_DECL}main: () -> int\nmain() {{\n    add(1);\n    0\n}}\n"
+    ));
+    let err = errs
+        .iter()
+        .find(|e| matches!(e.kind, TypeckErrorKind::PartialApplicationDiscarded { .. }))
+        .expect("PartialApplicationDiscarded");
+    assert!(err.curry, "the error records the file's flag");
+    assert!(err.to_string().contains("int -> int"), "got: {err}");
+}
+
+#[test]
+fn genuine_function_value_statement_stays_legal() {
+    // D10's negative: only the *marker* decides — a genuine unary function
+    // value as a statement is as legal as it was before 0.0.8.
+    let hir = compile_ok_flagged(&format!(
+        "#feature curry\n{ADD_DECL}main: () -> int\nmain() {{\n    f = add(1);\n    f;\n    0\n}}\n"
+    ));
+    let Some(TypedHirItem::Decl(TypedDeclHir::Func(f))) = hir.items.last() else {
+        panic!("expected the main function item");
+    };
+    assert_eq!(f.ret_type, Some(Type::Int));
+}
+
+#[test]
+fn owned_arg_without_move_still_rejected_for_a_partial() {
+    // D5: argument ownership is the full-call rule set — a bare owned
+    // local read into an owned parameter needs `move`/`clone`, partial
+    // application or not.
+    let errs = compile_err_flagged(
+        "#feature curry\nwrap: string -> string -> string\nwrap(a, b) { a }\nmain: () -> string\nmain() {\n    s = \"hi\";\n    wrap(s, \"x\")\n}\n",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn variadic_print_is_never_a_partial() {
+    // D7: a variadic's arity is unrestricted, so every call is complete —
+    // `print("a")` under the flag is `unit`, no marker.
+    let hir = compile_ok_flagged("#feature curry\nu: unit = print(\"a\");\n");
+    match binding_init(&hir) {
+        TypedExprHir::Call { ty, partial, .. } => {
+            assert_eq!(*ty, Type::Unit);
+            assert!(
+                partial.is_none(),
+                "a variadic call never carries the marker"
+            );
+        }
+        other => panic!("expected a call, got {other:?}"),
+    }
 }

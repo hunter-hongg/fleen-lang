@@ -833,8 +833,23 @@ pub enum TypedExprHir {
         hir_id: HirId,
         span: Span,
     },
-    /// Function call
-    Call(Box<TypedExprHir>, Vec<TypedExprHir>, Type), // Type = return type
+    /// Function call.
+    ///
+    /// 0.0.8 T05 (D5/D10): `partial` is `Some(captured_tys)` when the call
+    /// applied **fewer** arguments than the callee declares — an implicit
+    /// partial application, produced only in a `#feature curry` file — and
+    /// the call's `ty` is the remaining-parameter function
+    /// `Func(remaining, ret)`. `captured_tys` are the types of the `k`
+    /// arguments applied at this site. `None` is a full-arity call (the
+    /// pre-0.0.8 shape; `ty` is the return type as before).
+    Call {
+        callee: Box<TypedExprHir>,
+        args: Vec<TypedExprHir>,
+        /// Return type for a full call; the remaining-parameter function
+        /// `Func(remaining, ret)` for a partial application (D5).
+        ty: Type,
+        partial: Option<Vec<Type>>,
+    },
     /// Index access `a[i]` (0.0.3 V03): a bounds-checked **copy** of the
     /// element (deep for owned element types). `ty` is the element type.
     Index {
@@ -948,7 +963,7 @@ impl TypedExprHir {
             TypedExprHir::Addr { ty, .. } => ty.clone(),
             TypedExprHir::ArrayLit { ty, .. } => ty.clone(),
             TypedExprHir::StructLit { ty, .. } => ty.clone(),
-            TypedExprHir::Call(_, _, ret_ty) => ret_ty.clone(),
+            TypedExprHir::Call { ty: ret_ty, .. } => ret_ty.clone(),
             TypedExprHir::Index { ty, .. } => ty.clone(),
             TypedExprHir::Field { ty, .. } => ty.clone(),
             TypedExprHir::Int(_, _) => Type::Int,
@@ -1004,7 +1019,7 @@ impl TypedExprHir {
             TypedExprHir::AssignIndex { span, .. } => *span,
             TypedExprHir::ArrayLit { span, .. } => *span,
             TypedExprHir::StructLit { span, .. } => *span,
-            TypedExprHir::Call(f, _, _) => f.span(),
+            TypedExprHir::Call { callee, .. } => callee.span(),
             TypedExprHir::Index { span, .. } => *span,
             TypedExprHir::Field { span, .. } => *span,
             TypedExprHir::Int(_, s)

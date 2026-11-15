@@ -427,12 +427,12 @@ impl<'a> Cx<'a> {
                 self.walk_expr(l, false);
                 self.walk_expr(r, false);
             }
-            TypedExprHir::Call(f, args, _) => {
+            TypedExprHir::Call { callee, args, .. } => {
                 // The callee value is a plain read; each argument's own
                 // access (set by typeck) drives the transfer rules — a
                 // `move` argument registers, a `clone` one does not, a
                 // bare owned read auto-clones (print args, D3).
-                self.walk_expr(f, false);
+                self.walk_expr(callee, false);
                 for arg in args.iter_mut() {
                     self.walk_expr(arg, false);
                 }
@@ -936,8 +936,8 @@ fn scan_owned_local_uses(
         | TypedExprHir::AssignDerefPtr { rhs: inner, .. } => {
             scan_owned_local_uses(inner, out, globals, global_names, entry);
         }
-        TypedExprHir::Call(f, args, _) => {
-            scan_owned_local_uses(f, out, globals, global_names, entry);
+        TypedExprHir::Call { callee, args, .. } => {
+            scan_owned_local_uses(callee, out, globals, global_names, entry);
             for arg in args {
                 scan_owned_local_uses(arg, out, globals, global_names, entry);
             }

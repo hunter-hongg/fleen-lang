@@ -474,6 +474,12 @@ pub struct TypeChecker {
     enums: EnumTable,
     /// Function name → (is_unsafe, is_trusted) mapping. Built during typeck.
     func_flags: HashMap<String, (bool, bool)>,
+    /// The program's per-file `#feature` sets (0.0.8 T05, D1). Typeck runs
+    /// on the merged HIR, so the flag is consulted per call site through
+    /// the checked node's `Span.file` — a flag-off file keeps today's arity
+    /// error next to a flag-on file's partial application. An empty table
+    /// (the default) means every file is flag-off.
+    features: crate::FeatureTable,
 }
 
 impl TypeChecker {
@@ -497,12 +503,82 @@ impl TypeChecker {
             struct_by_name: HashMap::new(),
             enums: EnumTable::default(),
             func_flags: HashMap::new(),
+            features: crate::FeatureTable::empty(),
         }
     }
 
-    /// Add an error to the collection.
+    /// Create a type checker with the program's per-file feature table
+    /// (0.0.8 T05, D1/D5). The table is consulted per call site through the
+    /// checked node's `Span.file`.
+    pub fn with_features(features: &crate::FeatureTable) -> Self {
+        Self {
+            features: features.clone(),
+            ..Self::new()
+        }
+    }
+
+    /// Whether a callee may be partially applied (0.0.8 T05, D5/D7/D9):
+    /// fixed-arity and free of `ref`/`ptr` parameters; a *direct* user
+    /// function additionally must not be `unsafe`/`trusted`. Variadic
+    /// builtins never reach the call paths that consult this (their
+    /// `k < n` is always a complete call, D7).
+    fn call_participates(&self, direct_name: Option<&str>, param_types: &[Type]) -> bool {
+        // D9: a partially-applied borrow would have to outlive arbitrary
+        // control flow between the partial site and the final call; a
+        // captured pointer would make the capture list a new pointer
+        // storage location (`PtrNotStorable`'s ban list).
+        if param_types
+            .iter()
+            .any(|t| matches!(t, Type::Ref(_) | Type::Ptr(_)))
+        {
+            return false;
+        }
+        // D9: partial application must not become the routine path around
+        // the static `UnsafeCallOutsideUnsafe` check. Only a direct
+        // identifier callee is known here — a function value's
+        // participation is type-level only (the same documented hole as
+        // the static unsafe-call check).
+        if let Some(name) = direct_name
+            && let Some(&(is_unsafe, is_trusted)) = self.func_flags.get(name)
+            && (is_unsafe || is_trusted)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Add an error to the collection. The error records the checked file's
+    /// `#feature` flag (0.0.8 T05) so `Display` renders its types in the
+    /// file's spelling — flag-off files reproduce the pre-0.0.8 text.
     fn add_error(&mut self, kind: TypeckErrorKind, span: Span) {
-        self.errors.push(TypeckError::new(kind, span));
+        let curry = self.features.curry(span.file);
+        self.errors.push(TypeckError::with_curry(kind, span, curry));
+    }
+
+    /// Record an `ArityMismatch` and fail the current construct: the shared
+    /// failure shape of the call paths (0.0.8 T05) — the callee's declared
+    /// arity against the applied one, at the callee's span.
+    fn arity_mismatch<T>(&mut self, expected: usize, found: usize, span: Span) -> Result<T, ()> {
+        self.add_error(TypeckErrorKind::ArityMismatch { expected, found }, span);
+        Err(())
+    }
+
+    /// The result of a call node (0.0.8 T05, D5): a full call takes the
+    /// callee's return type; a partial application (`remaining` present)
+    /// takes the remaining-parameter function `Func(remaining, ret)` and
+    /// records the applied arguments' types in the marker.
+    fn finish_call(
+        full_ret: Type,
+        remaining: Option<Vec<Type>>,
+        typed_args: &[TypedExprHir],
+    ) -> (Type, Option<Vec<Type>>) {
+        match remaining {
+            None => (full_ret, None),
+            Some(remaining) => {
+                let captured = typed_args.iter().map(|a| a.ty().clone()).collect();
+                (Type::Func(remaining, Box::new(full_ret)), Some(captured))
+            }
+        }
     }
 
     /// Whether any lexically enclosing function is `async` (0.0.4 T03/D2).
@@ -1456,8 +1532,39 @@ impl TypeChecker {
         match item {
             HirItem::Import(import) => Ok(TypedHirItem::Import(import)),
             HirItem::Decl(decl) => Ok(TypedHirItem::Decl(self.typeck_decl(decl)?)),
-            HirItem::Expr(expr) => Ok(TypedHirItem::Expr(self.typeck_expr(expr, None)?)),
+            HirItem::Expr(expr) => {
+                let typed = self.typeck_expr(expr, None)?;
+                // D10 (0.0.8 T05) applies at the top level too — a
+                // discarded partial is the same typo there.
+                self.check_discarded_partial(&typed)?;
+                Ok(TypedHirItem::Expr(typed))
+            }
         }
+    }
+
+    /// 0.0.8 T05 (D10): the anti-typo guard. An expression statement whose
+    /// top-level typed expression is a partial application is a compile
+    /// error — a partial is pure, so discarding it is always meaningless
+    /// (the classic currying typo `add(a)` for `add(a, b)`). Only the
+    /// marker decides: a genuine function value as a statement stays as
+    /// legal as it was before 0.0.8, and no flag check is needed here
+    /// because only a `#feature curry` file can produce the marker.
+    fn check_discarded_partial(&mut self, typed: &TypedExprHir) -> Result<(), ()> {
+        if let TypedExprHir::Call {
+            ty,
+            partial: Some(_),
+            ..
+        } = typed
+        {
+            self.add_error(
+                TypeckErrorKind::PartialApplicationDiscarded {
+                    ty: Box::new(ty.clone()),
+                },
+                typed.span(),
+            );
+            return Err(());
+        }
+        Ok(())
     }
 
     /// Type check a declaration.
@@ -1779,6 +1886,9 @@ impl TypeChecker {
                     );
                     return Err(());
                 }
+                // 0.0.8 T05 (D10): the anti-typo guard — a discarded
+                // partial application is always a bug by construction.
+                self.check_discarded_partial(&typed_expr)?;
                 Ok(TypedStmtHir::Expr(Box::new(typed_expr), *has_semi))
             }
             StmtHir::Error => Ok(TypedStmtHir::Error),
@@ -3039,6 +3149,14 @@ impl TypeChecker {
             return Err(());
         }
 
+        // A direct user-function callee is recognized by name before the
+        // callee is typed (`typeck_expr` consumes the ExprHir); the D9
+        // participation check needs it for the unsafe/trusted exemption.
+        let direct_user_fn = match &func {
+            ExprHir::Ident { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+
         let typed_func = self.typeck_expr(func, None)?;
         let func_type = typed_func.ty().clone();
 
@@ -3054,20 +3172,36 @@ impl TypeChecker {
             }
         };
 
-        // Check argument count
-        if args.len() != param_types.len() {
-            self.add_error(
-                TypeckErrorKind::ArityMismatch {
-                    expected: param_types.len(),
-                    found: args.len(),
-                },
-                typed_func.span(),
-            );
-            return Err(());
-        }
+        // Check argument count. 0.0.8 T05 (D5): in a `#feature curry` file a
+        // call with *fewer* arguments than the callee declares to a
+        // participating callee is an implicit partial application — the
+        // result is the remaining-parameter function. `k > n` and every
+        // non-participating `k < n` keep today's `ArityMismatch`; flag-off
+        // files keep it unconditionally (the rule lives at the call site).
+        // A direct user-function callee participates per D9 (no
+        // `unsafe`/`trusted`); an indirect (function-value) callee's
+        // participation is type-level only — the same documented hole as the
+        // static unsafe-call check above.
+        let callee_span = typed_func.span();
+        let partial = if args.len() == param_types.len() {
+            None
+        } else if args.len() < param_types.len()
+            && self.features.curry(callee_span.file)
+            && self.call_participates(direct_user_fn.as_deref(), &param_types)
+        {
+            // The remaining parameters are sliced after the argument loop
+            // below (it consumes `args`); the marker only records that this
+            // call is a partial.
+            Some(Vec::<Type>::new())
+        } else {
+            return self.arity_mismatch(param_types.len(), args.len(), typed_func.span());
+        };
 
         // Check argument types
         let mut typed_args = Vec::new();
+        // The loop consumes `args`; a partial needs the applied count after
+        // it to slice the remaining parameters.
+        let applied = args.len();
         for (i, arg) in args.into_iter().enumerate() {
             let typed_arg = self.typeck_expr(arg, None)?;
             if let Err(e) =
@@ -3119,11 +3253,21 @@ impl TypeChecker {
             typed_args.push(typed_arg);
         }
 
-        Ok(TypedExprHir::Call(
-            Box::new(typed_func),
-            typed_args,
-            ret_type,
-        ))
+        // 0.0.8 T05 (D5): a partial application's type is the
+        // remaining-parameter function — the rest of the callee's signature
+        // (`add(1)` over `add: int -> int -> int` is `int -> int`). The
+        // arguments were checked against the first `k` parameters above, so
+        // the full-call rule set (unify, `ref` rules, `reject_bare_owned_arg`)
+        // applies unchanged; the marker records what the partial captured.
+        let remaining = partial.map(|_| param_types[applied..].to_vec());
+        let (call_ty, partial) = Self::finish_call(ret_type, remaining, &typed_args);
+
+        Ok(TypedExprHir::Call {
+            callee: Box::new(typed_func),
+            args: typed_args,
+            ty: call_ty,
+            partial,
+        })
     }
 
     /// Check a builtin call against its table signature (`builtins.rs`).
@@ -3140,18 +3284,33 @@ impl TypeChecker {
         }
 
         let typed_func = self.typeck_expr(func, None)?;
+        let callee_span = typed_func.span();
+
+        // 0.0.8 T05 (D5/D7/D8): a Fixed builtin participates under the
+        // flag — `range_from(0)` must produce the remaining function (T06
+        // reroutes its lowering to the generic partial sequence).
+        // Variadic builtins never do: fewer arguments is always a complete
+        // call for them (D7). The table's Fixed signatures carry no
+        // `ref`/`ptr` parameters today; the check keeps the D9 rule total.
+        let partial_remaining: Option<Vec<Type>> = match &sig.param {
+            BuiltinParam::Fixed(params) if args.len() < params.len() => {
+                if self.features.curry(callee_span.file)
+                    && params
+                        .iter()
+                        .all(|t| !matches!(t, Type::Ref(_) | Type::Ptr(_)))
+                {
+                    Some(params[args.len()..].to_vec())
+                } else {
+                    return self.arity_mismatch(params.len(), args.len(), callee_span);
+                }
+            }
+            _ => None,
+        };
 
         let allowed: &[Type] = match &sig.param {
             BuiltinParam::Fixed(params) => {
-                if args.len() != params.len() {
-                    self.add_error(
-                        TypeckErrorKind::ArityMismatch {
-                            expected: params.len(),
-                            found: args.len(),
-                        },
-                        typed_func.span(),
-                    );
-                    return Err(());
+                if args.len() != params.len() && partial_remaining.is_none() {
+                    return self.arity_mismatch(params.len(), args.len(), callee_span);
                 }
                 params
             }
@@ -3200,11 +3359,15 @@ impl TypeChecker {
             typed_args.push(typed_arg);
         }
 
-        Ok(TypedExprHir::Call(
-            Box::new(typed_func),
-            typed_args,
-            sig.ret.clone(),
-        ))
+        // 0.0.8 T05 (D5): a partial Fixed builtin's type is the
+        // remaining-parameter function over the table signature.
+        let (call_ty, partial) = Self::finish_call(sig.ret.clone(), partial_remaining, &typed_args);
+        Ok(TypedExprHir::Call {
+            callee: Box::new(typed_func),
+            args: typed_args,
+            ty: call_ty,
+            partial,
+        })
     }
 
     /// Check a schematic builtin call (`std.arr.*`, 0.0.3 V06).
@@ -3299,12 +3462,84 @@ impl TypeChecker {
             });
         }
 
-        // Bind `T0` from the argument types and substitute it into the
-        // parameter and return types.
+        // 0.0.8 T05 (D5/D8): a short-arity schematic call is an implicit
+        // partial application when the file opted in and the applied
+        // arguments bind every type variable the remaining parameters and
+        // the return type mention (`std.arr.get(arr)`; `map` with only the
+        // array leaves `T1` ambiguous and keeps today's error). Otherwise —
+        // including every flag-off file — today's `ArityMismatch` stands.
         let expected_arity = match &sig.param {
             BuiltinParam::Schematic { params, .. } => params.len(),
             _ => 0,
         };
+        if arg_types.len() < expected_arity {
+            // Flag-off files keep today's error unconditionally; under the
+            // flag, an ambiguous partial (a type variable the remaining
+            // parameters or the return type mention that the applied
+            // arguments did not bind) keeps it too.
+            let partial = if self.features.curry(func_span.file) {
+                crate::typeck::builtins::resolve_schematic_partial(sig, &arg_types)
+            } else {
+                None
+            };
+            let Some(partial) = partial else {
+                return self.arity_mismatch(expected_arity, arg_types.len(), func_span);
+            };
+            if let Some(conflict) = partial.conflict {
+                let span = typed_args[conflict.arg_index].span();
+                self.add_error(
+                    TypeckErrorKind::ArrayTypeMismatch {
+                        expected: conflict.expected,
+                        found: conflict.found,
+                    },
+                    span,
+                );
+                return Err(());
+            }
+            for (i, (typed_arg, expected_ty)) in typed_args
+                .iter()
+                .zip(partial.applied_params.iter())
+                .enumerate()
+            {
+                if let Err(e) =
+                    Self::unify_arg_ref_aware(expected_ty, &typed_arg.ty(), i, typed_arg.span())
+                {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
+                }
+            }
+            // The partial's type is the remaining-parameter function; the
+            // callee keeps its full substituted signature, exactly as a
+            // user-function partial's callee keeps the callee's own type.
+            let ret_type = partial.ret_type.clone();
+            let typed_func = TypedExprHir::Ident {
+                name,
+                binding_id,
+                ty: Type::Func(
+                    partial
+                        .applied_params
+                        .iter()
+                        .chain(partial.remaining.iter())
+                        .cloned()
+                        .collect(),
+                    Box::new(ret_type.clone()),
+                ),
+                access: Access::Copy,
+                hir_id,
+                span: func_span,
+            };
+            let (call_ty, partial) =
+                Self::finish_call(ret_type, Some(partial.remaining), &typed_args);
+            return Ok(TypedExprHir::Call {
+                callee: Box::new(typed_func),
+                args: typed_args,
+                ty: call_ty,
+                partial,
+            });
+        }
+
+        // Bind `T0` from the argument types and substitute it into the
+        // parameter and return types.
         let Some(resolved) = crate::typeck::builtins::resolve_schematic_call(sig, &arg_types)
         else {
             self.add_error(
@@ -3358,11 +3593,12 @@ impl TypeChecker {
             span: func_span,
         };
 
-        Ok(TypedExprHir::Call(
-            Box::new(typed_func),
-            typed_args,
-            ret_type,
-        ))
+        Ok(TypedExprHir::Call {
+            callee: Box::new(typed_func),
+            args: typed_args,
+            ty: ret_type,
+            partial: None,
+        })
     }
 
     /// Type a zero-payload variant in value position (0.0.6 T04, D3):

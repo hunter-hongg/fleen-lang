@@ -466,7 +466,20 @@ fn lower_global_init(
                 expr.span(),
             ));
         }
-        TypedExprHir::Call(callee, args, _) => match callee.as_ref() {
+        // 0.0.8 T05: same loud failure as in function bodies — a partial
+        // application's lowering (T06) is not implemented, and the full-call
+        // path below would miscompile the node.
+        TypedExprHir::Call {
+            partial: Some(_), ..
+        } => {
+            return Err(LowerError::new(
+                LowerErrorKind::UnsupportedFeature {
+                    feature: "partial application lowering (lands with 0.0.8 T06)",
+                },
+                expr.span(),
+            ));
+        }
+        TypedExprHir::Call { callee, args, .. } => match callee.as_ref() {
             TypedExprHir::Ident { name, .. } if lcx.func_ids.contains_key(name) => {
                 // 0.0.2 U06: check for Ref arguments in global init calls.
                 let fid = lcx.func_ids[name];
@@ -1194,7 +1207,22 @@ impl<'a> FnBodyCx<'a> {
             // emits a real `ExprFor` node, so no phase is skipped).
             TypedExprHir::For(e) => self.lower_for(fb, e)?,
             TypedExprHir::Choose(e) => self.lower_choose(fb, e)?,
-            TypedExprHir::Call(callee, args, _) => {
+            // 0.0.8 T05: a partial application node *does* reach lowering
+            // (flag-on files are compiled end-to-end since T05), so fail
+            // loudly instead of silently miscompiling it as a full call (a
+            // runtime arity failure). T06 lowers it (LoadFunc/callee + args
+            // + `PartialApply k`).
+            TypedExprHir::Call {
+                partial: Some(_), ..
+            } => {
+                return Err(LowerError::new(
+                    LowerErrorKind::UnsupportedFeature {
+                        feature: "partial application lowering (lands with 0.0.8 T06)",
+                    },
+                    expr.span(),
+                ));
+            }
+            TypedExprHir::Call { callee, args, .. } => {
                 self.lower_call(fb, callee, args, expr.span())?;
             }
             TypedExprHir::Block(b) => self.lower_block(fb, b)?,

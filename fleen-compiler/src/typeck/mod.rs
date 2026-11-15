@@ -35,7 +35,26 @@ use typed_hir::TypedHir;
 /// - `Ok(TypedHir)`: Type checking successful, all types inferred.
 /// - `Err(Vec<TypeckError>)`: Type errors (collected, not fail-fast).
 pub fn typeck(hir: Hir) -> Result<TypedHir, Vec<TypeckError>> {
-    let mut typed = TypeChecker::new().typeck(hir)?;
+    typeck_with_features(hir, &crate::FeatureTable::empty())
+}
+
+/// Type check a HIR program with the program's per-file `#feature` table
+/// (0.0.8 T05, D1/D5): the flag is consulted per call site through the
+/// checked node's `Span.file`, so a flag-on file's partial application and
+/// a flag-off file's exact `ArityMismatch` coexist in one merged HIR.
+///
+/// # Arguments
+/// - `hir`: The HIR from the resolver.
+/// - `features`: The `FileId → FeatureSet` table from the parse results.
+///
+/// # Returns
+/// - `Ok(TypedHir)`: Type checking successful, all types inferred.
+/// - `Err(Vec<TypeckError>)`: Type errors (collected, not fail-fast).
+pub fn typeck_with_features(
+    hir: Hir,
+    features: &crate::FeatureTable,
+) -> Result<TypedHir, Vec<TypeckError>> {
+    let mut typed = TypeChecker::with_features(features).typeck(hir)?;
     let ownership_errors = ownership::check_ownership(&mut typed);
     if !ownership_errors.is_empty() {
         return Err(ownership_errors);

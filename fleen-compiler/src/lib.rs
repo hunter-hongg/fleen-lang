@@ -208,8 +208,12 @@ impl Session {
         // the whole-program pipeline. Everything else keeps the exact
         // single-file chain below (byte-identical to before V06).
         if !uses_std(std::slice::from_ref(&ast)) {
+            // The file's own `#feature` set drives the flag-gated type rules
+            // (0.0.8 T05, D5) — a single file is the whole table here.
+            let features = FeatureTable::from_asts(std::slice::from_ref(&ast));
             let hir = resolver::resolve(ast).map_err(CompileError::Resolve)?;
-            let typed = typeck::typeck(hir).map_err(CompileError::Typeck)?;
+            let typed =
+                typeck::typeck_with_features(hir, &features).map_err(CompileError::Typeck)?;
             let mir = lower::lower(typed).map_err(CompileError::Lower)?;
             return codegen::codegen(mir).map_err(CompileError::Codegen);
         }
@@ -355,6 +359,7 @@ fn parse_all(sources: &source_map::SourceMap) -> Result<Vec<parser::ast::Ast>, C
 /// set is complete before any item is parsed — no pre-scan of later stages
 /// is needed. Later cards (T02–T06) consult the *current file's* set here
 /// when gating the curried productions and the partial-application rule.
+#[derive(Clone)]
 pub struct FeatureTable {
     sets: Vec<parser::ast::FeatureSet>,
 }
@@ -367,6 +372,19 @@ impl FeatureTable {
         Self {
             sets: asts.iter().map(|a| a.features).collect(),
         }
+    }
+
+    /// The empty table: every file is flag-off. The pre-0.0.8 behavior —
+    /// used by callers that never saw a parse result (e.g. the plain
+    /// [`crate::typeck::typeck`] entry).
+    pub fn empty() -> Self {
+        Self { sets: Vec::new() }
+    }
+
+    /// The `curry` flag of `file`, `false` for any file the table does not
+    /// know (including synthetic spans) — flag-off is the default.
+    pub fn curry(&self, file: source_map::FileId) -> bool {
+        self.sets.get(file.0 as usize).is_some_and(|s| s.curry)
     }
 
     /// The feature set of `file`.
@@ -391,6 +409,9 @@ fn compile_pre_parsed(
     asts: Vec<parser::ast::Ast>,
 ) -> Result<codegen::Bytecode, CompileError> {
     let table = build_module_table(crates, sources, &asts).map_err(CompileError::Resolve)?;
+    // Per-file `#feature` sets for the flag-gated type rules (0.0.8 T05,
+    // D1/D5) — consulted per call site through each node's `Span.file`.
+    let features = FeatureTable::from_asts(&asts);
     let mut hirs = Vec::with_capacity(table.modules.len());
     let mut binding_offset = 0u32;
     let mut hir_offset = 0u32;
@@ -419,7 +440,7 @@ fn compile_pre_parsed(
         enums,
         span,
     };
-    let typed = typeck::typeck(merged).map_err(CompileError::Typeck)?;
+    let typed = typeck::typeck_with_features(merged, &features).map_err(CompileError::Typeck)?;
     let mir = lower::lower(typed).map_err(CompileError::Lower)?;
     codegen::codegen(mir).map_err(CompileError::Codegen)
 }

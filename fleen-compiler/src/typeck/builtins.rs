@@ -404,6 +404,24 @@ pub struct VarConflict {
     pub arg_index: usize,
 }
 
+/// A resolved partial application of a schematic builtin (0.0.8 T05, D5):
+/// the table's type variables were bound from the `k` applied arguments;
+/// every variable the remaining parameters and the return type mention
+/// turned out to be bound, so the partial's type is determinate.
+pub struct ResolvedPartial {
+    /// The substituted parameter types for the `k` applied arguments.
+    pub applied_params: Vec<Type>,
+    /// The substituted remaining-parameter types — the partial function's
+    /// own parameters.
+    pub remaining: Vec<Type>,
+    /// The substituted return type.
+    pub ret_type: Type,
+    /// A conflicting type-variable binding among the applied arguments,
+    /// reported by typeck against the offending argument (as in the
+    /// full-call path).
+    pub conflict: Option<VarConflict>,
+}
+
 /// Resolve a builtin call at a given name and argument types.
 ///
 /// For schematic builtins, type variables (`Var(n)`) in the signature are
@@ -454,6 +472,70 @@ pub fn resolve_schematic_call(sig: &BuiltinSig, arg_types: &[Type]) -> Option<Re
             is_schematic: false,
             conflict: None,
         }),
+    }
+}
+
+/// Resolve a *partial* application of a schematic builtin (0.0.8 T05, D5):
+/// the first `k` arguments bind the table's type variables; the result is
+/// the remaining-parameter function when every variable the remaining
+/// parameters and the return type mention was bound by the applied
+/// arguments (`std.arr.get(arr)` works; `map` with only the array leaves
+/// `T1` ambiguous and returns `None`, so typeck keeps today's
+/// `ArityMismatch`). `None` for non-schematic signatures and for `k >= n`.
+pub fn resolve_schematic_partial(sig: &BuiltinSig, arg_types: &[Type]) -> Option<ResolvedPartial> {
+    let BuiltinParam::Schematic { params, ret } = &sig.param else {
+        return None;
+    };
+    if arg_types.len() >= params.len() {
+        return None;
+    }
+    let mut subst: Vec<(u32, Type)> = Vec::new();
+    let mut conflict: Option<VarConflict> = None;
+    for (i, (param, found)) in params.iter().zip(arg_types.iter()).enumerate() {
+        collect_bindings(param, found, i, &mut subst, &mut conflict);
+    }
+    let applied_params: Vec<Type> = params[..arg_types.len()]
+        .iter()
+        .map(|t| substitute(t, &subst))
+        .collect();
+    let remaining: Vec<Type> = params[arg_types.len()..]
+        .iter()
+        .map(|t| substitute(t, &subst))
+        .collect();
+    let ret_type = substitute(ret, &subst);
+    // An unbound variable anywhere in the partial's type makes it
+    // ambiguous — the partial cannot be typed, not even with the whole
+    // polymorphic machinery 0.1.0 might bring (PLAN §10).
+    if applied_params.iter().any(contains_unbound_var)
+        || remaining.iter().any(contains_unbound_var)
+        || contains_unbound_var(&ret_type)
+    {
+        return None;
+    }
+    Some(ResolvedPartial {
+        applied_params,
+        remaining,
+        ret_type,
+        conflict,
+    })
+}
+
+/// Whether a type still mentions a `Var` placeholder after substitution.
+fn contains_unbound_var(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) => true,
+        Type::Array(inner)
+        | Type::Box(inner)
+        | Type::Ref(inner)
+        | Type::Future(inner)
+        | Type::Channel(inner)
+        | Type::Ptr(inner) => contains_unbound_var(inner),
+        Type::Result(ok, err) => contains_unbound_var(ok) || contains_unbound_var(err),
+        Type::Func(params, ret) => {
+            params.iter().any(contains_unbound_var) || contains_unbound_var(ret)
+        }
+        Type::App(_, args) => args.iter().any(contains_unbound_var),
+        _ => false,
     }
 }
 

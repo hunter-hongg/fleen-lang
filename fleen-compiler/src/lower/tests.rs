@@ -2118,8 +2118,8 @@ fn make_inline_iter_hir(
     ret_ty: Type,
 ) -> TypedHir {
     let span = Span::SYNTHETIC;
-    let call = TypedExprHir::Call(
-        Box::new(TypedExprHir::Ident {
+    let call = TypedExprHir::Call {
+        callee: Box::new(TypedExprHir::Ident {
             name: callee_name.to_string(),
             binding_id: BindingId(0),
             ty: Type::Func(vec![], Box::new(ret_ty.clone())),
@@ -2128,8 +2128,9 @@ fn make_inline_iter_hir(
             span,
         }),
         args,
-        ret_ty,
-    );
+        ty: ret_ty,
+        partial: None,
+    };
 
     let mut items = helpers;
     items.push(TypedHirItem::Decl(TypedDeclHir::Func(TypedFuncDeclHir {

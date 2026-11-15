@@ -209,8 +209,8 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
             collect_expr(alloc, rhs);
             alloc.slot_for(*binding_id);
         }
-        TypedExprHir::Call(f, args, _) => {
-            collect_expr(alloc, f);
+        TypedExprHir::Call { callee, args, .. } => {
+            collect_expr(alloc, callee);
             for arg in args {
                 collect_expr(alloc, arg);
             }
