@@ -293,8 +293,10 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::EnumIs(_) => Opcode::EnumIs,
         MirInstrKind::EnumPayload(..) => Opcode::EnumPayload,
         // 0.0.8 T06: partial application reaches MIR now; its bytecode
-        // encoding (`PartialApply` 0xCE, u8 operand) lands with T07 —
-        // reject loudly here instead of encoding an invented opcode.
+        // encoding (u8 operand, first slot of the reserved 0xCE–0xDF
+        // group per BYTECODE.md §4.2 — slot value to be assigned and
+        // synced with the doc in T07) lands with T07 — reject loudly
+        // here instead of encoding an invented opcode.
         MirInstrKind::PartialApply(_) => {
             return Err(CodegenError {
                 message: "PartialApply bytecode encoding lands with 0.0.8 T07".to_string(),

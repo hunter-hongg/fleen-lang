@@ -3332,3 +3332,24 @@ fn t06_flag_on_without_partials_emits_no_partial_apply() {
         "flag-on full-arity module must not contain PartialApply"
     );
 }
+
+#[test]
+fn t06_partial_apply_operand_overflow_is_a_lower_error() {
+    // The `PartialApply` operand is a `u8`; a `k` above 255 must be a
+    // lowering error, not a silent truncation to a wrong arity (typeck
+    // enforces `k < n` but sets no arity cap).
+    let span = crate::lexer::Span::new(FileId(0), 0, 1);
+    let ok = super::partial_apply_instr(255, span).unwrap();
+    assert!(matches!(ok.kind, MirInstrKind::PartialApply(255)));
+    let err =
+        super::partial_apply_instr(256, span).expect_err("k = 256 must overflow the u8 operand");
+    assert!(
+        matches!(err.kind, super::LowerErrorKind::PartialArityOverflow),
+        "expected PartialArityOverflow, got {:?}",
+        err.kind
+    );
+    assert_eq!(
+        err.to_string(),
+        "a partial application cannot take more than 255 arguments"
+    );
+}

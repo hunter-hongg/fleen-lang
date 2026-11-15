@@ -326,6 +326,10 @@
       parameters). Direct builtins take `LoadFunc(fid)` like user
       functions (the D8 reroute is exactly *not* special-casing them);
       the `stack_delta` test helper grew the `PartialApply(k) => -k` arm.
+      Both paths build the instruction through one shared
+      `partial_apply_instr` helper, which rejects a `k` above 255
+      (`PartialArityOverflow`) instead of silently truncating the `u8`
+      operand (typeck enforces `k < n` but sets no arity cap).
 - [x] Inline-lowering reroute (D8): `range` / `range_from` (`MakeRange`)
       and the `std.collection.iter` helpers (`InlineIter`) take their
       inline path only on full-arity calls; a partial call emits the
@@ -341,13 +345,22 @@
 - [x] Tests: lower shapes for direct/indirect partial calls; `range_from(0)`
       does not fold to `MakeRange`; full-arity `range_from(a, b)` still
       folds; snapshot tests that flag-off modules emit zero new
-      instructions. **Implementation**: 7 inline lower tests
-      (`t06_partial_*`, `t06_flag_*`) — direct shape (`LoadFunc` + arg +
-      `PartialApply(1)`, no `Call`), indirect shape (callee slot load +
-      arg + `PartialApply(1)` + `CallValue(1)`), degenerate
-      `PartialApply(0)`, partial-in-global-init reroute, full-arity
-      `MakeRange` fold retained, flag-off zero-`PartialApply`, flag-on
-      full-arity zero-`PartialApply` (D13's v7 premise). Spelling notes
+      instructions. **Implementation**: 7 inline lower tests — direct
+      shape (`t06_partial_direct_call_lowers_load_func_args_partial_apply`:
+      `LoadFunc` + arg + `PartialApply(1)`, no `Call`), indirect shape
+      (`t06_partial_indirect_call_lowers_callee_expr_args_partial_apply`:
+      callee slot load + arg + `PartialApply(1)` + `CallValue(1)`),
+      degenerate `PartialApply(0)`
+      (`t06_degenerate_zero_arg_partial_is_partial_apply_zero`), the D8
+      reroute with the partial as a *global initializer* — covering the
+      flat global-init path in the same test
+      (`t06_partial_range_from_does_not_fold_to_make_range`), full-arity
+      `MakeRange` fold retained
+      (`t06_full_arity_range_from_still_folds_to_make_range`), and the
+      two flag snapshots
+      (`t06_flag_off_module_emits_no_partial_apply` /
+      `t06_flag_on_without_partials_emits_no_partial_apply`; D13's v7
+      premise). Spelling notes
       baked into the tests: `Range` as a type name needs the std import
       machinery (unannotated bindings used instead), and a chain's return
       side always merges in a flag-on file, so the indirect test observes

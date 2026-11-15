@@ -97,6 +97,10 @@ pub enum LowerErrorKind {
     /// 0.0.2 U06: defensive: typeck rejects deref-assign of global boxes.
     /// This ensures lower stays total for malformed trees.
     GlobalBoxDerefAssign { name: String },
+    /// 0.0.8 T06: a partial application with more than 255 arguments — the
+    /// `PartialApply` operand is a `u8` and cannot hold the arity
+    /// (defensive: typeck enforces `k < n` but sets no arity cap).
+    PartialArityOverflow,
 }
 
 impl LowerError {
@@ -137,6 +141,12 @@ impl std::fmt::Display for LowerError {
             }
             LowerErrorKind::GlobalBoxDerefAssign { name } => {
                 write!(f, "cannot deref-assign a global box ({name})")
+            }
+            LowerErrorKind::PartialArityOverflow => {
+                write!(
+                    f,
+                    "a partial application cannot take more than 255 arguments"
+                )
             }
         }
     }
@@ -342,6 +352,17 @@ impl LowerCtx {
     }
 }
 
+/// Build the `PartialApply k` instruction (0.0.8 T06, D13). The operand is
+/// a `u8`; a `k` that cannot fit is a lowering error rather than a silent
+/// truncation to a wrong arity (typeck enforces `k < n` but sets no arity
+/// cap). Shared by the function-body path (`lower_partial_call`) and the
+/// flat global-init path.
+fn partial_apply_instr(k: usize, span: Span) -> Result<MirInstr, LowerError> {
+    let k =
+        u8::try_from(k).map_err(|_| LowerError::new(LowerErrorKind::PartialArityOverflow, span))?;
+    Ok(MirInstr::new(MirInstrKind::PartialApply(k), span))
+}
+
 /// Lower a global initializer to a flat instruction list.
 ///
 /// Control-flow-bearing initializers are rejected: 0.0.1 requires global
@@ -468,28 +489,22 @@ fn lower_global_init(
         }
         // 0.0.8 T06: a partial application in a global initializer — the
         // same generic captured-function sequence as in function bodies
-        // (D13), on the flat global-init path. Direct callees only (the
-        // flat path has no frame to evaluate a callee expression in);
-        // the builtin lowering table is not consulted (D8, as in
-        // `lower_partial_call`).
+        // (D13, see `lower_partial_call` for the D8/D9 rationale), on the
+        // flat global-init path. Direct callees only (the flat path has
+        // no frame to evaluate a callee expression in); the builtin
+        // lowering table is not consulted (D8).
         TypedExprHir::Call {
             partial: Some(_),
             callee,
             args,
             ..
         } => match callee.as_ref() {
-            TypedExprHir::Ident { name, .. } if lcx.func_ids.contains_key(name) => {
-                out.push(MirInstr::new(
-                    MirInstrKind::LoadFunc(lcx.func_ids[name]),
-                    expr.span(),
-                ));
+            TypedExprHir::Ident { name, .. } if let Some(&fid) = lcx.func_ids.get(name) => {
+                out.push(MirInstr::new(MirInstrKind::LoadFunc(fid), expr.span()));
                 for a in args {
                     lower_global_init(lcx, a, out)?;
                 }
-                out.push(MirInstr::new(
-                    MirInstrKind::PartialApply(args.len() as u8),
-                    expr.span(),
-                ));
+                out.push(partial_apply_instr(args.len(), expr.span())?);
             }
             _ => {
                 return Err(LowerError::new(
@@ -1714,10 +1729,7 @@ impl<'a> FnBodyCx<'a> {
         for arg in args {
             self.lower_expr_into(fb, arg)?;
         }
-        fb.emit(MirInstr::new(
-            MirInstrKind::PartialApply(args.len() as u8),
-            span,
-        ));
+        fb.emit(partial_apply_instr(args.len(), span)?);
         Ok(())
     }
 
