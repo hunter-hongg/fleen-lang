@@ -1,0 +1,4 @@
+#feature curry
+add: int -> int -> int
+main: () -> int
+main() { 0 }

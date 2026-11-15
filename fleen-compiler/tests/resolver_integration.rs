@@ -10,6 +10,7 @@ use fleen_compiler::parser::parse;
 use fleen_compiler::resolver::error::ResolveErrorKind;
 use fleen_compiler::resolver::hir::DeclHir;
 use fleen_compiler::resolver::resolve;
+use fleen_compiler::resolver::resolve_module_with_table;
 use std::fs;
 use std::path::Path;
 
@@ -1395,6 +1396,242 @@ func main() {
     )
     .expect("should resolve");
     assert_eq!(hir.items.len(), 1);
+}
+
+// ========== 0.0.8 T04: two-part curried declarations (D3) ==========
+
+#[test]
+fn resolve_curried_two_part_declaration() {
+    // The signature carries the types/modifiers, the body the names — the
+    // resolver synthesizes the ordinary `FuncDecl` typeck/lower/codegen see.
+    use fleen_compiler::parser::ast::{BaseType, Type};
+    use fleen_compiler::resolver::hir::{FuncBodyHir, HirItem};
+
+    let hir = resolve_str("#feature curry\nadd: int -> int -> int\nadd(a, b) { a + b }")
+        .expect("two-part declaration should resolve");
+    // One function declaration — the signature contributes no item of its own.
+    assert_eq!(hir.items.len(), 1);
+    let HirItem::Decl(DeclHir::Func(func)) = &hir.items[0] else {
+        panic!("expected a function declaration")
+    };
+    assert_eq!(func.name, "add");
+    assert_eq!(func.params.len(), 2);
+    assert_eq!(func.params[0].name, "a");
+    assert_eq!(func.params[0].ty, Type::Base(BaseType::Int));
+    assert_eq!(func.params[1].name, "b");
+    assert_eq!(func.params[1].ty, Type::Base(BaseType::Int));
+    let Some(ret) = &func.ret_type else {
+        panic!("the signature's return type must travel")
+    };
+    assert_eq!(*ret, Type::Base(BaseType::Int));
+    assert!(matches!(func.body, FuncBodyHir::Block(_)));
+}
+
+#[test]
+fn resolve_curried_single_expr_body_and_modifiers() {
+    // `= expr` body form; modifiers (`async`) and `pub` come from the
+    // signature line (D3).
+    let hir = resolve_str("#feature curry\npub async half: int -> int\nhalf(n) = n / 2")
+        .expect("curried `= expr` body with modifiers should resolve");
+    let fleen_compiler::resolver::hir::HirItem::Decl(DeclHir::Func(func)) = &hir.items[0] else {
+        panic!("expected a function declaration")
+    };
+    assert!(func.is_async, "`async` on the signature must travel");
+    assert_eq!(func.name, "half");
+    assert_eq!(func.params.len(), 1);
+}
+
+#[test]
+fn resolve_curried_zero_param() {
+    // `() -> int` is a zero-parameter function (D4); `unit -> int` is unary.
+    let hir = resolve_str(
+        "#feature curry\nping: () -> int\nping() { 42 }\nunitf: unit -> int\nunitf(u) { 7 }",
+    )
+    .expect("zero-param and unit-param curried declarations should resolve");
+    assert_eq!(hir.items.len(), 2);
+    let fleen_compiler::resolver::hir::HirItem::Decl(DeclHir::Func(zero)) = &hir.items[0] else {
+        panic!("expected a function declaration")
+    };
+    assert!(zero.params.is_empty());
+}
+
+#[test]
+fn resolve_curried_recursion() {
+    // Signatures register before any body resolves, so recursion works
+    // unchanged (T04 card).
+    let hir = resolve_str(
+        "#feature curry\nfib: int -> int\nfib(n) {\n    if n < 2 { n }\n    else { fib(n - 1) + fib(n - 2) }\n}",
+    )
+    .expect("recursive two-part declaration should resolve");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn resolve_curried_forward_body_reference() {
+    // A call may appear before the callee's signature/body lines (the same
+    // forward-reference rule top-level `func` declarations follow).
+    let hir = resolve_str(
+        "#feature curry\nmain: () -> unit\nmain() { twice(21) }\ntwice: int -> int\ntwice(n) { n * 2 }",
+    )
+    .expect("forward-referenced two-part declaration should resolve");
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn error_curried_body_without_signature() {
+    let errs = resolve_str("#feature curry\nadd(a, b) { a + b }").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::BodyWithoutSignature { .. })),
+        "expected BodyWithoutSignature, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_signature_without_body() {
+    let errs = resolve_str("#feature curry\nadd: int -> int -> int").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::SignatureWithoutBody { .. })),
+        "expected SignatureWithoutBody, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_body_before_signature() {
+    // Source order is enforced (D3): even though the signature exists in the
+    // module, a body may only match a signature that *precedes* it.
+    let errs = resolve_str("#feature curry\nadd(a, b) { a + b }\nadd: int -> int -> int")
+        .expect_err("body-before-signature must fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::BodyWithoutSignature { .. })),
+        "expected BodyWithoutSignature, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_arity_mismatch() {
+    // The arrow chain's parameter count must equal the body's parameter count.
+    let errs = resolve_str("#feature curry\nadd: int -> int\nadd(a, b) { a + b }")
+        .expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::SignatureArityMismatch { .. })),
+        "expected SignatureArityMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_duplicate_signature() {
+    let errs = resolve_str("#feature curry\nf: int -> int\nf: int -> int\nf(x) { x }")
+        .expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding for the repeated signature, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_duplicate_body() {
+    // A second body line for an already-matched signature is a duplicate
+    // declaration, not a fresh orphan-body case.
+    let errs = resolve_str("#feature curry\nf: int -> int\nf(x) { x }\nf(x) { x }")
+        .expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding for the second body, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_curried_body_clashes_with_global_var() {
+    // The signature registers the name in the flat top-level namespace, so a
+    // later binding of the same name is the usual name clash (and vice versa:
+    // a body line before a `var` of the same name is an orphan body).
+    let errs =
+        resolve_str("#feature curry\nf: int -> int\nf(x) { x }\nf = 3;").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding, got {errs:?}"
+    );
+}
+
+#[test]
+fn resolve_curried_import_cross_module() {
+    // 0.0.8 T04 (D6): a curried declaration exports exactly like `func` — a
+    // flag-off importer sees the signature and calls it (T04 only resolves;
+    // the call's arity rule is typeck's, T05).
+    use fleen_compiler::lexer::Span;
+    use fleen_compiler::parser::ast::ImportDecl;
+    use fleen_compiler::resolver::modules::{CrateDef, ModuleDef, ModuleTable};
+    use fleen_compiler::source_map::FileId;
+    use std::collections::HashMap;
+
+    let mut table = ModuleTable::default();
+    table.crates.push(CrateDef::root_crate(FileId(0)));
+    table.modules.push(ModuleDef {
+        file: FileId(0),
+        path: Vec::new(),
+        crate_id: 0,
+        is_crate_root: true,
+        imports: vec![ImportDecl {
+            path: vec!["lib".to_string()],
+            span: Span::SYNTHETIC,
+        }],
+        items: HashMap::new(),
+    });
+    table.modules.push(ModuleDef {
+        file: FileId(1),
+        path: vec!["lib".to_string()],
+        crate_id: 0,
+        is_crate_root: false,
+        imports: Vec::new(),
+        items: {
+            // What `exports_of_ast` builds for the flag-on lib module: the
+            // signature half exports as `Func`, `pub` from the signature.
+            let mut items = HashMap::new();
+            items.insert(
+                "add".to_string(),
+                fleen_compiler::resolver::modules::ExportDef {
+                    name: "add".to_string(),
+                    is_pub: true,
+                    span: Span::SYNTHETIC,
+                    kind: fleen_compiler::resolver::modules::ExportKind::Func,
+                    enum_variants: Vec::new(),
+                    type_param_count: 0,
+                },
+            );
+            items
+        },
+    });
+
+    // The importing file carries no `#feature` directive (flag-off, D6): it
+    // sees the curried declaration as an ordinary function and uses the
+    // legacy `func` form it always had.
+    let main_ast = parse(tokenize("import lib;\nfunc main() { lib.add(1, 2) }").unwrap())
+        .expect("parser should succeed");
+    let (main_hir, _, _) =
+        resolve_module_with_table(main_ast, &table, 0, 0, 0).expect("should resolve");
+    // One import item + the main function declaration.
+    assert_eq!(main_hir.items.len(), 2);
+
+    // The exporting side resolves its two-part declaration into an ordinary
+    // function the merged HIR carries under its mangled name.
+    let lib_ast =
+        parse(tokenize("#feature curry\npub add: int -> int -> int\nadd(a, b) { a + b }").unwrap())
+            .expect("parser should succeed");
+    let (lib_hir, _, _) = resolve_module_with_table(lib_ast, &table, 1, 0, 0)
+        .expect("the flag-on lib module should resolve");
+    let fleen_compiler::resolver::hir::HirItem::Decl(DeclHir::Func(func)) = &lib_hir.items[0]
+    else {
+        panic!("expected the curried declaration to resolve into a function")
+    };
+    assert_eq!(func.name, "lib.add");
+    assert_eq!(func.params.len(), 2);
 }
 
 // ========== Directory-based tests ==========

@@ -4,9 +4,9 @@
 > with tests.  Decisions D1–D16 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T03 implemented and green (parser-level; T02's entry-wiring
-> verification carried into T04; T03's typeck rendering wiring carried into
-> T05); T04–T11 open.**
+> **Status: T01–T04 implemented and green (parser-level for T01–T03; T02's
+> entry-wiring verification done in T04; T03's typeck rendering wiring carried
+> into T05); T05–T11 open.**
 > **Posture reminder**: this release must stay non-breaking additive (PLAN
 > D16).  Every card that touches a shared path (parser, typeck, lower,
 > codegen) must keep flag-off behavior byte-identical; the e2e suite runs
@@ -72,12 +72,12 @@
       `PubOnCurriedBody`, `ModifierOnCurriedBody`, `DuplicateParam`.
 - [ ] Entry point: `main` in a flag-on file uses the two-part form; verify
       the project-mode entry wiring still finds it.
-      **Status**: the two-part-`main` parsing half is done (test
+      **Status**: done (the *wiring* half closed by T04 — see that card): the
+      two-part-`main` parsing half landed here (test
       `curried_main_uses_two_part_form`, fixture `curry_two_part.fln`); the
-      *wiring* half — project-mode entry discovery on the two-part path —
-      is **carried into T04**, because resolve still rejects every curried
-      declaration (`CurriedDeclNotYetResolved`, the pre-T04 guard), so no
-      project-mode run is possible yet.
+      project-mode entry discovery needed no change once T04 resolved curried
+      declarations into ordinary functions, and the e2e project fixture
+      `curry_main` pins it end-to-end.
 - [x] Tests: parser valid (0/1/2-param signatures, `= expr` body, block
       body, `async`/`unsafe`/`trusted` on the signature, `pub` on the
       signature, `main` two-part); invalid (`func` in flag-on file, two-part
@@ -162,23 +162,63 @@
 
 ## T04 — Resolver: signature/body matching + registration (F2; D3)
 
-- [ ] Carried from T02: verify the project-mode entry wiring finds a
+- [x] Carried from T02: verify the project-mode entry wiring finds a
       two-part `main` in a flag-on file end-to-end (T02 could only pin the
       parsing half — resolve still rejects curried declarations there).
-- [ ] Signatures register in the function table exactly as `func`
+      **Implementation**: no wiring change needed — a matched pair resolves
+      into an ordinary `FuncDeclHir` (name `main` included), so codegen's
+      `funcs.find(name == "main")` finds it unchanged; the e2e project
+      fixture `curry_main` runs a two-part `main` end-to-end
+      (`project_curry_two_part_main_runs`).
+- [x] Signatures register in the function table exactly as `func`
       declarations do — name, canonical type, modifiers, visibility —
       before bodies resolve (recursion and forward reference unchanged).
-- [ ] Match bodies to signatures by name within the module. New errors:
+      **Implementation**: `predeclare_global_functions` also walks
+      `CurriedSignature` items (binding + mangled global name +
+      `global_funcs` entry), keeping the signature (with its item index) in
+      `pending_sigs`. A matched pair is synthesized into a `FuncDecl`
+      (types/ret/modifiers/`pub` from the signature; names/body from the
+      body) and resolved through the unchanged `resolve_func_decl` path —
+      typeck/lower/codegen see an ordinary function (the D13 v7-module
+      property falls out of this).
+- [x] Match bodies to signatures by name within the module. New errors:
       `BodyWithoutSignature` (body line with no preceding signature —
       order is enforced, D3), `SignatureWithoutBody`, `SignatureArityMismatch`
-      (arrow count ≠ body parameter count).
-- [ ] Cross-module: export/import tables carry the signature (type +
+      (arrow count ≠ body parameter count). **Implementation**: matching is
+      order-sensitive via the signature's item index (`sig_index <
+      body_index`), so registration stays global while the source order D3
+      demands still holds. Two disambiguations: a *second* body for an
+      already-consumed signature is `DuplicateBinding` (flat-namespace rule),
+      and an arity-mismatched pair consumes its signature (no orphan-halves
+      double report). `CurriedDeclNotYetResolved` (the pre-T04 guard) is
+      removed; the `resolve_decl` arms became `unreachable!` (the parser
+      accepts the two-part form at top level only, same shape as
+      struct/enum).
+- [x] Cross-module: export/import tables carry the signature (type +
       modifiers + visibility) exactly as `func` exports do. The importing
-      file's flag never affects what it sees (D6).
-- [ ] Tests: resolver valid (recursion in flag-on files, forward body
+      file's flag never affects what it sees (D6). **Implementation**:
+      `exports_of_ast` maps `CurriedSignature` → `ExportKind::Func` (the
+      body half contributes no entry); the import path is the existing
+      `Func` machinery, untouched — the resolver stays flag-blind (D6).
+- [x] Tests: resolver valid (recursion in flag-on files, forward body
       reference, cross-module import of a curried declaration by a
       flag-off file); invalid (orphan signature, orphan body, arity
-      mismatch, duplicate names, body-before-signature).
+      mismatch, duplicate names, body-before-signature). Inline:
+      two-part synthesis shape (param names/types/ret travel), `= expr`
+      body + signature modifiers/`pub`, zero-param/`unit ->`, recursion,
+      forward reference, cross-module import both halves (mangled export
+      name, flag-off importer), the five error kinds, body-vs-global-var
+      name clash. Fixtures:
+      `curry_{recursion,zero_param,forward_reference}.fln` (valid),
+      `curry_{orphan_signature,orphan_body,arity_mismatch,
+      duplicate_signature,duplicate_body,body_before_signature}.fln`
+      (invalid).
+      **Coverage note (post-review)**: the inline cross-module test
+      hand-builds the export table, so it only exercises the *import* half;
+      the export half (`exports_of_ast` on a flag-on module) is pinned by
+      the e2e project fixture `curry_import` — a flag-off `main` imports a
+      `pub` curried declaration from a flag-on `lib` and runs it through the
+      real `--project` pipeline (`project_curry_import_cross_module_runs`).
 
 **Depends on**: T02, T03.
 **Refs**: PLAN §3.4, D2, D3, D6.

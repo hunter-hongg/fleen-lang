@@ -1,0 +1,5 @@
+#feature curry
+add: int -> int
+add(a, b) { a + b }
+main: () -> int
+main() { 0 }

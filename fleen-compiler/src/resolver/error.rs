@@ -86,12 +86,22 @@ pub enum ResolveErrorKind {
     /// read-only (DESIGN §10.4); a pointer would extend the write path
     /// past the borrow's lifetime and read-only guarantee.
     AddrOfRefParam { name: String },
-    /// 0.0.8 T02 (interim): the parser emits the two-part curried
-    /// declarations, but signature/body matching and function-table
-    /// registration are T04's card — until then a curry file that got past
-    /// the parser is rejected here. T04 replaces this kind with the real
-    /// signature/body resolution (and its own diagnostics).
-    CurriedDeclNotYetResolved,
+    /// 0.0.8 T04 (D3): a two-part curried *body* line whose signature line
+    /// has not been seen at its position. The signature must precede the
+    /// body (order is enforced, D3) and must be in the same module.
+    BodyWithoutSignature { name: String },
+    /// 0.0.8 T04 (D3): a two-part curried *signature* line never matched by
+    /// a body line in the same module.
+    SignatureWithoutBody { name: String },
+    /// 0.0.8 T04 (D3): the signature's parameter chain length (the number
+    /// of arrows) disagrees with the body's parameter count.
+    SignatureArityMismatch {
+        name: String,
+        /// Parameter count declared by the signature's arrow chain.
+        sig_params: usize,
+        /// Parameter count written on the body line.
+        body_params: usize,
+    },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -216,11 +226,32 @@ impl fmt::Display for ResolveErrorKind {
                      write protection it provides"
                 )
             }
-            ResolveErrorKind::CurriedDeclNotYetResolved => {
+            ResolveErrorKind::BodyWithoutSignature { name } => {
                 write!(
                     f,
-                    "two-part curried declarations are not resolved yet — \
-                     signature/body matching lands with 0.0.8 T04"
+                    "body line for `{name}` has no preceding signature line — \
+                     a two-part declaration starts with `{name}: <arrow type>` \
+                     above its body"
+                )
+            }
+            ResolveErrorKind::SignatureWithoutBody { name } => {
+                write!(
+                    f,
+                    "signature `{name}` has no matching body line — add \
+                     `{name}(params) {{ ... }}` below it"
+                )
+            }
+            ResolveErrorKind::SignatureArityMismatch {
+                name,
+                sig_params,
+                body_params,
+            } => {
+                write!(
+                    f,
+                    "signature `{name}` declares {sig_params} parameter{} but \
+                     its body takes {body_params} — the arrow count in the \
+                     signature must equal the body's parameter count",
+                    if *sig_params == 1 { "" } else { "s" }
                 )
             }
         }

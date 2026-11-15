@@ -161,6 +161,16 @@ struct Resolver {
     /// the names are `Option<T>`'s `T` — not values, not bindings, not
     /// visible outside the declaration body.
     type_param_scope: Vec<String>,
+    /// 0.0.8 T04 (D3): curried signature halves awaiting their body, keyed by
+    /// name, with the item index the signature line appeared at. Registration
+    /// is global (every signature is predeclared before any body resolves —
+    /// recursion and forward reference unchanged), but *matching* enforces
+    /// the source order: a body may only match a signature that precedes it.
+    pending_sigs: HashMap<String, (CurriedSignature, usize)>,
+    /// 0.0.8 T04: names whose signature was already consumed by a matched
+    /// body, with the first body's span — a second body for the same name is
+    /// a `DuplicateBinding`, not a fresh `BodyWithoutSignature`.
+    matched_sigs: HashMap<String, Span>,
 }
 impl Resolver {
     fn new_for_module(
@@ -180,6 +190,8 @@ impl Resolver {
             enum_table: HashMap::new(),
             variant_to_enum: HashMap::new(),
             type_param_scope: Vec::new(),
+            pending_sigs: HashMap::new(),
+            matched_sigs: HashMap::new(),
         }
     }
 
@@ -363,7 +375,7 @@ impl Resolver {
 
         let mut hir_items = Vec::new();
         let mut structs: Vec<StructDeclHir> = Vec::new();
-        for item in ast.items {
+        for (index, item) in ast.items.into_iter().enumerate() {
             // Struct declarations bypass per-item resolution (0.0.3 V02):
             // they are a type-table input for typeck, not executable code.
             // Only `ref`-in-type legality is checked here.
@@ -410,11 +422,47 @@ impl Resolver {
             if let Item::Decl(Decl::Enum(_)) = &item {
                 continue;
             }
+            // 0.0.8 T04 (D3): a signature half was registered by the
+            // predeclare pass; it contributes no HIR item of its own — the
+            // matched body below becomes the ordinary function declaration.
+            if let Item::Decl(Decl::CurriedSignature(_)) = &item {
+                continue;
+            }
+            // A body half is matched to its preceding signature (source order
+            // and arrow-count arity enforced, D3) and then resolved as an
+            // ordinary `func` declaration: the signature carried the types
+            // and modifiers, the body the parameter names and implementation.
+            if let Item::Decl(Decl::CurriedBody(body)) = &item {
+                if let Ok(func_decl) = self.match_curried_body(body, index)
+                    && let Ok(hir_item) =
+                        self.resolve_item(Item::Decl(Decl::Func(func_decl)), &global_funcs)
+                {
+                    hir_items.push(hir_item);
+                }
+                // On Err the error was already recorded by `add_error`; the
+                // body contributes no placeholder because the HIR is
+                // discarded anyway. Either way the half is consumed here —
+                // it never falls through to the generic item resolution.
+                continue;
+            }
             if let Ok(hir_item) = self.resolve_item(item, &global_funcs) {
                 hir_items.push(hir_item);
             }
             // On Err the error was already recorded by `add_error`; the item
             // contributes no placeholder because the HIR is discarded anyway.
+        }
+
+        // 0.0.8 T04 (D3): signatures still pending after the item pass never
+        // met a body line (or their body was out of order). Sorted by span so
+        // the collected error order is deterministic despite the HashMap.
+        let mut orphans: Vec<(String, CurriedSignature)> = self
+            .pending_sigs
+            .drain()
+            .map(|(name, (sig, _))| (name, sig))
+            .collect();
+        orphans.sort_by_key(|(_, sig)| (sig.span.start, sig.span.end));
+        for (name, sig) in orphans {
+            self.add_error(ResolveErrorKind::SignatureWithoutBody { name }, sig.span);
         }
 
         if !self.errors.is_empty() {
@@ -540,35 +588,51 @@ impl Resolver {
     /// First pass: declare all top-level functions so bodies can call
     /// functions declared later in the file. Duplicate top-level function
     /// names are reported here.
+    ///
+    /// 0.0.8 T04 (D3): a curried *signature* half registers here exactly as
+    /// a `func` declaration does — name, binding, mangled global name — and
+    /// additionally waits in `pending_sigs` (with its item index) for its
+    /// body half to match against. Registration happens before any body
+    /// resolves, so recursion and forward reference work unchanged.
     fn predeclare_global_functions(&mut self, ast: &Ast) {
-        for item in &ast.items {
-            if let Item::Decl(Decl::Func(func_decl)) = item {
-                let binding_id = self.next_binding_id();
-                let module = self.table.modules[self.cur_module].clone();
-                let global_name = module.mangled_name(&func_decl.name);
-                let binding = Binding {
-                    id: binding_id,
-                    kind: BindingKind::Function,
-                    mutable: false, // function names are immutable bindings
-                    builtin: false,
-                    ref_param: false,
-                    span: func_decl.span,
-                    hir_id: HirId(0), // placeholder, filled when the body resolves
-                    global_name: Some(global_name),
-                };
-                match self.scopes.declare(func_decl.name.clone(), binding) {
-                    Ok(()) => {
-                        self.global_funcs.insert(func_decl.name.clone(), binding_id);
-                    }
-                    Err(first) => {
-                        self.add_error(
-                            ResolveErrorKind::DuplicateBinding {
-                                name: func_decl.name.clone(),
-                                first_span: first.span,
-                            },
-                            func_decl.span,
-                        );
-                    }
+        for (index, item) in ast.items.iter().enumerate() {
+            let (name, span) = match item {
+                Item::Decl(Decl::Func(func_decl)) => (&func_decl.name, func_decl.span),
+                Item::Decl(Decl::CurriedSignature(sig)) => {
+                    // Order data for the body match; a duplicate signature is
+                    // reported below and the FIRST one stays pending.
+                    self.pending_sigs
+                        .entry(sig.name.clone())
+                        .or_insert((sig.clone(), index));
+                    (&sig.name, sig.span)
+                }
+                _ => continue,
+            };
+            let binding_id = self.next_binding_id();
+            let module = self.table.modules[self.cur_module].clone();
+            let global_name = module.mangled_name(name);
+            let binding = Binding {
+                id: binding_id,
+                kind: BindingKind::Function,
+                mutable: false, // function names are immutable bindings
+                builtin: false,
+                ref_param: false,
+                span,
+                hir_id: HirId(0), // placeholder, filled when the body resolves
+                global_name: Some(global_name),
+            };
+            match self.scopes.declare(name.clone(), binding) {
+                Ok(()) => {
+                    self.global_funcs.insert(name.clone(), binding_id);
+                }
+                Err(first) => {
+                    self.add_error(
+                        ResolveErrorKind::DuplicateBinding {
+                            name: name.clone(),
+                            first_span: first.span,
+                        },
+                        span,
+                    );
                 }
             }
         }
@@ -611,21 +675,171 @@ impl Resolver {
             // (they feed the typeck enum table, not `items`), and the parser
             // rejects enum declarations inside blocks, so this arm cannot run.
             Decl::Enum(_) => unreachable!("enum declarations never reach resolve_decl"),
-            // 0.0.8 T02 (interim): the parser emits the two-part curried
-            // declarations, but signature/body matching and function-table
-            // registration are T04's card. Until it lands, a curry file that
-            // got past the parser is rejected here rather than silently
-            // dropped — no test today reaches this arm (the T02 fixtures are
-            // parser-level only), and T04 replaces it with real resolution.
-            Decl::CurriedSignature(sig) => {
-                self.add_error(ResolveErrorKind::CurriedDeclNotYetResolved, sig.span);
-                Err(())
+            // 0.0.8 T04: curried halves are intercepted by `resolve_program`
+            // (signature registration + body matching happen there), and the
+            // parser accepts the two-part form at top level only, so these
+            // arms cannot run.
+            Decl::CurriedSignature(_) => {
+                unreachable!("curried signature halves never reach resolve_decl")
             }
-            Decl::CurriedBody(body) => {
-                self.add_error(ResolveErrorKind::CurriedDeclNotYetResolved, body.span);
-                Err(())
+            Decl::CurriedBody(_) => {
+                unreachable!("curried body halves never reach resolve_decl")
             }
         }
+    }
+
+    /// Match a two-part curried *body* half to its signature (0.0.8 T04, D3)
+    /// and synthesize the ordinary [`FuncDecl`] the rest of the pipeline
+    /// resolves: the signature carries the types, the modifiers and `pub`
+    /// (the interface half); the body carries the parameter names and the
+    /// implementation.
+    ///
+    /// Errors (all recorded, `Err(())` returned):
+    /// - the signature line has not been seen at the body's position — either
+    ///   never (no signature at all) or out of order (body before its
+    ///   signature; source order is enforced, D3) → `BodyWithoutSignature`;
+    /// - the signature was already consumed by an earlier body →
+    ///   `DuplicateBinding` (the same flat-namespace rule as every
+    ///   declaration);
+    /// - the signature's parameter count disagrees with the body's parameter
+    ///   count → `SignatureArityMismatch`.
+    fn match_curried_body(&mut self, body: &CurriedBody, index: usize) -> Result<FuncDecl, ()> {
+        // Inspect the pending signature with a short immutable borrow so the
+        // (expensive) parameter-type clone happens only on the success path —
+        // error paths record their diagnostic from scalar data alone.
+        enum SigMatch {
+            /// No signature pending under this name: never declared, or an
+            /// earlier body already consumed it.
+            Missing,
+            /// A signature is pending but sits after this body in the source
+            /// (order is enforced, D3).
+            OutOfOrder,
+            /// The signature is a function type whose parameter count differs
+            /// from the body's.
+            Arity { sig_params: usize },
+            /// The pair matches; the types travel to the synthesis below.
+            Ready {
+                param_tys: Vec<Type>,
+                ret: Box<Type>,
+            },
+        }
+        let outcome = match self.pending_sigs.get(&body.name) {
+            None => SigMatch::Missing,
+            Some((sig, sig_index)) => {
+                if *sig_index >= index {
+                    SigMatch::OutOfOrder
+                } else {
+                    // The parser guarantees a signature's type is a function
+                    // type (`SignatureNeedsFunctionType` at parse time), so
+                    // this match cannot fail on parser-produced ASTs.
+                    match &sig.ty {
+                        Type::Func(params, ret) => {
+                            if params.len() != body.params.len() {
+                                SigMatch::Arity {
+                                    sig_params: params.len(),
+                                }
+                            } else {
+                                SigMatch::Ready {
+                                    param_tys: params.clone(),
+                                    ret: ret.clone(),
+                                }
+                            }
+                        }
+                        _ => unreachable!(
+                            "parser guarantees a curried signature's type is a function type (`SignatureNeedsFunctionType`)"
+                        ),
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            SigMatch::Missing => {
+                if let Some(first_body) = self.matched_sigs.get(&body.name) {
+                    self.add_error(
+                        ResolveErrorKind::DuplicateBinding {
+                            name: body.name.clone(),
+                            first_span: *first_body,
+                        },
+                        body.span,
+                    );
+                } else {
+                    self.add_error(
+                        ResolveErrorKind::BodyWithoutSignature {
+                            name: body.name.clone(),
+                        },
+                        body.span,
+                    );
+                }
+                Err(())
+            }
+            SigMatch::OutOfOrder => {
+                self.add_error(
+                    ResolveErrorKind::BodyWithoutSignature {
+                        name: body.name.clone(),
+                    },
+                    body.span,
+                );
+                // The pair is already reported through its specific error —
+                // consume the signature so it is not *also* surfaced as
+                // `SignatureWithoutBody` by the end-of-pass orphan sweep
+                // (the same no-double-report rule as the arity path).
+                self.consume_curried_sig(&body.name, body.span);
+                Err(())
+            }
+            SigMatch::Arity { sig_params } => {
+                self.add_error(
+                    ResolveErrorKind::SignatureArityMismatch {
+                        name: body.name.clone(),
+                        sig_params,
+                        body_params: body.params.len(),
+                    },
+                    body.span,
+                );
+                // The body did find its signature — the pair is matched, just
+                // not arity-consistent. Consume the signature so the pair is
+                // not *also* reported as orphan halves.
+                self.consume_curried_sig(&body.name, body.span);
+                Err(())
+            }
+            SigMatch::Ready { param_tys, ret } => {
+                let (sig, _) = self.pending_sigs.remove(&body.name).unwrap_or_else(|| {
+                    unreachable!("signature was just inspected in `pending_sigs`")
+                });
+                self.matched_sigs.insert(body.name.clone(), body.span);
+                Ok(FuncDecl {
+                    name: sig.name,
+                    params: body
+                        .params
+                        .iter()
+                        .zip(param_tys)
+                        .map(|(p, ty)| Param {
+                            name: p.name.clone(),
+                            ty,
+                            span: p.span,
+                        })
+                        .collect(),
+                    ret_type: Some(*ret),
+                    body: body.body.clone(),
+                    span: body.span,
+                    is_pub: sig.is_pub,
+                    is_async: sig.is_async,
+                    is_unsafe: sig.is_unsafe,
+                    is_trusted: sig.is_trusted,
+                })
+            }
+        }
+    }
+
+    /// Consume a matched-but-rejected signature half (out-of-order body or
+    /// arity mismatch): the pair was reported through its specific error, so
+    /// the signature must not also surface as `SignatureWithoutBody` in the
+    /// end-of-pass orphan sweep. Recording the span in `matched_sigs` also
+    /// makes a *later* duplicate body a `DuplicateBinding` instead of a
+    /// second match against a half the source already rejected.
+    fn consume_curried_sig(&mut self, name: &str, span: Span) {
+        self.pending_sigs.remove(name);
+        self.matched_sigs.insert(name.to_string(), span);
     }
 
     /// Resolve a function declaration.

@@ -1,0 +1,6 @@
+import lib;
+// No `#feature curry` here (flag-off importer, D6): the curried declaration
+// is seen through the export table as an ordinary `func` export.
+func main() {
+    print(lib.add(20, 22) as string);
+}

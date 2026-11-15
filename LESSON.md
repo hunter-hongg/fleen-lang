@@ -353,3 +353,39 @@ velocity: zero deliverables after several turns.
 
 **Closed when**: a hurry-up work order produces a concrete edit before the next user
 message.
+
+---
+
+## L11 — When an edit rewrites a shared region, carry forward every pre-existing arm — and on a sudden wave of unrelated failures, diff your own edit first
+
+**When**: 0.0.8 T04 implementation, restructuring `resolve_program_inner`'s
+item loop to intercept curried halves.
+
+**What happened**: The edit that inserted the `CurriedSignature` /
+`CurriedBody` interception into the item loop accidentally **dropped the
+generic `resolve_item` tail** — every non-curried top-level item was silently
+discarded. The symptom was maximally misleading: ~100 pre-existing resolver
+tests failed (any test expecting an error got `Ok` with empty items), pointing
+everywhere except the actual cause. The agent spent several rounds
+instrumenting the resolver before noticing the loop no longer ended with the
+`resolve_item` call the original code had. A `git diff` of the edited region
+would have shown it in one step.
+
+**Root cause**: authoring a replacement block that covered the *new* arms but
+omitted one pre-existing statement the `old_string` had swallowed. Then,
+when the failure pattern arrived, debugging the *new* code paths instead of
+diffing the edit that had just been applied.
+
+**Rule going forward**:
+- When a `read`→`edit` replaces a region, the `new_string` must account for
+  **every line the `old_string` matched** — new arms are added *around* the
+  preserved fall-through, never in place of it.
+- If a broad wave of previously-green tests fails immediately after an edit,
+  the first move is `git diff` on the edited region — not instrumentation of
+  the feature being built. "The suite was green before this edit" makes the
+  edit itself the prime suspect, regardless of how unrelated the failures
+  look.
+
+**Closed when**: no restructuring edit leaves the edited region unverified
+against what it replaced, and a post-edit failure wave starts with a diff of
+that edit.

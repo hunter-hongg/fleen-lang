@@ -193,6 +193,30 @@ fn project_imported_globals_prints_expected_output() {
     assert_eq!(stdout, expected, "stdout mismatch for imported globals");
 }
 
+/// 0.0.8 T04 (carried from T02): a flag-on file whose `main` uses the
+/// two-part curried form is found by the project-mode entry wiring
+/// end-to-end — compile, verify and execute.
+#[test]
+fn project_curry_two_part_main_runs() {
+    let project = e2e_dir("projects/curry_main");
+    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
+    assert_eq!(code, 0, "exit code (stderr: {stderr})");
+    assert_eq!(stdout, expected, "stdout mismatch for two-part main");
+}
+
+/// 0.0.8 T04 (D6): a flag-on module's `pub` curried declaration reaches a
+/// flag-off importer through the real export table (`exports_of_ast` maps
+/// the signature half to `ExportKind::Func`) — compile, verify and execute.
+#[test]
+fn project_curry_import_cross_module_runs() {
+    let project = e2e_dir("projects/curry_import");
+    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
+    assert_eq!(code, 0, "exit code (stderr: {stderr})");
+    assert_eq!(stdout, expected, "stdout mismatch for curried import");
+}
+
 #[test]
 fn project_cycle_reports_error() {
     let project = e2e_dir("projects/circular");

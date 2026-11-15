@@ -1,0 +1,7 @@
+#feature curry
+ping: () -> int
+ping() { 42 }
+unitf: unit -> int
+unitf(u) { u }
+main: () -> int
+main() { ping() }

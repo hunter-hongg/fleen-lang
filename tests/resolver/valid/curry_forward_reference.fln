@@ -1,0 +1,5 @@
+#feature curry
+main: () -> int
+main() { twice(21) }
+twice: int -> int
+twice(n) { n * 2 }
