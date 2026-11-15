@@ -286,6 +286,13 @@ mod tests {
 
     #[test]
     fn diagnose_works() {
+        // Sibling tests set FLINT_HOME / FLINT_STD_PATH; without the lock
+        // this test read their environment mid-suite and saw a temp home
+        // instead of the embedded default (a parallel-run race, not a
+        // resolver bug — same shape as `embedded_always_available` above).
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard_home = EnvGuard::remove(FLINT_HOME);
+        let _guard_path = EnvGuard::remove(FLINT_STD_PATH);
         let resolver = StdResolver::from_compiler_version();
         let diag = resolver.diagnose().unwrap();
         assert_eq!(diag.source, StdSource::Embedded);
