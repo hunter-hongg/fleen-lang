@@ -18,8 +18,8 @@
 > in `docs/0.0.4/PLAN.md`.
 > **v0.0.5 additions**: pointer / unsafe instructions (0xC8–0xCA) — `AddrOf` / `LoadPtr` / `StorePtr` — and the `.flnc` version bumps to 5 (no layout change — no new tables). Design decisions are in `docs/0.0.5/PLAN.md`.
 > **v0.0.6 additions**: enum instructions (0xCB–0xCD) — `EnumNew` / `EnumIs` / `EnumPayload` — the appended `enum_defs` table, `FieldTypeTag::Enum = 12`, and `Value::Enum` in the value model. The `.flnc` version bumps to 6 (one appended table — the v1–v5 layout stays byte-identical). Design decisions are in `docs/0.0.6/PLAN.md`.
-> **v0.0.8 additions**: bytecode version 8 — the `PartialApply` instruction (0xCE, §5.18) and the **content-driven** version rule: a module is v8 iff it contains at least one `PartialApply`, else a flag-on file still compiles to a v7 stream (`#feature curry` without a partial call is byte-identical to 0.0.7, D16). Captured function values are runtime-only and never serialized (D14) — v8 differs from v7 by exactly this one opcode and one §10 row. Design decisions are in `docs/0.0.8/PLAN.md` (D13/D14).
 > **v0.0.7 additions**: bytecode version 7 — the `enum_defs` table gains one descriptive `type_param_count: u32` per enum (§2, §9); **no new opcodes** and no `FieldTypeTag` change, so the only layout difference from v6 is that one field (the v1–v6 byte streams stay byte-identical). Design decisions are in `docs/0.0.7/PLAN.md` (D8).
+> **v0.0.8 additions**: bytecode version 8 — the `PartialApply` instruction (0xCE, §5.18) and the **content-driven** version rule: a module is v8 iff it contains at least one `PartialApply`, else a flag-on file still compiles to a v7 stream (`#feature curry` without a partial call is byte-identical to 0.0.7, D16). Captured function values are runtime-only and never serialized (D14) — v8 differs from v7 by exactly this one opcode and one §10 row. Design decisions are in `docs/0.0.8/PLAN.md` (D13/D14).
 
 ---
 

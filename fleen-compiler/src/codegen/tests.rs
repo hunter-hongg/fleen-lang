@@ -1720,8 +1720,8 @@ fn flag_on_without_partials_stays_v7() {
     // module (content-driven: the version follows emitted content, not
     // the flag), so old 0.0.7 readers accept it. The two-part spelling
     // is mandatory here (`func` is forbidden in a curry file, T01), and
-    // the flag-off path itself is unchanged code — its bytes stay pinned
-    // by the pre-existing v7 round-trip tests above.
+    // the flag-on path's byte identity with the flag-off path is pinned
+    // by `flag_off_v7_output_is_byte_identical_with_0_0_7` below.
     let src = format!(
         "#feature curry\n{T07_ADD_DECL}\
 main: () -> int\n\
@@ -1732,6 +1732,82 @@ main() {{ add(1, 2) }}\n"
     // Round-trips as v7 (READ_VERSIONS keeps accepting it).
     let parsed = from_bytes(&to_bytes(&module)).expect("v7 round trip");
     assert_eq!(parsed.version, MODULE_VERSION);
+}
+
+/// The full encoded stream (1385 bytes, std prelude constant pool
+/// included — this program goes through `crate::compile`, the
+/// `Session::compile` wiring) that the plain flag-off program below
+/// produced under the released 0.0.7 compiler. Captured by compiling
+/// the same source through a `v0.0.7` worktree and through HEAD and
+/// confirming the dumps were identical before pinning (LESSON L3: no
+/// unverified byte claim is written down).
+const FLAG_OFF_V7_EXPECTED_HEX: &str = concat!(
+    "464c4e4307002200000002050000007072696e74020e0000007374642e696f2e7072",
+    "696e746c6e02100000007374642e696f2e726561645f6c696e65020c000000737464",
+    "2e696f2e736c656570020d0000007374642e6173796e632e72756e02130000007374",
+    "642e6173796e632e7969656c645f6e6f7702140000007374642e636f6e6375727265",
+    "6e742e73706c6974020b0000007374642e7374722e6c656e020e0000007374642e73",
+    "74722e636f6e636174020d0000007374642e7374722e73706c6974020c0000007374",
+    "642e6e756d2e73717274020d0000007374642e6e756d2e666c6f6f72020b00000073",
+    "74642e6f732e61726773020b0000007374642e6f732e657869740213000000737464",
+    "2e74696d652e6e6f775f6d696c6c6973020b0000007374642e6172722e6c656e020b",
+    "0000007374642e6172722e676574020b0000007374642e6172722e736574020c0000",
+    "007374642e6172722e70757368020e0000007374642e6172722e636f6e636174020f",
+    "0000007374642e6172722e666c617474656e02170000007374642e636f6c6c656374",
+    "696f6e2e697465722e6d6170021a0000007374642e636f6c6c656374696f6e2e6974",
+    "65722e66696c74657202190000007374642e636f6c6c656374696f6e2e697465722e",
+    "666f6c646c02190000007374642e636f6c6c656374696f6e2e697465722e666f6c64",
+    "7202180000007374642e636f6c6c656374696f6e2e697465722e74616b6502050000",
+    "0072616e6765020a00000072616e67655f66726f6d021a0000007374642e636f6c6c",
+    "656374696f6e2e72616e67652e72616e6765021f0000007374642e636f6c6c656374",
+    "696f6e2e72616e67652e72616e67655f66726f6d020300000061646402040000006d",
+    "61696e00010000000000000000020000000000000020000000000000000100010001",
+    "02000000036300000000010000000100010001020000000363000000000200000000",
+    "00010001020000000363000000000300000001000100010200000003630000000004",
+    "00000001000100010200000003630000000005000000000001000102000000036300",
+    "00000006000000010001000102000000036300000000070000000100010001020000",
+    "00036300000000080000000200020001020000000363000000000900000002000200",
+    "01020000000363000000000a0000000100010001020000000363000000000b000000",
+    "0100010001020000000363000000000c000000000001000102000000036300000000",
+    "0d0000000100010001020000000363000000000e0000000000010001020000000363",
+    "000000000f0000000100010001020000000363000000001000000002000200010200",
+    "00000363000000001100000003000300010200000003630000000012000000020002",
+    "00010200000003630000000013000000020002000102000000036300000000140000",
+    "00010001000102000000036300000000150000000200020001020000000363000000",
+    "00160000000200020001020000000363000000001700000003000300010200000003",
+    "63000000001800000003000300010200000003630000000019000000020002000102",
+    "0000000363000000001a0000000100010001020000000363000000001b0000000200",
+    "020001020000000363000000001c0000000100010001020000000363000000001d00",
+    "00000200020001020000000363000000001e00000002000200000800000010000010",
+    "01002063030000000000000020000000210000000300000024000000250000000600",
+    "000020000000210000001f00000000000000000e0000000020000000002100000060",
+    "1e006303000000000000003d0000003e0000000500000040000000410000000a0000",
+    "00390000003c000000000000001f0000000000000000000000"
+);
+
+#[test]
+fn flag_off_v7_output_is_byte_identical_with_0_0_7() {
+    // Ticket bullet: "flag-on-without-partials → v7 (byte-for-byte vs
+    // 0.0.7 output)". The flag-off program `add` + `main` compiles to
+    // exactly the stream the released 0.0.7 compiler produced — pinned
+    // here as a hex snapshot so any future change to the flag-off
+    // encoder (opcode numbering, const-pool layout, span map, version
+    // field) breaks this test loudly instead of silently desyncing from
+    // the published 0.0.7 bytecode. Regen instructions: compile
+    // `probe_flagoff.fln` content via `crate::compile` + `to_bytes`,
+    // hex-encode, verify against a v0.0.7 worktree dump first.
+    let src = "func add(a: int, b: int): int = a + b\nfunc main(): int = add(1, 2)\n";
+    let module = crate::compile(src).expect("compile flag-off program");
+    assert_eq!(module.version, MODULE_VERSION);
+    let bytes = to_bytes(&module);
+    let expected: Vec<u8> = (0..FLAG_OFF_V7_EXPECTED_HEX.len() / 2)
+        .map(|i| {
+            u8::from_str_radix(&FLAG_OFF_V7_EXPECTED_HEX[i * 2..i * 2 + 2], 16)
+                .expect("valid hex byte")
+        })
+        .collect();
+    assert_eq!(bytes.len(), expected.len(), "stream length changed");
+    assert_eq!(bytes.as_slice(), expected.as_slice(), "byte stream changed");
 }
 
 #[test]

@@ -1,8 +1,8 @@
 //! Static verification of bytecode modules (BYTECODE.md §8).
 
 use fleen_compiler::codegen::{
-    Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
-    V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE,
+    Const, Func, FuncId, MODULE_VERSION_V8, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE,
+    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE,
 };
 
 /// A verification failure.
@@ -606,51 +606,43 @@ fn walk_function(
     let is_boundary = |t: usize| boundaries.binary_search(&t).is_ok();
 
     for d in &at {
-        // Version gate: v1 opcode numbers are all below V2_OPCODE_BASE and v2
-        // ones at or above it (BYTECODE.md §4.2), so a single comparison keeps
-        // v2 instructions out of v1 modules; likewise v3 (structs, >= 0xB0)
-        // are kept out of v1/v2 modules — an explicit comparison, not
-        // something that holds "naturally" (the 0.0.2 U07 lesson).
-        if module.version < 2 && (d.opcode as u8) >= V2_OPCODE_BASE {
-            return Err(VerifyError::V2OpcodeInV1Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
-        }
-        if module.version < 3 && (d.opcode as u8) >= V3_OPCODE_BASE {
-            return Err(VerifyError::V3OpcodeInV1V2Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
-        }
-        // 0.0.4 T05: v4 (async, >= 0xC0) is kept out of v1–v3 modules — the
-        // same explicit comparison as the v2/v3 gates.
-        if module.version < 4 && (d.opcode as u8) >= V4_OPCODE_BASE {
-            return Err(VerifyError::V4OpcodeInV1V2V3Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
-        }
-        // 0.0.5 T05: v5 (pointer, >= 0xC8) is kept out of v1–v4 modules.
-        if module.version < 5 && (d.opcode as u8) >= V5_OPCODE_BASE {
-            return Err(VerifyError::V5OpcodeInV1V2V3V4Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
-        }
-        // 0.0.6 T06: v6 (enum, >= 0xCB) is kept out of v1–v5 modules.
-        if module.version < 6 && (d.opcode as u8) >= V6_OPCODE_BASE {
-            return Err(VerifyError::V6OpcodeInV1V2V3V4V5Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
-        }
-        // 0.0.8 T07: v8 (`PartialApply`, 0xCE) is kept out of v1–v7 modules.
-        if module.version < 8 && (d.opcode as u8) >= V8_OPCODE_BASE {
-            return Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module {
-                pc: d.pc,
-                byte: d.opcode as u8,
-            });
+        // Version gate table (0.0.2 U07 pattern, one entry per gated
+        // version): v1 opcode numbers are all below V2_OPCODE_BASE and v2
+        // ones at or above it (BYTECODE.md §4.2), so a single comparison
+        // keeps each gated version's instructions out of the older modules
+        // — an explicit comparison, not something that holds "naturally"
+        // (the 0.0.2 U07 lesson). The gates are checked in ascending order;
+        // v7 added no opcodes, so it has no entry. The error constructors
+        // stay as the public `VerifyError` variants; the table only drives
+        // the checks.
+        // The fn-pointer tuple trips clippy's type-complexity lint; the
+        // shape is intentional (one entry per gated version), so the lint
+        // is allowed here rather than the table being restructured.
+        #[allow(clippy::type_complexity)]
+        const VERSION_GATES: [(u16, u8, fn(usize, u8) -> VerifyError); 6] = [
+            (2, V2_OPCODE_BASE, |pc, byte| {
+                VerifyError::V2OpcodeInV1Module { pc, byte }
+            }),
+            (3, V3_OPCODE_BASE, |pc, byte| {
+                VerifyError::V3OpcodeInV1V2Module { pc, byte }
+            }),
+            (4, V4_OPCODE_BASE, |pc, byte| {
+                VerifyError::V4OpcodeInV1V2V3Module { pc, byte }
+            }),
+            (5, V5_OPCODE_BASE, |pc, byte| {
+                VerifyError::V5OpcodeInV1V2V3V4Module { pc, byte }
+            }),
+            (6, V6_OPCODE_BASE, |pc, byte| {
+                VerifyError::V6OpcodeInV1V2V3V4V5Module { pc, byte }
+            }),
+            (MODULE_VERSION_V8, V8_OPCODE_BASE, |pc, byte| {
+                VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc, byte }
+            }),
+        ];
+        for (min_version, base, err) in VERSION_GATES {
+            if module.version < min_version && (d.opcode as u8) >= base {
+                return Err(err(d.pc, d.opcode as u8));
+            }
         }
         match d.opcode {
             // 0.0.3 V02: `StructNew`'s struct id must index the

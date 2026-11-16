@@ -2014,7 +2014,7 @@ fn t07_main_code() -> Vec<u8> {
     ]
 }
 
-fn t08_v8_module() -> Module {
+fn t07_v8_module() -> Module {
     let mut m = module(
         vec![Const::Str("main".into()), Const::Int(1)],
         vec![func(ConstId(0), 0, 1, t07_main_code())],
@@ -2029,7 +2029,7 @@ fn t08_v8_module() -> Module {
 fn partial_apply_verifies_in_a_v8_module() {
     // Valid stack shape: pops the function value and its k applied args,
     // pushes the captured value; the completion call then pops f' + arg.
-    let r = verify::verify(&t08_v8_module());
+    let r = verify::verify(&t07_v8_module());
     if let Err(e) = &r {
         panic!("v8 module should verify, got {e:?}");
     }
@@ -2039,7 +2039,7 @@ fn partial_apply_verifies_in_a_v8_module() {
 fn partial_apply_underflow_is_rejected() {
     // `PartialApply 2` with only f + one argument on the stack: the depth
     // pass must reject it (min k+1).
-    let mut m = t08_v8_module();
+    let mut m = t07_v8_module();
     m.functions[0].code[9] = 2;
     match verify::verify(&m) {
         Err(VerifyError::StackUnderflow {
@@ -2054,7 +2054,7 @@ fn partial_apply_underflow_is_rejected() {
 #[test]
 fn partial_apply_truncated_operand_is_rejected() {
     // The `u8 k` operand chopped off the end: TruncatedInstruction.
-    let mut m = t08_v8_module();
+    let mut m = t07_v8_module();
     let full = t07_main_code();
     m.functions[0].code = full[..10].to_vec().into_boxed_slice();
     // The decode pass validates instruction lengths first: an operand cut
@@ -2071,7 +2071,7 @@ fn partial_apply_truncated_operand_is_rejected() {
 fn partial_apply_rejected_below_v8() {
     // v7 is the immediate predecessor: 0xCE must trip the v8 gate exactly
     // (U07 pattern — one exact gate per version, checked in ascending order).
-    let mut m = t08_v8_module();
+    let mut m = t07_v8_module();
     m.version = 7;
     match verify::verify(&m) {
         Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc: 8, byte }) => {
@@ -2106,13 +2106,5 @@ fn partial_apply_rejected_below_v8() {
             Err(e) => assert_eq!(e, want, "version {version}"),
             Ok(()) => panic!("version {version}: expected a gate error"),
         }
-    }
-    // v7 is the immediate predecessor: 0xCE must trip the v8 gate exactly.
-    m.version = 7;
-    match verify::verify(&m) {
-        Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc: 8, byte }) => {
-            assert_eq!(byte, Opcode::PartialApply as u8);
-        }
-        other => panic!("version 7: expected V8Opcode gate, got {other:?}"),
     }
 }

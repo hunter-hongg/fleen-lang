@@ -16,7 +16,7 @@ pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
 
 use crate::lexer::Span;
-use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
+use crate::lower::mir::{Mir, MirBlock, MirInstr, MirInstrKind};
 
 /// Bytecode version emitted by this compiler for content that needs no
 /// newer features (the default).
@@ -66,17 +66,8 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
     // the version too). A byte scan of the encoded stream would not do:
     // 0xCE can appear as an operand byte of another instruction, and a
     // false positive would break the flag-off byte-identity posture (D16).
-    let has_partial_apply = funcs.iter().any(|f| {
-        f.blocks.iter().any(|b| {
-            b.instrs
-                .iter()
-                .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
-        })
-    }) || globals.iter().any(|g| {
-        g.init
-            .iter()
-            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
-    });
+    let has_partial_apply = funcs.iter().any(|f| blocks_have_partial(&f.blocks))
+        || globals.iter().any(|g| instrs_have_partial(&g.init));
 
     let mut pool = ConstPool::new();
 
@@ -206,4 +197,23 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         struct_defs,
         enum_defs,
     })
+}
+
+/// Whether any instruction in these blocks is a `PartialApply` (the
+/// content-driven version scan, 0.0.8 T07/D13). Shared by the function-body
+/// scan and the global-initializer scan.
+fn blocks_have_partial(blocks: &[MirBlock]) -> bool {
+    blocks.iter().any(|b| {
+        b.instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+    })
+}
+
+/// The instruction-level scan backing `blocks_have_partial`; used directly
+/// for global initializers, which are bare instruction lists.
+fn instrs_have_partial(instrs: &[MirInstr]) -> bool {
+    instrs
+        .iter()
+        .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
 }

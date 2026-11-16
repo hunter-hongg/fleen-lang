@@ -1,6 +1,6 @@
 //! Core interpreter loop.
 
-use fleen_compiler::codegen::{Const, FuncId, Module, Opcode};
+use fleen_compiler::codegen::{Const, FuncId, MODULE_VERSION_V8, Module, Opcode};
 
 use crate::error::{RuntimeError, RuntimeErrorKind};
 use crate::executor::{Scheduler, Task};
@@ -241,7 +241,7 @@ impl Vm {
         // flag-blind). Structurally v8 differs from v7 by the `PartialApply`
         // opcode only; executing it lands with T08 (function-value captures)
         // and is rejected below until then.
-        if !(1..=8).contains(&self.module.version) {
+        if !(1..=MODULE_VERSION_V8).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;

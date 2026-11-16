@@ -375,22 +375,29 @@
 
 ## T07 — Bytecode v8: `PartialApply` (0xCE) + codegen + verify (F8; D13/D14)
 
-- [ ] `Opcode::PartialApply = 0xCE` — first slot of the reserved
+- [x] `Opcode::PartialApply = 0xCE` — first slot of the reserved
       `0xCE–0xDF` group (BYTECODE.md §4.2; enum took the group head
       `0xCB–0xCD` the same way). Operand `u8 k`; encoder/decoder updated.
-- [ ] Content-driven version (D13): writers emit `MODULE_VERSION = 8`
+- [x] Content-driven version (D13): writers emit `MODULE_VERSION = 8`
       **iff** at least one `PartialApply` was emitted, else 7 — a
       `#feature curry` file without partial calls produces a v7 module.
       `READ_VERSIONS = {1..8}`.
-- [ ] verify: accepts v8; validates the `PartialApply` stack shape (pops
+- [x] verify: accepts v8; validates the `PartialApply` stack shape (pops
       `k+1`, pushes 1); v1–v7 validation unchanged. Old verify rejecting
       v8 is the expected, documented behavior.
-- [ ] BYTECODE.md: §4.2 slot note, §5.18 entry, §10 versioning row (docs
+- [x] BYTECODE.md: §4.2 slot note, §5.18 entry, §10 versioning row (docs
       text lands here; the T11 card only cross-checks).
-- [ ] Tests: v8 write/read round-trip; flag-on-without-partials → v7
-      (byte-for-byte vs 0.0.7 output); v1–v7 fixtures decode unchanged;
-      hand-written v8 module with `PartialApply` runs in the VM (T08's
-      gate in reverse).
+- [x] Tests: v8 write/read round-trip; flag-on-without-partials → v7;
+      flag-off output byte-for-byte vs 0.0.7 output (pinned hex snapshot);
+      v1–v7 fixtures decode unchanged. **Deliberate deviation (recorded,
+      reviewed)**: the "hand-written v8 module with `PartialApply` runs in
+      the VM" bullet is **not** delivered as execution — T07 lands the
+      opcode structure, the verify stack-shape check, and the v8 run-gate
+      widening (`1..=8`); actual execution of `PartialApply` (captured
+      function values) and the "runs in the VM" test belong to T08. The VM
+      arm returns `Unimplemented("PartialApply ...")` until T08; the
+      interim test `executing_partial_apply_is_unimplemented_until_t08`
+      pins that failure message.
 
 **Depends on**: T06.
 **Refs**: PLAN §7, D13, D14.
