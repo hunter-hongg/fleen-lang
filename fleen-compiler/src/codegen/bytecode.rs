@@ -393,6 +393,15 @@ pub enum Opcode {
     /// reference, u16 payload index.
     /// Stack effect: e → p (Δ0, min 1).
     EnumPayload = 0xCD,
+    // 0xCE partial-application instruction (0.0.8 T07, bytecode v8).
+    /// Capture a partial application: f a₁ … aₖ → f'. Operand `u8 k` —
+    /// the number of arguments applied at this site. Pops the function
+    /// value and its `k` arguments, pushes the captured function value.
+    /// Stack effect: f a₁ … aₖ → f' (Δ−k, min k+1). First slot of the
+    /// reserved `0xCE–0xDF` group (BYTECODE.md §4.2, §5.18). Content-
+    /// driven version: its presence in a module lifts the module to v8
+    /// (D13); captures are runtime-only and never serialized (D14).
+    PartialApply = 0xCE,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -417,6 +426,11 @@ pub const V5_OPCODE_BASE: u8 = 0xC8;
 /// Lowest opcode number reserved for the 0.0.6 (v6) instruction set
 /// (enums 0xCB–0xCD). v6 opcodes are at or above this.
 pub const V6_OPCODE_BASE: u8 = 0xCB;
+
+/// Lowest opcode number reserved for the 0.0.8 (v8) instruction set
+/// (`PartialApply` 0xCE, first slot of the reserved `0xCE–0xDF` group).
+/// v8 opcodes are at or above this.
+pub const V8_OPCODE_BASE: u8 = 0xCE;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -459,6 +473,8 @@ impl Opcode {
             // `EnumPayload`: u16 variant id + u16 payload index.
             Opcode::EnumPayload => 4,
             Opcode::CallValue => 1,
+            // 0.0.8 T07: `PartialApply` carries the applied-argument count.
+            Opcode::PartialApply => 1,
             _ => 0,
         }
     }
@@ -550,6 +566,8 @@ impl Opcode {
             0xCB => Opcode::EnumNew,
             0xCC => Opcode::EnumIs,
             0xCD => Opcode::EnumPayload,
+            // 0.0.8 (v8): partial application (T07).
+            0xCE => Opcode::PartialApply,
             _ => return None,
         })
     }

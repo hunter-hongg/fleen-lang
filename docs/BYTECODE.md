@@ -18,6 +18,7 @@
 > in `docs/0.0.4/PLAN.md`.
 > **v0.0.5 additions**: pointer / unsafe instructions (0xC8–0xCA) — `AddrOf` / `LoadPtr` / `StorePtr` — and the `.flnc` version bumps to 5 (no layout change — no new tables). Design decisions are in `docs/0.0.5/PLAN.md`.
 > **v0.0.6 additions**: enum instructions (0xCB–0xCD) — `EnumNew` / `EnumIs` / `EnumPayload` — the appended `enum_defs` table, `FieldTypeTag::Enum = 12`, and `Value::Enum` in the value model. The `.flnc` version bumps to 6 (one appended table — the v1–v5 layout stays byte-identical). Design decisions are in `docs/0.0.6/PLAN.md`.
+> **v0.0.8 additions**: bytecode version 8 — the `PartialApply` instruction (0xCE, §5.18) and the **content-driven** version rule: a module is v8 iff it contains at least one `PartialApply`, else a flag-on file still compiles to a v7 stream (`#feature curry` without a partial call is byte-identical to 0.0.7, D16). Captured function values are runtime-only and never serialized (D14) — v8 differs from v7 by exactly this one opcode and one §10 row. Design decisions are in `docs/0.0.8/PLAN.md` (D13/D14).
 > **v0.0.7 additions**: bytecode version 7 — the `enum_defs` table gains one descriptive `type_param_count: u32` per enum (§2, §9); **no new opcodes** and no `FieldTypeTag` change, so the only layout difference from v6 is that one field (the v1–v6 byte streams stay byte-identical). Design decisions are in `docs/0.0.7/PLAN.md` (D8).
 
 ---
@@ -377,13 +378,14 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0xC0–0xC7  async / channel (0.0.4, §5.15)
 0xC8–0xCA  pointer / unsafe (0.0.5 T05, §5.16)
 0xCB–0xCD  enum (0.0.6 T06, §5.17)
-0xCE–0xDF  Reserved
+0xCE      partial application (0.0.8 T07, §5.18)
+0xCF–0xDF  Reserved
 0xE0–0xFF  Reserved
 ```
 
 ---
 
-## 5. Instruction Set (v0.0.1 base + v0.0.2 additions + v0.0.3 additions + v0.0.6 additions)
+## 5. Instruction Set (v0.0.1 base + v0.0.2 additions + v0.0.3 additions + v0.0.6 additions + v0.0.8 additions)
 
 ### 5.1 Constants and Stack Operations
 
@@ -670,6 +672,18 @@ Rules:
 - `EnumIs` / `EnumPayload` take a **variant reference**, not an enum id: the lowering resolves the variant once, at compile time, against the scrutinee's enum type
 - The payload count of `EnumNew` is *not* an operand — it is implied by the `enum_defs` table, so a mismatched stack shape is caught by verify's stack-effect pass rather than by the instruction itself
 - An enum is Copy iff all of its payloads are Copy (§3.2); the ownership rules (`move` / `clone`) are enforced by typeck, not by these instructions
+
+### 5.18 partial application (v0.0.8 T07)
+
+| Mnemonic | Operands | Bytes | Stack effect | Description |
+|--------|--------|------|--------|------|
+| `PartialApply` | `u8 k` | 2 | `f a₁ … aₖ → f'` (delta −k, min k+1) | Capture a partial application: pop the `k` arguments (in reverse), pop the function value, push the captured function value `f'` — calling `f'` with the remaining arguments completes the original call. `k` is the number of arguments applied at this site (0 ≤ k) |
+
+Rules:
+- `PartialApply` takes the **first slot of the reserved `0xCE–0xDF` group** (§4.2); the rest of the group stays reserved
+- The version bump is **content-driven** (D13): a module is v8 iff it contains at least one `PartialApply`, decided structurally over the MIR (function bodies *and* global initializers — the latter are spliced into the synthesized `__init__`) — **not** by the `#feature curry` flag alone and **not** by a byte scan of the encoded stream (0xCE can appear as an operand byte of another instruction, and a false positive would break the flag-off byte-identity, D16)
+- Captured function values are **runtime-only and never serialized** (D14): the captured state lives in the VM's `Value::Func`, and v8 differs from v7 by exactly this one opcode plus one §10 row — no new table, no `FieldTypeTag` change
+- Verify validates the stack shape (`pops k+1, pushes 1`; the operand is read as the count) and keeps the opcode out of v1–v7 modules (§8); executing `PartialApply` in the VM lands with 0.0.8 T08 (function-value captures)
 
 ---
 
@@ -1148,6 +1162,9 @@ Constant pool:
 - [ ] **v6 instructions must not appear in a lower-version module**: the v6 opcodes are
       `0xCB–0xCD` (§4.2), so a range comparison suffices — a v6 opcode in any v1–v5 module →
       `BadOpcode`
+- [ ] **v8 instructions must not appear in a lower-version module**: the v8 opcodes are
+      ≥ 0xCE (§4.2, §5.18), so a range comparison suffices — `PartialApply` in any v1–v7
+      module → `BadOpcode` (0.0.8 T07)
 
 ### Per-Instruction Stack Depth Effect (Δdepth)
 
@@ -1317,7 +1334,7 @@ Rules:
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2, 3, 4, 5, 6, 7}` (from 0.0.7 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`; v7 adds the `type_param_count: u32` per `enum_defs` entry (no new table).
+- `version` accepts `{1, 2, 3, 4, 5, 6, 7, 8}` (from 0.0.8 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`; v7 adds the `type_param_count: u32` per `enum_defs` entry (no new table); v8 (content-driven, D13) changes no table — its only delta is the `PartialApply` opcode (§5.18).
 
 ---
 
@@ -1332,6 +1349,7 @@ Rules:
 | 5 | 0.0.5 | + pointer / unsafe instructions: `AddrOf`/`LoadPtr`/`StorePtr` (0xC8–0xCA); **zero layout changes** — no new table (§5.16) |
 | 6 | 0.0.6 | + enum instructions: `EnumNew`/`EnumIs`/`EnumPayload` (0xCB–0xCD); the `Enum` runtime value (not serialized); the appended `enum_defs` table and `FieldTypeTag::Enum = 12` (§5.17, §2, §9) |
 | 7 | 0.0.7 | the `enum_defs` table gains one descriptive `type_param_count: u32` per enum, written after `variant_count`, only in v7+ streams (§2, §9); **zero layout changes beyond that field** — no new table, no new opcodes, no `FieldTypeTag` change (D8) |
+| 8 | 0.0.8 | + `PartialApply` (0xCE, first slot of the reserved `0xCE–0xDF` group, §5.18); **content-driven** (D13): emitted iff at least one `PartialApply` was encoded, else the module stays v7 (a flag-on file without partial calls compiles to a v7 stream, byte-identical to 0.0.7, D16); captured function values are runtime-only and never serialized (D14) — **zero layout changes** — no new table (§5.18) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

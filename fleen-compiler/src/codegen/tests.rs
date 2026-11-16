@@ -1451,13 +1451,15 @@ func main(): int {
 
 #[test]
 fn enum_opcode_numbers_lock_the_v6_range() {
-    // The three enum instructions own 0xCB–0xCD and nothing else; 0xCE stays
-    // unallocated (BYTECODE §10 append-only rule).
+    // The three enum instructions own 0xCB–0xCD and nothing else; the v8
+    // group starts at 0xCE (0.0.8 T07) and 0xCF stays unallocated
+    // (BYTECODE §10 append-only rule).
     assert_eq!(Opcode::EnumNew as u8, 0xCB);
     assert_eq!(Opcode::EnumIs as u8, 0xCC);
     assert_eq!(Opcode::EnumPayload as u8, 0xCD);
     assert_eq!(V6_OPCODE_BASE, 0xCB);
-    assert_eq!(Opcode::from_byte(0xCE), None);
+    assert_eq!(Opcode::from_byte(0xCE), Some(Opcode::PartialApply));
+    assert_eq!(Opcode::from_byte(0xCF), None);
     for op in [Opcode::EnumNew, Opcode::EnumIs, Opcode::EnumPayload] {
         assert_eq!(Opcode::from_byte(op as u8), Some(op));
     }
@@ -1466,6 +1468,20 @@ fn enum_opcode_numbers_lock_the_v6_range() {
     assert_eq!(Opcode::EnumNew.operand_len(), 4);
     assert_eq!(Opcode::EnumIs.operand_len(), 2);
     assert_eq!(Opcode::EnumPayload.operand_len(), 4);
+}
+
+// ------------------- 0.0.8 T07: PartialApply (bytecode v8, 0xCE) ----------
+
+#[test]
+fn partial_apply_opcode_numbers_lock_the_v8_range() {
+    // `PartialApply` owns the first slot of the reserved 0xCE–0xDF group
+    // (BYTECODE §4.2); the rest of the group stays unallocated.
+    assert_eq!(Opcode::PartialApply as u8, 0xCE);
+    assert_eq!(V8_OPCODE_BASE, 0xCE);
+    assert_eq!(Opcode::from_byte(0xCE), Some(Opcode::PartialApply));
+    assert_eq!(Opcode::from_byte(0xCF), None);
+    // Operand width (PLAN D13): one `u8 k` — the applied-argument count.
+    assert_eq!(Opcode::PartialApply.operand_len(), 1);
 }
 
 #[test]
@@ -1637,4 +1653,101 @@ fn enum_payload_tag_encodes_and_decodes_as_12() {
     );
     let parsed = from_bytes(&to_bytes(&module)).expect("round trip");
     assert_eq!(parsed.enum_defs[1], module.enum_defs[1]);
+}
+
+// ---- 0.0.8 T07: content-driven version (D13/D14) --------------------------
+
+/// Compile `source` with its own `#feature` table (the `Session::compile`
+/// wiring; a single file is the whole table) and run full codegen — the
+/// flag-on counterpart of `compile_full`.
+fn compile_full_flagged(source: &str) -> Module {
+    let tokens = crate::lexer::tokenize(source).expect("lex");
+    let ast = crate::parser::parse(tokens).expect("parse");
+    let features = crate::FeatureTable::from_asts(std::slice::from_ref(&ast));
+    let hir = crate::resolver::resolve(ast).expect("resolve");
+    let typed = crate::typeck::typeck_with_features(hir, &features).expect("typeck");
+    let mir = crate::lower::lower(typed).expect("lower");
+    codegen(mir).expect("codegen")
+}
+
+/// The flag-on declarations shared by the T07 codegen tests (the T06
+/// spelling: two-part `add`, then a partial binding).
+const T07_ADD_DECL: &str = "add: int -> int -> int\nadd(a, b) { a + b }\n";
+
+#[test]
+fn partial_call_lifts_the_module_to_v8() {
+    // Content-driven (D13): one partial call anywhere in the module —
+    // here in `main` — lifts the version to 8, flag or no flag beyond
+    // the source needing it to typecheck.
+    let src = format!(
+        "#feature curry\n{T07_ADD_DECL}\
+main: () -> int\n\
+main() {{\n\
+    f: int -> int = add(1);\n\
+    f(2)\n\
+}}\n"
+    );
+    let module = compile_full_flagged(&src);
+    assert_eq!(module.version, MODULE_VERSION_V8);
+    assert_eq!(module.version, 8);
+
+    // The encoded stream round-trips with the v8 version preserved
+    // (READ_VERSIONS accepts it, BYTECODE §9).
+    let bytes = to_bytes(&module);
+    let parsed = from_bytes(&bytes).expect("v8 round trip");
+    assert_eq!(parsed.version, MODULE_VERSION_V8);
+}
+
+#[test]
+fn partial_in_a_global_initializer_lifts_the_module_to_v8() {
+    // The merged-module reality (PLAN D13): a partial inside a global
+    // initializer is spliced into the synthesized `__init__`, so it lifts
+    // the whole module. A function-body-only scan would miss it.
+    let src = format!(
+        "#feature curry\n{T07_ADD_DECL}\
+inc: int -> int = add(1);\n\
+main: () -> int\n\
+main() {{ inc(41) }}\n"
+    );
+    let module = compile_full_flagged(&src);
+    assert_eq!(module.version, MODULE_VERSION_V8);
+}
+
+#[test]
+fn flag_on_without_partials_stays_v7() {
+    // D13/D16: the flag alone does NOT lift the version — a `#feature
+    // curry` file whose calls are all complete still compiles to a v7
+    // module (content-driven: the version follows emitted content, not
+    // the flag), so old 0.0.7 readers accept it. The two-part spelling
+    // is mandatory here (`func` is forbidden in a curry file, T01), and
+    // the flag-off path itself is unchanged code — its bytes stay pinned
+    // by the pre-existing v7 round-trip tests above.
+    let src = format!(
+        "#feature curry\n{T07_ADD_DECL}\
+main: () -> int\n\
+main() {{ add(1, 2) }}\n"
+    );
+    let module = compile_full_flagged(&src);
+    assert_eq!(module.version, MODULE_VERSION);
+    // Round-trips as v7 (READ_VERSIONS keeps accepting it).
+    let parsed = from_bytes(&to_bytes(&module)).expect("v7 round trip");
+    assert_eq!(parsed.version, MODULE_VERSION);
+}
+
+#[test]
+fn reader_accepts_every_version_one_through_eight() {
+    // T07 widens READ_VERSIONS to {1..8}; the writer emits `version`
+    // verbatim and gates tables on it, so sweeping the version over a
+    // plain module pins the reader to accept all eight without a
+    // layout change (BYTECODE §9).
+    // plain module — no flag needed (classic `func` spelling).
+    let module =
+        compile_full("func add(a: int, b: int): int { a + b }\nfunc main(): int { add(1, 2) }\n");
+    for version in 1u16..=8 {
+        let mut m = module.clone();
+        m.version = version;
+        let parsed = from_bytes(&to_bytes(&m))
+            .unwrap_or_else(|e| panic!("version {version} should decode: {e}"));
+        assert_eq!(parsed.version, version);
+    }
 }

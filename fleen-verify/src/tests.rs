@@ -1984,3 +1984,135 @@ fn enum_new_stack_effect_is_computed_from_enum_defs() {
         Err(VerifyError::EnumIndexOutOfRange { pc: 0, index: 9 })
     );
 }
+
+// ------------------- 0.0.8 T07: PartialApply / bytecode v8 -----------------
+
+/// The v8 ok-case body: `LoadFunc(add)` + arg + `PartialApply 1` + arg +
+/// `CallValue 1` + `Return` — completes the partial with one more arg.
+/// The loaded function is the entry itself (index 0), which is enough for
+/// a shape check; `CallValue` dispatches through the value, statically.
+fn t07_main_code() -> Vec<u8> {
+    vec![
+        Opcode::LoadFunc as u8,
+        0,
+        0, // FuncId 0
+        CONST_INT,
+        1,
+        0,
+        0,
+        0, // ConstId 1
+        Opcode::PartialApply as u8,
+        1, // k = 1 applied argument
+        CONST_INT,
+        1,
+        0,
+        0,
+        0, // ConstId 1
+        Opcode::CallValue as u8,
+        1, // complete the call with the last argument
+        Opcode::Return as u8,
+    ]
+}
+
+fn t08_v8_module() -> Module {
+    let mut m = module(
+        vec![Const::Str("main".into()), Const::Int(1)],
+        vec![func(ConstId(0), 0, 1, t07_main_code())],
+        vec![],
+        0,
+    );
+    m.version = 8;
+    m
+}
+
+#[test]
+fn partial_apply_verifies_in_a_v8_module() {
+    // Valid stack shape: pops the function value and its k applied args,
+    // pushes the captured value; the completion call then pops f' + arg.
+    let r = verify::verify(&t08_v8_module());
+    if let Err(e) = &r {
+        panic!("v8 module should verify, got {e:?}");
+    }
+}
+
+#[test]
+fn partial_apply_underflow_is_rejected() {
+    // `PartialApply 2` with only f + one argument on the stack: the depth
+    // pass must reject it (min k+1).
+    let mut m = t08_v8_module();
+    m.functions[0].code[9] = 2;
+    match verify::verify(&m) {
+        Err(VerifyError::StackUnderflow {
+            pc: 8,
+            needed: 3,
+            actual: 2,
+        }) => {}
+        other => panic!("expected StackUnderflow {{ pc: 8, needed: 3, actual: 2 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_apply_truncated_operand_is_rejected() {
+    // The `u8 k` operand chopped off the end: TruncatedInstruction.
+    let mut m = t08_v8_module();
+    let full = t07_main_code();
+    m.functions[0].code = full[..10].to_vec().into_boxed_slice();
+    // The decode pass validates instruction lengths first: an operand cut
+    // off the end is `FallOffEnd` there; `partial_apply_k`'s own
+    // `TruncatedInstruction` stays as defense in depth (mirrors
+    // `call_value_argc`).
+    match verify::verify(&m) {
+        Err(VerifyError::FallOffEnd { pc: 8 }) => {}
+        other => panic!("expected FallOffEnd {{ pc: 8 }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_apply_rejected_below_v8() {
+    // v7 is the immediate predecessor: 0xCE must trip the v8 gate exactly
+    // (U07 pattern — one exact gate per version, checked in ascending order).
+    let mut m = t08_v8_module();
+    m.version = 7;
+    match verify::verify(&m) {
+        Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc: 8, byte }) => {
+            assert_eq!(byte, Opcode::PartialApply as u8);
+        }
+        other => panic!("version 7: expected V8Opcode gate, got {other:?}"),
+    }
+    // Ascending exact gates (0.0.6's U07 pattern): 0xCE lies above every
+    // base, so each lower version trips its own *next-version* gate —
+    // v1 → V2 gate, v2 → V3 gate, … — and only v6/v7 (v7 added no opcodes,
+    // so there is no v7 gate) reach the v8 gate itself.
+    let expected: [(u16, VerifyError); 6] = [
+        (1, VerifyError::V2OpcodeInV1Module { pc: 8, byte: 0xCE }),
+        (2, VerifyError::V3OpcodeInV1V2Module { pc: 8, byte: 0xCE }),
+        (3, VerifyError::V4OpcodeInV1V2V3Module { pc: 8, byte: 0xCE }),
+        (
+            4,
+            VerifyError::V5OpcodeInV1V2V3V4Module { pc: 8, byte: 0xCE },
+        ),
+        (
+            5,
+            VerifyError::V6OpcodeInV1V2V3V4V5Module { pc: 8, byte: 0xCE },
+        ),
+        (
+            6,
+            VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc: 8, byte: 0xCE },
+        ),
+    ];
+    for (version, want) in expected {
+        m.version = version;
+        match verify::verify(&m) {
+            Err(e) => assert_eq!(e, want, "version {version}"),
+            Ok(()) => panic!("version {version}: expected a gate error"),
+        }
+    }
+    // v7 is the immediate predecessor: 0xCE must trip the v8 gate exactly.
+    m.version = 7;
+    match verify::verify(&m) {
+        Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module { pc: 8, byte }) => {
+            assert_eq!(byte, Opcode::PartialApply as u8);
+        }
+        other => panic!("version 7: expected V8Opcode gate, got {other:?}"),
+    }
+}

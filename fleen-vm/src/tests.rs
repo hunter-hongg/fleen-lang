@@ -712,16 +712,18 @@ fn v2_module_gate() {
     };
     assert!(matches!(Vm::new(m).run(), Ok(Value::Str(_))));
 
-    // Unknown module versions are rejected before execution.
+    // Unknown module versions are rejected before execution. v8 stopped
+    // being a future version in 0.0.8 T07 (the run gate widened to 1..=8,
+    // D15), so probe v9.
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 8,
+        version: 9,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(8)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(9)))
     );
 }
 
@@ -1648,13 +1650,13 @@ fn unsupported_version_has_no_location() {
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 8,
+        version: 9,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(8))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(9))
     );
 }
 
@@ -4244,4 +4246,55 @@ func main(): string {
     );
     let v = Vm::new(decoded).run().expect("runs");
     assert_eq!(v, Value::Str("hi".into()));
+}
+
+// ------------------- 0.0.8 T07: bytecode v8 accepted by the VM -------------
+
+#[test]
+fn v8_module_without_partial_apply_runs_normally() {
+    // D15: the VM is flag-blind and accepts v8 unconditionally — structurally
+    // v8 differs from v7 by the `PartialApply` opcode only, so a v8 module
+    // with no partial calls executes exactly like v7.
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(7)],
+        functions: vec![func(
+            enc(&[(Opcode::Const, u32b(1)), (Opcode::Return, vec![])]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run(), Ok(Value::Int(7)));
+}
+
+#[test]
+fn executing_partial_apply_is_unimplemented_until_t08() {
+    // T07 lands the opcode's structure (slot, operand, verify shape, v8
+    // gate) but not the captured-function-value runtime — executing it
+    // reports `Unimplemented` instead of mis-executing. T08 replaces this.
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into())],
+        functions: vec![func(
+            enc(&[(Opcode::PartialApply, vec![1]), (Opcode::Return, vec![])]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    match Vm::new(m).run() {
+        Err(err) => assert!(
+            err.to_string()
+                .contains("unimplemented opcode: PartialApply"),
+            "expected Unimplemented PartialApply, got {err}"
+        ),
+        Ok(v) => panic!("expected Unimplemented, got {v:?}"),
+    }
 }

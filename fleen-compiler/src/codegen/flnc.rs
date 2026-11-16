@@ -4,7 +4,7 @@ use super::bytecode::*;
 
 const MAGIC: &[u8; 4] = b"FLNC";
 
-/// Versions this reader accepts: 0.0.1 (v1) through 0.0.7 (v7).
+/// Versions this reader accepts: 0.0.1 (v1) through 0.0.8 (v8).
 ///
 /// v2 adds instructions and fills `span_map`; v3 adds the struct
 /// instructions and the appended `struct_defs` table (read only for
@@ -14,10 +14,12 @@ const MAGIC: &[u8; 4] = b"FLNC";
 /// adds the enum instructions 0xCB–0xCD and the appended `enum_defs`
 /// table (read only for version >= 6); v7 (0.0.7 T07) adds one
 /// `type_param_count: u32` per `enum_defs` entry (read only for
-/// version >= 7).
+/// version >= 7); v8 (0.0.8 T07/D13) adds the `PartialApply`
+/// instruction 0xCE — content-driven, so a v8 stream differs from v7
+/// only by that opcode's presence (no new table; D14).
 /// The field order and widths of every existing table are unchanged
 /// (BYTECODE.md §9), so a v1 file reads unmodified.
-const READ_VERSIONS: [u16; 7] = [1, 2, 3, 4, 5, 6, 7];
+const READ_VERSIONS: [u16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /// Error produced by `from_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq)]

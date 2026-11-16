@@ -10,7 +10,7 @@ mod tests;
 pub use bytecode::{
     Bytecode, Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, Global,
     GlobalId, Module, Opcode, SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE,
-    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE,
+    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -18,7 +18,8 @@ pub use flnc::{FlncError, from_bytes, to_bytes};
 use crate::lexer::Span;
 use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 
-/// Bytecode version emitted by this compiler.
+/// Bytecode version emitted by this compiler for content that needs no
+/// newer features (the default).
 ///
 /// Version 1 was 0.0.1; version 2 adds the ownership / Result instructions
 /// and a populated `span_map` (BYTECODE.md §10); version 3 (0.0.3 V02) adds
@@ -27,16 +28,27 @@ use crate::lower::mir::{Mir, MirInstr, MirInstrKind};
 /// 5 (0.0.5) adds the pointer / unsafe instructions 0xC8–0xCA; version 6
 /// (0.0.6 T06) adds the enum instructions 0xCB–0xCD and the appended
 /// `enum_defs` table; version 7 (0.0.7 T07) adds one `type_param_count:
-/// u32` per `enum_defs` entry. No new opcodes, no `FieldTypeTag` change.
-/// Readers accept all seven.
+/// u32` per `enum_defs` entry; version 8 (0.0.8 T07/D13) adds the
+/// `PartialApply` instruction 0xCE — **content-driven**: emitted only when
+/// at least one `PartialApply` was encoded, else the module stays v7 (a
+/// `#feature curry` file without partial calls compiles to a v7 module).
+/// Readers accept all eight.
 pub const MODULE_VERSION: u16 = 7;
+
+/// Bytecode version emitted when at least one `PartialApply` instruction
+/// was encoded (0.0.8 T07, content-driven bump, D13). The only delta from
+/// v7 is that opcode — no new table, no `FieldTypeTag` change (D14).
+pub const MODULE_VERSION_V8: u16 = 8;
 
 /// Lower MIR into a bytecode module.
 ///
-/// The emitted module is bytecode version 7 (BYTECODE.md §10): it carries
-/// the struct / async / pointer / enum instructions and the appended
-/// `struct_defs` and `enum_defs` tables (the latter with the per-enum
-/// `type_param_count` field, 0.0.7 T07/D8).
+/// The emitted module is bytecode version 7 by default (BYTECODE.md §10):
+/// it carries the struct / async / pointer / enum instructions and the
+/// appended `struct_defs` and `enum_defs` tables (the latter with the
+/// per-enum `type_param_count` field, 0.0.7 T07/D8). When at least one
+/// `PartialApply` instruction was encoded, the module lifts to version 8
+/// (content-driven, 0.0.8 T07/D13) — a flag-on file without partial calls
+/// still produces a v7 module.
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).
@@ -47,6 +59,24 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         structs,
         enums,
     } = mir;
+
+    // Content-driven version (0.0.8 T07/D13): scan the MIR structurally —
+    // function bodies *and* global initializers (the latter are spliced
+    // into the synthesized `__init__` below, so a partial there must lift
+    // the version too). A byte scan of the encoded stream would not do:
+    // 0xCE can appear as an operand byte of another instruction, and a
+    // false positive would break the flag-off byte-identity posture (D16).
+    let has_partial_apply = funcs.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+        })
+    }) || globals.iter().any(|g| {
+        g.init
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
+    });
 
     let mut pool = ConstPool::new();
 
@@ -164,7 +194,11 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         .collect();
 
     Ok(Module {
-        version: MODULE_VERSION,
+        version: if has_partial_apply {
+            MODULE_VERSION_V8
+        } else {
+            MODULE_VERSION
+        },
         constants: pool.items,
         functions,
         globals: gmodule,

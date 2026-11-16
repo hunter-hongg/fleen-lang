@@ -237,7 +237,11 @@ impl Vm {
         // 0.0.7 T07/D8: v7 adds only the descriptive `type_param_count` field
         // per `enum_defs` entry — the opcode set and `Value::Enum` shape are
         // identical to v6, so the run gate extends rather than changes.
-        if !(1..=7).contains(&self.module.version) {
+        // 0.0.8 T07/D13/D15: v8 is accepted unconditionally (the VM is
+        // flag-blind). Structurally v8 differs from v7 by the `PartialApply`
+        // opcode only; executing it lands with T08 (function-value captures)
+        // and is rejected below until then.
+        if !(1..=8).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -2286,6 +2290,16 @@ impl Vm {
                     .ok_or(Self::enum_payload_mismatch(variant_ref))?
                     .clone();
                 self.stack.push(p);
+            }
+            // 0.0.8 T07: `PartialApply` (0xCE) is recognized structurally
+            // (the opcode space, verify's stack shape, and the v8 gate all
+            // landed with T07), but executing it requires captured function
+            // values — the runtime representation lands with T08. Reject
+            // here instead of mis-executing; T08 replaces this arm.
+            Opcode::PartialApply => {
+                return Err(RuntimeErrorKind::Unimplemented(
+                    "PartialApply (captured function values land with 0.0.8 T08)",
+                ));
             }
         }
         self.frames

@@ -2,7 +2,7 @@
 
 use fleen_compiler::codegen::{
     Const, Func, FuncId, Module, Opcode, V2_OPCODE_BASE, V3_OPCODE_BASE, V4_OPCODE_BASE,
-    V5_OPCODE_BASE, V6_OPCODE_BASE,
+    V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE,
 };
 
 /// A verification failure.
@@ -112,6 +112,12 @@ pub enum VerifyError {
     /// A v6 instruction (opcode >= 0xCB) appears in a v1–v5 module
     /// (0.0.6 T06; the explicit gate).
     V6OpcodeInV1V2V3V4V5Module {
+        pc: usize,
+        byte: u8,
+    },
+    /// A v8 instruction (`PartialApply`, 0xCE) appears in a v1–v7
+    /// module (0.0.8 T07; the explicit gate, U07 pattern).
+    V8OpcodeInV1V2V3V4V5V6V7Module {
         pc: usize,
         byte: u8,
     },
@@ -259,6 +265,12 @@ impl std::fmt::Display for VerifyError {
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v6, module is v1/v2/v3/v4/v5"
                 )
             }
+            Self::V8OpcodeInV1V2V3V4V5V6V7Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v8, module is v1/v2/v3/v4/v5/v6/v7"
+                )
+            }
             Self::StructIndexOutOfRange { pc, index } => {
                 write!(
                     f,
@@ -371,6 +383,14 @@ pub fn call_value_argc(code: &[u8], d: &Decoded) -> Result<u8, VerifyError> {
         .ok_or(VerifyError::TruncatedInstruction { pc: d.pc })
 }
 
+/// The `u8 k` operand of `PartialApply` — the number of arguments applied
+/// at the partial-application site (0.0.8 T07, BYTECODE.md §5.18).
+pub fn partial_apply_k(code: &[u8], d: &Decoded) -> Result<u8, VerifyError> {
+    code.get(d.pc + 1)
+        .copied()
+        .ok_or(VerifyError::TruncatedInstruction { pc: d.pc })
+}
+
 /// Jump targets of an instruction (absolute byte offsets).
 pub fn jump_targets(code: &[u8], d: &Decoded) -> Result<Vec<usize>, VerifyError> {
     match d.opcode {
@@ -460,6 +480,13 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         Opcode::CallValue => {
             let argc = call_value_argc(code, d)? as i64;
             (-argc, argc + 1)
+        }
+        // 0.0.8 T07 (BYTECODE.md §5.18): `PartialApply` pops the function
+        // value and its `k` applied arguments, pushes the captured function
+        // value — the same shape as `CallValue` with the operand as count.
+        Opcode::PartialApply => {
+            let k = partial_apply_k(code, d)? as i64;
+            (-k, k + 1)
         }
         Opcode::BindMatch => (0, 1),
         Opcode::Return => (0, 1), // treated as path termination; depth equality is checked separately in the analysis
@@ -614,6 +641,13 @@ fn walk_function(
         // 0.0.6 T06: v6 (enum, >= 0xCB) is kept out of v1–v5 modules.
         if module.version < 6 && (d.opcode as u8) >= V6_OPCODE_BASE {
             return Err(VerifyError::V6OpcodeInV1V2V3V4V5Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
+        }
+        // 0.0.8 T07: v8 (`PartialApply`, 0xCE) is kept out of v1–v7 modules.
+        if module.version < 8 && (d.opcode as u8) >= V8_OPCODE_BASE {
+            return Err(VerifyError::V8OpcodeInV1V2V3V4V5V6V7Module {
                 pc: d.pc,
                 byte: d.opcode as u8,
             });

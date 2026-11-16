@@ -120,6 +120,8 @@ impl Encoder {
             MirInstrKind::Call(fid) => self.emit_u16(fid_u16(*fid)?),
             MirInstrKind::LoadFunc(fid) => self.emit_u16(fid_u16(*fid)?),
             MirInstrKind::CallValue(argc) => self.emit_u8(*argc),
+            // 0.0.8 T07: the applied-argument count rides as one u8.
+            MirInstrKind::PartialApply(k) => self.emit_u8(*k),
             MirInstrKind::BindMatch(slot) => self.emit_u16(*slot),
             // 0.0.3 V02: struct instructions. `SetField*` carry two u16
             // operands (slot/gid + field offset).
@@ -292,16 +294,11 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         MirInstrKind::EnumNew(..) => Opcode::EnumNew,
         MirInstrKind::EnumIs(_) => Opcode::EnumIs,
         MirInstrKind::EnumPayload(..) => Opcode::EnumPayload,
-        // 0.0.8 T06: partial application reaches MIR now; its bytecode
-        // encoding (u8 operand, first slot of the reserved 0xCE–0xDF
-        // group per BYTECODE.md §4.2 — slot value to be assigned and
-        // synced with the doc in T07) lands with T07 — reject loudly
-        // here instead of encoding an invented opcode.
-        MirInstrKind::PartialApply(_) => {
-            return Err(CodegenError {
-                message: "PartialApply bytecode encoding lands with 0.0.8 T07".to_string(),
-            });
-        }
+        // 0.0.8 T07: partial application encodes as `PartialApply` (0xCE,
+        // u8 operand, first slot of the reserved 0xCE–0xDF group per
+        // BYTECODE.md §4.2/§5.18). Its presence in the encoded module lifts
+        // the version to 8 (content-driven, D13).
+        MirInstrKind::PartialApply(_) => Opcode::PartialApply,
     };
     Ok(op)
 }
