@@ -4271,30 +4271,263 @@ fn v8_module_without_partial_apply_runs_normally() {
     assert_eq!(Vm::new(m).run(), Ok(Value::Int(7)));
 }
 
+/// The three-argument callee shared by the T08 partial tests: returns
+/// `a + b + c` (params occupy slots 0..3).
+fn add3() -> Func {
+    func(
+        enc(&[
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(1)),
+            (Opcode::IAdd, vec![]),
+            (Opcode::LoadLocal, u16b(2)),
+            (Opcode::IAdd, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        3,
+        3,
+    )
+}
+
+/// The box-reading callee shared by the deep-copy soundness test: returns
+/// the pointee of its box parameter.
+fn read_box() -> Func {
+    func(
+        enc(&[
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::DerefBox, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        1,
+        1,
+    )
+}
+
 #[test]
-fn executing_partial_apply_is_unimplemented_until_t08() {
-    // T07 lands the opcode's structure (slot, operand, verify shape, v8
-    // gate) but not the captured-function-value runtime — executing it
-    // reports `Unimplemented` instead of mis-executing. T08 replaces this.
+fn partial_apply_then_callvalue_consumes_captures() {
+    // T08/D13/D15: `PartialApply 2` folds two arguments into the function
+    // value's capture list; the later `CallValue 1` consumes
+    // `captures.len() + argc == 3 == params` and runs to completion.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::PartialApply, vec![2]),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::Const, u32b(3)),
+            (Opcode::CallValue, vec![1]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
         version: 8,
-        constants: vec![Const::Str("main".into())],
-        functions: vec![func(
-            enc(&[(Opcode::PartialApply, vec![1]), (Opcode::Return, vec![])]),
-            0,
-            0,
-        )],
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+        ],
+        functions: vec![main, add3()],
         globals: vec![],
         entry: FuncId(0),
     };
-    match Vm::new(m).run() {
-        Err(err) => assert!(
-            err.to_string()
-                .contains("unimplemented opcode: PartialApply"),
-            "expected Unimplemented PartialApply, got {err}"
-        ),
-        Ok(v) => panic!("expected Unimplemented, got {v:?}"),
-    }
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(60));
+}
+
+#[test]
+fn callvalue_total_must_equal_callee_params() {
+    // D15: the call consumes `captures.len() + argc` values and that total
+    // must equal the callee's `params` — here 2 + 0 == 2 != 3, so the
+    // shape check rejects the call even though `argc` alone would be
+    // "fine" for a zero-arg-looking call site.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::Const, u32b(2)),
+            (Opcode::PartialApply, vec![2]),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::CallValue, vec![0]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        1,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(10), Const::Int(20)],
+        functions: vec![main, add3()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::StackShape
+    );
+}
+
+#[test]
+fn partial_apply_on_non_function_is_defensive() {
+    // verify rejects PartialApply under a non-function; the VM's arm keeps
+    // the same defensive posture for hand-forged bytecode.
+    let main = func(
+        enc(&[
+            (Opcode::Const, u32b(1)),
+            (Opcode::PartialApply, vec![0]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(5)],
+        functions: vec![main],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ArithTypeMismatch
+    );
+}
+
+#[test]
+fn chained_partial_apply_extends_captures() {
+    // D13/D15 flag-blind uniformity: applying an already-captured value
+    // *extends* the capture list in source order, so a chain of
+    // `PartialApply 1`s reads like supplying the arguments one at a time;
+    // the final call consumes all three captures.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::Const, u32b(2)),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::Const, u32b(3)),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::CallValue, vec![0]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(10),
+            Const::Int(20),
+            Const::Int(30),
+        ],
+        functions: vec![main, add3()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(60));
+}
+
+#[test]
+fn partial_deep_copy_two_copies_consume_own_snapshots() {
+    // D11 soundness: `Dup` of a captured function value deep-copies the
+    // capture list (here an owned heap `Boxed` snapshot). Each copy is
+    // called separately and consumes *its own* snapshot — a shared or
+    // drained list would leave the second call with an empty capture list
+    // and fail the `captures + argc == params` shape check.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::AllocBox, vec![]),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::Dup, vec![]),
+            (Opcode::StoreLocal, u16b(0)),
+            (Opcode::StoreLocal, u16b(1)),
+            (Opcode::LoadLocal, u16b(0)),
+            (Opcode::CallValue, vec![0]),
+            (Opcode::LoadLocal, u16b(1)),
+            (Opcode::CallValue, vec![0]),
+            (Opcode::IAdd, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        2,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(42)],
+        functions: vec![main, read_box()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Int(84));
+}
+
+#[test]
+fn partial_with_channel_capture_is_refused_on_copy() {
+    // The capture-aware `deep_fork_kind` backstop: a channel *captured*
+    // inside a partial aliases on copy exactly like one buried in an
+    // array, so a plain copy load (`q = p`, Func is Copy) is refused with
+    // `ChannelNotClonable` — the value still travels by move. The typeck
+    // gap that admits Future/channel captured params (T05/D9 excludes
+    // only ref/ptr) makes this reachable from legal source, not just
+    // forged bytecode.
+    let src = r#"
+#feature curry
+import std.concurrent;
+grab: (channel<int>, int) -> int
+grab(c, n) { n }
+main: () -> int
+main() {
+    ch = channel<int>(4);
+    p = grab(move ch);
+    q = p;
+    q(1)
+}
+"#;
+    let module = fleen_compiler::compile(src).expect("typeck admits a channel capture (T05 gap)");
+    assert_eq!(module.version, 8);
+    let err = Vm::new(module).run().unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ChannelNotClonable);
+}
+
+#[test]
+fn captured_partial_crosses_an_await_boundary_as_a_value() {
+    // D12: a partial is an ordinary value — it is bound into the future's
+    // frame as a parameter, sits there across a suspending `sleep`, and is
+    // called after the coroutine resumes. The future is created only at
+    // the final `use(p, 5)` call; no new boundary rule.
+    let src = r#"
+#feature curry
+import std.io;
+add: int -> int -> int
+add(a, b) { a + b }
+async apply: (int -> int, int) -> int
+apply(f, x) { std.io.sleep(1); f(x) }
+main: () -> int
+main() {
+    p = add(10);
+    apply(p, 5) await
+}
+"#;
+    let module =
+        fleen_compiler::compile(src).expect("partial-typed parameter compiles under curry");
+    // D13: the partial lifts the module to v8.
+    assert_eq!(module.version, 8);
+    assert_eq!(Vm::new(module).run().unwrap(), Value::Int(15));
 }

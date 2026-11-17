@@ -110,7 +110,7 @@ impl Value {
             Value::Arr(_) => PayloadKind::Arr,
             Value::Range { .. } => PayloadKind::Range,
             Value::Unit => PayloadKind::Unit,
-            Value::Func(_) => PayloadKind::Func,
+            Value::Func { .. } => PayloadKind::Func,
             Value::Future(_) => PayloadKind::Future,
             Value::Channel(_) => PayloadKind::Channel,
             Value::Ptr(_) => PayloadKind::Ptr,
@@ -190,8 +190,25 @@ pub enum Value {
     },
     /// The unit value (no meaningful data).
     Unit,
-    /// First-class function reference.
-    Func(FuncId),
+    /// First-class function reference. A *bare* function value carries an
+    /// empty capture list; a value produced by `PartialApply` (0.0.8 T08,
+    /// F9) carries the already-applied arguments so that a later
+    /// `CallValue` can consume `captures.len() + argc` values together.
+    /// The capture list is runtime-only (D14): like `Future`/`Channel`/
+    /// `Ptr` it is never serialized — there is no `.flnc` tag, no
+    /// constant-pool or `FieldTypeTag` surface. `Func` is unconditionally
+    /// Copy at the language level (D11), so any copy consumption
+    /// (`clone`, `Dup`, array/struct/global stores) deep-copies the list
+    /// via the derived `Clone` (owned kinds duplicate their heap data; a
+    /// `Future`/`Channel`/`Ptr` capture would alias — the same
+    /// `deep_fork_kind` backstops that reject a copy, mirroring the
+    /// container rules for arrays and enum payloads).
+    Func {
+        id: FuncId,
+        /// The already-applied arguments (D11/D13). Boxed like `Enum`'s
+        /// payload list and `Arr` so the variant does not inflate `Value`.
+        captures: Box<[Value]>,
+    },
     /// Suspendable coroutine frame — the runtime value of a `Future<T>`
     /// (0.0.4 D1/T04).  Boxed so that the frame's two `Vec`s and its state do
     /// not inflate every `Value` the VM touches (D1 also calls a future a heap
@@ -257,7 +274,9 @@ impl fmt::Display for Value {
             // `start..end`, `end` exclusive (matches `std.collection.range`).
             Value::Range { start, end } => write!(f, "{start}..{end}"),
             Value::Unit => write!(f, "unit"),
-            Value::Func(id) => write!(f, "<func #{}>", id.0),
+            // The capture list is runtime state, not user-visible text (T08):
+            // a captured partial renders exactly like its bare function.
+            Value::Func { id, .. } => write!(f, "<func #{}>", id.0),
             // A future has no user-visible payload; the frame contents would be
             // noise (and can be large).
             Value::Future(_) => write!(f, "<future>"),
@@ -349,5 +368,53 @@ mod tests {
             payload: vec![Value::Int(7), Value::Str("hi".into())].into_boxed_slice(),
         };
         assert_eq!(two.to_string(), "Enum(2, 7, hi)");
+    }
+
+    /// 0.0.8 T08 (D11): cloning a captured function value deep-copies the
+    /// capture list — owned payloads (here a `Str`) are pointer-distinct in
+    /// the copy, so two copies of a partial each own an independent
+    /// snapshot. `PayloadKind::Func` is unchanged, and a captured partial
+    /// renders exactly like its bare function (the capture list is not
+    /// user-visible).
+    #[test]
+    fn func_clone_deep_copies_captures_and_display_is_bare() {
+        let captured = Value::Func {
+            id: FuncId(3),
+            captures: vec![Value::Str("snapshot".into()), Value::Int(9)].into(),
+        };
+        let copy = captured.clone();
+        assert_eq!(captured, copy);
+        match (&captured, &copy) {
+            (
+                Value::Func {
+                    id: ia,
+                    captures: ca,
+                },
+                Value::Func {
+                    id: ib,
+                    captures: cb,
+                },
+            ) => {
+                assert_eq!(ia, ib);
+                // Pointer-distinct capture buffers: the copy is deep, not a
+                // shared list.
+                assert_ne!(ca.as_ptr(), cb.as_ptr());
+                let (Value::Str(x), Value::Str(y)) = (&ca[0], &cb[0]) else {
+                    unreachable!("first capture is a string")
+                };
+                // Distinct heap strings, same content.
+                assert_ne!(x.as_ptr(), y.as_ptr());
+                assert_eq!(x, y);
+            }
+            _ => unreachable!("both are funcs"),
+        }
+        // Bare and captured render identically; captures stay runtime-only.
+        let bare = Value::Func {
+            id: FuncId(3),
+            captures: Vec::new().into(),
+        };
+        assert_eq!(captured.to_string(), bare.to_string());
+        assert_eq!(captured.to_string(), "<func #3>");
+        assert_eq!(captured.payload_kind(), PayloadKind::Func);
     }
 }

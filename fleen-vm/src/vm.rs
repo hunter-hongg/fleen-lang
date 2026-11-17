@@ -54,6 +54,13 @@ fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
         // struct-field storage rules, and typeck rejects Future/channel/ptr
         // payloads anyway; this is the forged-bytecode backstop).
         Value::Enum { payload, .. } => payload.iter().find_map(deep_fork_kind),
+        // 0.0.8 T08: a captured function value is a container too — the
+        // capture list travels with the value on every copy (D11), so a
+        // Future/channel/ptr *capture* would alias exactly like one buried
+        // in an array. Typeck rejects ref/ptr partials (D9) but currently
+        // admits Future/channel captures, so this backstop must see inside
+        // the list.
+        Value::Func { captures, .. } => captures.iter().find_map(deep_fork_kind),
         _ => None,
     }
 }
@@ -723,6 +730,13 @@ impl Vm {
 
     /// Invoke `fid` with `argc` arguments already on the operand stack.
     /// Builtins execute host-side; normal functions push a new frame.
+    ///
+    /// 0.0.8 T08 (D15): for a `CallValue` on a captured function value,
+    /// `argc` counts the callee's *full* parameter list — the capture list
+    /// followed by the freshly pushed stack arguments (the caller relays
+    /// captures onto the stack before calling). A direct `Call` never sees
+    /// captures, and a bare function value's `argc` is just its stack args,
+    /// so the pre-T08 contract is unchanged there.
     pub(crate) fn call(&mut self, fid: FuncId, argc: u16) -> Result<(), RuntimeErrorKind> {
         let func = self
             .module
@@ -1277,6 +1291,26 @@ impl Vm {
                     .last()
                     .cloned()
                     .ok_or(RuntimeErrorKind::StackUnderflow)?;
+                // 0.0.8 T08 backstop: `Dup` copies a Copy-typed value, and a
+                // captured function value copies its capture list with it
+                // (D11). A Future/channel/ptr *capture* would alias on that
+                // copy — the same silent-alias rule the container backstops
+                // enforce — so refuse the copy here too. The LoadLocal
+                // posture applies unchanged: a top-level Channel handle
+                // stays legal (an Rc bump is the intended handle semantics),
+                // while a top-level Future/Ptr can only reach `Dup` through
+                // malformed bytecode (both are non-Copy, so legal codegen
+                // emits `DupDeep` and the ptr guard fires first).
+                match deep_fork_kind(&v) {
+                    Some(DeepFork::Future) => return Err(RuntimeErrorKind::FutureNotClonable),
+                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
+                        return Err(RuntimeErrorKind::ChannelNotClonable);
+                    }
+                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
+                        return Err(RuntimeErrorKind::PtrNotClonable);
+                    }
+                    _ => {}
+                }
                 self.stack.push(v);
             }
             Opcode::LoadLocal => {
@@ -1485,7 +1519,12 @@ impl Vm {
                 if id as usize >= self.module.functions.len() {
                     return Err(RuntimeErrorKind::FuncOutOfRange(FuncId(id)));
                 }
-                self.stack.push(Value::Func(FuncId(id)));
+                self.stack.push(Value::Func {
+                    id: FuncId(id),
+                    // LoadFunc always produces a *bare* function value; the
+                    // capture list only fills via PartialApply (T08).
+                    captures: Vec::new().into(),
+                });
             }
             Opcode::CallValue => {
                 let s = take!(1);
@@ -1496,13 +1535,33 @@ impl Vm {
                 let idx = self.stack.len() - argc as usize - 1;
                 let f = self.stack.remove(idx);
                 match f {
-                    Value::Func(fid) => {
+                    Value::Func { id: fid, captures } => {
+                        // D15: the callee's parameter slots are the capture
+                        // list followed by the stack arguments, so the call
+                        // must consume `captures.len() + argc` values in
+                        // total and that total must equal `params`. A bare
+                        // function value (empty captures) behaves exactly
+                        // like the pre-T08 path.
+                        let mut args: Vec<Value> = (0..argc)
+                            .map(|_| self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        args.reverse();
+                        // Guard the u16 cast before it truncates: a forged
+                        // capture list could overflow `argc`'s width.
+                        let total = u16::try_from(captures.len() + argc as usize)
+                            .map_err(|_| RuntimeErrorKind::StackShape)?;
+                        for c in captures {
+                            self.stack.push(c);
+                        }
+                        for a in args {
+                            self.stack.push(a);
+                        }
                         let start = frame.ip;
                         self.frames
                             .last_mut()
                             .ok_or(RuntimeErrorKind::StackUnderflow)?
                             .ip = ip;
-                        if let Err(e) = self.call(fid, argc) {
+                        if let Err(e) = self.call(fid, total) {
                             // Same rewind as the `Call` arm: `call` errors
                             // surface before the callee's frame is pushed.
                             self.frames
@@ -1802,6 +1861,16 @@ impl Vm {
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
                 };
+                // 0.0.8 T08 backstop, mirroring `ArrGet`: a field read
+                // copies out, and a captured function value field would
+                // alias its Future/channel/ptr captures on that copy.
+                if let Some(kind) = deep_fork_kind(&copy) {
+                    return Err(match kind {
+                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
+                    });
+                }
                 self.stack.push(copy);
             }
             Opcode::SetFieldLocal => {
@@ -2289,17 +2358,50 @@ impl Vm {
                     .get(index)
                     .ok_or(Self::enum_payload_mismatch(variant_ref))?
                     .clone();
+                // 0.0.8 T08 backstop, mirroring `ArrGet`: the payload read
+                // copies out, and a captured function value payload would
+                // alias its Future/channel/ptr captures on that copy.
+                if let Some(kind) = deep_fork_kind(&p) {
+                    return Err(match kind {
+                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
+                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
+                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
+                    });
+                }
                 self.stack.push(p);
             }
-            // 0.0.8 T07: `PartialApply` (0xCE) is recognized structurally
-            // (the opcode space, verify's stack shape, and the v8 gate all
-            // landed with T07), but executing it requires captured function
-            // values — the runtime representation lands with T08. Reject
-            // here instead of mis-executing; T08 replaces this arm.
+            // 0.0.8 T08: `PartialApply k` (0xCE) pops the k most recent
+            // stack values plus the function value beneath them and pushes
+            // the function with those k arguments *appended* to its capture
+            // list (D13 stack shape `f a₁…aₖ → f'`). A bare function value
+            // gets its first captures; applying an already-captured value
+            // extends the list, so chains read in source order. The VM is
+            // flag-blind (D15): this is unconditional, exactly like `Call`.
             Opcode::PartialApply => {
-                return Err(RuntimeErrorKind::Unimplemented(
-                    "PartialApply (captured function values land with 0.0.8 T08)",
-                ));
+                let s = take!(1);
+                let k = s[0] as usize;
+                if self.stack.len() < k + 1 {
+                    return Err(RuntimeErrorKind::StackUnderflow);
+                }
+                let mut args: Vec<Value> = (0..k)
+                    .map(|_| self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow))
+                    .collect::<Result<Vec<_>, _>>()?;
+                args.reverse();
+                let f = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                match f {
+                    Value::Func { id, captures } => {
+                        let mut merged = Vec::with_capacity(captures.len() + args.len());
+                        merged.extend(captures.iter().cloned());
+                        merged.append(&mut args);
+                        self.stack.push(Value::Func {
+                            id,
+                            captures: merged.into_boxed_slice(),
+                        });
+                    }
+                    // Defensive: verify rejects PartialApply under a
+                    // non-function, and typeck never emits one.
+                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                }
             }
         }
         self.frames
@@ -2614,7 +2716,32 @@ impl Vm {
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
             (Value::Unit, Value::Unit) => true,
-            (Value::Func(x), Value::Func(y)) => x == y,
+            // 0.0.8 T08: two function values compare structurally — same
+            // target function and equal capture lists. A fork-kind capture
+            // (Future/channel/ptr) must not be inspected by the derived
+            // compare (it would read a shared buffer or a suspended frame,
+            // the same posture as the channel/future `==` bans), so the
+            // comparison is refused instead. Bare values (empty captures)
+            // reduce to today's identity compare.
+            (
+                Value::Func {
+                    id: ix,
+                    captures: cx,
+                },
+                Value::Func {
+                    id: iy,
+                    captures: cy,
+                },
+            ) => {
+                if cx
+                    .iter()
+                    .chain(cy.iter())
+                    .any(|v| deep_fork_kind(v).is_some())
+                {
+                    return Err(RuntimeErrorKind::ArithTypeMismatch);
+                }
+                ix == iy && cx == cy
+            }
             // A box observes — and compares — its pointee (§3.2, matching
             // Rust's `Box: PartialEq`).
             (Value::Boxed(x), Value::Boxed(y)) => x == y,

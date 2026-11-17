@@ -76,7 +76,10 @@ mod tests {
         assert_eq!(fmt_scalar(&Value::Str("hello".into())), None);
         assert_eq!(fmt_scalar(&Value::Unit), None);
         assert_eq!(
-            fmt_scalar(&Value::Func(fleen_compiler::codegen::FuncId(0))),
+            fmt_scalar(&Value::Func {
+                id: fleen_compiler::codegen::FuncId(0),
+                captures: Vec::new().into(),
+            }),
             None
         );
     }
