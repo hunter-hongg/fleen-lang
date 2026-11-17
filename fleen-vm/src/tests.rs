@@ -4302,6 +4302,16 @@ fn read_box() -> Func {
     )
 }
 
+/// A one-parameter callee for the forged fork-kind-capture tests: the
+/// partial applies exactly one (channel) argument.
+fn add1() -> Func {
+    func(
+        enc(&[(Opcode::LoadLocal, u16b(0)), (Opcode::Return, vec![])]),
+        1,
+        1,
+    )
+}
+
 #[test]
 fn partial_apply_then_callvalue_consumes_captures() {
     // T08/D13/D15: `PartialApply 2` folds two arguments into the function
@@ -4377,7 +4387,9 @@ fn callvalue_total_must_equal_callee_params() {
 #[test]
 fn partial_apply_on_non_function_is_defensive() {
     // verify rejects PartialApply under a non-function; the VM's arm keeps
-    // the same defensive posture for hand-forged bytecode.
+    // the same defensive posture for hand-forged bytecode. `StackShape` is
+    // the kind the VM's shape-violation backstops use — the operand has the
+    // wrong type for the instruction's stack contract.
     let main = func(
         enc(&[
             (Opcode::Const, u32b(1)),
@@ -4398,7 +4410,7 @@ fn partial_apply_on_non_function_is_defensive() {
     };
     assert_eq!(
         Vm::new(m).run().unwrap_err().kind,
-        RuntimeErrorKind::ArithTypeMismatch
+        RuntimeErrorKind::StackShape
     );
 }
 
@@ -4530,4 +4542,108 @@ main() {
     // D13: the partial lifts the module to v8.
     assert_eq!(module.version, 8);
     assert_eq!(Vm::new(module).run().unwrap(), Value::Int(15));
+}
+
+#[test]
+fn partial_apply_refuses_a_fork_kind_capture() {
+    // T08 review fix: a capture list is a storage location (D9 — it joins
+    // the `PtrNotStorable` ban list), and a Channel captured into it would
+    // alias the shared buffer. The typeck gate admits Future/Channel
+    // partials (only ref/ptr params are banned), so the VM must refuse at
+    // the apply itself, not at some later copy path. Forge:
+    // `ChannelNew 1; LoadFunc 1; PartialApply 1` — the apply pops the
+    // channel argument and rejects it with `ChannelNotClonable`.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![main, add1()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelNotClonable
+    );
+}
+
+#[test]
+fn chained_partial_apply_of_a_channel_is_refused_at_the_reapply() {
+    // The sharpest pre-fix hole: the *first* apply moves the channel into
+    // the capture list (no copy, no alias), but the second apply *clones*
+    // the existing list to extend it — an Rc alias with no refusal. The
+    // fix guards the re-apply clone: this must fail at the second
+    // `PartialApply`, before any copy path ever sees the value.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::PartialApply, vec![0]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![main, add1()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelNotClonable
+    );
+}
+
+#[test]
+fn deref_box_of_a_partial_with_a_fork_kind_capture_is_refused() {
+    // T08 review fix: `DerefBox` copies the pointee out (the same
+    // copy-out posture as `GetField`/`EnumPayload`, which the commit
+    // backstopped but this site was missed). `Func` is Copy, so `box p`
+    // over a partial is source-reachable; a box holding a partial whose
+    // capture is a channel must refuse the copy with `ChannelNotClonable`.
+    let main = func(
+        enc(&[
+            (Opcode::LoadFunc, u16b(1)),
+            (Opcode::Const, u32b(1)),
+            (Opcode::ChannelNew, vec![]),
+            (Opcode::PartialApply, vec![1]),
+            (Opcode::AllocBox, vec![]),
+            (Opcode::DerefBox, vec![]),
+            (Opcode::Return, vec![]),
+        ]),
+        0,
+        0,
+    );
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 8,
+        constants: vec![Const::Str("main".into()), Const::Int(1)],
+        functions: vec![main, add1()],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(
+        Vm::new(m).run().unwrap_err().kind,
+        RuntimeErrorKind::ChannelNotClonable
+    );
 }

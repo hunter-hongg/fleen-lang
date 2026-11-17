@@ -65,6 +65,37 @@ fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
     }
 }
 
+/// Refuse a copy of a value whose fork-kind payload is *buried* in a
+/// container (array/enum/`Ok`/`Err`/capture list). The shared form of the
+/// copy-path backstops: a top-level `Value::Channel` stays legal (the clone
+/// is the intended `Rc` bump — handle semantics), while a Future/Ptr at the
+/// top level can only reach a copy through forged bytecode. Sites that have
+/// no top-level exemption (GetField, EnumPayload, PartialApply — the value
+/// there is always *inside* something) should use
+/// [`reject_deep_fork_unconditional`] instead.
+fn reject_deep_fork(v: &Value) -> Result<(), RuntimeErrorKind> {
+    match deep_fork_kind(v) {
+        Some(DeepFork::Future) => Err(RuntimeErrorKind::FutureNotClonable),
+        Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
+            Err(RuntimeErrorKind::ChannelNotClonable)
+        }
+        Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => Err(RuntimeErrorKind::PtrNotClonable),
+        _ => Ok(()),
+    }
+}
+
+/// Unconditional form for sites where the value being copied is by
+/// construction *nested* (a field read, a payload read, a capture being
+/// merged): a fork kind at any depth is refused outright.
+fn reject_deep_fork_unconditional(v: &Value) -> Result<(), RuntimeErrorKind> {
+    match deep_fork_kind(v) {
+        Some(DeepFork::Future) => Err(RuntimeErrorKind::FutureNotClonable),
+        Some(DeepFork::Channel) => Err(RuntimeErrorKind::ChannelNotClonable),
+        Some(DeepFork::Ptr) => Err(RuntimeErrorKind::PtrNotClonable),
+        None => Ok(()),
+    }
+}
+
 /// The virtual machine.
 ///
 /// Executes the bytecode produced by `fleen-compiler::codegen`. Builtin
@@ -1111,13 +1142,7 @@ impl Vm {
                 // Channel) passes them — the copy happens here, so the deep
                 // backstop lives here (0.0.4 review fix).
                 for arg in &args {
-                    if let Some(kind) = deep_fork_kind(arg) {
-                        return Err(match kind {
-                            DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                            DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                            DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                        });
-                    }
+                    reject_deep_fork_unconditional(arg)?;
                 }
                 match name {
                     "std.arr.get" => self.builtin_arr_get(&args),
@@ -1301,16 +1326,7 @@ impl Vm {
                 // while a top-level Future/Ptr can only reach `Dup` through
                 // malformed bytecode (both are non-Copy, so legal codegen
                 // emits `DupDeep` and the ptr guard fires first).
-                match deep_fork_kind(&v) {
-                    Some(DeepFork::Future) => return Err(RuntimeErrorKind::FutureNotClonable),
-                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
-                        return Err(RuntimeErrorKind::ChannelNotClonable);
-                    }
-                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
-                        return Err(RuntimeErrorKind::PtrNotClonable);
-                    }
-                    _ => {}
-                }
+                reject_deep_fork(&v)?;
                 self.stack.push(v);
             }
             Opcode::LoadLocal => {
@@ -1330,21 +1346,7 @@ impl Vm {
                 // *buried* in a container (`Ok(...)`, an array) is a silent
                 // alias; typeck rejects the bare read of such a local, and
                 // the deep walk mirrors it (0.0.4 review fix).
-                match deep_fork_kind(&v) {
-                    Some(DeepFork::Future) => {
-                        return Err(RuntimeErrorKind::FutureNotClonable);
-                    }
-                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
-                        return Err(RuntimeErrorKind::ChannelNotClonable);
-                    }
-                    // A top-level ptr handle load is the `LoadPtr`/`StorePtr`
-                    // source, so it stays legal; a ptr buried in a container
-                    // is the silent cell alias, rejected (0.0.5 T06).
-                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
-                        return Err(RuntimeErrorKind::PtrNotClonable);
-                    }
-                    _ => {}
-                }
+                reject_deep_fork(&v)?;
                 self.stack.push(v);
             }
             Opcode::StoreLocal => {
@@ -1368,21 +1370,7 @@ impl Vm {
                 // suspended frame. Typeck rejects Future globals outright
                 // (`FutureNotStorable`), so this is malformed-bytecode-only;
                 // the deep walk also covers a container of either kind.
-                match deep_fork_kind(&v) {
-                    Some(DeepFork::Future) => {
-                        return Err(RuntimeErrorKind::FutureNotClonable);
-                    }
-                    Some(DeepFork::Channel) if !matches!(v, Value::Channel(_)) => {
-                        return Err(RuntimeErrorKind::ChannelNotClonable);
-                    }
-                    // Mirrors `LoadLocal`: a bare ptr global handle load is the
-                    // pointer-opcode source; a container-held ptr aliases the
-                    // cell on copy and is rejected (0.0.5 T06).
-                    Some(DeepFork::Ptr) if !matches!(v, Value::Ptr(_)) => {
-                        return Err(RuntimeErrorKind::PtrNotClonable);
-                    }
-                    _ => {}
-                }
+                reject_deep_fork(&v)?;
                 self.stack.push(v);
             }
             Opcode::StoreGlobal => {
@@ -1595,6 +1583,12 @@ impl Vm {
                     .last()
                     .cloned()
                     .ok_or(RuntimeErrorKind::StackUnderflow)?;
+                // The cloned scrutinee is normally the product of the
+                // choose-lowering `Dup` (which already ran its fork-kind
+                // backstop), so this is a forged-bytecode backstop only —
+                // a captured-func value with a buried Channel re-cloned
+                // here would alias the buffer before the bind.
+                reject_deep_fork(&v)?;
                 let idx = frame.stack_base + slot;
                 if idx >= self.stack.len() {
                     return Err(RuntimeErrorKind::StackShape);
@@ -1640,6 +1634,13 @@ impl Vm {
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
                 };
+                // A box read copies the pointee out — the same copy-out
+                // posture as `GetField`/`EnumPayload`: a pointee (or captured
+                // function value pointee) holding a fork-kind value would
+                // alias on this copy, so refuse it. `box<T>` holds owned
+                // types and `Func` is Copy, so `box p` over a partial is
+                // source-reachable, not just forged-bytecode territory.
+                reject_deep_fork_unconditional(&copy)?;
                 self.stack.push(copy);
             }
             Opcode::StoreDerefBox => {
@@ -1699,6 +1700,13 @@ impl Vm {
                     let top = self.stack.last().ok_or(RuntimeErrorKind::StackUnderflow)?;
                     self.read_ref(top)?.as_value().clone()
                 };
+                // Fork-kind values are non-Copy, so compiled code never
+                // emits `clone` for one (and never for a `Func`, which is
+                // Copy and routes to `Dup`) — but this *is* a deep copy of
+                // whatever reaches it, so the guard costs one walk and
+                // closes the forged-bytecode hole (a captured-func value
+                // with a buried Channel would otherwise alias here).
+                reject_deep_fork(&copy)?;
                 self.stack.push(copy);
             }
             Opcode::MoveLocal => {
@@ -1735,13 +1743,7 @@ impl Vm {
                 // same kinds inside `Ok`/`Err`/array containers (0.0.4
                 // review fix).
                 let resolved = self.read_slot(idx)?;
-                if let Some(kind) = deep_fork_kind(&resolved) {
-                    return Err(match kind {
-                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                    });
-                }
+                reject_deep_fork_unconditional(&resolved)?;
                 match resolved {
                     v @ Value::Ref { .. } => {
                         let copy = self.read_ref(&v)?.as_value().clone();
@@ -1761,13 +1763,7 @@ impl Vm {
                 // `Ok`/`Err`/array containers (0.0.4 review fix).
                 // 0.0.5 T06: dereference a promoted global's stable cell.
                 let g = self.read_global(id)?;
-                if let Some(kind) = deep_fork_kind(&g) {
-                    return Err(match kind {
-                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                    });
-                }
+                reject_deep_fork_unconditional(&g)?;
                 // Globals never hold borrow handles in compiled code (typeck
                 // forbids storing a `Ref`); the defensive backstop for
                 // hand-written modules is the dereference at the consumption
@@ -1864,13 +1860,7 @@ impl Vm {
                 // 0.0.8 T08 backstop, mirroring `ArrGet`: a field read
                 // copies out, and a captured function value field would
                 // alias its Future/channel/ptr captures on that copy.
-                if let Some(kind) = deep_fork_kind(&copy) {
-                    return Err(match kind {
-                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                    });
-                }
+                reject_deep_fork_unconditional(&copy)?;
                 self.stack.push(copy);
             }
             Opcode::SetFieldLocal => {
@@ -1986,16 +1976,8 @@ impl Vm {
                             // for malformed bytecode; the deep walk covers
                             // the same kinds inside `Ok`/`Err`/nested-array
                             // containers (0.0.4 review fix).
-                            match deep_fork_kind(&elems[i as usize]) {
-                                Some(kind) => {
-                                    return Err(match kind {
-                                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                                    });
-                                }
-                                None => elems[i as usize].clone(),
-                            }
+                            reject_deep_fork_unconditional(&elems[i as usize])?;
+                            elems[i as usize].clone()
                         }
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
@@ -2361,13 +2343,7 @@ impl Vm {
                 // 0.0.8 T08 backstop, mirroring `ArrGet`: the payload read
                 // copies out, and a captured function value payload would
                 // alias its Future/channel/ptr captures on that copy.
-                if let Some(kind) = deep_fork_kind(&p) {
-                    return Err(match kind {
-                        DeepFork::Future => RuntimeErrorKind::FutureNotClonable,
-                        DeepFork::Channel => RuntimeErrorKind::ChannelNotClonable,
-                        DeepFork::Ptr => RuntimeErrorKind::PtrNotClonable,
-                    });
-                }
+                reject_deep_fork_unconditional(&p)?;
                 self.stack.push(p);
             }
             // 0.0.8 T08: `PartialApply k` (0xCE) pops the k most recent
@@ -2390,8 +2366,24 @@ impl Vm {
                 let f = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 match f {
                     Value::Func { id, captures } => {
-                        let mut merged = Vec::with_capacity(captures.len() + args.len());
-                        merged.extend(captures.iter().cloned());
+                        // A capture list is a new storage location (D9: the
+                        // capture list joins the `PtrNotStorable` ban list),
+                        // and re-applying an already-captured value *clones*
+                        // the existing list — a Future/Channel/Ptr capture
+                        // would fork or alias right here, before any copy
+                        // path ever sees the value. Guard the args (the
+                        // values being captured) and the existing list (the
+                        // re-apply clone) identically.
+                        for a in &args {
+                            reject_deep_fork_unconditional(a)?;
+                        }
+                        for c in &captures {
+                            reject_deep_fork_unconditional(c)?;
+                        }
+                        // `captures` is owned here (matched out of the popped
+                        // value), so move out of it instead of re-cloning —
+                        // chained applies stay O(1) per apply, not O(n²).
+                        let mut merged = captures.into_vec();
                         merged.append(&mut args);
                         self.stack.push(Value::Func {
                             id,
@@ -2400,7 +2392,7 @@ impl Vm {
                     }
                     // Defensive: verify rejects PartialApply under a
                     // non-function, and typeck never emits one.
-                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                    _ => return Err(RuntimeErrorKind::StackShape),
                 }
             }
         }
@@ -2716,32 +2708,24 @@ impl Vm {
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
             (Value::Unit, Value::Unit) => true,
-            // 0.0.8 T08: two function values compare structurally — same
-            // target function and equal capture lists. A fork-kind capture
-            // (Future/channel/ptr) must not be inspected by the derived
-            // compare (it would read a shared buffer or a suspended frame,
-            // the same posture as the channel/future `==` bans), so the
-            // comparison is refused instead. Bare values (empty captures)
-            // reduce to today's identity compare.
+            // Function values compare by target identity, as pre-T08. The
+            // capture list stays out of the comparison on purpose: capture
+            // *value* equality is unspecified semantics T08 never asked for
+            // (a structural compare would also have to define equality for
+            // Future/channel/ptr captures, which are refused even to
+            // inspect). Two values of the same function are simply equal,
+            // captured or bare — matching the pre-T08 `Func(x) == Func(y)`
+            // identity rule the D14 minimal-surface posture keeps.
             (
                 Value::Func {
                     id: ix,
-                    captures: cx,
+                    captures: _,
                 },
                 Value::Func {
                     id: iy,
-                    captures: cy,
+                    captures: _,
                 },
-            ) => {
-                if cx
-                    .iter()
-                    .chain(cy.iter())
-                    .any(|v| deep_fork_kind(v).is_some())
-                {
-                    return Err(RuntimeErrorKind::ArithTypeMismatch);
-                }
-                ix == iy && cx == cy
-            }
+            ) => ix == iy,
             // A box observes — and compares — its pointee (§3.2, matching
             // Rust's `Box: PartialEq`).
             (Value::Boxed(x), Value::Boxed(y)) => x == y,
