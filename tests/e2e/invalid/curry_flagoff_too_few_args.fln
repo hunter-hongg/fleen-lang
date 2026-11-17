@@ -1,0 +1,7 @@
+// 0.0.8 T09: flag-off file — a too-few-arguments call keeps today's
+// ArityMismatch (D5/D16: the arity relaxation applies in `#feature curry`
+// files only; without the directive nothing changes).
+func add(a: int, b: int): int = a + b
+func main() {
+    print(add(1) as string);
+}

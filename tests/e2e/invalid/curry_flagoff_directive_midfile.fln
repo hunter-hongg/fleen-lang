@@ -1,0 +1,7 @@
+// 0.0.8 T09: flag-off file — a `#feature` directive after the first
+// declaration is misplaced (T01: the directive is only legal in the header
+// region, before the first item).
+func main() {
+    print("hi");
+}
+#feature curry

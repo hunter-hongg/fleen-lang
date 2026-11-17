@@ -1,0 +1,12 @@
+#feature curry
+// 0.0.8 T09: flag-on file — an unknown feature name is a hard error (T01:
+// `curry` is the only registered feature in 0.0.8).
+#feature nope
+
+add: int -> int -> int
+add(a, b) = a + b
+
+main: () -> unit
+main() {
+    print(add(1, 2) as string);
+}

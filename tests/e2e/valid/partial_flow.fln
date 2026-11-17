@@ -1,0 +1,23 @@
+// 0.0.8 T09 (F10): a partial application produced in a flag-on file flows
+// through flag-off code (std's inline `map` expansion) and is called there at
+// its remaining arity. The producing file carries `#feature curry`; the code
+// that consumes the value (std) is flag-off and never mentions the flag — the
+// VM treats bare and captured function values uniformly (D15). Running this
+// exercises T08's copy-soundness property end-to-end: `map`'s inline loop
+// loads the captured value once per element and each iteration must call its
+// own snapshot of the capture list (TICKETS.md T08, D11).
+#feature curry
+import std.collection.iter;
+import std.io;
+
+add: int -> int -> int
+add(a, b) = a + b
+
+main: () -> unit
+main() {
+    xs = [0, 1, 2, 3];
+    // `add(10)` is an `int -> int` partial; `map` receives it as a plain
+    // function value and calls `f(elem)` per element.
+    shifted = std.collection.iter.map(xs, add(10));
+    for s in shifted { std.io.println(s as string); };
+}

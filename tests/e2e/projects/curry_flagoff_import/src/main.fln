@@ -1,0 +1,7 @@
+import lib;
+// Flag-off importer (D6): the curried declaration is seen through the export
+// table as an ordinary `func` export; a too-few-args call keeps today's
+// ArityMismatch (the relaxation is a call-site rule, D5).
+func main() {
+    print(lib.add(1) as string);
+}

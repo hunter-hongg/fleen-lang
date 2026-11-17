@@ -1,0 +1,14 @@
+#feature curry
+// 0.0.8 T09: flag-on file — an `unsafe` function is exempt from partial
+// application (D9: a captured function value would let the unsafe body be
+// invoked through a function value, the same hole as the static unsafe-call
+// check). Even inside the unsafe context, `add(1)` with `k < n` keeps
+// today's ArityMismatch instead of yielding a partial.
+unsafe add: int -> int -> int
+add(a, b) = a + b
+
+unsafe main: () -> unit
+main() {
+    p = add(1);
+    print(p(2) as string);
+}

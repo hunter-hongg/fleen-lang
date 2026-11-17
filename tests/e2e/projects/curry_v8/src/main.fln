@@ -1,0 +1,11 @@
+#feature curry
+// Flag-on project WITH one partial call (D13): the partial lifts the whole
+// merged module to bytecode v8.
+add: int -> int -> int
+add(a, b) = a + b
+
+main: () -> unit
+main() {
+    add10 = add(10);
+    print(add10(32) as string);
+}

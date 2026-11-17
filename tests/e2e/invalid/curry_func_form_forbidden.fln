@@ -1,0 +1,8 @@
+#feature curry
+// 0.0.8 T09: flag-on file — the legacy `func`-keyword form is a parse error
+// in a `#feature curry` file (D2: the two-part form is the only declaration
+// shape there).
+func add(a: int, b: int): int = a + b
+func main() {
+    print(add(1, 2) as string);
+}

@@ -1,0 +1,12 @@
+#feature curry
+// Flag-on project with NO partial calls (D13): two-part declarations and a
+// curried arrow type only, so the emitted module stays bytecode v7.
+fib: int -> int
+fib(n) {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+main: () -> unit
+main() {
+    print(fib(10) as string);
+}

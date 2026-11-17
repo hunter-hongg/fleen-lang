@@ -1,0 +1,38 @@
+#feature curry
+// 0.0.8 T09: flag-on demo — two-part curried declarations, curried arrow
+// types, implicit partial application, and std imports used at full arity.
+//
+// Participation notes pinned here: `add` and `mul` are fixed-arity user
+// functions (D5), so `add(10)` / `mul(2)` are `int -> int` partials. A
+// partial flows into `std.collection.iter.map` as the function argument and
+// is called at its remaining arity inside std's inline expansion — the VM is
+// flag-blind (D15), so std never sees the `#feature` directive that produced
+// the value. The partial is bound (a discarded partial would be
+// `PartialApplicationDiscarded`, D10).
+import std.collection.iter;
+import std.io;
+
+add: int -> int -> int
+add(a, b) = a + b
+
+mul: int -> int -> int
+mul(a, b) = a * b
+
+double: int -> int
+double(n) = mul(2)(n)
+
+describe: string -> string
+describe(name) { name }
+
+main: () -> unit
+main() {
+    // full-arity std import (unchanged shape)
+    std.io.println(describe("curry"));
+    // implicit partial application, then the final call
+    add10 = add(10);
+    std.io.println(add10(32) as string);
+    // a partial flows through a flag-off std higher-order helper (D15)
+    xs = [1, 2, 3];
+    doubled = std.collection.iter.map(xs, mul(2));
+    for d in doubled { std.io.println(d as string); };
+}

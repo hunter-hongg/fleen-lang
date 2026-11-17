@@ -1,0 +1,11 @@
+#feature curry
+// 0.0.8 T09: flag-on file — a partial application produced as a bare
+// statement is discarded (D10 anti-typo guard: the classic `add(a)` typo for
+// `add(a, b)`). Assign it or supply the remaining arguments.
+add: int -> int -> int
+add(a, b) = a + b
+
+main: () -> unit
+main() {
+    add(10);
+}
