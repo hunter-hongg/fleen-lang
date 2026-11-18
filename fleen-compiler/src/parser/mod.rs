@@ -15,42 +15,13 @@ pub use error::{ParseError, ParseErrorKind};
 
 use crate::lexer::{Span, Token};
 use crate::source_map::FileId;
-use ast::{Ast, Expr};
+use ast::{Ast, Expr, SignatureModifiers};
 
 /// One parsed `#feature` directive: the feature it names and the span of the
 /// name token (for the `DuplicateFeature` diagnostic).
 struct FeatureDirective {
     feature: Feature,
     name_span: Span,
-}
-
-/// The `async`/`unsafe`/`trusted` modifier run (0.0.4 F1, 0.0.5 T02) —
-/// shared by `parse_func_decl` and the curried signature line (0.0.8 T02).
-/// The order is free (`unsafe async func` == `async unsafe func`) and
-/// repeats are rejected by the guard patterns in [`Parser::parse_modifiers`].
-struct SignatureModifiers {
-    is_async: bool,
-    is_unsafe: bool,
-    is_trusted: bool,
-    /// The first modifier spelled in the source, for diagnostics that name
-    /// the offending modifier (`ModifierOnCurriedBody`). `None` only when no
-    /// modifier was consumed — the curried-body diagnostic is unreachable
-    /// on that path (its caller dispatched on a modifier in the first
-    /// place), but the parser never asserts that, so the caller falls back.
-    first: Option<&'static str>,
-}
-
-impl SignatureModifiers {
-    /// The empty run (`parse_curried_sig_or_binding`'s path — no modifier
-    /// reached the signature line).
-    fn none() -> Self {
-        Self {
-            is_async: false,
-            is_unsafe: false,
-            is_trusted: false,
-            first: None,
-        }
-    }
 }
 
 /// Keywords that cannot be used as identifiers.
@@ -1114,7 +1085,14 @@ impl Parser {
         // most). `finish_curried_signature` rejects a non-function type
         // (D3): in a flag-on file the bare `name : type` production *is*
         // the signature, so there is no other reading of the line.
-        self.finish_curried_signature(name, ty, ty_span, is_pub, SignatureModifiers::none(), start)
+        self.finish_curried_signature(
+            name,
+            ty,
+            ty_span,
+            is_pub,
+            SignatureModifiers::default(),
+            start,
+        )
     }
 
     /// Complete a signature whose modifiers were already consumed (by
@@ -1144,9 +1122,7 @@ impl Parser {
             name,
             ty,
             is_pub,
-            is_async: mods.is_async,
-            is_unsafe: mods.is_unsafe,
-            is_trusted: mods.is_trusted,
+            mods,
             span: self.span(start, self.prev_span_end()),
         };
         // Single-line only (D3): the ASI pass inserts the zero-width `Semi`

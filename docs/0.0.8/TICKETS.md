@@ -409,26 +409,26 @@
 
 ## T08 — VM: captured function values (F9; D11/D15)
 
-- [ ] `Value::Func` grows the capture list: `Func { id: FuncId, captures:
+- [x] `Value::Func` grows the capture list: `Func { id: FuncId, captures:
       Vec<Value> }`; bare function = empty list. Update every
       `Value::Func` match site: `PayloadKind` mapping, `Display`
       (`<func #N>` unchanged for bare; captured renders the same — the
       capture list is not user-visible), promote/move helpers.
-- [ ] `PartialApply k`: pops `f` and `k` arguments, pushes the captured
+- [x] `PartialApply k`: pops `f` and `k` arguments, pushes the captured
       function value.
-- [ ] `CallValue`: consumes `captures.len() + argc`; total must equal the
+- [x] `CallValue`: consumes `captures.len() + argc`; total must equal the
       callee's `params` (today vm.rs:730 requires `argc == params`). Bare
       functions behave exactly as today. `Call` (direct) never sees
       captures.
-- [ ] Copy paths deep-copy a non-empty capture list (D11): `Dup`, array
+- [x] Copy paths deep-copy a non-empty capture list (D11): `Dup`, array
       element store, struct field write, global store, any other
       Copy-consumption site for `Value::Func`. Soundness property to test:
       two copies of a partial, called separately, consume their own
       snapshots.
-- [ ] The VM is flag-blind — no feature plumbing, unconditional support
+- [x] The VM is flag-blind — no feature plumbing, unconditional support
       (D15). No serialization of captures (D14): no constant-pool /
       `FieldTypeTag` surface.
-- [ ] Tests: VM unit tests for `PartialApply`/`CallValue` with captures;
+- [x] Tests: VM unit tests for `PartialApply`/`CallValue` with captures;
       deep-copy soundness (copy → call both); bare-function regression
       (every existing function-value test passes untouched); boundary
       (partial crossing an await boundary travels as a value).

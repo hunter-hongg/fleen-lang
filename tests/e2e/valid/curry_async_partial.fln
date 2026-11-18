@@ -1,0 +1,19 @@
+#feature curry
+// 0.0.8 D12: an async function participates in implicit partial
+// application — its caller-visible signature is already
+// `Func(params, Future<T>)` (0.0.4 F1), so the uniform partial rule types
+// a short call as `(remaining) -> Future<T>` with no async-specific code.
+// The future exists only at the final call: `h = half(100)` captures the
+// total, and `h(40) await` drives the Future then.
+import std.io;
+
+async half: int -> int -> int
+half(total, part) {
+    total - part
+}
+
+main: () -> unit
+main() {
+    h = half(100);
+    std.io.println((h(40) await) as string);
+}

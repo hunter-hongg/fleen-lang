@@ -2761,12 +2761,12 @@ func main() {
         let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[0] else {
             panic!("expected a curried signature");
         };
-        assert!(sig.is_pub && sig.is_unsafe);
-        assert!(!sig.is_async && !sig.is_trusted);
+        assert!(sig.is_pub && sig.mods.is_unsafe);
+        assert!(!sig.mods.is_async && !sig.mods.is_trusted);
         let Item::Decl(Decl::CurriedSignature(sig)) = &ast.items[2] else {
             panic!("expected a curried signature");
         };
-        assert!(sig.is_async);
+        assert!(sig.mods.is_async);
     }
 
     #[test]

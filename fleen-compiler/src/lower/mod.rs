@@ -363,6 +363,23 @@ fn partial_apply_instr(k: usize, span: Span) -> Result<MirInstr, LowerError> {
     Ok(MirInstr::new(MirInstrKind::PartialApply(k), span))
 }
 
+/// Emit the `k` captured arguments plus the terminating `PartialApply k`
+/// instruction (0.0.8 T06). Shared by the function-body path
+/// (`lower_partial_call`, which lowers each argument through
+/// `lower_expr_into`) and the flat global-init path (which lowers each
+/// argument through `lower_global_init`): the callee value must already be
+/// on the stack, and each site supplies its own argument emitter.
+fn emit_partial_capture_args(
+    args: &[TypedExprHir],
+    span: Span,
+    mut emit_arg: impl FnMut(&TypedExprHir) -> Result<(), LowerError>,
+) -> Result<MirInstr, LowerError> {
+    for arg in args {
+        emit_arg(arg)?;
+    }
+    partial_apply_instr(args.len(), span)
+}
+
 /// Lower a global initializer to a flat instruction list.
 ///
 /// Control-flow-bearing initializers are rejected: 0.0.1 requires global
@@ -501,10 +518,10 @@ fn lower_global_init(
         } => match callee.as_ref() {
             TypedExprHir::Ident { name, .. } if let Some(&fid) = lcx.func_ids.get(name) => {
                 out.push(MirInstr::new(MirInstrKind::LoadFunc(fid), expr.span()));
-                for a in args {
-                    lower_global_init(lcx, a, out)?;
-                }
-                out.push(partial_apply_instr(args.len(), expr.span())?);
+                let instr = emit_partial_capture_args(args, expr.span(), |a| {
+                    lower_global_init(lcx, a, out)
+                })?;
+                out.push(instr);
             }
             _ => {
                 return Err(LowerError::new(
@@ -1726,10 +1743,8 @@ impl<'a> FnBodyCx<'a> {
                 self.lower_expr_into(fb, callee)?;
             }
         }
-        for arg in args {
-            self.lower_expr_into(fb, arg)?;
-        }
-        fb.emit(partial_apply_instr(args.len(), span)?);
+        let instr = emit_partial_capture_args(args, span, |a| self.lower_expr_into(fb, a))?;
+        fb.emit(instr);
         Ok(())
     }
 

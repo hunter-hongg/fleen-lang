@@ -823,9 +823,9 @@ impl Resolver {
                     body: body.body.clone(),
                     span: body.span,
                     is_pub: sig.is_pub,
-                    is_async: sig.is_async,
-                    is_unsafe: sig.is_unsafe,
-                    is_trusted: sig.is_trusted,
+                    is_async: sig.mods.is_async,
+                    is_unsafe: sig.mods.is_unsafe,
+                    is_trusted: sig.mods.is_trusted,
                 })
             }
         }

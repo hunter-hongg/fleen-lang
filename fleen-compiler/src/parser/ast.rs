@@ -213,6 +213,21 @@ pub struct Param {
     pub span: Span,
 }
 
+/// The `async`/`unsafe`/`trusted` modifier run (0.0.4 F1, 0.0.5 T02) —
+/// shared by `func` declarations and the curried signature line (0.0.8 T02).
+/// The order is free (`unsafe async func` == `async unsafe func`) and
+/// repeats are rejected by the parser's modifier guard patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SignatureModifiers {
+    pub is_async: bool,
+    pub is_unsafe: bool,
+    pub is_trusted: bool,
+    /// The first modifier spelled in the source, for diagnostics that name
+    /// the offending modifier (`ModifierOnCurriedBody`). `None` when no
+    /// modifier was consumed.
+    pub first: Option<&'static str>,
+}
+
 /// Signature half of a two-part curried declaration (0.0.8 T02, D2):
 /// `[pub] [modifier] name : type` — the interface half. The type must be a
 /// function type (`SignatureNeedsFunctionType` otherwise); the arrow-chain
@@ -230,12 +245,9 @@ pub struct CurriedSignature {
     pub span: Span,
     /// Whether the signature was prefixed with `pub` (0.0.3 V05 shape).
     pub is_pub: bool,
-    /// `async` modifier (D3): the caller sees `Future<T>`, as with `func`.
-    pub is_async: bool,
-    /// `unsafe` modifier (D3), as with `func`.
-    pub is_unsafe: bool,
-    /// `trusted` modifier (D3), as with `func`.
-    pub is_trusted: bool,
+    /// The `async`/`unsafe`/`trusted` modifier run (D3) — one shared struct
+    /// with `FuncDecl`'s modifiers instead of a parallel bool clump.
+    pub mods: SignatureModifiers,
 }
 
 /// One parameter name on the body half of a two-part curried declaration
@@ -339,26 +351,18 @@ impl Type {
     /// `curry = false` is byte-identical to `Display`, so every existing
     /// error text is unchanged; the curry spelling is opt-in at each
     /// rendering site.
-    ///
-    /// Mirrors `typeck::Type::name_with` (typeck/typed_hir.rs) — the parser
-    /// and typeck carry distinct IR types, so the two spellings are kept in
-    /// step by hand; change both together.
     pub fn render(&self, curry: bool) -> String {
         if !curry {
             return self.to_string();
         }
         match self {
             Type::Func(params, ret) => {
-                let ret_atom = ret.render_func_atom();
-                if params.is_empty() {
-                    // Zero-parameter function: the explicit empty parameter
-                    // list is the only spelling (D4) — never `unit -> int`,
-                    // which is a unary function *over* `unit`.
-                    format!("() -> {}", ret_atom)
-                } else {
-                    let ps: Vec<String> = params.iter().map(|p| p.render_func_atom()).collect();
-                    format!("{} -> {}", ps.join(" -> "), ret_atom)
-                }
+                let ret_atom = chain_atom(matches!(&**ret, Type::Func(..)), ret.render(true));
+                let ps: Vec<String> = params
+                    .iter()
+                    .map(|p| chain_atom(matches!(p, Type::Func(..)), p.render(true)))
+                    .collect();
+                render_chain(&ps, ret_atom)
             }
             // Containers render their inner types with the same spelling so
             // a nested chain reads uniformly (`Result[int -> int, string]`).
@@ -386,16 +390,26 @@ impl Type {
             other => other.to_string(),
         }
     }
+}
 
-    /// Render as an atom of an arrow chain: a function type needs
-    /// parentheses in parameter/return position (`(int -> int) -> int`),
-    /// every other type renders bare.
-    fn render_func_atom(&self) -> String {
-        match self {
-            Type::Func(..) => format!("({})", self.render(true)),
-            _ => self.render(true),
-        }
+/// Render a right-associative arrow chain (0.0.8 T03, D4): zero parameters
+/// take the explicit `() -> T` spelling (never `unit -> T`), one or more
+/// parameters join with ` -> `. Shared by `ast::Type::render` and
+/// `typeck::Type::name_with` — the parser and typeck carry distinct IR
+/// types, so each renders its own atoms and hands the strings here.
+pub(crate) fn render_chain(params: &[String], ret_atom: String) -> String {
+    if params.is_empty() {
+        format!("() -> {}", ret_atom)
+    } else {
+        format!("{} -> {}", params.join(" -> "), ret_atom)
     }
+}
+
+/// Render one atom of an arrow chain: a function type needs parentheses in
+/// parameter/return position (`(int -> int) -> int`), every other type
+/// renders bare. Shared by the parser and typeck arrow-chain renderers.
+pub(crate) fn chain_atom(is_func: bool, atom: String) -> String {
+    if is_func { format!("({})", atom) } else { atom }
 }
 
 /// Base types.

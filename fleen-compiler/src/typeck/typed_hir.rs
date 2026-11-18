@@ -170,25 +170,29 @@ impl Type {
     /// when building diagnostics) lands with T05's rendering card; this is
     /// the renderer T05 consults.
     ///
-    /// Mirrors `ast::Type::render` (parser/ast.rs) — the parser and typeck
-    /// carry distinct IR types, so the two spellings are kept in step by
-    /// hand; change both together.
+    /// Mirrors `ast::Type::render` (parser/ast.rs) in spelling; the chain
+    /// assembly itself is the shared `render_chain` / `chain_atom` helpers,
+    /// so the two spellings cannot drift.
     pub fn name_with(&self, curry: bool) -> String {
         if !curry {
             return self.name();
         }
         match self {
             Type::Func(params, ret) => {
-                let ret_atom = ret.render_func_atom();
-                if params.is_empty() {
-                    // Zero-parameter function: the explicit empty parameter
-                    // list is the only spelling (D4) — never `unit -> int`,
-                    // which is a unary function *over* `unit`.
-                    format!("() -> {}", ret_atom)
-                } else {
-                    let ps: Vec<String> = params.iter().map(|p| p.render_func_atom()).collect();
-                    format!("{} -> {}", ps.join(" -> "), ret_atom)
-                }
+                let ret_atom = crate::parser::ast::chain_atom(
+                    matches!(&**ret, Type::Func(..)),
+                    ret.name_with(true),
+                );
+                let ps: Vec<String> = params
+                    .iter()
+                    .map(|p| {
+                        crate::parser::ast::chain_atom(
+                            matches!(p, Type::Func(..)),
+                            p.name_with(true),
+                        )
+                    })
+                    .collect();
+                crate::parser::ast::render_chain(&ps, ret_atom)
             }
             // The hardcoded `true` is safe: this arm is only reachable when
             // the `curry = false` early return above did not fire, so the
@@ -212,16 +216,6 @@ impl Type {
                     .join(", ")
             ),
             _ => self.name(),
-        }
-    }
-
-    /// Render as an atom of an arrow chain: a function type needs
-    /// parentheses in parameter/return position (`(int -> int) -> int`),
-    /// every other type renders bare.
-    fn render_func_atom(&self) -> String {
-        match self {
-            Type::Func(..) => format!("({})", self.name_with(true)),
-            _ => self.name_with(true),
         }
     }
 
