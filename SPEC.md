@@ -568,6 +568,24 @@ bytecode v7 + verify/VM, e2e fixtures/examples, the tour example + CHANGELOG ent
 synced the docs and the version was bumped to `0.0.7` (`Cargo.toml` / `std/VERSION`).
 Version 0.0.7 Mantis Shrimp 🦐 (release published — tag and archives cut).**
 
+**0.0.8 goal: per-file feature flags + function currying — an opt-in `#feature curry`
+directive switches a file's function declaration form to the two-part curried declaration
+(`add: int -> int -> int` / `add(a, b) = a + b`), makes curried arrow function types the
+canonical notation, and enables implicit partial application (a short-arity call yields a
+function over the remaining parameters). Bytecode v8 adds `PartialApply` (0xCE) and is
+**content-driven**: a module is v8 only when a partial call was actually encoded, so a
+flag-on file without partial calls stays v7 and every flag-off file is byte-identical to
+0.0.7 (D16). The flag is per file, not per project: a flag-off file can import and call a
+flag-on file's functions at full arity, but cannot partially apply them. Non-breaking
+additive (plan in `docs/0.0.8/PLAN.md`, decisions D1–D16 settled, tickets in
+`docs/0.0.8/TICKETS.md`). T01–T10 are implemented and green (the `#feature` directive +
+per-file `FeatureSet`, two-part declarations, curried arrow types, resolver matching,
+typeck partial typing + participation + the discarded-partial guard, lower's partial-call
+reroute, codegen/verify/VM `PartialApply` with captured function values, the both-modes
+e2e matrix, examples + CHANGELOG); T11 synced the docs and bumped the version to `0.0.8`
+(`Cargo.toml` / `std/VERSION`). Version 0.0.8 Cheeky Hamster 🐹 (release publication —
+tag and archives — is separate and not yet performed).**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -643,6 +661,70 @@ func greet(name: string) {
 func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
 result = apply(add, 1, 2);
 ```
+
+### Feature Flags and Curried Declarations (0.0.8)
+
+```fleen
+#feature curry      // per-file opt-in, only before the first declaration (D1)
+
+// In a flag-on file a function is declared in two parts: a single-line
+// signature holding a curried arrow type, then a body with named parameters.
+// `func` is forbidden in these files (FuncFormForbiddenInCurryFile, D3).
+add: int -> int -> int
+add(a, b) = a + b
+
+greet: string -> string
+greet(name) { name }
+
+// the signature is the body's type: an `async` function's signature names
+// the Result the body returns, and callers still see `Future<T>`
+async half: int -> int -> Result[int, string]
+half(n, d) {
+    if d == 0 { Err("zero") } else { Ok(n / d) }
+}
+
+// `pub` and the `async` / `unsafe` / `trusted` modifiers belong on the
+// signature line only (PubOnCurriedBody / ModifierOnCurriedBody)
+pub unsafe peek: int -> int
+peek(x) = x
+
+// arrow types are right-associative: `int -> int -> int` is one function of
+// two parameters. A parenthesized parameter-side arrow keeps its grouping
+// (`(int -> int) -> int` takes a function); `() -> T` is a zero-parameter
+// function (`unit -> T` is a one-parameter function of `unit`). The legacy
+// tuple spelling `(int, int) -> int` stays legal (D4).
+apply_twice: (int -> int) -> int -> int
+apply_twice(f, x) = f(f(x))
+
+// implicit partial application (D5): a call with fewer arguments than the
+// callee's parameters yields a function over the remaining ones. Only fixed-
+// arity user functions participate; variadic builtins (`print`, `println`),
+// functions with `ref` / `ptr<T>` parameters, and `unsafe` / `trusted`
+// functions do not (D9 keeps the §12 static unsafe check total).
+inc = add(1);        // inc: int -> int
+five = inc(4);       // 5
+copy_me = add;       // the function itself (D11: partials are Copy)
+
+// a partial bound to a name is fine; a partial used only as a discarded
+// expression statement is PartialApplicationDiscarded (D10)
+add(1);              // error: the partial's value is discarded
+```
+
+> **Rules (0.0.8)**: the flag is **per file**, never per project — two files in one
+> project may disagree (`docs/DESIGN.md` D6). An importer's flag does not change what an
+> imported function is; partial application is decided at the **call site**, so a flag-on
+> file may partially apply an ordinary flag-off `func`, while a flag-off file keeps its
+> pre-0.0.8 `ArityMismatch` for too-few arguments (D5/D16). A `call()` with zero
+> arguments yields the function itself, not a partial. Functions with parameters of a
+> non-Copy type keep the ordinary full-call ownership rules for the arguments that are
+> supplied. Captured arguments live in the function value at runtime; partials are Copy
+> and their captures are deep-copied by `clone` / assignment (D11). Bytecode v8 is
+> content-driven: a module reaches v8 only if a `PartialApply` was actually encoded
+> (D14), so a flag-on file without partials stays v7 and every flag-off module is
+> byte-identical to 0.0.7. Known limit: a partial over an inline-lowered builtin (for
+> example `range_from(0)`) compiles but fails at runtime until the captured-builtin gap
+> is closed (`docs/0.0.8/TICKETS.md` T09 deviations). See `docs/DESIGN.md` §5/§9/§10.8
+> and `docs/0.0.8/PLAN.md` D1–D16.
 
 ### Aggregation Types (0.0.3) and Enums (0.0.6)
 
@@ -919,41 +1001,45 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 |
-|---------|-------|-------|-------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ |
-| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ |
-| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ |
-| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ |
-| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ |
-| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ |
-| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ |
-| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ |
-| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ |
-| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) |
-| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) |
-| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 |
+|---------|-------|-------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag) |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ |
+| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ |
+| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ | ✅ |
+| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ | ✅ |
+| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) | ✅ |
+| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) | ✅ |
+| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) | ✅ |
+| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01: `#feature` header directive, per-file `FeatureSet`, D1/D6) |
+| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) |
+| Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) |
+| Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,
@@ -993,6 +1079,26 @@ are implemented and green. T11 synced the documentation; the version was bumped 
 target archives are cut; `release/0.0.7/` mirrors the 0.0.6 layout). Breaking set: none
 (non-breaking additive, D10).
 See `docs/0.0.7/PLAN.md` and `docs/0.0.7/TICKETS.md`.
+
+**Status of 0.0.8**: T01–T11 complete. Per-file feature flags (the `#feature curry`
+directive before the first declaration, a per-file `FeatureSet` threaded from `FileId`,
+D1/D6), two-part curried declarations (single-line signature holding an arrow function
+type plus a named-parameter body, matched in the resolver by name and arity, `func`
+forbidden in a flag-on file, D2/D3), curried arrow types (right-associative `->`, a
+zero-parameter `() -> T`, parameter-side grouping preserved, the legacy tuple spelling
+retained, D4), implicit partial application (fixed-arity user functions only, a short call
+typed as the remaining function, a discarded partial is `PartialApplicationDiscarded`, no
+subtyping, D5/D9/D10), the D11 capture semantics (partials are Copy; their captured
+arguments are deep-copied on the Copy paths), `PartialApply` (0xCE) with the content-driven
+v8 version (only a module that encodes a partial is v8, D13/D14), the flag-blind VM (D15),
+the both-modes e2e matrix, `examples/0.0.8/`, and the CHANGELOG entry are implemented and
+green. T11 synced the docs and bumped the version to 0.0.8 (`Cargo.toml` / `std/VERSION`);
+doc drift fixed while doing so: the card's "DESIGN.md §14" does not exist as a language
+reference (DESIGN.md §14 is Explicit Rejections), so the two-part declaration and arrow
+notation were written into DESIGN.md §5/§9, the capture rules into §10.8, the matrix into
+§17 and the roadmap into §18, with the as-built notes recorded in `docs/0.0.8/TICKETS.md`.
+Release publication (tag and archives) is separate and not yet performed. Breaking set:
+none (non-breaking additive, D16). See `docs/0.0.8/PLAN.md` and `docs/0.0.8/TICKETS.md`.
 
 ---
 

@@ -1,5 +1,5 @@
 (* ============================================ *)
-(* Fleen EBNF Grammar v0.0.6                    *)
+(* Fleen EBNF Grammar v0.0.8                    *)
 (* New in 0.0.2: box/deref/move/clone prefix    *)
 (* expressions, the ? suffix, Ok/Err patterns,  *)
 (* deref assignment targets, the as cast layer, *)
@@ -45,11 +45,31 @@
 (* grammar becomes recursive — multi-payload      *)
 (* destructuring, nested patterns, or-patterns    *)
 (* `p₁ | p₂` and type guards `p : T` (D4–D7).     *)
+(* New in 0.0.8: per-file feature flags — the     *)
+(* header directive `#feature curry` (D1), which  *)
+(* switches the file's function form to the       *)
+(* two-part curried declaration `name : type` +   *)
+(* `name(params) ( block | = expr )` (D2/D3) and  *)
+(* enables curried arrow types `T -> T` (D4).     *)
+(* Arrow types require the flag; flag-off files   *)
+(* keep the v0.0.7 type grammar exactly.          *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
 
-program         = { import_decl | declaration } ;
+(* 0.0.8 T01 (D1): the header region — zero or more `#feature` directives,
+   each on its own line, before the first import or declaration. Comments and
+   blank lines do not end the region; the first item does. After it, any `#`
+   is `FeatureDirectiveMisplaced` (top level and inside a block alike).
+   The directives are a per-file setting, never a per-project one (D6). *)
+program         = { feature_directive } , { import_decl | declaration } ;
+
+(* 0.0.8 T01 (D1): `#` is not a comment in Fleen; `#feature` is the only hash
+   form. `feature` is not a keyword — the directive is recognized by the `#`
+   in header position. The directive is newline-terminated; a trailing `;`
+   is not part of the form. `curry` is the only known feature name
+   (`UnknownFeature` otherwise); repeating a directive is `DuplicateFeature`. *)
+feature_directive = "#" , "feature" , ident ;
 
 import_decl     = "import" , module_path ;
 
@@ -60,9 +80,16 @@ module_path     = ident , { "." , ident } ;
 
 (* 0.0.3 V05: `pub` is a top-level-only visibility modifier on func / const /
    struct / enum / global var; it is illegal elsewhere (on `import`, inside a
-   block). *)
+   block).
+   0.0.8 T02 (D2): a `#feature curry` file replaces `func_decl` with the
+   two-part form — a signature item followed by a body item, at top level
+   (D3). A curried body line takes no `pub` and no `async`/`unsafe`/`trusted`
+   (`PubOnCurriedBody` / `ModifierOnCurriedBody`); a `func_decl` in a flag-on
+   file is `FuncFormForbiddenInCurryFile`; the two-part form requires the flag. *)
 declaration     = [ "pub" ] , ( const_decl
                 | func_decl
+                | curried_sig
+                | curried_body
                 | struct_decl
                 | enum_decl
                 | var_binding )
@@ -130,9 +157,46 @@ param_list      = param , { "," , param } ;
 param           = ident , ":" , type ;
 
 
+(* 0.0.8 T02 (D2/D3): the two-part curried declaration — flag-on files only.
+   The signature is a single line: `[pub] [func_modifiers] name : type`. The
+   type must be a function type (arrow chain or tuple spelling) —
+   `SignatureNeedsFunctionType` otherwise — and `pub` / the modifiers belong
+   here, never on the body line. A trailing `;` is tolerated (the ASI pass
+   normally ends the line).
+   In a flag-on file a top-level `name : type = expr` is still a variable
+   binding (the signature form is only the `name : type` line with no `=`). *)
+curried_sig     = [ func_modifiers ] , ident , ":" , type , [ ";" ] ;
+
+(* 0.0.8 T02/D3: the body line — bare parameter names (keyword-protected, no
+   type annotations: the signature carries the types) and a body that is
+   either `= expr` or a block, exactly like the two `func_decl` bodies. A
+   repeated parameter name is `DuplicateParam`. The resolver pairs the body
+   with its signature by name and arity (`BodyWithoutSignature`,
+   `SignatureWithoutBody`, `SignatureArityMismatch`). Declarations inside
+   blocks are top-level-only, so the two-part form is top-level only. *)
+curried_body    = ident , "(" , [ curried_param_list ] , ")"
+                , ( "=" , expr , [ ";" ]
+                  | block ) , [ ";" ] ;
+
+curried_param_list = ident , { "," , ident } ;
+
+
 (* ---------- Types ---------- *)
 
-type            = base_type
+(* 0.0.8 T03 (D4): a curried arrow type — any type atom may be followed by
+   `-> type`. The arrow is right-associative, so `int -> int -> int` is one
+   function of two parameters; the parser canonicalizes it (and the legacy
+   tuple spelling) to the same flat `Func(params, ret)` — arrow types are
+   parse sugar, there is no representational currying. `() -> T` is the
+   zero-parameter function type (`unit -> T` is a one-parameter function of
+   `unit`), and a parenthesized left-side arrow keeps its grouping
+   (`(int -> int) -> int` takes a function).
+   The arrow tail is accepted ONLY in a `#feature curry` file: a flag-off
+   file keeps the 0.0.7 type grammar byte-for-byte (D16), so `int -> int`
+   there remains the old parse error. *)
+type            = type_atom , [ "->" , type ] ;
+
+type_atom       = base_type
                 | array_type
                 | box_type
                 | ref_type
