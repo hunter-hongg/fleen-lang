@@ -1,3 +1,105 @@
+## [0.0.8] - 2026-11-18
+
+Codename: **Cheeky Hamster 🐹** (per `docs/0.0.8/PLAN.md`). Non-breaking additive (D16).
+
+### Added
+- **Per-file feature flags** (D1): a new `#feature` magic statement —
+  `#feature curry` — accepted only in the file header region (before the
+  first item; comments and blank lines do not end the region). Directive
+  lines take no semicolon and are newline-terminated. The parser records a
+  per-file feature set (`FileId → FeatureSet`), consulted by parser, typeck
+  and lower; unknown features are a hard error (`UnknownFeature`),
+  duplicates are `DuplicateFeature`, a directive after the first item is
+  `FeatureDirectiveMisplaced`. The directive is unconditional grammar — it
+  is recognized in every file, flag-on or flag-off (it *is* the flag
+  carrier). `curry` is the only registered feature name in 0.0.8.
+- **Two-part curried declarations** (D2/D3, strict per file): in a
+  `curry` file a function is declared as a signature line plus a body —
+  `add: int -> int -> int` / `add(a, b) = a + b` (block or `= expr` body;
+  the signature is single-line by grammar). The signature carries the
+  modifiers (`async`/`unsafe`/`trusted`) and `pub`; the body line takes
+  none (`PubOnCurriedBody` / `ModifierOnCurriedBody`), duplicate body
+  parameters are `DuplicateParam`. The legacy `func` form is a parse error
+  in a flag-on file (`FuncFormForbiddenInCurryFile`); in flag-off files
+  the two-part productions do not exist. The resolver matches bodies to
+  signatures by name, order-enforced (`BodyWithoutSignature`,
+  `SignatureWithoutBody`, `SignatureArityMismatch`), registers signatures
+  before bodies resolve (recursion and forward reference unchanged), and
+  synthesizes a matched pair into an ordinary function — typeck, lower,
+  codegen and the project-mode entry wiring see an ordinary `main`/`func`.
+  Cross-module: the export/import tables carry the signature exactly as
+  `func` exports do; the importing file's flag never affects what it sees
+  (D6).
+- **Curried arrow function types** (D4, flag-on files): `arrow_type` —
+  right-associative `int -> int -> int` (canonicalizes to
+  `Type::Func([int, int], int)`), accepted in every type position;
+  `() -> int` is the zero-parameter form (`unit -> int` is unary over
+  `unit`), `(int -> int) -> int` groups a param-side chain (param-side
+  functions never merge), and the legacy tuple spelling
+  `(int, int) -> int` stays legal as sugar with the same canonical type.
+  Type rendering picks the spelling per the *file's* flag — flag-off
+  diagnostics keep the pre-0.0.8 text byte-identical.
+- **Implicit partial application** (D5/D7/D9, flag-on call sites): a call
+  to a participating callee with `k < n` arguments produces a function
+  value over the remaining parameters (`add(10)` is an `int -> int`;
+  `k = 0` is the degenerate partial; `k > n` stays `ArityMismatch`).
+  Participation is a call-site rule — the callee's file flag is irrelevant
+  (D6), so a flag-on file may partially apply flag-off imports — but the
+  callee must be fixed-arity, non-variadic, without `ref`/`ptr` parameters
+  and without `unsafe`/`trusted` modifiers (permanent exemption, D9).
+  Fixed and schematic builtins participate (`range_from(0)` is
+  `int -> Range`; a schematic partial stays ambiguous while a type
+  variable is unresolved); a partial's argument ownership is the
+  full-call rule set; a partial is Copy like any function value (D11) and
+  does not satisfy a full-arity `Func` parameter (no coercion, D6).
+  `async` callees participate uniformly — a partial is
+  `(rem) -> Future<T>` (D12). An expression statement discarding a
+  partial is `PartialApplicationDiscarded` (D10). Lowering: a partial
+  call (direct or indirect) emits `LoadFunc` + applied arguments +
+  `PartialApply k`, skipping the inline-lowering reroute of
+  `range`/`range_from`/iter helpers on partial sites (D8).
+- **Bytecode v8 — `PartialApply` (0xCE)** (D13/D14): one new opcode in
+  the reserved `0xCE–0xDF` group, `u8` operand; the version bump is
+  **content-driven** — writers emit version 8 iff at least one
+  `PartialApply` was emitted, else 7 (a flag-on file without partials
+  ships a v7 module); readers accept `{1..8}`, v1–v7 decode unchanged.
+  verify validates the `PartialApply` stack shape (pops `k+1`, pushes 1).
+- **VM captured function values** (D11/D15): `Value::Func` carries a
+  capture list (`Func { id, captures }`; bare functions unchanged);
+  `PartialApply k` pops the function and `k` arguments and pushes the
+  captured value; `CallValue` consumes `captures.len() + argc` and the
+  total must equal the callee's parameter count. Copy paths deep-copy a
+  non-empty capture list — two copies of a partial consume their own
+  snapshots. The VM is unconditional and flag-blind (D15); captures are
+  never serialized (D14).
+- E2E: the whole matrix runs in **both modes** — every pre-0.0.8 fixture
+  passes byte-identically (the non-breaking gate, D16) — plus flag-on
+  fixtures (`curry_demo`, `partial_flow`) and per-mode invalid fixtures
+  (`FuncFormForbiddenInCurryFile`, discarded partial, partial of an
+  `unsafe` function, `UnknownFeature`, `#` mid-file, unchanged
+  flag-off `ArityMismatch`); project fixtures pin cross-flag import both
+  directions and the per-module v7/v8 split.
+- `examples/0.0.8/` — the single-file `curry_demo.fln` (two-part
+  declarations, partial application, a partial through std `map` and
+  through a higher-order parameter) and the multi-module `curry_tour/`
+  project (flag-on `main` partially applying flag-off `helpers` exports,
+  a partial flowing into the flag-off `twice` helper) with README (T10).
+
+### Non-breaking
+- **This release is additive** (D16): every new form is behind the
+  per-file `#feature curry` directive; a file without the directive
+  compiles to the same bytecode as 0.0.7 (flag-off snapshots pin this),
+  too-few-args calls in flag-off files keep `ArityMismatch`, and std is
+  untouched — written flag-off, compiled flag-off, full-arity call sites
+  only.
+- **Known limitation (recorded, not silently dropped)**: a partial over an
+  **inline-lowered builtin** (`range`/`range_from`/`map`/`filter`/
+  `foldl`/`foldr`/`take`) lowers through the D8 reroute but fails at
+  runtime with `UnknownBuiltin` — captured function values for
+  inline-lowered builtins are the recorded T08 gap
+  (`docs/0.0.8/TICKETS.md`, T09 deviations). Partials over user functions
+  (local or imported) run end to end.
+
 ## [0.0.7] - 2026-11-14
 
 Codename: **Mantis Shrimp 🦐** (per `docs/0.0.7/PLAN.md`). Non-breaking additive (D10).

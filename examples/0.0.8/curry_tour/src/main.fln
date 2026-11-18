@@ -1,0 +1,55 @@
+#feature curry
+// 0.0.8 T10: the multi-file cross-flag tour (TICKETS.md T10).
+//
+// This file opts in with `#feature curry` (D1) — two-part declarations, and
+// `func` is forbidden here (D3). The `helpers` module it imports is
+// flag-off; the import boundary carries the ordinary function type and
+// modifiers (D6), and because partial application is a call-site rule (D5),
+// this flag-on file may partially apply the imported functions while the
+// flag-off module itself could not. Run:
+//     cargo fln --project examples/0.0.8/curry_tour
+import helpers;
+import std.io;
+
+// A local curried declaration, mixed with the imported full-arity ones.
+power: int -> int -> int
+power(base, exp) {
+    acc = 1;
+    i = 0;
+    while i < exp {
+        acc = helpers.scale(acc, base);
+        i = i + 1;
+    }
+    acc
+}
+
+main: () -> unit
+main() {
+    // ── 1. full-arity cross-flag call (unchanged shape, D6) ──
+    std.io.println("== 1. full-arity import ==");
+    std.io.println(helpers.add(20, 22) as string);
+    std.io.println(helpers.describe("cross-flag"));
+
+    // ── 2. partial application of an imported flag-off function (D5):
+    //       `helpers.add(5)` is an `int -> int` partial produced at this
+    //       flag-on call site, from an ordinary `func` export ──
+    std.io.println("== 2. partial of an imported function ==");
+    add5 = helpers.add(5);
+    std.io.println(add5(37) as string);
+
+    // ── 3. the partial flows into flag-off code: `helpers.twice` receives
+    //       `helpers.add(3)` as a plain `(int) -> int` function value and
+    //       calls it there at its remaining arity (D15 — the VM is
+    //       flag-blind); T08's copy-soundness property, cross-module ──
+    std.io.println("== 3. a partial into a flag-off helper ==");
+    through = helpers.twice(helpers.add(3), 4);
+    std.io.println(through as string);
+
+    // ── 4. local curried declarations + partials (D2/D5/D10) ──
+    std.io.println("== 4. local curried declarations ==");
+    pow2 = power(2);
+    std.io.println(pow2(10) as string);
+    std.io.println(helpers.twice(pow2, 3) as string);
+
+    std.io.println("curry tour done");
+}

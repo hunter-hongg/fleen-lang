@@ -1,0 +1,64 @@
+#feature curry
+// 0.0.8 T10: the single-file curry demo (TICKETS.md T10).
+//
+// Everything in this file is behind the per-file `#feature curry` directive
+// (D1): the two-part curried declarations (D2/D3), the curried arrow types
+// (D4), and implicit partial application at the call site (D5). The partials
+// here apply **user** functions only — a partial over an inline-lowered
+// builtin (e.g. `range_from(0)`) compiles but fails at runtime until the
+// captured-builtin gap is closed (see docs/0.0.8/TICKETS.md T09 deviations).
+// std is imported flag-off and called at full arity (D16).
+import std.collection.iter;
+import std.io;
+
+add: int -> int -> int
+add(a, b) = a + b
+
+mul: int -> int -> int
+mul(a, b) = a * b
+
+greet: string -> string
+greet(name) { name }
+
+// a higher-order curried declaration: the first parameter is a genuine
+// unary function `(int -> int)` (grouped — a param-side chain never merges,
+// D4), the applied chain over the remaining `int` merges on the return side.
+apply_twice: (int -> int) -> int -> int
+apply_twice(f, x) = f(f(x))
+
+main: () -> unit
+main() {
+    // ── 1. a full-arity call and a std import used at full arity ──
+    std.io.println("== 1. full-arity calls ==");
+    std.io.println(greet("curry"));
+    std.io.println(add(20, 22) as string);
+
+    // ── 2. implicit partial application (D5): `add(10)` with k=1 < n=2
+    //       yields an `int -> int` partial; bound, never discarded (D10) ──
+    std.io.println("== 2. partial application ==");
+    add10 = add(10);
+    std.io.println(add10(32) as string);
+
+    // ── 3. the partial as an `int -> int` flowing into higher-order use:
+    //       passed into a flag-off std helper (D15 — the VM is flag-blind)
+    //       and called there at its remaining arity ──
+    std.io.println("== 3. a partial through std map ==");
+    xs = [1, 2, 3];
+    doubled = std.collection.iter.map(xs, mul(2));
+    for d in doubled { std.io.println(d as string); };
+
+    // ── 4. the same flow through this file's own higher-order function:
+    //       `add(3)` (an `int -> int` partial) fills the `(int -> int)`
+    //       parameter exactly like a genuine unary function would ──
+    std.io.println("== 4. a partial as a function argument ==");
+    step = apply_twice(add(3), 4);
+    std.io.println(step as string);
+
+    // ── 5. partials are Copy (D11): the same `add10` serves twice ──
+    std.io.println("== 5. a partial is Copy ==");
+    a = add10(100);
+    b = add10(7);
+    std.io.println((a + b) as string);
+
+    std.io.println("curry demo done");
+}

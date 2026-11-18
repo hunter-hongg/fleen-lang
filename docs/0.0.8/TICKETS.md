@@ -9,8 +9,8 @@
 > landed with T05; T06's codegen gate errors loudly until T07; T07's codegen
 > + verify + VM landed; T08's VM captured function values landed; T09's
 > e2e matrix + cross-flag import landed, see its card for two honest
-> deviations from the planned checks);
-> T10–T11 open.**
+> deviations from the planned checks; T10's examples + CHANGELOG landed);
+> T11 open.**
 > **Posture reminder**: this release must stay non-breaking additive (PLAN
 > D16).  Every card that touches a shared path (parser, typeck, lower,
 > codegen) must keep flag-off behavior byte-identical; the e2e suite runs
@@ -492,16 +492,30 @@
 
 ## T10 — Examples + CHANGELOG (F10)
 
-- [ ] `examples/0.0.8/` — a single-file `curry_demo.fln` (two-part
+- [x] `examples/0.0.8/` — a single-file `curry_demo.fln` (two-part
       declarations, partial application, `int -> int` flowing through
       higher-order use) runnable with `cargo fln`, plus a multi-file
       project demonstrating cross-flag import (flag-on main importing
       flag-off helpers) if the 0.0.7 tour layout is followed.
-- [ ] CHANGELOG gains the `0.0.8` entry: per-file `#feature` directive,
+      **Implementation**: `curry_demo.fln` (flag-on: two-part declarations
+      incl. a two-part `main: () -> unit`, partial application, a partial
+      through flag-off std `map` and through the file's own
+      `(int -> int) -> int -> int` higher-order declaration, Copy partial
+      reuse); `curry_tour/` (flag-on `main.fln` partially applies the
+      flag-off `helpers.fln` `func` exports and flows a partial into the
+      flag-off `twice(f: (int) -> int, x)` helper) + `README.md`. All
+      partials apply **user** functions — the inline-lowered-builtin
+      runtime gap (T09 deviations) is noted in the README, not demoed.
+- [x] CHANGELOG gains the `0.0.8` entry: per-file `#feature` directive,
       curried declarations, curried arrow types, implicit partial
       application, participation rules, `PartialApply`/v8 (content-driven),
-      non-breaking additive posture (D16).
-- [ ] All examples pass `cargo test` and `cargo fln` runs.
+      non-breaking additive posture (D16) — plus the recorded
+      inline-lowered-builtin runtime limitation.
+- [x] All examples pass `cargo test` and `cargo fln` runs.
+      **Verified**: `cargo test` fully green (the `examples.rs` sweep now
+      runs `curry_demo.fln` and the `curry_tour` project), both `cargo fln`
+      runs exit 0 with deterministic output. `cargo fmt --check` green (no
+      Rust source touched); version bump stays T11's per its card.
 
 **Depends on**: T09.
 **Refs**: PLAN §10, D16.

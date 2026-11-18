@@ -1,0 +1,22 @@
+// The flag-off helpers module (0.0.8 T10 cross-flag tour).
+//
+// This file carries **no** `#feature curry` directive (D1: flags are
+// per-file), so it uses the legacy `func` form and its too-few-args rule is
+// today's `ArityMismatch` (D16). Nothing here knows about currying: the
+// importing file's flag never changes what an imported function is (D6) —
+// partial application is decided at the **call site**, so the flag-on
+// `main` may partially apply these ordinary functions even though they were
+// declared flag-off (D5).
+
+pub func add(a: int, b: int): int = a + b
+
+pub func scale(n: int, by: int): int = n * by
+
+pub func describe(name: string): string { name }
+
+// A higher-order helper: the parameter type is the pre-0.0.8 function-type
+// spelling `(int) -> int` (in a flag-off file the arrow chain is not a type
+// production — D3). It receives whatever `int -> int` value the caller
+// passes — a genuine unary function or a curried partial, both canonicalize
+// to `Func([int], int)` (D4/D5).
+pub func twice(f: (int) -> int, x: int): int = f(f(x))
