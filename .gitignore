@@ -7,3 +7,5 @@ release/**/*.zip
 .flint-test-cache/
 # Test-run scratch home (flint dep-cache clones created by test sessions).
 .flint-home-tmp/
+# Local reproduction scratch (session probes, not part of the test suite).
+.probe/
