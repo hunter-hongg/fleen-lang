@@ -1152,8 +1152,184 @@ impl Vm {
                     _ => self.builtin_arr_set(&args),
                 }
             }
+            // 0.0.8 T09: `range` / `range_from` and the inline-iteration
+            // helpers fold to dedicated bytecode only at a full-arity call
+            // site. As first-class values (a curried partial like
+            // `range_from(0)`, or a bare `f = range_from`) they travel as a
+            // captured `Value::Func` and reach the VM through `CallValue`
+            // (D8: `PartialApply` emits `LoadFunc`; "the VM decides how to
+            // execute it"). Before this arm they fell into the
+            // `UnknownBuiltin` fallthrough, so every captured value of these
+            // builtins failed at its final call. The semantics below mirror
+            // `lower_inline_iter` (compiler/src/lower/mod.rs) so a captured
+            // call produces exactly what the folded form would.
+            "range" | "range_from" | "std.collection.range.range"
+            | "std.collection.range.range_from" => {
+                // `range(n)` → `range_from(0, n)`; both args are ints and
+                // arrive in source order `[start, end]`.
+                let (start, end) = match (args.first(), args.get(1)) {
+                    (Some(Value::Int(s)), Some(Value::Int(e))) => (*s, *e),
+                    (Some(Value::Int(n)), None) => (0, *n),
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                Ok(Value::Range { start, end })
+            }
+            "std.collection.iter.map"
+            | "std.collection.iter.filter"
+            | "std.collection.iter.foldl"
+            | "std.collection.iter.foldr"
+            | "std.collection.iter.take" => {
+                self.exec_captured_inline_iter(name, args)
+            }
             _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
         }
+    }
+
+    /// `range_from(0)(5)` and friends land here with the *full* argument
+    /// list (captures + stack args merged by `call`), so the helpers run
+    /// the same walk the compiler's folded form emits.
+    ///
+    /// The user-supplied callable (`f`) in `map`/`filter`/`foldl`/`foldr`
+    /// may itself be an `async func`'s function value; its call returns a
+    /// `Future`, not the result, so [`Self::call_captured_fn`] drives the
+    /// future to completion with the same nested-stepping `Await` uses. The
+    /// drive shares this Vm's `frames`/`stack`, so a `Suspend` inside the
+    /// helper parks the *whole* task via the caller's existing
+    /// need_join/pending plumbing and resumes through the normal chain —
+    /// exactly what an inline `await` does in a sync-called async body.
+    ///
+    /// Elements and accumulator values are copied into fresh storage, so
+    /// each carries the unconditional deep-fork guard used by `std.arr.*`.
+    fn exec_captured_inline_iter(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeErrorKind> {
+        // Read the array through its (defensive) ref handle first.
+        let xs: Vec<Value> = match self.read_ref(&args[0])?.as_value() {
+            Value::Arr(elems) => elems.to_vec(),
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        for v in &xs {
+            reject_deep_fork_unconditional(v)?;
+        }
+        match name {
+            "std.collection.iter.take" => {
+                // `take([T0], int) -> [T0]`: `min(n, len(xs))` elements.
+                let n = match args.get(1) {
+                    Some(Value::Int(n)) => *n,
+                    _ => return Err(RuntimeErrorKind::StackShape),
+                };
+                let take = if n < 0 { 0 } else { n as usize };
+                Ok(Value::Arr(
+                    xs.into_iter().take(take).collect::<Vec<_>>().into_boxed_slice(),
+                ))
+            }
+            "std.collection.iter.map" => {
+                let f = args.get(1).cloned().ok_or(RuntimeErrorKind::StackShape)?;
+                let mut out: Vec<Value> = Vec::with_capacity(xs.len());
+                for v in xs {
+                    let mapped = self.call_captured_fn(&f, vec![v])?;
+                    reject_deep_fork_unconditional(&mapped)?;
+                    out.push(mapped);
+                }
+                Ok(Value::Arr(out.into_boxed_slice()))
+            }
+            "std.collection.iter.filter" => {
+                let f = args.get(1).cloned().ok_or(RuntimeErrorKind::StackShape)?;
+                let mut out: Vec<Value> = Vec::new();
+                for v in xs {
+                    let keep = self.call_captured_fn(&f, vec![v.clone()])?;
+                    // The predicate result is a `bool`; anything else is a
+                    // defensive shape error (typeck pins the param type).
+                    let keep = match keep {
+                        Value::Bool(b) => b,
+                        _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                    };
+                    if keep {
+                        out.push(v);
+                    }
+                }
+                Ok(Value::Arr(out.into_boxed_slice()))
+            }
+            "std.collection.iter.foldl" | "std.collection.iter.foldr" => {
+                let f = args.get(2).cloned().ok_or(RuntimeErrorKind::StackShape)?;
+                let mut acc = args.get(1).cloned().ok_or(RuntimeErrorKind::StackShape)?;
+                reject_deep_fork_unconditional(&acc)?;
+                if name.ends_with("foldl") {
+                    for v in xs {
+                        // `f(acc, elem)`
+                        acc = self.call_captured_fn(&f, vec![acc, v])?;
+                        reject_deep_fork_unconditional(&acc)?;
+                    }
+                } else {
+                    // foldr walks backward; `f(elem, acc)`.
+                    for v in xs.into_iter().rev() {
+                        acc = self.call_captured_fn(&f, vec![v, acc])?;
+                        reject_deep_fork_unconditional(&acc)?;
+                    }
+                }
+                Ok(acc)
+            }
+            _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
+        }
+    }
+
+    /// Call a captured user function `f(args...)` to completion, driving an
+    /// async callee's `Future` through the same nested-step loop `Await`
+    /// uses. The call shares this Vm's `frames`/`stack`; on error the caller
+    /// (`exec_builtin`) propagates and the outer step unwinds.
+    /// Call a captured user function `f(args...)` to completion.
+    ///
+    /// Used by the captured `map`/`filter`/`foldl`/`foldr` helpers, whose
+    /// callee is whatever callable the caller supplied. The call shares this
+    /// Vm's `frames`/`stack` and is driven with the same `step()` loop
+    /// `drive_join` uses; the frame count is measured *before* the call so a
+    /// builtin callee (which never pushes a frame) and a user callee (which
+    /// pushes one and unwinds it on `Return`) both terminate correctly.
+    ///
+    /// An `async func` value in the slot is unreachable for type-checked
+    /// code: its result would be a `Future` flowing into the result array /
+    /// accumulator, which typeck rejects (arrays and enum payloads refuse a
+    /// `Future` element). Should it arrive anyway, the loop returns the
+    /// `Future` and the caller's `reject_deep_fork_unconditional` turns it
+    /// into `FutureNotClonable` — a defensive error, never a wrong result.
+    fn call_captured_fn(&mut self, f: &Value, args: Vec<Value>) -> Result<Value, RuntimeErrorKind> {
+        let Value::Func { id: fid, captures } = f else {
+            // A non-callable in the slot is a defensive shape error; typeck
+            // pins the parameter to a function type.
+            return Err(RuntimeErrorKind::ArithTypeMismatch);
+        };
+        for a in &args {
+            reject_deep_fork_unconditional(a)?;
+        }
+        let argc = u16::try_from(captures.len() + args.len())
+            .map_err(|_| RuntimeErrorKind::StackShape)?;
+        for c in captures.iter() {
+            reject_deep_fork_unconditional(c)?;
+            self.stack.push(c.clone());
+        }
+        for a in args {
+            self.stack.push(a);
+        }
+        // Frame depth before the call: the drive loop stops once the callee's
+        // frame (pushed by a user callee) unwinds back below this line. A
+        // builtin callee never pushes one, so it completes inside `call` and
+        // the loop exits immediately.
+        let depth_before = self.frames.len();
+        self.call(*fid, argc)?;
+        loop {
+            if self.frames.len() <= depth_before {
+                break;
+            }
+            // A suspension is only reachable from an async body; a sync
+            // callee cannot park. Backstop rather than corrupt the stack.
+            if self.pending.is_some() || self.suspended_on_channel {
+                return Err(RuntimeErrorKind::StackShape);
+            }
+            self.step()?;
+        }
+        self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)
     }
 
     /// `std.arr.get` — element read as a `Result` value (D3: out of bounds
