@@ -100,6 +100,10 @@ impl FnBuilder {
     /// Terminate the current block with a conditional jump whose taken
     /// target is not yet known. Call [`Self::resolve`] once the target
     /// block exists.
+    ///
+    /// Callers must ensure the emitting block is physically last (see
+    /// [`Self::spill_for_fallthrough`]) so the untaken edge lands on the
+    /// continuation block they create next.
     pub fn jump_if_false_later(&mut self) -> BlockId {
         let cur = self.cur;
         self.end(Terminator::JumpIfFalse(UNKNOWN));

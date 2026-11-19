@@ -2836,6 +2836,32 @@ fn t05_choose_enum_stack_depths_consistent() {
         "enum Shape { Point, Circle(float), }\n\
          func f(s: Shape): int {\n    choose s {\n        when Circle(r) if r > 1.0 { 2 }\n        when Circle(r) { 1 }\n        when Point { 0 }\n    }\n}",
     );
+    assert_stack_depths_consistent(
+        "enum E { A, B }\n\
+         func f(e: E): int {\n    choose e {\n        when A { if true { 1 } else { 2 } }\n        when B { 3 }\n    }\n}",
+    );
+    // Every conditional emitter has to spill before it terminates a block:
+    // a `choose` arm body is a pre-created block, so its physical successor is
+    // some *other* arm's entry, not the fallthrough target. Cover each
+    // conditional-producing construct that can appear at an arm tail
+    // (docs/0.0.7/BUGS.md BUG-1).
+    assert_stack_depths_consistent(
+        "enum E { A, B }\n\
+         func f(e: E): bool {\n    choose e {\n        when A { true and false }\n        when B { false }\n    }\n}",
+    );
+    assert_stack_depths_consistent(
+        "enum E { A, B }\n\
+         func f(e: E): bool {\n    choose e {\n        when A { false or true }\n        when B { false }\n    }\n}",
+    );
+    assert_stack_depths_consistent(
+        "enum E { A, B }\n\
+         func f(e: E): int {\n    choose e {\n        when A { x = 0; while x < 3 { x = x + 1; }; x }\n        when B { 3 }\n    }\n}",
+    );
+    assert_stack_depths_consistent(
+        "enum E { A, B }\n\
+         func div(a: int, b: int): Result<int, string> { if b == 0 { Err(\"z\") } else { Ok(a / b) } }\n\
+         func f(n: int): Result<int, string> {\n    e = E.A;\n    choose e {\n        when A { r = div(n, 2)?; Ok(r) }\n        when B { Err(\"b\") }\n    }\n}",
+    );
 }
 
 #[test]

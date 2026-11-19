@@ -1185,10 +1185,15 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::And(l, r) => {
                 // c0: l; JumpIfFalse F   c1: r; JumpIfFalse F   t: True   F: False
                 // Layout: c0, c1, t, F, M
+                // Same §6.3 hazard as `if`: the block that ends in the first
+                // `JumpIfFalse` must be physically followed by its fallthrough
+                // (`c1_b`), which is not the case inside a pre-created block.
+                fb.spill_for_fallthrough();
                 self.lower_expr_into(fb, l)?;
                 let c0 = fb.jump_if_false_later();
                 let c1_b = fb.new_block();
                 fb.start(c1_b);
+                fb.spill_for_fallthrough();
                 self.lower_expr_into(fb, r)?;
                 let c1 = fb.jump_if_false_later();
                 let t = fb.new_block();
@@ -1209,10 +1214,12 @@ impl<'a> FnBodyCx<'a> {
             TypedExprHir::Or(l, r) => {
                 // c0: l; JumpIfTrue T   c1: r; JumpIfTrue T   F: False   T: True
                 // Layout: c0, c1, F, T, M
+                fb.spill_for_fallthrough();
                 self.lower_expr_into(fb, l)?;
                 let c0 = fb.jump_if_true_later();
                 let c1_b = fb.new_block();
                 fb.start(c1_b);
+                fb.spill_for_fallthrough();
                 self.lower_expr_into(fb, r)?;
                 let c1 = fb.jump_if_true_later();
                 let f_b = fb.new_block();
@@ -2235,6 +2242,14 @@ impl<'a> FnBodyCx<'a> {
         // Layout: c0; then0; c1; then1; …; else-or-unit; M
         let mut cond_blocks: Vec<BlockId> = Vec::new();
         let mut branch_jumps: Vec<BlockId> = Vec::new();
+
+        // cfg.rs §6.3 — a conditional's untaken edge falls through to the
+        // *physically next* block, so the block ending in it must be last.
+        // Spilling here is a no-op in the ordinary case and is what keeps the
+        // layout correct when this `if` is emitted into a pre-created block
+        // (`choose` arms create their bodies and the merge up front), where
+        // the next physical block is some other arm's entry.
+        fb.spill_for_fallthrough();
 
         self.lower_expr_into(fb, &e.condition)?;
         cond_blocks.push(fb.jump_if_false_later());

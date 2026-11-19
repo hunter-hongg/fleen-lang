@@ -1,0 +1,13 @@
+enum E { A, B }
+
+func f(e: E): int {
+    choose e {
+        when A { if true { 1 } else { 2 } }
+        when B { 3 }
+    }
+}
+
+func main(): int {
+    print(f(E.A) as string);
+    0
+}
