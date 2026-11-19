@@ -31,8 +31,17 @@ impl Drop for Temp {
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    // Isolate the dependency cache (0.0.3 V08 / D9): without `FLINT_HOME`
+    // `resolve.rs` falls back to `$HOME/.flint`, so a host that has that
+    // directory read-only (or a real cache) breaks every test that fetches a
+    // git dependency. Each `Temp` dir is pid-tagged and unique per test, so
+    // routing the cache into it keeps tests independent and parallel-safe —
+    // no test ever touches a real home.
+    let flint_home = dir.join(".flint-home");
+    std::fs::create_dir_all(&flint_home).expect("create isolated FLINT_HOME");
     let out = Command::new(BIN)
         .args(args)
+        .env("FLINT_HOME", &flint_home)
         .current_dir(dir)
         .output()
         .unwrap_or_else(|e| panic!("spawn flint in {}: {e}", dir.display()));
