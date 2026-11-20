@@ -1,0 +1,29 @@
+// `flint test` fixture (0.0.8): a currying / partial-application case.
+// Standalone by contract — `flint test` compiles each `tests/*.fln` as a
+// single file, so this file opts in with its own `#feature curry` directive
+// and declares everything it uses (no project imports, D6).
+#feature curry
+import std.io;
+
+add: int -> int -> int
+add(a, b) = a + b
+
+twice: (int -> int) -> int -> int
+twice(f, x) = f(f(x))
+
+inc: int -> int
+inc(n) = n + 1
+
+main: () -> unit
+main() {
+    // implicit partial application (D5): `add(1)` is an `int -> int` value
+    inc10 = add(10);
+    std.io.println(inc10(7) as string);
+
+    // a partial flows into a higher-order curried function (D4/D5)
+    std.io.println(twice(inc, 5) as string);
+
+    // a partial is Copy (D11): the same partial serves several calls
+    copy_me = inc10;
+    std.io.println(copy_me(90) as string);
+}

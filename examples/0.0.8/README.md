@@ -31,6 +31,10 @@ cargo fln --project examples/0.0.8/curry_tour
 # or through flint
 cd examples/0.0.8/curry_tour
 cargo run -q -p flint-cli -- run
+
+# the tests/ e2e case (`flint test`)
+cd examples/0.0.8/curry_tour
+cargo run -q -p flint-cli -- test
 ```
 
 Both outputs are fully deterministic — no timers, no concurrency, no
@@ -74,7 +78,10 @@ file (`FuncFormForbiddenInCurryFile`), a partial of a
 ├── README.md                # this file
 └── curry_tour/              # cross-flag project (T10)
     ├── flint.toml           # manifest (flint)
-    └── src/
-        ├── main.fln         # flag-on: two-part declarations, partials of imports
-        └── helpers.fln      # flag-off: ordinary `func` exports, no directive
+    ├── src/
+    │   ├── main.fln         # flag-on: two-part declarations, partials of imports
+    │   └── helpers.fln      # flag-off: ordinary `func` exports, no directive
+    └── tests/
+        ├── curry_case.fln       # `flint test` case (standalone by contract)
+        └── curry_case.expected  # expected stdout ("17\n7\n100")
 ```
