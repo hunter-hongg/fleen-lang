@@ -583,8 +583,8 @@ per-file `FeatureSet`, two-part declarations, curried arrow types, resolver matc
 typeck partial typing + participation + the discarded-partial guard, lower's partial-call
 reroute, codegen/verify/VM `PartialApply` with captured function values, the both-modes
 e2e matrix, examples + CHANGELOG); T11 synced the docs and bumped the version to `0.0.8`
-(`Cargo.toml` / `std/VERSION`). Version 0.0.8 Cheeky Hamster 🐹 (release publication —
-tag and archives — is separate and not yet performed).**
+(`Cargo.toml` / `std/VERSION`).
+Version 0.0.8 Cheeky Hamster 🐹 (release published — tag and archives cut).**
 
 ---
 
@@ -1097,8 +1097,8 @@ doc drift fixed while doing so: the card's "DESIGN.md §14" does not exist as a 
 reference (DESIGN.md §14 is Explicit Rejections), so the two-part declaration and arrow
 notation were written into DESIGN.md §5/§9, the capture rules into §10.8, the matrix into
 §17 and the roadmap into §18, with the as-built notes recorded in `docs/0.0.8/TICKETS.md`.
-Release publication (tag and archives) is separate and not yet performed. Breaking set:
-none (non-breaking additive, D16). See `docs/0.0.8/PLAN.md` and `docs/0.0.8/TICKETS.md`.
+The release was published (the `v0.0.8` tag and the six target archives are cut;
+`release/0.0.8/` mirrors the 0.0.7 layout). Breaking set: none (non-breaking additive, D16). See `docs/0.0.8/PLAN.md` and `docs/0.0.8/TICKETS.md`.
 
 ---
 
