@@ -5,10 +5,11 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.7 · Mantis Shrimp 🦐 · parameterized types + pattern matching** —
-> user-defined type constructors (`enum Option<T>`), argument-dependent `is_copy`, full
-> multi-payload destructuring, nested patterns, or-patterns and type guards, complete
-> (T01–T11; built on **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
+> Current version **0.0.8 · Cheeky Hamster 🐹 · per-file feature flags + function currying** —
+> the `#feature curry` directive, two-part curried declarations (`add: int -> int -> int` /
+> `add(a, b) = a + b`), canonical arrow function types, and implicit partial application
+> (T01–T11; built on **0.0.7 · parameterized types + pattern matching**,
+> **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
 > **0.0.4 · Patient Ants 🐜**, **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚**
 > and **0.0.1 · Swift Fox 🦊**).
 
