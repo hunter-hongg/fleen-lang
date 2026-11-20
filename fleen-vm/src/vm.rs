@@ -1163,7 +1163,9 @@ impl Vm {
             // builtins failed at its final call. The semantics below mirror
             // `lower_inline_iter` (compiler/src/lower/mod.rs) so a captured
             // call produces exactly what the folded form would.
-            "range" | "range_from" | "std.collection.range.range"
+            "range"
+            | "range_from"
+            | "std.collection.range.range"
             | "std.collection.range.range_from" => {
                 // `range(n)` → `range_from(0, n)`; both args are ints and
                 // arrive in source order `[start, end]`.
@@ -1178,9 +1180,7 @@ impl Vm {
             | "std.collection.iter.filter"
             | "std.collection.iter.foldl"
             | "std.collection.iter.foldr"
-            | "std.collection.iter.take" => {
-                self.exec_captured_inline_iter(name, args)
-            }
+            | "std.collection.iter.take" => self.exec_captured_inline_iter(name, args),
             _ => Err(RuntimeErrorKind::UnknownBuiltin(name.to_string())),
         }
     }
@@ -1222,7 +1222,10 @@ impl Vm {
                 };
                 let take = if n < 0 { 0 } else { n as usize };
                 Ok(Value::Arr(
-                    xs.into_iter().take(take).collect::<Vec<_>>().into_boxed_slice(),
+                    xs.into_iter()
+                        .take(take)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
                 ))
             }
             "std.collection.iter.map" => {
@@ -1303,8 +1306,8 @@ impl Vm {
         for a in &args {
             reject_deep_fork_unconditional(a)?;
         }
-        let argc = u16::try_from(captures.len() + args.len())
-            .map_err(|_| RuntimeErrorKind::StackShape)?;
+        let argc =
+            u16::try_from(captures.len() + args.len()).map_err(|_| RuntimeErrorKind::StackShape)?;
         for c in captures.iter() {
             reject_deep_fork_unconditional(c)?;
             self.stack.push(c.clone());
