@@ -724,10 +724,16 @@ pub struct ChooseArm {
     pub body: Block,
 }
 
-/// Which Result constructor a `result_pattern` matches (0.0.2).
+/// Which Result constructor a pattern or constructor expression names.
 ///
-/// `Ok` / `Err` stay plain identifiers at the lexer level; the parser only
-/// recognizes the syntactic form, and typeck (U04) binds the semantics.
+/// 0.0.10 T02 (D1): `Ok` / `Err` are prelude variant-constructor names of
+/// `std.result.Result`. The parser no longer produces Result shapes —
+/// `Ok(p)` / `Err(p)` parse as ordinary constructor patterns (`Pattern::
+/// Enum`) and `Ok(...)` / `Err(...)` stay ordinary calls — and the resolver
+/// classifies them back onto `ResultCtor`-tagged nodes. The tag therefore
+/// survives as the shared HIR / typed-HIR constructor marker (`PatternHir::
+/// ResultCtor`, `TypedPatternHir::ResultCtor`, `TypedExprHir::ResultCtor`);
+/// only the parser's dedicated `Pattern::ResultCtor` production is retired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultCtor {
     Ok,
@@ -736,20 +742,18 @@ pub enum ResultCtor {
 
 /// Pattern in a `choose` arm.
 ///
-/// 0.0.7 T02: patterns become recursive. `ResultCtor`/`Enum` payloads are full
+/// 0.0.7 T02: patterns become recursive. `Enum` payloads are full
 /// `Pattern`s (nested, multi-binding); `Or` and `TypeGuard` are new.
+/// 0.0.10 T02 (D1): `Ok(p)` / `Err(p)` parse through the ordinary `Enum`
+/// constructor-pattern path — the resolver maps them back onto the
+/// `ResultCtor`-tagged HIR nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// Literal pattern (int, float, bool, string).
     Literal(Expr),
     /// Identifier pattern (binds variable, or `_` wildcard). Carries the pattern's span.
     Ident(String, Span),
-    /// `Ok(p)` / `Err(p)` (0.0.2: Result pattern; 0.0.7: payload is a full pattern).
-    ResultCtor {
-        ctor: ResultCtor,
-        payload: Box<Pattern>,
-        span: Span,
-    },
+
     /// `Variant(p₁, …, pₙ)` enum-variant pattern (0.0.6; 0.0.7: payloads are full patterns).
     /// Zero-payload variants written bare are represented as `Ident` (parser), not `Enum`.
     Enum {
@@ -773,7 +777,6 @@ impl Pattern {
         match self {
             Pattern::Literal(e) => e.span(),
             Pattern::Ident(_, s) => *s,
-            Pattern::ResultCtor { span, .. } => *span,
             Pattern::Enum { span, .. } => *span,
             Pattern::Or(_, span) => *span,
             Pattern::TypeGuard { span, .. } => *span,

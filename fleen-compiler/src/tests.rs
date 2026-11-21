@@ -64,6 +64,49 @@ func main(): int {
     );
 }
 
+/// 0.0.10 T02 (D2): the prelude trio works **without** any import — the
+/// `Result<T, E>` type use maps onto the internal builtin representation
+/// (no `enum_defs` entry, D1), the constructors and their patterns
+/// classify through the prelude registration, and `?` propagation is
+/// untouched. `import std.result;` remains the documented explicit
+/// spelling (pinned by `std_result_import_compiles_with_no_enum_defs`).
+#[test]
+fn prelude_trio_compiles_without_import() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        r#"
+struct Holder {
+    r: Result<int, string>,
+}
+
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func unwrap(r: Result<int, string>): Result<int, string> {
+    v = r?;
+    Ok(v)
+}
+
+func main(): int {
+    h = Holder { r: div(10, 2) };
+    u = unwrap(h.r);
+    r = choose div(1, 0) {
+        when Ok(x) { x }
+        otherwise { 0 - 1 }
+    };
+    0
+}
+"#,
+    );
+    let module = session.compile(root).expect("should compile");
+    assert!(
+        module.enum_defs.is_empty(),
+        "the prelude Result type use must not reach enum_defs (D1)"
+    );
+}
+
 /// An `enum Result` in a user project is rejected at compile time (D2
 /// groundwork): only `std/result.fln` may declare it.
 #[test]
@@ -81,6 +124,116 @@ fn user_enum_named_result_is_a_compile_error() {
         CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
             &e.kind,
             ResolveErrorKind::ReservedBuiltinName { name } if name == "Result"
+        ))
+    ));
+}
+
+// ========== 0.0.10 T02: the prelude trio is non-shadowable (D2) ==========
+
+// **Recorded behavior flip (T02 as-built)**: at the 0.0.9 merge-base these
+// declarations were LEGAL — `Ok` / `Err` were shadowable builtins (§4.3's
+// Python-style builtin overwrite in `Scope::declare`; pinned empirically
+// before this change: `func Ok` / local `Ok = 42` / param `Ok` /
+// `const Err` all compiled). D2's normative rule is non-shadowable, so the
+// declarations are now `ReservedBuiltinName` rejections. The parity
+// sweep's one-directional constraint holds: every program rejected before
+// is still rejected. The flips are recorded in `docs/0.0.10/TICKETS.md`
+// T02, never silent.
+
+/// A user function named `Ok` is rejected (D2; was legal at the merge-base).
+#[test]
+fn user_func_named_ok_is_rejected() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "func Ok(x: int): int = x + 1\nfunc main(): int = Ok(3)\n",
+    );
+    let err = session
+        .compile(root)
+        .expect_err("a `func Ok` must be rejected (D2 non-shadowable)");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
+        ))
+    ));
+}
+
+/// A binding named `Ok` is rejected (D2; was legal at the merge-base).
+#[test]
+fn user_binding_named_ok_is_rejected() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "func main(): int {\n    Ok = 42\n    Ok\n}\n",
+    );
+    let err = session
+        .compile(root)
+        .expect_err("a binding named `Ok` must be rejected (D2 non-shadowable)");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
+        ))
+    ));
+}
+
+/// A `const Err` is rejected (D2; was legal at the merge-base).
+#[test]
+fn user_const_named_err_is_rejected() {
+    let mut session = Session::new();
+    let root = session.add_file("src/main.fln", "const Err = 42\nfunc main(): int = Err\n");
+    let err = session
+        .compile(root)
+        .expect_err("a `const Err` must be rejected (D2 non-shadowable)");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Err"
+        ))
+    ));
+}
+
+/// A parameter named `Ok` is rejected (D2; was legal at the merge-base).
+#[test]
+fn user_param_named_ok_is_rejected() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "func f(Ok: int): int = Ok\nfunc main(): int = f(1)\n",
+    );
+    let err = session
+        .compile(root)
+        .expect_err("a parameter named `Ok` must be rejected (D2 non-shadowable)");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
+        ))
+    ));
+}
+
+/// A pattern binding named `Ok` (a bare `when Ok` arm) is rejected (D2;
+/// was legal at the merge-base on a non-Result scrutinee).
+#[test]
+fn user_pattern_binding_named_ok_is_rejected() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "func main(): int {\n    r = choose 5 { when Ok { 1 } otherwise { 2 } }\n    r\n}\n",
+    );
+    let err = session
+        .compile(root)
+        .expect_err("a pattern binding named `Ok` must be rejected (D2 non-shadowable)");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
         ))
     ));
 }

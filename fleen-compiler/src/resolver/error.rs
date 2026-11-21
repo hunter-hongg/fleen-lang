@@ -102,12 +102,17 @@ pub enum ResolveErrorKind {
         /// Parameter count written on the body line.
         body_params: usize,
     },
-    /// 0.0.10 T01 (D2 groundwork): a declaration uses a builtin name the
-    /// language reserves. `Result` is declared in `std.result` and cannot
-    /// be shadowed or re-declared (`Ok` / `Err` follow in T02). The verdict
-    /// is unchanged from 0.0.10's predecessor, where the `Result` keyword
-    /// made an `enum Result` a parse error — the parity rationale lives
-    /// canonically at `collect_enums` in `resolver/mod.rs`.
+    /// 0.0.10 T01/T02 (D2): a declaration uses a builtin name the language
+    /// reserves. `Result` is declared in `std.result` and cannot be
+    /// shadowed or re-declared (`enum Result` outside `std.result`, T01);
+    /// `Ok` / `Err` are the prelude constructor names and cannot be
+    /// shadowed either (T02, `check_reserved_binding_name`). For `Result`
+    /// the verdict is unchanged from 0.0.10's predecessor, where the
+    /// `Result` keyword made an `enum Result` a parse error — the parity
+    /// rationale lives canonically at `collect_enums` in
+    /// `resolver/mod.rs`. For `Ok` / `Err` the rejection is a recorded
+    /// behavior change: the names were §4.3-shadowable before 0.0.10 (see
+    /// the T02 as-built notes).
     ReservedBuiltinName { name: String },
 }
 

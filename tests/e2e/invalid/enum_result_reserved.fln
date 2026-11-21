@@ -1,0 +1,7 @@
+// 0.0.10 T02 parity pin: an `enum Result` outside std.result keeps its
+// T01 rejection, unchanged from the merge-base.
+enum Result {
+    Ok(int),
+}
+
+func main(): int = 0

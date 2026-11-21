@@ -578,30 +578,20 @@ func div(a: int, b: int): Result<int, string> {
 }
 
 #[test]
-fn check_user_shadows_ok() {
-    // §4.3: a user function named `Ok` shadows the builtin constructor;
-    // the call is then checked as an ordinary call.
-    let source = "func Ok(x: int): int = x + 1\nOk(3);";
-    let hir = compile_ok(source);
-    assert_eq!(hir.items.len(), 2);
-}
-
-#[test]
-fn check_local_binding_shadows_ok() {
-    // §4.3: a local binding named `Ok` also shadows the builtin
-    // constructor; the call is then an ordinary call of that binding.
-    let source = "Ok = 42;\nx = Ok;";
-    let hir = compile_ok(source);
-    assert_eq!(hir.items.len(), 2);
-}
-
-#[test]
-fn check_param_shadows_ok() {
-    // §4.3: a parameter named `Ok` shadows the builtin constructor
-    // inside the function body.
-    let source = "func f(Ok: int): int = Ok + 1\nf(1);";
-    let hir = compile_ok(source);
-    assert_eq!(hir.items.len(), 2);
+fn check_bare_ok_is_not_a_value() {
+    // 0.0.10 T02 parity pin: bare `Ok` in expression position (no call)
+    // keeps its rejection — the constructors are not values. The text is
+    // unchanged from the pre-0.0.10 pipeline behavior
+    // (`UndefinedVariable`; the resolver's builtin binding never becomes a
+    // typeck value binding).
+    let errs = compile_err("x = Ok;");
+    assert!(
+        errs.iter().any(
+            |e| matches!(e.kind, TypeckErrorKind::UndefinedVariable { ref name } if name == "Ok")
+        ),
+        "expected UndefinedVariable for `Ok`, got {:?}",
+        errs
+    );
 }
 
 // ========== Result: `?` Propagation (0.0.2 U04, PLAN §3.4.3/D6) ==========

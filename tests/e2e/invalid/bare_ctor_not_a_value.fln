@@ -1,0 +1,6 @@
+// 0.0.10 T02 parity pin: bare `Ok` in expression position (no call) keeps
+// its pre-0.0.10 rejection — the constructors are not values.
+func main(): int {
+    x = Ok;
+    x
+}

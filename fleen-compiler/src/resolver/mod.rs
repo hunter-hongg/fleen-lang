@@ -42,10 +42,28 @@ use std::collections::HashMap;
 
 /// Builtin functions available in every program (registered in the global scope).
 ///
-/// `print` is the only builtin *function*. `Ok`/`Err` are builtin Result
-/// constructors: they resolve like functions here (shadowable, §4.3), while
-/// typeck gives them their context-dependent semantics (0.0.2 U04, PLAN §3.4.1).
+/// `print` is the only builtin *function*. `Ok`/`Err` are the prelude
+/// variant-constructor names of the std-declared `Result` enum (0.0.10 D2):
+/// they resolve like functions here, while typeck gives them their
+/// context-dependent constructor semantics (0.0.2 U04, PLAN §3.4.1). From
+/// 0.0.10 T02 (D2) the trio `Ok` / `Err` / `Result` cannot be shadowed —
+/// see [`Resolver::check_reserved_binding_name`].
 const BUILTINS: &[&str] = &["print", "Ok", "Err", "range", "range_from"];
+
+/// The canonical module path of the std-declared `Result` enum (0.0.10 D1):
+/// the compiler-recognized builtin path every `Result<T, E>` type use and
+/// `Ok` / `Err` constructor reference maps onto. A user module can never
+/// contribute a module of this path (the `std` crate name is reserved), so
+/// comparing an enum's mangled name against this constant identifies the
+/// builtin declaration unambiguously.
+const BUILTIN_RESULT_PATH: &str = "std.result.Result";
+
+/// The prelude constructor names of the builtin `Result` (0.0.10 D2). These
+/// are reserved binding names: declaring a binding of any of them is a
+/// `ReservedBuiltinName` rejection. (`Result` itself is covered at parse
+/// level — it stays a lexer keyword — and at declaration level for `enum
+/// Result` via `collect_enums`, T01.)
+const RESERVED_CTOR_NAMES: &[&str] = &["Ok", "Err"];
 
 /// Whether a type mentions `ref` anywhere in its structure (0.0.2 U05):
 /// `ref T` is legal only as the *outer* type of a function parameter
@@ -227,6 +245,84 @@ impl Resolver {
         );
     }
 
+    /// 0.0.10 T02 (D2): register the builtin `Result` declaration as a
+    /// prelude name in every module's resolution-time tables, so `Ok` / `Err`
+    /// classify as its variant constructors (patterns) whether or not the
+    /// module spells `import std.result;` — the D2 prelude rule ("print +
+    /// the Result trio").
+    ///
+    /// The synthetic declaration is exactly what the std `result` module's
+    /// own pre-pass registers (same mangled name [`BUILTIN_RESULT_PATH`],
+    /// same two variants), so `collect_enums` re-registering it there is a
+    /// no-op overwrite. `variant_to_enum` is first-wins by registration
+    /// order: seeding `Ok` / `Err` here — before any module declaration —
+    /// keeps a user enum's `Ok` / `Err` variants unreachable through the
+    /// bare spelling, which is precisely the pre-0.0.10 behavior (the
+    /// parser's `Ok(`/`Err(` special case used to hijack the pattern first).
+    /// The entry never reaches the output HIR: `collect_enums` excludes the
+    /// std `result` module's declaration (T01), and this registration feeds
+    /// only the classification lookup below.
+    fn register_builtin_result_prelude(&mut self) {
+        let param = |name: &str| Type::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+            span: Span::SYNTHETIC,
+        };
+        let variant = |name: &str, payload: Type| EnumVariantHir {
+            name: name.to_string(),
+            payload_types: vec![payload],
+            span: Span::SYNTHETIC,
+        };
+        let decl = EnumDeclHir {
+            name: BUILTIN_RESULT_PATH.to_string(),
+            type_params: vec!["T".to_string(), "E".to_string()],
+            variants: vec![variant("Ok", param("T")), variant("Err", param("E"))],
+            span: Span::SYNTHETIC,
+            // The prelude registration is a resolution-time seed, never an
+            // export surface: the std.result module's own `pub` declaration
+            // (T01) is the importable one.
+            is_pub: false,
+        };
+        self.enum_table.insert("Result".to_string(), decl);
+        for ctor in RESERVED_CTOR_NAMES {
+            self.variant_to_enum
+                .entry((*ctor).to_string())
+                .or_insert_with(|| "Result".to_string());
+        }
+    }
+
+    /// 0.0.10 T02 (D1): whether this resolved enum declaration is the builtin
+    /// `std.result.Result` — the compiler-mapped std declaration whose
+    /// variants are the prelude `Ok` / `Err` constructors.
+    fn is_builtin_result_enum(decl: &EnumDeclHir) -> bool {
+        decl.name == BUILTIN_RESULT_PATH
+    }
+
+    /// 0.0.10 T02 (D2): reject a binding declaration named `Ok` / `Err` —
+    /// the prelude constructor names are not shadowable. The type name
+    /// `Result` is covered elsewhere: it stays a lexer keyword (every other
+    /// declaration position rejects it at parse level, as before 0.0.10)
+    /// and `collect_enums` rejects `enum Result` outside `std.result` (T01).
+    ///
+    /// **Recorded behavior change (T02 as-built)**: before this milestone
+    /// these names were shadowable (the §4.3 Python-style builtin overwrite;
+    /// `Scope::declare` lets a user binding overwrite a builtin one). D2's
+    /// normative rule is non-shadowable, so a program that shadowed `Ok` /
+    /// `Err` — legal at the 0.0.9 merge-base — is now rejected. Every
+    /// program *rejected* before is still rejected (the parity sweep's
+    /// one-directional constraint); the flip is recorded in
+    /// `docs/0.0.10/TICKETS.md` T02, never silent.
+    fn check_reserved_binding_name(&mut self, name: &str, span: Span) {
+        if RESERVED_CTOR_NAMES.contains(&name) {
+            self.add_error(
+                ResolveErrorKind::ReservedBuiltinName {
+                    name: name.to_string(),
+                },
+                span,
+            );
+        }
+    }
+
     /// Resolve the payload types of one enum's variants (0.0.6 T04 /
     /// 0.0.7 T03). This is the ONLY place that installs
     /// `type_param_scope`: it is active exactly for payload-type resolution
@@ -285,6 +381,20 @@ impl Resolver {
                 args,
                 span: ty_span,
             } => {
+                // 0.0.10 T02 (D1): a parameterized type use of the prelude
+                // `Result` — the bare spelling `Result<T, E>` / `Result[T, E]`
+                // (the parser produces exactly two arguments for the keyword
+                // spelling; the check is defensive) — maps back onto the
+                // internal `Type::Result`, so typeck / lower / codegen see
+                // the same shape as before the migration (D1: the std
+                // declaration is the language-level source of truth, the
+                // backend keeps the 0.0.2 encoding).
+                if name == "Result" && args.len() == 2 {
+                    return Type::Result(
+                        Box::new(self.resolve_type(&args[0], *ty_span)),
+                        Box::new(self.resolve_type(&args[1], *ty_span)),
+                    );
+                }
                 let resolved_name = self.resolve_type_name_str(name, *ty_span);
                 let resolved_args = args
                     .iter()
@@ -368,6 +478,10 @@ impl Resolver {
     /// multi-module compiler can keep ID spaces disjoint (0.0.3 V05).
     fn resolve_program_inner(mut self, ast: Ast) -> Result<(Hir, u32, u32), Vec<ResolveError>> {
         self.register_builtins();
+        // 0.0.10 T02 (D2): the prelude is `print` + the Result trio — seed
+        // the builtin Result declaration before any module enum is
+        // collected, so `Ok` / `Err` classify through it in every module.
+        self.register_builtin_result_prelude();
         self.register_imported_items();
         self.predeclare_global_functions(&ast);
         let global_funcs = std::mem::take(&mut self.global_funcs);
@@ -611,6 +725,11 @@ impl Resolver {
                 }
                 _ => continue,
             };
+            // 0.0.10 T02 (D2): the prelude constructor names are not
+            // shadowable — a `func Ok` (or curried signature `Ok: ...`) is a
+            // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
+            // `check_reserved_binding_name`).
+            self.check_reserved_binding_name(name, span);
             let binding_id = self.next_binding_id();
             let module = self.table.modules[self.cur_module].clone();
             let global_name = module.mangled_name(name);
@@ -972,6 +1091,10 @@ impl Resolver {
         for param in params {
             let binding_id = self.next_binding_id();
             let hir_id = self.next_hir_id();
+            // 0.0.10 T02 (D2): a parameter named `Ok` / `Err` is a
+            // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
+            // `check_reserved_binding_name`).
+            self.check_reserved_binding_name(&param.name, param.span);
             let binding = Binding {
                 id: binding_id,
                 kind: BindingKind::Parameter,
@@ -1130,6 +1253,10 @@ impl Resolver {
 
         // New binding. If it shadows an outer name, mutability must match
         // (DESIGN.md §4.3); parameters, functions and builtins are exempt.
+        // 0.0.10 T02 (D2): the prelude constructor names are not shadowable
+        // — a binding named `Ok` / `Err` is a `ReservedBuiltinName` rejection
+        // (was legal before 0.0.10; see `check_reserved_binding_name`).
+        self.check_reserved_binding_name(&var.name, var.span);
         let new_mutable = true; // plain bindings are mutable
         if let Some(outer) = self.scopes.find_shadow_domain(&var.name)
             && outer.kind.shadow_checks()
@@ -1225,6 +1352,10 @@ impl Resolver {
 
         // Shadow-check up to the function boundary only (DESIGN.md §4.3:
         // "functions have no effect"); parameters/functions/builtins are exempt.
+        // 0.0.10 T02 (D2): a `const` named `Ok` / `Err` is a
+        // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
+        // `check_reserved_binding_name`).
+        self.check_reserved_binding_name(&c.name, c.span);
         let new_mutable = false; // const is immutable
         if let Some(outer) = self.scopes.find_shadow_domain(&c.name)
             && outer.kind.shadow_checks()
@@ -2253,6 +2384,10 @@ impl Resolver {
         self.scopes.enter_loop_scope();
         let var_binding_id = self.next_binding_id();
         let var_hir_id = self.next_hir_id();
+        // 0.0.10 T02 (D2): the loop variable is a fresh binding, so a `for
+        // Ok in …` is a `ReservedBuiltinName` rejection (see
+        // `check_reserved_binding_name`).
+        self.check_reserved_binding_name(&for_expr.var, for_expr.span);
         if let Err(existing) = self.scopes.declare(
             for_expr.var.clone(),
             Binding {
@@ -2399,25 +2534,46 @@ impl Resolver {
                     span,
                 })
             }
-            Pattern::ResultCtor {
-                ctor,
-                payload,
-                span,
-            } => {
-                let hir_id = self.next_hir_id();
-                let payload_hir = self.resolve_pattern(*payload)?;
-                Ok(PatternHir::ResultCtor {
-                    ctor,
-                    payload: Box::new(payload_hir),
-                    hir_id,
-                    span,
-                })
-            }
             Pattern::Enum {
                 name,
                 payloads,
                 span,
             } => {
+                // 0.0.10 T02 (D1): the prelude `Ok(p)` / `Err(p)` patterns
+                // arrive as ordinary constructor patterns and classify back
+                // onto the ResultCtor-tagged HIR nodes through the same
+                // resolution-time tables every user variant goes through
+                // (the 0.0.9 D1 variant-reference machinery; the prelude
+                // registration is `register_builtin_result_prelude`). A user
+                // binding of the name shadows the classification (it cannot
+                // exist — D2 rejects the declaration — so the check is
+                // defensive), and a payload count other than one falls
+                // through to the generic enum-pattern path: typeck then
+                // reports the mismatch against the scrutinee type, which
+                // replaces the pre-0.0.10 parse-level rejection for
+                // `Ok(a, b)` / `Ok()` (recorded in the T02 card).
+                let is_prelude_ctor = RESERVED_CTOR_NAMES.contains(&name.as_str())
+                    && self.scopes.get(&name).is_none_or(|b| b.builtin)
+                    && self
+                        .variant_to_enum
+                        .get(&name)
+                        .and_then(|enum_name| self.enum_table.get(enum_name))
+                        .is_some_and(Self::is_builtin_result_enum);
+                if let ([payload], true) = (payloads.as_slice(), is_prelude_ctor) {
+                    let hir_id = self.next_hir_id();
+                    let ctor = if name == "Ok" {
+                        ResultCtor::Ok
+                    } else {
+                        ResultCtor::Err
+                    };
+                    let payload_hir = self.resolve_pattern(payload.clone())?;
+                    return Ok(PatternHir::ResultCtor {
+                        ctor,
+                        payload: Box::new(payload_hir),
+                        hir_id,
+                        span,
+                    });
+                }
                 let hir_id = self.next_hir_id();
                 let mut payloads_hir = Vec::with_capacity(payloads.len());
                 for p in payloads {
@@ -2482,6 +2638,12 @@ impl Resolver {
     /// the arm's scope. Shadow-check up to the function boundary; parameters,
     /// functions and builtins are exempt (DESIGN.md §4.3).
     ///
+    /// 0.0.10 T02 (D2): a pattern binding named `Ok` / `Err` is a
+    /// `ReservedBuiltinName` rejection — a bare `when Ok { … }` arm used to
+    /// bind a variable of that name (legal before 0.0.10 on a non-Result
+    /// scrutinee); the prelude constructor names are constructors, not
+    /// bindable values (see `check_reserved_binding_name`).
+    ///
     /// A `ref` parameter is not merely exempt — re-declaring its name is an
     /// `AssignToRefParam` error (0.0.2 U05, DESIGN §10.4), mirroring the
     /// `s = …` shadow case in `resolve_var_binding`.
@@ -2491,6 +2653,7 @@ impl Resolver {
         span: Span,
     ) -> Result<(BindingId, HirId), ()> {
         let new_mutable = true; // pattern bindings are mutable
+        self.check_reserved_binding_name(name, span);
         if let Some(outer) = self.scopes.find_shadow_domain(name)
             && outer.ref_param
         {

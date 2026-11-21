@@ -1,0 +1,7 @@
+// 0.0.10 T02 (D2): `Ok` / `Err` are prelude constructor names and cannot
+// be shadowed. **Recorded behavior flip**: at the 0.0.9 merge-base this
+// file was a *valid* fixture (the §4.3 Python-style builtin overwrite made
+// `Ok` / `Err` shadowable); D2's non-shadowable rule rejects the
+// declarations (`ReservedBuiltinName`).
+Ok = 5;
+const Err = "shadowed";

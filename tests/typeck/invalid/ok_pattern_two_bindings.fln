@@ -1,0 +1,8 @@
+// 0.0.2 U02: `Ok(v, w)` — a Result pattern takes exactly one payload.
+// 0.0.10 T02 (D1) stage shift (recorded): the parser accepts the ordinary
+// two-payload constructor shape; typeck rejects it (no matching enum
+// scrutinee for the prelude constructor pattern).
+r = 1;
+choose r {
+    when Ok(v, w) { v }
+}

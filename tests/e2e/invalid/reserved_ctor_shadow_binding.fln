@@ -1,0 +1,6 @@
+// 0.0.10 T02 (D2): a binding named `Ok` is a ReservedBuiltinName rejection.
+// **Recorded flip**: legal at the 0.0.9 merge-base.
+func main(): int {
+    Ok = 42;
+    Ok
+}

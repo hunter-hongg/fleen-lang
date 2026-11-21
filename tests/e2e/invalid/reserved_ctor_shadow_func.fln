@@ -1,0 +1,5 @@
+// 0.0.10 T02 (D2): the prelude constructor names are not shadowable.
+// **Recorded flip**: legal at the 0.0.9 merge-base (§4.3 builtin overwrite).
+func Ok(x: int): int = x + 1
+
+func main(): int = Ok(3)

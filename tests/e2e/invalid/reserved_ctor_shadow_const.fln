@@ -1,0 +1,5 @@
+// 0.0.10 T02 (D2): a `const Err` is a ReservedBuiltinName rejection.
+// **Recorded flip**: legal at the 0.0.9 merge-base.
+const Err = "shadowed"
+
+func main(): int = 0

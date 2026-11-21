@@ -1,0 +1,5 @@
+// 0.0.10 T02 (D2): a parameter named `Ok` is a ReservedBuiltinName
+// rejection. **Recorded flip**: legal at the 0.0.9 merge-base.
+func f(Ok: int): int = Ok
+
+func main(): int = f(1)

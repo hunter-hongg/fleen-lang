@@ -2010,8 +2010,6 @@ fn resolve_non_ref_param_rebind_ok() {
 
 // ========== 0.0.6 T03: enum declarations + constructor paths ==========
 
-use fleen_compiler::resolver::hir::ExprHir;
-
 #[test]
 fn enum_decl_collects_into_hir_table() {
     let hir =
@@ -2443,4 +2441,191 @@ func main(): int {
     )
     .expect("literal payload arms bind no names");
     assert_eq!(hir.items.len(), 1);
+}
+
+// ========== 0.0.10 T02: the prelude trio (D1/D2) ==========
+
+use fleen_compiler::resolver::hir::{ExprHir, FuncBodyHir, HirItem, PatternHir, StmtHir};
+
+#[test]
+fn prelude_ctor_patterns_classify_to_result_ctor() {
+    // D1: `when Ok(v)` / `when Err(e)` parse as ordinary constructor
+    // patterns and the resolver classifies them back onto the
+    // `PatternHir::ResultCtor` nodes (resolver/hir.rs) through the 0.0.9 D1
+    // variant-reference machinery — typeck/lower churn stays zero.
+    let hir = resolve_str(
+        r#"
+func main(): int {
+    choose 1 { when Ok(v) { 1 } when Err(e) { 2 } }
+}
+"#,
+    )
+    .expect("prelude ctor patterns resolve");
+    let Some(HirItem::Decl(DeclHir::Func(func))) = hir.items.first() else {
+        panic!("expected a func item");
+    };
+    let FuncBodyHir::Block(body) = &func.body else {
+        panic!("expected a block body");
+    };
+    let Some(tail) = body.tail_expr.as_ref() else {
+        panic!("expected a choose tail expression");
+    };
+    let ExprHir::Choose(choose) = tail.as_ref() else {
+        panic!("expected a choose expression");
+    };
+    use fleen_compiler::parser::ast::ResultCtor;
+    assert!(
+        matches!(
+            choose.arms[0].pattern,
+            PatternHir::ResultCtor {
+                ctor: ResultCtor::Ok,
+                ..
+            }
+        ),
+        "arm 0 must classify as the Ok ResultCtor, got {:?}",
+        choose.arms[0].pattern
+    );
+    assert!(
+        matches!(
+            choose.arms[1].pattern,
+            PatternHir::ResultCtor {
+                ctor: ResultCtor::Err,
+                ..
+            }
+        ),
+        "arm 1 must classify as the Err ResultCtor, got {:?}",
+        choose.arms[1].pattern
+    );
+}
+
+#[test]
+fn prelude_result_type_use_maps_to_internal_result() {
+    // D1: `Result<T, E>` parses as an ordinary parameterized type use and
+    // the resolver maps the prelude name back onto the internal
+    // `ast::Type::Result` — typeck/lower/codegen see the pre-migration
+    // shape in every type position (annotations, params, returns, struct
+    // fields, enum payloads, casts all flow through `resolve_type`).
+    use fleen_compiler::parser::ast::{BaseType, Type};
+    let hir = resolve_str("func f(a: int): Result<int, string> = Ok(a);")
+        .expect("prelude Result type use resolves");
+    let Some(HirItem::Decl(DeclHir::Func(func))) = hir.items.first() else {
+        panic!("expected a func item");
+    };
+    match &func.ret_type {
+        Some(Type::Result(ok, err)) => {
+            assert!(matches!(ok.as_ref(), Type::Base(BaseType::Int)));
+            assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
+        }
+        other => panic!("expected the internal Type::Result, got {:?}", other),
+    }
+}
+
+#[test]
+fn struct_field_of_result_type_maps_to_internal_result() {
+    // D1 mapping coverage: struct field types flow through the same
+    // `resolve_type` Named arm (T03's `FieldTypeTag::Result = 6` parity).
+    use fleen_compiler::parser::ast::{BaseType, Type};
+    let hir = resolve_str(
+        r#"
+struct Holder {
+    r: Result<int, string>,
+}
+func main(): int { 0 }
+"#,
+    )
+    .expect("struct with a Result field resolves");
+    let field = &hir.structs[0].fields[0];
+    assert_eq!(field.name, "r");
+    match &field.ty {
+        Type::Result(ok, err) => {
+            assert!(matches!(ok.as_ref(), Type::Base(BaseType::Int)));
+            assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
+        }
+        other => panic!("expected the internal Type::Result, got {:?}", other),
+    }
+}
+
+#[test]
+fn prelude_trio_available_without_import() {
+    // D2: `Ok` / `Err` / `Result` are prelude names — available in every
+    // file without `import std.result;` (`import std.result;` also works
+    // and stays the documented explicit spelling).
+    let hir = resolve_str(
+        r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("zero") } else { Ok(a / b) }
+}
+func main(): int {
+    q = div(4, 2)?;
+    choose div(1, 0) {
+        when Ok(v) { v }
+        otherwise { 2 }
+    };
+    q
+}
+"#,
+    )
+    .expect("the prelude trio resolves without any import");
+    assert_eq!(hir.items.len(), 2);
+}
+
+#[test]
+fn prelude_ctor_multi_payload_falls_to_enum_path() {
+    // 0.0.10 T02 (recorded stage shift): `Ok(a, b)` parses as an ordinary
+    // two-payload constructor pattern; the prelude classification takes
+    // exactly one payload, so the arm falls through to the generic enum-
+    // pattern path and typeck reports the mismatch against the scrutinee.
+    // Resolution itself succeeds (the rejection moves to typeck).
+    let hir = resolve_str(
+        r#"
+func main(): int {
+    choose 1 { when Ok(a, b) { 1 } otherwise { 2 } }
+}
+"#,
+    )
+    .expect("multi-payload Ok resolves to the generic enum-pattern path");
+    let Some(HirItem::Decl(DeclHir::Func(func))) = hir.items.first() else {
+        panic!("expected a func item");
+    };
+    let FuncBodyHir::Block(body) = &func.body else {
+        panic!("expected a block body");
+    };
+    let Some(tail) = body.tail_expr.as_ref() else {
+        panic!("expected a choose tail expression");
+    };
+    let ExprHir::Choose(choose) = tail.as_ref() else {
+        panic!("expected a choose expression");
+    };
+    assert!(
+        matches!(&choose.arms[0].pattern, PatternHir::Enum { name, .. } if name == "Ok"),
+        "a two-payload `Ok` stays the generic Enum pattern, got {:?}",
+        choose.arms[0].pattern
+    );
+}
+
+#[test]
+fn reserved_ctor_name_rejections() {
+    // D2: declaring a binding named `Ok` / `Err` is a ReservedBuiltinName
+    // rejection (behavior flip from the pre-0.0.10 §4.3 shadow — recorded
+    // in the T02 card).
+    for (src, name) in [
+        ("func Ok(x: int): int = x", "Ok"),
+        ("Ok = 5;", "Ok"),
+        ("const Err = 5;", "Err"),
+        ("func f(Ok: int): int = Ok", "Ok"),
+        (
+            "func main(): int {\n    r = choose 5 { when Ok { 1 } otherwise { 2 } }\n    r\n}",
+            "Ok",
+        ),
+        ("for Ok in [1] { }", "Ok"),
+    ] {
+        let errs = resolve_str(src).expect_err("the declaration must be rejected");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e.kind,
+                ResolveErrorKind::ReservedBuiltinName { name: ref n } if n == name
+            )),
+            "src {src:?}: expected ReservedBuiltinName({name}), got {errs:?}"
+        );
+    }
 }

@@ -1556,7 +1556,17 @@ impl Parser {
                 ast::Type::Ref(Box::new(inner))
             }
             crate::lexer::TokenKind::ResultType => {
-                // Result<T, E> (angle) or Result[T, E] (bracket, 0.0.7 D9).
+                // 0.0.10 T02 (D1): `Result<T, E>` / `Result[T, E]` (bracket,
+                // 0.0.7 D9) now parses as an ordinary parameterized type use
+                // (`Type::Named` named `Result`) — the dedicated builtin
+                // shape is retired; the resolver maps the prelude name back
+                // onto the internal `Type::Result`. `Result` stays a lexer
+                // keyword (PLAN §5: no lexer change this milestone), and the
+                // two-argument shape keeps the pre-0.0.10 parse errors
+                // byte-for-byte: a bare `Result` and every too-few/too-many
+                // argument spelling are rejected at the same stage with the
+                // same text as before the migration.
+                let start = self.current().span.start;
                 self.advance();
                 let (close, close_msg) = if self.matches(&crate::lexer::TokenKind::LBracket) {
                     (crate::lexer::TokenKind::RBracket, "`]` in Result type")
@@ -1568,7 +1578,12 @@ impl Parser {
                 self.expect(&crate::lexer::TokenKind::Comma, "`,` in Result type")?;
                 let err = self.parse_type()?;
                 self.expect(&close, close_msg)?;
-                ast::Type::Result(Box::new(ok), Box::new(err))
+                let end = self.prev_span_end();
+                ast::Type::Named {
+                    name: "Result".to_string(),
+                    args: vec![ok, err],
+                    span: self.span(start, end),
+                }
             }
             crate::lexer::TokenKind::Channel => {
                 // channel<T> (0.0.4 F9): a message-passing channel type.

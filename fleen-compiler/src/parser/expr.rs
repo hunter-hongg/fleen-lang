@@ -32,7 +32,7 @@
 use crate::lexer::Span;
 use crate::lexer::TokenKind;
 use crate::parser::Parser;
-use crate::parser::ast::{Expr, ExprChoose, ExprFor, ExprIf, ExprWhile, Pattern, ResultCtor};
+use crate::parser::ast::{Expr, ExprChoose, ExprFor, ExprIf, ExprWhile, Pattern};
 use crate::parser::error::{ParseError, ParseErrorKind};
 
 /// Parse an expression starting from the current position.
@@ -679,18 +679,12 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 reject_neg!();
-                // 0.0.2/0.0.7: `Ok(p)` / `Err(p)` win over Enum; payload is a full pattern.
-                if (name == "Ok" || name == "Err")
-                    && matches!(self.peek_kind(1), Some(TokenKind::LParen))
-                {
-                    let ctor = if name == "Ok" {
-                        ResultCtor::Ok
-                    } else {
-                        ResultCtor::Err
-                    };
-                    return self.parse_result_pattern(ctor, span);
-                }
-                // 0.0.6/0.0.7: `Variant(p₁, …, pₙ)`; zero-payload bare → Ident.
+                // 0.0.10 T02 (D1): `Ok(p)` / `Err(p)` no longer have a parser
+                // special case — they parse as ordinary constructor patterns
+                // (`Pattern::Enum`, bare identifier + payload sub-patterns)
+                // exactly like every user variant; the resolver classifies
+                // the prelude constructor names back onto the ResultCtor-
+                // tagged HIR nodes. Zero-payload bare → Ident.
                 if matches!(self.peek_kind(1), Some(TokenKind::LParen)) {
                     let vname = name.clone();
                     self.advance(); // consume variant name
@@ -729,24 +723,5 @@ impl Parser {
         };
 
         Ok(pat)
-    }
-
-    /// Parse `Ok(p)` / `Err(p)` after the constructor token is recognized.
-    /// Caller has not consumed the `Ok`/`Err` identifier yet. (0.0.7: payload is a full pattern.)
-    fn parse_result_pattern(
-        &mut self,
-        ctor: ResultCtor,
-        ctor_span: Span,
-    ) -> Result<Pattern, ParseError> {
-        self.advance(); // consume `Ok` / `Err`
-        self.expect(&TokenKind::LParen, "`(` after `Ok`/`Err` pattern")?;
-        let payload = Box::new(self.parse_pattern()?);
-        self.expect(&TokenKind::RParen, "`)` after pattern")?;
-        let end = self.prev_span_end();
-        Ok(Pattern::ResultCtor {
-            ctor,
-            payload,
-            span: self.span(ctor_span.start, end),
-        })
     }
 }

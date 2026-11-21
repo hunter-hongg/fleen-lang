@@ -1059,24 +1059,39 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
 
     #[test]
     fn parse_result_type() {
-        // P4: Result<T, E> with angle brackets (per EBNF)
+        // P4: `Result<T, E>` with angle brackets (per EBNF). 0.0.10 T02
+        // (D1): the type position parses as an ordinary parameterized type
+        // use — the `Named` shape with exactly two arguments; the resolver
+        // maps the prelude name back onto the internal `Type::Result`.
         let ast = parse_str("const r: Result<int, string> = 42;");
         match &ast.items[0] {
-            Item::Decl(Decl::Const(c)) => {
-                assert!(matches!(c.ty, Some(Type::Result(_, _))));
-            }
+            Item::Decl(Decl::Const(c)) => match &c.ty {
+                Some(Type::Named { name, args, .. }) => {
+                    assert_eq!(name, "Result");
+                    assert!(matches!(
+                        args.as_slice(),
+                        [Type::Base(BaseType::Int), Type::Base(BaseType::String)]
+                    ));
+                }
+                other => panic!("expected Named type use, got {:?}", other),
+            },
             _ => panic!("expected Const decl"),
         }
     }
 
     #[test]
     fn parse_result_type_square_brackets_valid() {
-        // 0.0.7 T01/D9: bracket spelling `Result[T, E]` is accepted at use sites.
+        // 0.0.7 T01/D9: bracket spelling `Result[T, E]` is accepted at use
+        // sites. 0.0.10 T02: same ordinary `Named` shape as the angle form.
         let ast = parse_str("const r: Result[int, string] = 42;");
         match &ast.items[0] {
-            Item::Decl(Decl::Const(c)) => {
-                assert!(matches!(c.ty, Some(Type::Result(_, _))));
-            }
+            Item::Decl(Decl::Const(c)) => match &c.ty {
+                Some(Type::Named { name, args, .. }) => {
+                    assert_eq!(name, "Result");
+                    assert_eq!(args.len(), 2);
+                }
+                other => panic!("expected Named type use, got {:?}", other),
+            },
             _ => panic!("expected Const decl"),
         }
     }
@@ -1346,17 +1361,25 @@ func main() {
 
     #[test]
     fn parse_result_patterns() {
+        // 0.0.10 T02 (D1): `Ok(v)` / `Err(e)` parse as ordinary constructor
+        // patterns — the generic `Enum` shape with one payload sub-pattern.
+        // The resolver classifies the prelude constructor names back onto
+        // the ResultCtor-tagged HIR nodes.
         let ast = parse_str("choose r { when Ok(v) { 1 } when Err(e) { 2 } } ;");
         match &ast.items[0] {
             Item::Expr(Expr::Choose(ch)) => {
                 assert_eq!(ch.arms.len(), 2);
                 assert!(matches!(
                     &ch.arms[0].pattern,
-                    Pattern::ResultCtor { ctor: ResultCtor::Ok, payload, .. } if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "v")
+                    Pattern::Enum { name, payloads, .. }
+                        if name == "Ok"
+                            && matches!(payloads.as_slice(), [Pattern::Ident(n, _)] if n == "v")
                 ));
                 assert!(matches!(
                     &ch.arms[1].pattern,
-                    Pattern::ResultCtor { ctor: ResultCtor::Err, payload, .. } if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "e")
+                    Pattern::Enum { name, payloads, .. }
+                        if name == "Err"
+                            && matches!(payloads.as_slice(), [Pattern::Ident(n, _)] if n == "e")
                 ));
             }
             other => panic!("expected Choose expr, got {:?}", other),
@@ -1656,7 +1679,8 @@ func main() {
         // 0.0.7 D6: constructor patterns in an or-pattern; each sub-pattern is
         // a full recursive pattern. `Some(x)` is a ctor call (parens), while
         // bare `None` is a zero-payload variant parsed as `Ident` at this
-        // stage (resolution to `EnumVariant` happens in typeck).
+        // stage (resolution to `EnumVariant` happens in typeck). 0.0.10 T02:
+        // the outer `Ok` is likewise the generic `Enum` shape now.
         let ast = parse_str("choose r { when Ok(Some(x)) | Ok(None) { 1 } } ;");
         match &ast.items[0] {
             Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
@@ -1664,13 +1688,19 @@ func main() {
                     assert_eq!(alts.len(), 2);
                     assert!(matches!(
                         &alts[0],
-                        Pattern::ResultCtor { payload, .. }
-                            if matches!(**payload, Pattern::Enum { name: ref n, .. } if n == "Some")
+                        Pattern::Enum { name, payloads, .. }
+                            if name == "Ok" && matches!(
+                                payloads.as_slice(),
+                                [Pattern::Enum { name: inner, .. }] if inner == "Some"
+                            )
                     ));
                     assert!(matches!(
                         &alts[1],
-                        Pattern::ResultCtor { payload, .. }
-                            if matches!(**payload, Pattern::Ident(ref n, _) if n.as_str() == "None")
+                        Pattern::Enum { name, payloads, .. }
+                            if name == "Ok" && matches!(
+                                payloads.as_slice(),
+                                [Pattern::Ident(n, _)] if n.as_str() == "None"
+                            )
                     ));
                 }
                 other => panic!("expected Or pattern, got {:?}", other),
@@ -1727,19 +1757,20 @@ func main() {
 
     #[test]
     fn parse_nested_pattern_ok_pair() {
-        // 0.0.7 D5: `Ok(Pair(a, b))` — ResultCtor payload is a full ctor
-        // pattern with two sub-patterns.
+        // 0.0.7 D5: `Ok(Pair(a, b))` — the ctor payload is a full ctor
+        // pattern with two sub-patterns. 0.0.10 T02 (D1): the outer `Ok` is
+        // the generic `Enum` shape; the resolver classifies it back.
         let ast = parse_str("choose r { when Ok(Pair(a, b)) { 1 } } ;");
         match &ast.items[0] {
             Item::Expr(Expr::Choose(ch)) => match &ch.arms[0].pattern {
-                Pattern::ResultCtor { payload, .. } => match &**payload {
-                    Pattern::Enum { name, payloads, .. } => {
+                Pattern::Enum { name, payloads, .. } if name == "Ok" => match payloads.as_slice() {
+                    [Pattern::Enum { name, payloads, .. }] => {
                         assert_eq!(name, "Pair");
                         assert_eq!(payloads.len(), 2);
                     }
                     other => panic!("expected Enum payload, got {:?}", other),
                 },
-                other => panic!("expected ResultCtor, got {:?}", other),
+                other => panic!("expected Enum pattern for `Ok`, got {:?}", other),
             },
             _ => panic!("expected Choose expr"),
         }
@@ -1822,15 +1853,18 @@ func main() {
 
     #[test]
     fn parse_nested_result_pattern() {
-        // Payloads are recursive patterns (semantics land in T06).
+        // Payloads are recursive patterns (semantics land in T06). 0.0.10
+        // T02 (D1): both levels are the generic `Enum` shape now — nested
+        // `Ok(Err(e))` is `Enum{Ok, [Enum{Err, [Ident e]}]}`.
         let ast = parse_str("choose r { when Ok(Err(e)) { 1 } } ;");
         match &ast.items[0] {
             Item::Expr(Expr::Choose(ch)) => assert!(matches!(
                 &ch.arms[0].pattern,
-                Pattern::ResultCtor { ctor: ResultCtor::Ok, payload, .. }
-                    if matches!(payload.as_ref(),
-                        Pattern::ResultCtor { ctor: ResultCtor::Err, payload, .. }
-                            if matches!(payload.as_ref(), Pattern::Ident(n, _) if n == "e"))
+                Pattern::Enum { name, payloads, .. }
+                    if name == "Ok" && matches!(payloads.as_slice(),
+                        [Pattern::Enum { name, payloads, .. }]
+                            if name == "Err" && matches!(payloads.as_slice(),
+                                [Pattern::Ident(n, _)] if n == "e"))
             )),
             other => panic!("expected Choose expr, got {:?}", other),
         }
@@ -1896,10 +1930,20 @@ func main() {
     }
 
     #[test]
-    fn reject_result_pattern_without_binding() {
-        // `Ok()` — parse_result_pattern requires exactly one payload binding
-        let err = parse_err("choose r { when Ok() { 0 } }");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    fn parse_result_pattern_empty_payloads_is_enum_pattern() {
+        // 0.0.10 T02 (D1): `Ok()` has no dedicated parse rule anymore — it
+        // parses as the generic zero-payload constructor shape and is
+        // rejected later (typeck: no matching enum scrutinee), the recorded
+        // stage shift from the pre-0.0.10 parse error.
+        let ast = parse_str("choose r { when Ok() { 0 } } ;");
+        match &ast.items[0] {
+            Item::Expr(Expr::Choose(ch)) => assert!(matches!(
+                &ch.arms[0].pattern,
+                Pattern::Enum { name, payloads, .. }
+                    if name == "Ok" && payloads.is_empty()
+            )),
+            other => panic!("expected Choose expr, got {:?}", other),
+        }
     }
 
     // ========== ASI (0.0.2, see docs/0.0.2/ASI.md §5.1 pitfall table) ==========
@@ -2649,16 +2693,21 @@ func main() {
 
     #[test]
     fn parse_result_bracket_syntax_with_complex_args() {
+        // 0.0.10 T02 (D1): the bracket spelling parses as an ordinary
+        // parameterized type use — `Named` named `Result`, two arguments.
         let ast = parse_str("x: Result[Option<int>, string] = make();\n");
         if let Item::Decl(Decl::Var(v)) = &ast.items[0] {
             match v.ty.as_ref().unwrap() {
-                Type::Result(ok, err) => {
-                    assert!(
-                        matches!(ok.as_ref(), Type::Named { name, args, .. } if name == "Option" && args.len() == 1)
-                    );
-                    assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
-                }
-                other => panic!("expected Result, got {:?}", other),
+                Type::Named { name, args, .. } if name == "Result" => match args.as_slice() {
+                    [ok, err] => {
+                        assert!(
+                            matches!(ok, Type::Named { name, args, .. } if name == "Option" && args.len() == 1)
+                        );
+                        assert!(matches!(err, Type::Base(BaseType::String)));
+                    }
+                    other => panic!("expected two type arguments, got {:?}", other),
+                },
+                other => panic!("expected Named Result use, got {:?}", other),
             }
         } else {
             panic!("expected Var");

@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02–T08 open.**
+> **Status: T01 done; T02 done; T03–T08 open.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
@@ -65,34 +65,127 @@
 
 ## T02 — Parser/Resolver: `Ok` / `Err` / `Result` become prelude names (F1; D1/D2)
 
-- [ ] **Regression-first**: pin current rejections at the merge-base
+- [x] **Regression-first**: pin current rejections at the merge-base
       before touching anything — shadowing the ctor names, bare `Ok` in
       expression position, a user enum named `Result` (record the exact
       merge-base error texts; any later text change is recorded in this
       card, never silent).
-- [ ] Parser: retire the `Ok`/`Err` syntactic special case — `Ok(...)`
+- [x] Parser: retire the `Ok`/`Err` syntactic special case — `Ok(...)`
       and `Err(...)` parse as ordinary calls of bare identifiers; `when
       Ok(v)` / `when Err(e)` parse as ordinary constructor patterns (bare
       identifier + payload sub-patterns); the `ResultCtor` **AST** nodes
       are deleted (`parser/ast.rs`, `parser/expr.rs`).
-- [ ] Parser: retire the type-position `Result<` special case —
+- [x] Parser: retire the type-position `Result<` special case —
       `Result<int, string>` (and `Result[T, E]`, 0.0.7 D9 spellings)
       parses as an ordinary parameterized type use.
-- [ ] Resolver: the prelude gains `Ok` / `Err` (variant-constructor
+- [x] Resolver: the prelude gains `Ok` / `Err` (variant-constructor
       names) and `Result` (type name); classification runs through the
       0.0.9 D1 variant-reference machinery and maps back onto the
       existing `ResultCtor` **HIR** nodes (`resolver/hir.rs:478`) — no
       typeck/lower churn.
-- [ ] Shadow rules: `Ok` / `Err` / `Result` cannot be shadowed (D2);
+- [x] Shadow rules: `Ok` / `Err` / `Result` cannot be shadowed (D2);
       bare `Ok` / `Err` in expression position (no call) keeps today's
       rejection (they are constructors, not values).
-- [ ] Parity sweep: every merge-base-pinned rejection still rejects (same
+- [x] Parity sweep: every merge-base-pinned rejection still rejects (same
       verdict; error text may only differ where recorded above).
-- [ ] Tests: parser unit tests (generic AST shape for ctor calls,
+- [x] Tests: parser unit tests (generic AST shape for ctor calls,
       patterns, and the parameterized type use); resolver unit tests
       (prelude availability with and without `import std.result`, shadow
       rejection, bare-ctor rejection); the pinned fixtures stay red→green
       correctly.
+
+**As-built notes (T02)**:
+
+- **D2's factual premise was wrong, its normative rule is implemented —
+  recorded here, never silent.** D2 claims non-shadowable is "the same
+  effective semantics as today" and the card listed "shadowing the ctor
+  names" among the merge-base *rejections* to pin. Empirical pinning at
+  the merge-base (`505f11e`) proved the opposite: `Scope::declare`'s
+  §4.3 Python-style builtin overwrite made `Ok` / `Err` **shadowable** —
+  `func Ok(x: int)` + call, a local `Ok = 42`, `const Err = "…"`, a
+  parameter named `Ok`, and even a pattern binding named `Ok` (`when Ok {
+  1 }` on a non-Result scrutinee) all *compiled and ran* (pinned by the
+  `check_user_shadows_ok` / `check_local_binding_shadows_ok` /
+  `check_param_shadows_ok` typeck tests, which asserted the §4.3 shadow).
+  D2's normative bullet ("declaring a binding … named `Ok` / `Err` /
+  `Result` is rejected") and this card's shadow-rules item are
+  unambiguous, so T02 implements non-shadowable via
+  `check_reserved_binding_name` (`ReservedBuiltinName`, reusing the T01
+  kind and text) at every declaration site: top-level funcs and curried
+  signatures, params, var/const bindings, `for` loop variables, and
+  pattern bindings. The flips are pinned: the typeck shadow tests are
+  rewritten as rejection tests, `tests/resolver/valid/ok_err_shadow.fln`
+  moved to `invalid/`, and the six new e2e invalid pins
+  (`reserved_ctor_shadow_{func,binding,const,param}`,
+  `bare_ctor_not_a_value`, `enum_result_reserved`) record the verdicts.
+  The parity sweep's one-directional constraint holds — every program
+  rejected before is still rejected. If the maintainer prefers the old
+  shadowable semantics, that is a D2 revision by a new PLAN entry, not a
+  code revert.
+- **Merge-base error texts pinned** (unchanged after T02 unless noted):
+  bare `Ok` in expression position → typeck `undefined variable \`Ok\``
+  (unchanged — the resolver keeps emitting `ExprHir::Ident` for the
+  prelude constructor names and typeck's name-based interception
+  (`infer.rs`) still handles only calls); `enum Result` → resolve
+  `` `Result` is a builtin name (declared in `std.result`) and cannot be
+  shadowed — choose a different name `` (T01 text, unchanged).
+- **`ResultCtor` survival clarified**: the card's "the `ResultCtor` AST
+  nodes are deleted" is satisfied by deleting the parser's
+  `Pattern::ResultCtor` production (the `ast.rs` variant,
+  `parse_result_pattern`, and the `expr.rs` special case). The two-variant
+  `ResultCtor` tag enum survives — it is the ctor tag of the existing
+  `PatternHir::ResultCtor` / `TypedPatternHir::ResultCtor` /
+  `TypedExprHir::ResultCtor` nodes that typeck and lower consume; deleting
+  it would have been exactly the typeck/lower churn the card forbids. Its
+  doc comment now records the tag role.
+- **Expression-position calls needed no parser change**: `Ok(...)` /
+  `Err(...)` were *already* ordinary calls at the merge-base (the parser
+  special case existed only in patterns); the value side is untouched.
+- **Type-position mapping lands in the resolver (T02), not typeck
+  (T03)**: the parser's `TokenKind::ResultType` arm still requires the
+  two-argument shape (so a bare `Result` and `Result<T>` / `Result<T, E,
+  F>` keep the exact pre-0.0.10 parse errors — zero recorded text change
+  there) but now emits the ordinary `Type::Named { name: "Result", args:
+  [ok, err] }`. Every type position flows through the resolver's
+  `resolve_type` (annotations, params, returns, struct fields, enum
+  payloads, casts), whose `Named` arm maps the prelude spelling back onto
+  the internal `ast::Type::Result` — typeck/lower/codegen see the
+  pre-migration shape in all cases, T03's "parameterized type use maps to
+  `Type::Result`" item is satisfied by construction and pinned by tests
+  (`prelude_result_type_use_maps_to_internal_result`,
+  `struct_field_of_result_type_maps_to_internal_result`,
+  `prelude_trio_compiles_without_import` with an empty `enum_defs`).
+  `Result` stays a lexer keyword (PLAN §5: "Lexer — nothing to remove");
+  the dotted `std.result.Result<…>` type spelling remains unparseable
+  (parity — it was a parse error at the merge-base; the resolver's
+  mapping keys on the bare prelude spelling).
+- **Prelude registration**: `register_builtin_result_prelude` seeds the
+  builtin declaration (mangled `std.result.Result`) into each module's
+  `enum_table` + `variant_to_enum` before `collect_enums` — the resolution
+  -time tables T01 kept the declaration in. First-wins seeding keeps a
+  user enum's `Ok` / `Err` variants unreachable through the bare spelling,
+  exactly the pre-0.0.10 parser-hijack behavior. Pattern classification
+  (`Pattern::Enum{name:"Ok"/"Err"}` → `PatternHir::ResultCtor`) runs
+  through those tables (`is_builtin_result_enum`), is user-binding-blind
+  (defensive; D2 makes such bindings undeclarable), and requires exactly
+  one payload.
+- **Recorded stage shifts (verdict parity holds, stage/text move)**:
+  `Ok(a, b)` (two payloads) was a parse error (`` expected `)` after
+  pattern ``), now parses as the generic two-payload constructor pattern
+  and is rejected at typeck (`Ok` pattern requires a matching enum
+  scrutinee, found `Result[…]`); `Ok()` likewise moved from parse to
+  typeck — the fixtures `ok_pattern_empty.fln` /
+  `ok_pattern_two_bindings.fln` moved from `tests/parser/invalid/` to
+  `tests/typeck/invalid/` with their headers updated; a bare `when Ok { …
+  }` arm (a pattern *binding* named `Ok`, legal at the merge-base on a
+  non-Result scrutinee) is now a resolve-time `ReservedBuiltinName`
+  rejection (`declare_pattern_binding` guard).
+- **Bytecode unchanged (D7, recorded expectation — no hash gate)**: the
+  diff touches only parser/resolver (+tests); the HIR shapes typeck, lower
+  and codegen consume are byte-shape-identical (pinned by the HIR-shape
+  tests above), and the standing byte-level pin
+  (`fleen-vm/tests/std_byte_identity.rs`) passes unchanged, as do all 108
+  e2e valid fixtures' stdout/stderr comparisons.
 
 **Depends on**: T01.
 **Refs**: PLAN §1 D1/D2, §3.1; 0.0.9 PLAN D1 (variant-reference
