@@ -232,6 +232,10 @@ pub(crate) fn exports_of_ast(ast: &Ast) -> HashMap<String, ExportDef> {
         match item {
             ast::Item::Import(_) => {}
             ast::Item::Expr(_) => {}
+            // 0.0.9 T03 (D4): a `break` / `continue` statement exports
+            // nothing (and typeck rejects a top-level one).
+            ast::Item::Break(_) => {}
+            ast::Item::Continue(_) => {}
             ast::Item::Decl(decl) => {
                 let export = match decl {
                     ast::Decl::Func(f) => {

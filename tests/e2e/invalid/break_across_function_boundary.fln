@@ -1,0 +1,18 @@
+// 0.0.9 T03 (PLAN D4, lexical containment): the nested `func` declaration
+// inside the loop body is a function boundary — its `break` sees no loop,
+// even though the declaration lexically sits inside the `while` body.
+import std.io;
+
+func f(): int {
+    x = 0;
+    while x < 3 {
+        func inner(): int {
+            break;
+            0
+        }
+        x = x + 1;
+    };
+    x
+}
+
+func main(): int { std.io.println(f() as string); 0 }

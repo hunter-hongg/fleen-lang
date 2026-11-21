@@ -105,6 +105,12 @@ pub enum Item {
     Decl(Decl),
     /// Top-level expression statement
     Expr(Expr),
+    /// Top-level `break` statement (0.0.9 T03, D4). Legal to *parse* at the
+    /// top level; typeck rejects it (`BreakOutsideLoop`) because no loop can
+    /// enclose a top-level item.
+    Break(Span),
+    /// Top-level `continue` statement (0.0.9 T03, D4). Same shape as `Item::Break`.
+    Continue(Span),
 }
 
 /// Import declaration.
@@ -493,6 +499,14 @@ pub enum Stmt {
     /// Expression statement.
     /// The boolean indicates whether a semicolon was present (true = discard value, false = tail expression).
     Expr(Box<Expr>, bool),
+    /// `break` statement (0.0.9 T03, D4): exit the innermost enclosing loop.
+    /// A keyword statement, never an expression (`x = break` is a parse
+    /// error); the span points at the keyword. The trailing `;` is optional
+    /// (ASI) and carries no meaning — no value is discarded.
+    Break(Span),
+    /// `continue` statement (0.0.9 T03, D4): jump to the innermost loop's
+    /// next-iteration edge. Same shape as [`Stmt::Break`].
+    Continue(Span),
 }
 
 /// Expression.

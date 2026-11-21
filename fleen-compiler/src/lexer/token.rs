@@ -196,6 +196,16 @@ pub enum TokenKind {
     /// `trusted` keyword (0.0.5: `func` modifier, author-attested safe wrapper)
     Trusted,
 
+    // Loop-jump keywords (0.0.9 T03, D4) — reserved words, legal only as
+    // keyword *statements* inside a loop body (typeck enforces the position;
+    // the parser wires the keyword-statement shapes). They are not
+    // expressions: `x = break` is a parse error at the expression entry.
+    /// `break` keyword (0.0.9 T03, D4: exit the innermost enclosing loop)
+    Break,
+    /// `continue` keyword (0.0.9 T03, D4: jump to the innermost loop's
+    /// next-iteration edge)
+    Continue,
+
     // Enum keyword (0.0.6) — reserved here; the parser wires `enum_decl` and
     // the variant patterns in T02, so until then misuse surfaces at the
     // binding-name rejection (`enum = 1`) or as a plain "expected expression"
@@ -337,6 +347,8 @@ impl TokenKind {
                 | TokenKind::DerefPtr
                 | TokenKind::Unsafe
                 | TokenKind::Trusted
+                | TokenKind::Break
+                | TokenKind::Continue
                 | TokenKind::Enum
         )
     }
@@ -383,6 +395,8 @@ impl TokenKind {
             TokenKind::DerefPtr => "deref_ptr",
             TokenKind::Unsafe => "unsafe",
             TokenKind::Trusted => "trusted",
+            TokenKind::Break => "break",
+            TokenKind::Continue => "continue",
             TokenKind::Enum => "enum",
             _ => return None,
         })

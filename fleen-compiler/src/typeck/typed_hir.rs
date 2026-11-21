@@ -593,6 +593,12 @@ pub enum TypedHirItem {
     Import(ImportDeclHir),
     Decl(TypedDeclHir),
     Expr(TypedExprHir),
+    /// Top-level `break` (0.0.9 T03, D4): reachable only from malformed
+    /// trees — typeck rejects a top-level `break` (no loop can enclose a
+    /// top-level item), and lower skips the item like `Expr` on error paths.
+    Break(Span),
+    /// Top-level `continue` (0.0.9 T03, D4). Same shape as [`TypedHirItem::Break`].
+    Continue(Span),
 }
 
 /// Declaration in Typed HIR.
@@ -661,6 +667,14 @@ pub struct TypedConstDeclHir {
 pub enum TypedStmtHir {
     Decl(TypedDeclHir),
     Expr(Box<TypedExprHir>, bool), // bool = has_semicolon
+    /// `break` statement (0.0.9 T03, D4): unit-valued control flow, no
+    /// type of its own. Legal only inside a loop body of the lexically
+    /// enclosing function (checked before this node is produced); lower
+    /// jumps to the loop's exit edge (0.0.9 T04).
+    Break(Span),
+    /// `continue` statement (0.0.9 T03, D4): jump to the innermost loop's
+    /// next-iteration edge. Same shape as [`TypedStmtHir::Break`].
+    Continue(Span),
     Error,
 }
 

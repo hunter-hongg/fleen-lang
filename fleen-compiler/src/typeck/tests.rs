@@ -3686,3 +3686,245 @@ fn variadic_print_is_never_a_partial() {
         other => panic!("expected a call, got {other:?}"),
     }
 }
+
+// ========== 0.0.9 T03: `break` / `continue` loop context (D4) ==========
+
+#[test]
+fn break_in_while_body_is_legal() {
+    let _ = compile_ok(
+        "func f(): int { \
+         x = 0; \
+         while x < 10 { x = x + 1; if x > 5 { break; } }; \
+         x \
+         }",
+    );
+}
+
+#[test]
+fn break_in_for_over_array_is_legal() {
+    let _ = compile_ok(
+        "func f(): int { \
+         total = 0; \
+         for v in [1, 2, 3, 4] { if v == 3 { break; }; total = total + v; }; \
+         total \
+         }",
+    );
+}
+
+#[test]
+fn continue_in_for_over_range_is_legal() {
+    let _ = compile_ok(
+        "import std.collection.range; \
+         func f(): int { \
+         total = 0; \
+         for i in range_from(0, 10) { if i % 2 == 0 { continue; }; total = total + i; }; \
+         total \
+         }",
+    );
+}
+
+#[test]
+fn continue_in_while_body_is_legal() {
+    let _ = compile_ok(
+        "func f(): int { \
+         x = 0; seen = 0; \
+         while x < 10 { x = x + 1; if x % 2 == 0 { continue; }; seen = seen + 1; }; \
+         seen \
+         }",
+    );
+}
+
+#[test]
+fn break_binds_innermost_of_nested_loops() {
+    let _ = compile_ok(
+        "func f(): int { \
+         x = 0; \
+         while x < 3 { \
+         y = 0; \
+         while y < 3 { y = y + 1; if y == 2 { break; } }; \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+}
+
+#[test]
+fn break_inside_loop_inside_choose_arm_is_legal() {
+    // D4 blocks the `choose`-arm boundary only for jumps that would cross
+    // it: a loop *inside* the arm re-establishes the loop context, so its
+    // own `break` binds to that loop.
+    let _ = compile_ok(
+        "func f(n: int): int { \
+         x = 0; \
+         while x < n { \
+         y = choose x { when 1 { while true { break; }; 0 } otherwise { 2 } }; \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+}
+
+#[test]
+fn break_outside_loop_at_top_level_is_rejected() {
+    let errs = compile_err("break;");
+    assert_eq!(errs.len(), 1, "got {errs:?}");
+    assert!(matches!(
+        err_kinds(&errs)[0],
+        TypeckErrorKind::BreakOutsideLoop
+    ));
+}
+
+#[test]
+fn continue_outside_loop_in_function_is_rejected() {
+    let errs = compile_err("func f(): int { continue; 0 }");
+    assert_eq!(errs.len(), 1, "got {errs:?}");
+    assert!(matches!(
+        err_kinds(&errs)[0],
+        TypeckErrorKind::ContinueOutsideLoop
+    ));
+}
+
+#[test]
+fn break_in_choose_arm_is_rejected_even_inside_a_loop() {
+    // D4: a `choose` arm is a boundary — the jump may not cross it to the
+    // enclosing loop, so the arm's `break` reports outside-of-loop despite
+    // the `while` around the `choose`.
+    let errs = compile_err(
+        "func f(n: int): int { \
+         x = 0; \
+         while x < n { \
+         y = choose x { when 1 { break; } otherwise { 2 } }; \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+    // The jump is a *statement* in the arm block, so the arm block still
+    // types `Unit` and the arm unification reports its own mismatch — the
+    // jump error does not abort the choose.
+    assert_eq!(errs.len(), 2, "got {errs:?}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::BreakOutsideLoop)),
+        "got {errs:?}"
+    );
+}
+
+#[test]
+fn continue_in_choose_arm_is_rejected_even_inside_a_loop() {
+    let errs = compile_err(
+        "func f(n: int): int { \
+         x = 0; \
+         while x < n { \
+         y = choose x { when 1 { continue; } otherwise { 2 } }; \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+    assert_eq!(errs.len(), 2, "got {errs:?}");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ContinueOutsideLoop)),
+        "got {errs:?}"
+    );
+}
+
+#[test]
+fn break_in_nested_function_is_rejected() {
+    // D4's lexical containment: the nested declaration is a function
+    // boundary — its `break` sees no loop even though the declaration sits
+    // inside the outer `while` body.
+    let errs = compile_err(
+        "func outer(): int { \
+         x = 0; \
+         while x < 3 { \
+         func inner(): int { break; 0 } \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+    assert_eq!(errs.len(), 1, "got {errs:?}");
+    assert!(matches!(
+        err_kinds(&errs)[0],
+        TypeckErrorKind::BreakOutsideLoop
+    ));
+}
+
+#[test]
+fn break_in_nested_async_function_is_rejected() {
+    // Same boundary for `async func` (D4 covers the async case with the
+    // same lexical rule).
+    let errs = compile_err(
+        "func outer(): int { \
+         x = 0; \
+         while x < 3 { \
+         async func inner(): int { break; 0 } \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+    assert_eq!(errs.len(), 1, "got {errs:?}");
+    assert!(matches!(
+        err_kinds(&errs)[0],
+        TypeckErrorKind::BreakOutsideLoop
+    ));
+}
+
+#[test]
+fn loop_depth_is_not_leaked_across_functions() {
+    // Errors are collected, not fail-fast: the first function's loop body
+    // errors (its tail), but the depth restore must still run before the
+    // `?` propagates — otherwise the second function's bare `break` would
+    // compile against the leaked depth.
+    let errs = compile_err(
+        "func a(): int { \
+         x = 0; \
+         while x < 3 { 1 + \"s\" }; \
+         x \
+         } \
+         func b(): int { break; }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::TypeMismatch { .. })),
+        "expected the first function's operand error, got {errs:?}"
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::BreakOutsideLoop)),
+        "expected BreakOutsideLoop in the second function, got {errs:?}"
+    );
+}
+
+#[test]
+fn choose_arm_depth_is_restored_after_an_arm_error() {
+    // The mirror pin: an arm body error propagates out of the arm's
+    // (cleared) depth; the restore must put the enclosing loop's depth
+    // back, so the `break` *after* the choose stays legal and only the
+    // arm's own error is reported.
+    let errs = compile_err(
+        "func f(n: int): int { \
+         x = 0; \
+         while x < n { \
+         y = choose x { when 1 { 1 + \"s\" } otherwise { 0 } }; \
+         break; \
+         x = x + 1; \
+         }; \
+         x \
+         }",
+    );
+    assert_eq!(errs.len(), 1, "got {errs:?}");
+    assert!(matches!(
+        err_kinds(&errs)[0],
+        TypeckErrorKind::TypeMismatch { .. }
+    ));
+}

@@ -241,6 +241,13 @@ impl<'a> Cx<'a> {
             }
             TypedStmtHir::Decl(TypedDeclHir::Func(f)) => self.check_function(f, true),
             TypedStmtHir::Expr(e, _) => self.walk_expr(e, false),
+            // 0.0.9 T03 (D4): `break` / `continue` move no values and bind
+            // no names — nothing to track. The jump itself is a control-flow
+            // concern (lower, T04); the liveness model is flow-insensitive
+            // to it and stays sound, since a jump can only *shrink* the
+            // set of paths that reach later statements.
+            TypedStmtHir::Break(_) => {}
+            TypedStmtHir::Continue(_) => {}
             TypedStmtHir::Error => {}
         }
     }
@@ -859,12 +866,7 @@ fn pattern_bindings(pat: &TypedPatternHir, out: &mut Vec<BindingId>) {
 /// (`_` or `otherwise`, parsed as an identifier pattern — see
 /// `infer::check_exhaustiveness`).
 fn has_otherwise(arms: &[TypedChooseArmHir]) -> bool {
-    arms.iter().any(|arm| {
-        matches!(
-            &arm.pattern,
-            TypedPatternHir::Ident { name, .. } if name == "_" || name == "otherwise"
-        )
-    })
+    arms.iter().any(|arm| arm.pattern.is_wildcard())
 }
 
 /// Read-only scan: owned-local identifier uses in a condition expression,
@@ -1058,6 +1060,10 @@ pub fn check_ownership(program: &mut TypedHir) -> Vec<TypeckError> {
             TypedHirItem::Decl(TypedDeclHir::Var(v)) => cx.walk_expr(&mut v.init, false),
             TypedHirItem::Decl(TypedDeclHir::Const(c)) => cx.walk_expr(&mut c.init, false),
             TypedHirItem::Expr(e) => cx.walk_expr(e, false),
+            // 0.0.9 T03 (D4): unreachable in a well-typed program (typeck
+            // rejects a top-level `break` / `continue`); nothing to walk.
+            TypedHirItem::Break(_) => {}
+            TypedHirItem::Continue(_) => {}
             TypedHirItem::Import(_) => {}
         }
     }

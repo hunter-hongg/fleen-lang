@@ -48,6 +48,13 @@ pub enum HirItem {
     Import(ImportDeclHir),
     Decl(DeclHir),
     Expr(ExprHir),
+    /// Top-level `break` statement (0.0.9 T03, D4). No names to resolve —
+    /// the span rides through for typeck's `BreakOutsideLoop` (no loop can
+    /// enclose a top-level item).
+    Break(Span),
+    /// Top-level `continue` statement (0.0.9 T03, D4). Same shape as
+    /// [`HirItem::Break`].
+    Continue(Span),
 }
 
 /// Import declaration in HIR.
@@ -168,6 +175,11 @@ pub struct EnumVariantHir {
 pub enum StmtHir {
     Decl(DeclHir),
     Expr(Box<ExprHir>, bool), // bool = has_semicolon
+    /// `break` statement (0.0.9 T03, D4): no names to resolve; the span
+    /// rides through for typeck's loop-context check.
+    Break(Span),
+    /// `continue` statement (0.0.9 T03, D4). Same shape as [`StmtHir::Break`].
+    Continue(Span),
     /// Error placeholder: the statement failed to resolve (error already recorded).
     /// Keeps positions of later statements stable during error recovery.
     Error,

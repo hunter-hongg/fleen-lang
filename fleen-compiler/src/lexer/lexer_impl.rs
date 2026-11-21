@@ -324,6 +324,11 @@ impl<'a> Lexer<'a> {
             "deref_ptr" => TokenKind::DerefPtr,
             "unsafe" => TokenKind::Unsafe,
             "trusted" => TokenKind::Trusted,
+            // 0.0.9 T03 (D4): the loop-jump keywords are reserved words (the
+            // source breaking set of 0.0.9) — using them as identifiers stops
+            // compiling, the 0.0.5/0.0.6 precedent.
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             "enum" => TokenKind::Enum,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
@@ -643,6 +648,38 @@ mod tests {
         assert_eq!(TokenKind::Enum.keyword_str(), Some("enum"));
         assert!(TokenKind::Enum.is_keyword());
         assert_eq!(TokenKind::Enum.to_string(), "enum");
+    }
+
+    #[test]
+    fn tokenize_break_continue_keywords() {
+        // 0.0.9 T03 (D4): `break` / `continue` are reserved words; they no
+        // longer lex as identifiers (the source breaking set of 0.0.9).
+        let tokens = tokenize("break continue").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Break);
+        assert_eq!(tokens[1].kind, TokenKind::Continue);
+        // Same metadata consistency contract as the `enum` test: `Display`
+        // renders keywords via `keyword_str`, and a keyword variant missing
+        // there hits an `unreachable!` panic on user-error paths.
+        assert_eq!(TokenKind::Break.keyword_str(), Some("break"));
+        assert_eq!(TokenKind::Continue.keyword_str(), Some("continue"));
+        assert!(TokenKind::Break.is_keyword());
+        assert!(TokenKind::Continue.is_keyword());
+        assert_eq!(TokenKind::Break.to_string(), "break");
+        assert_eq!(TokenKind::Continue.to_string(), "continue");
+    }
+
+    #[test]
+    fn tokenize_break_continue_prefix_identifiers() {
+        // The keywords must not swallow longer identifiers that merely start
+        // with them (`breakx`, `continue_2` stay identifiers; the loop-jump
+        // words are case-sensitive like every other keyword spelling).
+        let tokens = tokenize("breaks breakx continue_2 ContinueX break continue").unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(ref s) if s == "breaks"));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "breakx"));
+        assert!(matches!(tokens[2].kind, TokenKind::Ident(ref s) if s == "continue_2"));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "ContinueX"));
+        assert_eq!(tokens[4].kind, TokenKind::Break);
+        assert_eq!(tokens[5].kind, TokenKind::Continue);
     }
 
     #[test]

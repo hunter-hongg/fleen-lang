@@ -1,0 +1,19 @@
+// 0.0.9 T03 (PLAN D4): a `choose` arm is a boundary — a `continue` in an
+// arm body may not cross it to reach the enclosing `while`, even though the
+// choose sits inside the loop. Typeck reports `ContinueOutsideLoop`; the
+// arm's `unit`/`int` mismatch is the follow-on error of the failed arm.
+import std.io;
+
+func f(n: int): int {
+    x = 0;
+    while x < n {
+        y = choose x {
+            when 1 { continue; }
+            otherwise { 2 }
+        };
+        x = x + 1;
+    };
+    x
+}
+
+func main(): int { std.io.println(f(1) as string); 0 }

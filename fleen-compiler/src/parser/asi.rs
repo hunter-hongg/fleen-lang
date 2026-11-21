@@ -48,6 +48,12 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::DerefPtr
             | TokenKind::Unsafe
             | TokenKind::Trusted
+            // 0.0.9 T03 (D4): `break` / `continue` are keyword statements.
+            // Statement-starting so a line beginning with one passes the
+            // statement-entry guards and a previous line's statement gets its
+            // separator (rule 4 reads this set through `implies_stmt_end`).
+            | TokenKind::Break
+            | TokenKind::Continue
             // 0.0.8 T01: `#` opens a `#feature` directive. Statement-starting
             // so (a) consecutive directives in the header region insert a
             // `Semi` at the newline between them instead of tripping rule 6,
@@ -145,6 +151,14 @@ fn can_end_stmt(kind: &TokenKind) -> bool {
             | TokenKind::BoolType
             | TokenKind::StringType
             | TokenKind::UnitType
+            // 0.0.9 T03 (D4): `break` / `continue` are complete statements —
+            // a following statement on the next line needs its separator.
+            // The parser has no newline information (ASI consumed it), so
+            // rule 3 must treat `break` as a statement ender, or
+            // `break` ⏎ `x = 1` would reach the parser as `break x = 1` and
+            // be misreported as same-line juxtaposition.
+            | TokenKind::Break
+            | TokenKind::Continue
     )
 }
 
@@ -383,6 +397,9 @@ mod tests {
             TokenKind::DerefPtr,
             TokenKind::Unsafe,
             TokenKind::Trusted,
+            // 0.0.9 T03 (D4): `break` / `continue` are keyword statements.
+            TokenKind::Break,
+            TokenKind::Continue,
             TokenKind::Not,
             TokenKind::Bang,
             TokenKind::Minus,
@@ -476,6 +493,9 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::Struct));
         // 0.0.6 T01: `enum` starts a declaration (never a continuation).
         assert!(implies_stmt_end(&TokenKind::Enum));
+        // 0.0.9 T03 (D4): `break` / `continue` start and end statements.
+        assert!(implies_stmt_end(&TokenKind::Break));
+        assert!(implies_stmt_end(&TokenKind::Continue));
         assert!(implies_stmt_end(&TokenKind::True));
         assert!(implies_stmt_end(&TokenKind::If));
         assert!(implies_stmt_end(&TokenKind::While));
@@ -752,6 +772,26 @@ mod tests {
         // closing brace inserts a semicolon, exactly like `if`/`while`.
         let ks = kinds("for x in a { }\nprint(1)\n");
         assert_eq!(semi_count(&ks), 2);
+    }
+
+    #[test]
+    fn break_starts_a_new_statement() {
+        // 0.0.9 T03 (D4): `x = 1` ⏎ `break` ⏎ `x = 2` — `break` is a
+        // statement start, so the previous statement gets its separator and
+        // `break` itself ends its line (rule 3 reads `can_end_stmt`).
+        let ks = kinds("x = 1\nbreak\nx = 2\n");
+        assert_eq!(semi_count(&ks), 3);
+        assert!(has_no_newline(&ks));
+    }
+
+    #[test]
+    fn break_before_rbrace_inserts_nothing() {
+        // Rule 2: never insert before `}` — `{ break` ⏎ `}` keeps no
+        // separator; the parser accepts the block-tail shape (the last
+        // statement takes no semicolon).
+        let ks = kinds("while c { break\n}\n");
+        assert_eq!(semi_count(&ks), 1); // where the while statement ends
+        assert!(has_no_newline(&ks));
     }
 
     #[test]

@@ -1001,6 +1001,28 @@ impl<'a> FnBodyCx<'a> {
                         fb.emit(MirInstr::new(MirInstrKind::Pop, e.span()));
                     }
                 }
+                // 0.0.9 T03 (D4): interim defensive arms — T04 owns the loop
+                // exit / continue edges, so a *legal* program containing the
+                // keywords passes typeck and fails here until then (the T02
+                // defensive-arm precedent: a named, actionable error beats a
+                // dropped statement). No bytecode change (D6 holds trivially:
+                // nothing new reaches codegen yet).
+                TypedStmtHir::Break(span) => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "`break` (loop exit edges are not implemented yet)",
+                        },
+                        *span,
+                    ));
+                }
+                TypedStmtHir::Continue(span) => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "`continue` (loop exit edges are not implemented yet)",
+                        },
+                        *span,
+                    ));
+                }
                 TypedStmtHir::Error => {}
             }
         }

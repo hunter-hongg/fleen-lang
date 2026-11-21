@@ -259,6 +259,11 @@ impl Parser {
             crate::lexer::TokenKind::DerefPtr => "deref_ptr",
             crate::lexer::TokenKind::Unsafe => "unsafe",
             crate::lexer::TokenKind::Trusted => "trusted",
+            // 0.0.9 T03 (D4): the loop-jump keywords are reserved words
+            // (`break = 1` names the keyword, not a statement-separator
+            // error) — the same path as the 0.0.5/0.0.6 words.
+            crate::lexer::TokenKind::Break => "break",
+            crate::lexer::TokenKind::Continue => "continue",
             // 0.0.6 T01: `enum` joins the same path. It is statement-starting
             // from day one (unlike the 0.0.5 words before their T02), so
             // `enum = 1` reaches this rejection instead of the ASI
@@ -594,6 +599,17 @@ impl Parser {
                 },
                 span,
             });
+        }
+
+        // `break` / `continue` statements (0.0.9 T03, D4): keyword
+        // statements, parsed at the top level too. Whether one is *legal*
+        // there is typeck's business (`BreakOutsideLoop` /
+        // `ContinueOutsideLoop` — no loop can enclose a top-level item), so
+        // the parser accepts the shape everywhere statements are accepted.
+        if self.check(&crate::lexer::TokenKind::Break)
+            || self.check(&crate::lexer::TokenKind::Continue)
+        {
+            return self.parse_break_like_item();
         }
 
         // Expression statement at top level.
@@ -1707,6 +1723,18 @@ impl Parser {
                 });
             }
 
+            // `break` / `continue` statements (0.0.9 T03, D4): keyword
+            // statements, never expressions. Whether the position is legal
+            // (inside a loop body of the lexically enclosing function) is
+            // typeck's business — the parser accepts the shape everywhere.
+            if self.check(&crate::lexer::TokenKind::Break)
+                || self.check(&crate::lexer::TokenKind::Continue)
+            {
+                let stmt = self.parse_break_like_stmt()?;
+                stmts.push(stmt);
+                continue;
+            }
+
             if is_decl {
                 // Parse declaration
                 if self.check(&crate::lexer::TokenKind::Const) {
@@ -1757,6 +1785,64 @@ impl Parser {
             tail_expr,
             span: self.span(start, end),
         })
+    }
+
+    /// Parse a `break` / `continue` *statement* (0.0.9 T03, D4):
+    /// `break_stmt = "break" , [ ";" ]`. The trailing `;` is optional (the
+    /// ASI pass supplies one at line ends; rule 2 never inserts before `}`),
+    /// so the accepted boundaries are `;`, `}` and EOF — anything else is
+    /// one-line juxtaposition (`break 1`) and reports the statement-separator
+    /// error, exactly like the expression-statement path.
+    ///
+    /// They are statements, not expressions (D4): the grammar has no
+    /// `break <value>` form, so `x = break` fails in the expression parser,
+    /// and `break = 1` reports the reserved word through
+    /// [`Parser::reject_keyword_binding_name`].
+    /// The `break` / `continue` keyword-statement shape (0.0.9 T03, D4),
+    /// built from the shared [`Parser::parse_break_like`] core.
+    fn parse_break_like_stmt(&mut self) -> Result<ast::Stmt, ParseError> {
+        let (is_break, span) = self.parse_break_like(true)?;
+        Ok(if is_break {
+            ast::Stmt::Break(span)
+        } else {
+            ast::Stmt::Continue(span)
+        })
+    }
+
+    /// Top-level shape of [`Parser::parse_break_like_stmt`]: an
+    /// `Item::Break` / `Item::Continue` (0.0.9 T03, D4). A top-level `break`
+    /// is legal to *parse*; typeck rejects it (no loop can enclose a
+    /// top-level item).
+    fn parse_break_like_item(&mut self) -> Result<ast::Item, ParseError> {
+        let (is_break, span) = self.parse_break_like(false)?;
+        Ok(if is_break {
+            ast::Item::Break(span)
+        } else {
+            ast::Item::Continue(span)
+        })
+    }
+
+    /// Shared core of the two `break` / `continue` shapes: reject
+    /// binding-name misuse, pick the keyword, advance, then check the
+    /// terminator, returning `(is_break, span)` for the wrappers to build
+    /// their node. `allow_rbrace` marks the statement form, whose last
+    /// statement may end at a block boundary (`{ break }` stays legal);
+    /// the item form takes `;` or ends at EOF.
+    fn parse_break_like(&mut self, allow_rbrace: bool) -> Result<(bool, Span), ParseError> {
+        // `break = 1` names the keyword (same route as `move = 1`); a bare
+        // `break` falls through (peek is not `=` / `:`).
+        self.reject_keyword_binding_name()?;
+        let is_break = self.check(&crate::lexer::TokenKind::Break);
+        let span = self.current().span;
+        self.advance();
+        // Terminator: explicit `;`, or an accepted boundary — EOF, plus a
+        // block boundary for the statement form.
+        if self.is_at_end() || (allow_rbrace && self.check(&crate::lexer::TokenKind::RBrace)) {
+            // no terminator consumed
+        } else if !self.matches(&crate::lexer::TokenKind::Semi) {
+            return Err(self.err_expected_stmt_end());
+        }
+        Ok((is_break, span))
     }
 }
 

@@ -647,6 +647,10 @@ impl Resolver {
             Item::Import(import_decl) => HirItem::Import(self.resolve_import(import_decl)),
             Item::Decl(decl) => HirItem::Decl(self.resolve_decl(decl, global_funcs)?),
             Item::Expr(expr) => HirItem::Expr(self.resolve_expr(expr)?),
+            // 0.0.9 T03 (D4): the keyword is a token kind — nothing to
+            // resolve; typeck owns the position check.
+            Item::Break(span) => HirItem::Break(span),
+            Item::Continue(span) => HirItem::Continue(span),
         };
         Ok(hir_item)
     }
@@ -1734,32 +1738,44 @@ impl Resolver {
         }
     }
 
+    /// The scope-first bare-name lookup shared by the value side
+    /// (`resolve_ident`) and the pattern side (`is_zero_payload_variant`,
+    /// 0.0.9 T01): when no binding of `name` is visible on the scope chain,
+    /// the name may still denote a declared enum variant (0.0.6 T04, D3).
+    /// Returns the owning enum's declaration and the variant so the value
+    /// side can build a constructor and the pattern side can ask for zero
+    /// payloads — pattern and value positions agree on what a bare name can
+    /// refer to because both walk this one lookup. The registry and the enum
+    /// table are populated together, so a registry hit always finds its
+    /// declaration; the `?` chain keeps the lookup total regardless.
+    fn lookup_unshadowed_variant(&self, name: &str) -> Option<(&EnumDeclHir, &EnumVariantHir)> {
+        if self.scopes.get(name).is_some() {
+            return None;
+        }
+        let enum_name = self.variant_to_enum.get(name)?;
+        let decl = self.enum_table.get(enum_name)?;
+        let variant = decl.variants.iter().find(|v| v.name == name)?;
+        Some((decl, variant))
+    }
+
     /// Resolve an identifier expression (variable or function reference).
     /// The recorded span is the *use* site, not the definition site.
     fn resolve_ident(&mut self, name: String, span: Span) -> Result<ExprHir, ()> {
         // 0.0.6 T04 (D3): a bare identifier that names an enum variant and is
         // not shadowed by a local binding, function, const or var resolves to
         // that variant's constructor, exactly as the dotted `Shape.Circle`
-        // spelling does. Scope lookup happens first, so a declared
-        // function/const/var with the same name wins (shadowing); only when
-        // the name is not a binding do we fall to the variant map.
-        if self.scopes.get(&name).is_none()
-            && let Some(enum_name) = self.variant_to_enum.get(&name).cloned()
-        {
-            let decl = self
-                .enum_table
-                .get(&enum_name)
-                .expect("variant map names a live enum");
-            let variant = decl
-                .variants
-                .iter()
-                .find(|v| v.name == name.as_str())
-                .expect("variant map names a declared variant");
+        // spelling does. The scope-first order lives in
+        // `lookup_unshadowed_variant`, shared with the pattern side (0.0.9
+        // T01) so both positions classify a bare name identically.
+        if let Some((decl, variant)) = self.lookup_unshadowed_variant(&name) {
+            let enum_name = decl.name.clone();
+            let payload_types = variant.payload_types.clone();
+            let arity = payload_types.len();
             return Ok(ExprHir::EnumCtor {
-                enum_name: decl.name.clone(),
+                enum_name,
                 variant_name: name,
-                payload_types: variant.payload_types.clone(),
-                arity: variant.payload_types.len(),
+                payload_types,
+                arity,
                 hir_id: self.next_hir_id(),
                 span,
             });
@@ -2307,16 +2323,17 @@ impl Resolver {
                 // 0.0.9 T01 (BUG-2, PLAN D1): a bare identifier pattern is a
                 // *variant reference* — not a binding — iff no binding of the
                 // name is visible (same-pattern earlier bindings and enclosing
-                // locals all live on the scope chain; the scope-first
-                // precedence is the same one `resolve_ident` applies on the
-                // value side) and the name is a zero-payload variant of a
-                // reachable enum. The name then never enters the pattern's
-                // binding namespace, so `when P(None, None)` no longer trips
-                // `DuplicateBinding`. The HIR shape is unchanged: typeck
-                // reclassifies the unshadowed bare identifier into
+                // locals all live on the scope chain) and the name is a
+                // zero-payload variant of a reachable enum. The scope-first
+                // precedence lives in `lookup_unshadowed_variant`, the same
+                // lookup `resolve_ident` applies on the value side, so the two
+                // positions always agree. The name then never enters the
+                // pattern's binding namespace, so `when P(None, None)` no
+                // longer trips `DuplicateBinding`. The HIR shape is unchanged:
+                // typeck reclassifies the unshadowed bare identifier into
                 // `TypedPatternHir::EnumVariant` via the scrutinee's type (the
                 // 0.0.6 T05 path), so coverage and lowering are unchanged.
-                if self.scopes.get(&name).is_none() && self.is_zero_payload_variant(&name) {
+                if self.is_zero_payload_variant(&name) {
                     // The ids are still allocated (ids stay contiguous) so a
                     // typeck fall-back to the binding path (a scrutinee of a
                     // non-enum type) keeps a coherent `binding_id`.
@@ -2405,17 +2422,15 @@ impl Resolver {
         }
     }
 
-    /// Whether `name` is a zero-payload variant of an enum reachable in scope.
-    /// The registry is the same `variant_to_enum` / `enum_table` pair the
-    /// value-side bare-variant constructor resolution uses (0.0.6 T04, D3),
-    /// so pattern and value positions always agree on what a bare name can
-    /// refer to. 0.0.9 T01 (BUG-2, PLAN D1).
+    /// Whether `name` is a zero-payload variant of an enum reachable in
+    /// scope — the shared [`Self::lookup_unshadowed_variant`] lookup (the
+    /// same `variant_to_enum` / `enum_table` pair the value-side
+    /// bare-variant constructor resolution uses, 0.0.6 T04, D3), so pattern
+    /// and value positions always agree on what a bare name can refer to.
+    /// 0.0.9 T01 (BUG-2, PLAN D1).
     fn is_zero_payload_variant(&self, name: &str) -> bool {
-        self.variant_to_enum
-            .get(name)
-            .and_then(|enum_name| self.enum_table.get(enum_name))
-            .and_then(|decl| decl.variants.iter().find(|v| v.name == name))
-            .is_some_and(|variant| variant.payload_types.is_empty())
+        self.lookup_unshadowed_variant(name)
+            .is_some_and(|(_, variant)| variant.payload_types.is_empty())
     }
 
     /// Register a pattern binding (identifier or Result-payload binding) in
@@ -2536,6 +2551,11 @@ impl Resolver {
                 let hir_expr = self.resolve_expr(*expr)?;
                 Ok(StmtHir::Expr(Box::new(hir_expr), has_semi))
             }
+            // 0.0.9 T03 (D4): `break` / `continue` name nothing — the keyword
+            // is already a token kind, so no identifier resolution applies.
+            // The position check (inside a loop body) is typeck's.
+            Stmt::Break(span) => Ok(StmtHir::Break(span)),
+            Stmt::Continue(span) => Ok(StmtHir::Continue(span)),
         }
     }
 }

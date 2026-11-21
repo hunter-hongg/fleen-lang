@@ -1,0 +1,13 @@
+// 0.0.9 T03 (PLAN D4): `break` is legal only inside a loop body of the
+// lexically enclosing function — a plain function body with no loop reports
+// `BreakOutsideLoop` at typeck (the parser accepts the statement shape
+// everywhere; the position check is typeck's).
+import std.io;
+
+func f(): int {
+    x = 0;
+    if x == 0 { break; }
+    x
+}
+
+func main(): int { std.io.println(f() as string); 0 }

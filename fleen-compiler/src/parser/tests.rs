@@ -523,6 +523,113 @@ mod tests {
         assert!(matches!(item, Item::Expr(Expr::While(_))));
     }
 
+    // ========== Break / Continue Statements (0.0.9 T03, D4) ==========
+
+    #[test]
+    fn parse_break_statement() {
+        // With and without the trailing `;` (ASI supplies one at EOF).
+        let ast = parse_str("break;");
+        assert!(matches!(ast.items[0], Item::Break(_)));
+        let ast = parse_str("break");
+        assert!(matches!(ast.items[0], Item::Break(_)));
+    }
+
+    #[test]
+    fn parse_continue_statement() {
+        let ast = parse_str("continue;");
+        assert!(matches!(ast.items[0], Item::Continue(_)));
+        let ast = parse_str("continue");
+        assert!(matches!(ast.items[0], Item::Continue(_)));
+    }
+
+    #[test]
+    fn parse_break_inside_while_block() {
+        let ast = parse_str("while c { break; }");
+        if let Item::Expr(Expr::While(w)) = &ast.items[0] {
+            assert_eq!(w.body.stmts.len(), 1);
+            assert!(matches!(w.body.stmts[0], Stmt::Break(_)));
+            assert!(w.body.tail_expr.is_none());
+        } else {
+            panic!("expected While expr, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_break_last_in_block_no_semicolon() {
+        // The last statement takes no semicolon: `}` immediately after the
+        // keyword (ASI rule 2 never inserts before `}`).
+        let ast = parse_str("while c { break }");
+        if let Item::Expr(Expr::While(w)) = &ast.items[0] {
+            assert!(matches!(w.body.stmts[0], Stmt::Break(_)));
+        } else {
+            panic!("expected While expr, got {:?}", ast.items[0]);
+        }
+        let ast = parse_str("for x in a { continue }");
+        if let Item::Expr(Expr::For(f)) = &ast.items[0] {
+            assert!(matches!(f.body.stmts[0], Stmt::Continue(_)));
+        } else {
+            panic!("expected For expr, got {:?}", ast.items[0]);
+        }
+    }
+
+    #[test]
+    fn parse_break_after_statement_on_next_line() {
+        // ASI interaction (D4): `break` on its own line starts a new
+        // statement — the previous statement's separator comes from ASI
+        // (rule 4 reads `break` as statement-starting). `x = 1` parses as
+        // a variable binding (top-level `=` binds).
+        let ast = parse_str("x = 1\nbreak\ny = 2");
+        assert_eq!(ast.items.len(), 3);
+        assert!(matches!(ast.items[0], Item::Decl(Decl::Var(_))));
+        assert!(matches!(ast.items[1], Item::Break(_)));
+        assert!(matches!(ast.items[2], Item::Decl(Decl::Var(_))));
+    }
+
+    #[test]
+    fn parse_rejects_break_as_value() {
+        // `break` is a statement, not an expression (D4): the grammar has
+        // no `break <value>` form, so the expression parser rejects it.
+        assert!(matches!(
+            parse_err("x = break;").kind,
+            ParseErrorKind::Expected { .. }
+        ));
+        assert!(matches!(
+            parse_err("1 + break;").kind,
+            ParseErrorKind::Expected { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_break_as_identifier() {
+        // Reserved word (D4's source breaking set): the diagnostic names
+        // the keyword instead of a statement-separator error.
+        let e = parse_err("break = 1;");
+        assert!(matches!(e.kind, ParseErrorKind::Expected { .. }));
+        assert!(e.to_string().contains("`break`"));
+        let e = parse_err("continue = 1;");
+        assert!(e.to_string().contains("`continue`"));
+    }
+
+    #[test]
+    fn parse_rejects_break_followed_by_expression() {
+        // One-line juxtaposition is illegal (`break 1`), same as every
+        // other statement shape.
+        assert!(matches!(
+            parse_err("break 1;").kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_break_inside_expression_position() {
+        // Even at statement level, a `break` glued to an expression is a
+        // separator error (`break\nx = 1` is the legal spelling).
+        assert!(matches!(
+            parse_err("while c { break x = 1; }").kind,
+            ParseErrorKind::ExpectedSemiOrNewStmt { .. }
+        ));
+    }
+
     // ========== For Expression (0.0.3 V04) ==========
 
     #[test]

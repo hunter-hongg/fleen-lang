@@ -1,0 +1,9 @@
+// 0.0.9 T03 (PLAN D4): `break` / `continue` are statements, not expressions
+// — the grammar has no `break <value>` form, so `x = break` is rejected by
+// the parser ("expected expression"), never reaching typeck.
+import std.io;
+
+func main(): int {
+    x = break;
+    0
+}

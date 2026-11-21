@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D6 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T02 implemented and green; T03–T07 not started.**
+> **Status: T01–T03 implemented and green; T04–T07 not started.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -184,21 +184,102 @@ its shape is now a valid-program case covered by the e2e valid fixture.
 
 ## T03 — Frontend: `break` / `continue` reserved words + loop-context checks (F3; D4)
 
-- [ ] Lexer: `break` / `continue` keywords (two new token kinds); reserved
+- [x] Lexer: `break` / `continue` keywords (two new token kinds); reserved
       word lists updated (source breaking change of 0.0.9, D4).
-- [ ] Parser: `break_stmt` / `continue_stmt` keyword statements (ASI
+- [x] Parser: `break_stmt` / `continue_stmt` keyword statements (ASI
       handles the trailing semicolon; they take no value).
-- [ ] Typeck: loop-context tracking — legal inside `while` bodies and `for`
+- [x] Typeck: loop-context tracking — legal inside `while` bodies and `for`
       bodies (both array and Range skeletons, including inline-iter expanded
       loops); `BreakOutsideLoop` / `ContinueOutsideLoop` at top level, in
       plain function bodies without a lexically enclosing loop, inside
       `choose` arm bodies, and across any function/`async` boundary (D4's
       lexical containment rule); `x = break` / break-as-expression rejected
       (statements, not expressions).
-- [ ] Errors: the two new variants with actionable spans (which loop is
-      missing) + hint text.
-- [ ] Tests: typeck unit tests per position above; parser tests (statement
+- [x] Errors: the two new variants with actionable spans + help text (the
+      lexical-containment rule — which boundaries do not count).
+- [x] Tests: typeck unit tests per position above; parser tests (statement
       shape, ASI interaction); e2e invalid set per PLAN §9.
+
+**As-built note (ASI membership)**: the keywords joined **both**
+`can_start_stmt` *and* `can_end_stmt`. The end-set membership is
+load-bearing and easy to miss: the parser has no newline information (ASI
+consumed it), so without `break` in `can_end_stmt`, rule 3 drops the
+newline after a `break` and `break` ⏎ `x = 1` reaches the parser as
+`break x = 1` — indistinguishable from same-line juxtaposition, which the
+statement parser must then reject. With the membership, ASI's output stays
+isomorphic ("semicolons everywhere the parser expects them") and the
+parser accepts the same three boundaries as every other statement shape:
+`;`, `}` (rule 2 never inserts before it — `{ break }` stays legal), EOF.
+The keywords deliberately stay out of `can_continue_expr`, so `x = 1 +` ⏎
+`break` joins as `break`-in-expression and dies with "expected expression".
+
+**As-built note (`x = break` is a parse error, not a typeck one)**: the
+card lists break-as-expression under Typeck, but per PLAN §3.3 ("they are
+statements, not expressions; the parser classifies them like any keyword
+statement") the grammar has no break-expression at any IR layer — there is
+no `Expr`/`ExprHir`/`TypedExprHir` variant to type-check. `x = break` dies
+in the expression parser ("expected expression, found break"), pinned by
+`parse_rejects_break_as_value` and e2e `break_as_value.fln`. Nothing
+reachable remains for typeck to check.
+
+**As-built note (top level)**: a top-level `break` parses (typeck owns the
+position check, so the shape is legal to parse everywhere statements are)
+through dedicated `Item::Break`/`Item::Continue` → `HirItem` →
+`TypedHirItem` variants; `typeck_item` routes them through the same shared
+check, where the depth is always 0. Lower skips the item variants like the
+pre-existing `TypedHirItem::Expr` skip — unreachable in a well-typed
+program because typeck rejects.
+
+**As-built note (loop context)**: one `loop_depth: usize` field on the
+`TypeChecker`; `while`/`for` bodies increment (both skeletons — the
+array/Range split is lower's desugar, so typeck sees every `for` the same
+way and accepts the keywords in any `for` body; whether the inline-iter
+closure-shaped expansion threads the edges is T04's decision to record);
+`choose` arm bodies and nested function declarations (the only in-body
+function boundary — `async` bodies are function bodies) **clear** it for
+their extent, so one non-zero test rejects all four positions through one
+shared `typeck_loop_jump`. The house collect-errors discipline made the
+save/restore-before-`?` order mandatory: an error inside a loop body must
+not leak the incremented (or cleared) depth into later functions — pinned
+by `loop_depth_is_not_leaked_across_functions` (first function's loop-body
+tail error + second function's bare `break` ⇒ both errors) and
+`choose_arm_depth_is_restored_after_an_arm_error` (an arm error must not
+leave the cleared depth behind; the `break` after the choose stays legal).
+
+**As-built note (lower interim)**: T04 owns the loop edges, so
+`lower_block`'s two new arms return the named, actionable defensive error
+(`unsupported feature: \`break\` (loop exit edges are not implemented yet)` —
+the T02 defensive-arm precedent) until T04 replaces them: a *legal*
+program containing the keywords passes typeck and fails at lower. The
+slots pass and the ownership walk gained no-op arms (no bindings, no
+values; the ownership liveness model is flow-insensitive to the jump and
+stays sound since a jump only shrinks the paths reaching later
+statements). No bytecode change (D6 holds trivially: nothing new reaches
+codegen until T04).
+
+Tests: lexer `tokenize_break_continue_keywords` /
+`tokenize_break_continue_prefix_identifiers`; ASI
+`break_starts_a_new_statement` / `break_before_rbrace_inserts_nothing` +
+the two decision-table updates; parser `parse_break_statement` /
+`parse_continue_statement` / `parse_break_inside_while_block` /
+`parse_break_last_in_block_no_semicolon` /
+`parse_break_after_statement_on_next_line` /
+`parse_rejects_break_as_value` / `parse_rejects_break_as_identifier` /
+`parse_rejects_break_followed_by_expression` /
+`parse_rejects_break_inside_expression_position`; typeck legal set
+(`break_in_while_body_is_legal`, `break_in_for_over_array_is_legal`,
+`continue_in_for_over_range_is_legal`, `continue_in_while_body_is_legal`,
+`break_binds_innermost_of_nested_loops`,
+`break_inside_loop_inside_choose_arm_is_legal`) and rejection set
+(top level, function without loop, choose arm ×2, nested `func` and
+`async func` boundary) plus the two leak pins; e2e invalid per PLAN §9 —
+`break_outside_loop.fln` (function without a loop),
+`continue_in_choose_arm.fln`, `break_across_function_boundary.fln`
+(nested `func`), `break_as_identifier.fln` (reserved word),
+`break_as_value.fln` (statement-not-expression). All gates green:
+`cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo
+test` (26 suites), `cargo doc --no-deps`; the 0.0.8 both-mode e2e matrix
+unchanged and green.
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D4, §3.3.

@@ -1,0 +1,8 @@
+// 0.0.9 T03 (PLAN D4, source breaking set): `break` / `continue` are
+// reserved words — using one as a binding name stops compiling with the
+// keyword-naming diagnostic (the 0.0.5/0.0.6 precedent).
+import std.io;
+
+break = 1;
+
+func main(): int { std.io.println("unreachable"); 0 }

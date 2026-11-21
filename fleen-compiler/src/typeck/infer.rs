@@ -695,6 +695,16 @@ pub struct TypeChecker {
     /// T03 (D3): trusted functions may contain unsafe ops and are callable
     /// from anywhere.
     fn_trusted_stack: Vec<bool>,
+    /// Number of loop bodies lexically enclosing the statement currently
+    /// being checked, *within the current function* (0.0.9 T03, D4).
+    /// `break` / `continue` are legal only when this is non-zero: a `choose`
+    /// arm body and a nested function declaration each reset it to 0 for
+    /// their extent (the arm / function boundary blocks the enclosing loop,
+    /// while a loop inside them re-establishes the depth). Every entry and
+    /// exit restores the saved depth *before* propagating an error with `?`
+    /// — errors are collected, so a leaked depth would misclassify every
+    /// later function (the same discipline as the `fn_*_stack` pops).
+    loop_depth: usize,
     /// Ref bindings already diagnosed by `RefInAsync`; a ref parameter is
     /// reported once at its declaration, so later uses do not repeat it.
     reported_ref_ids: HashSet<BindingId>,
@@ -741,6 +751,7 @@ impl TypeChecker {
             fn_async_stack: Vec::new(),
             fn_unsafe_stack: Vec::new(),
             fn_trusted_stack: Vec::new(),
+            loop_depth: 0,
             reported_ref_ids: HashSet::new(),
             reported_ptr_ids: HashSet::new(),
             binding_types: HashMap::new(),
@@ -1786,6 +1797,15 @@ impl TypeChecker {
                 self.check_discarded_partial(&typed)?;
                 Ok(TypedHirItem::Expr(typed))
             }
+            // 0.0.9 T03 (D4): a top-level `break` / `continue` is always an
+            // error — no loop can enclose a top-level item, so the same
+            // `loop_depth` test rejects it (the depth is 0 at item level).
+            // The `Ok` arm of the map is unreachable for a well-typed tree;
+            // the node rides through unchanged for lower's skip path.
+            HirItem::Break(span) => self.typeck_break(span).map(|_| TypedHirItem::Break(span)),
+            HirItem::Continue(span) => self
+                .typeck_continue(span)
+                .map(|_| TypedHirItem::Continue(span)),
         }
     }
 
@@ -1902,7 +1922,12 @@ impl TypeChecker {
             self.check_ptr_in_async(ret, None, func.span);
         }
         self.fn_ret_stack.push(ret_ty.clone());
-        let body_result = self.typeck_func_body(&func.body, ret_ty.as_ref());
+        // 0.0.9 T03 (D4): a function boundary (nested `func` / `async func`
+        // declaration included) blocks the enclosing loop context — the
+        // body starts with no loop open, so a `break` binds only to loops
+        // of the function it lexically belongs to.
+        let body_result =
+            self.with_loop_depth(0, |s| s.typeck_func_body(&func.body, ret_ty.as_ref()));
         self.fn_ret_stack.pop();
         // Pop before `?`: errors are collected, so a leaked flag would
         // misclassify every later function.
@@ -2138,8 +2163,59 @@ impl TypeChecker {
                 self.check_discarded_partial(&typed_expr)?;
                 Ok(TypedStmtHir::Expr(Box::new(typed_expr), *has_semi))
             }
+            // 0.0.9 T03 (D4): `break` / `continue` — legal only inside a
+            // loop body of the lexically enclosing function.
+            StmtHir::Break(span) => self.typeck_break(*span),
+            StmtHir::Continue(span) => self.typeck_continue(*span),
             StmtHir::Error => Ok(TypedStmtHir::Error),
         }
+    }
+
+    /// The position rule shared by `typeck_break` / `typeck_continue`
+    /// (0.0.9 T03, D4): both are unit-valued control-flow statements with
+    /// no type of their own, legal only while a loop body of the *lexically
+    /// enclosing function* is open (`loop_depth > 0`). A `choose` arm and a
+    /// nested function declaration reset the depth for their extent, so the
+    /// same non-zero test rejects every boundary crossing (top level, plain
+    /// function body, `choose` arm, nested function inside a loop) — one
+    /// rule, all four positions.
+    fn check_loop_jump_position(
+        &mut self,
+        outside_error: TypeckErrorKind,
+        span: Span,
+    ) -> Result<(), ()> {
+        if self.loop_depth == 0 {
+            self.add_error(outside_error, span);
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn typeck_break(&mut self, span: Span) -> Result<TypedStmtHir, ()> {
+        self.check_loop_jump_position(TypeckErrorKind::BreakOutsideLoop, span)?;
+        Ok(TypedStmtHir::Break(span))
+    }
+
+    fn typeck_continue(&mut self, span: Span) -> Result<TypedStmtHir, ()> {
+        self.check_loop_jump_position(TypeckErrorKind::ContinueOutsideLoop, span)?;
+        Ok(TypedStmtHir::Continue(span))
+    }
+
+    /// Run `f` with the loop depth set to `depth`, restoring the previous
+    /// depth before the returned `Result` escapes: errors are collected,
+    /// so a leaked depth (incremented or cleared) would misclassify every
+    /// later site — the same restore-before-`?` discipline as the
+    /// `fn_*_stack` pops.
+    fn with_loop_depth<T>(
+        &mut self,
+        depth: usize,
+        f: impl FnOnce(&mut Self) -> Result<T, ()>,
+    ) -> Result<T, ()> {
+        let saved = self.loop_depth;
+        self.loop_depth = depth;
+        let result = f(self);
+        self.loop_depth = saved;
+        result
     }
 
     /// Type check an expression.
@@ -2467,8 +2543,11 @@ impl TypeChecker {
         }
 
         // The body's value is discarded (while evaluates to unit), so the
-        // body never inherits the outer expected type.
-        let typed_body = self.typeck_block(&while_expr.body, None)?;
+        // body never inherits the outer expected type. The body is a loop
+        // body (0.0.9 T03, D4): `break` / `continue` are legal within it.
+        let typed_body = self.with_loop_depth(self.loop_depth + 1, |s| {
+            s.typeck_block(&while_expr.body, None)
+        })?;
 
         Ok(TypedExprHir::While(TypedExprWhileHir {
             condition: Box::new(typed_cond),
@@ -2537,7 +2616,12 @@ impl TypeChecker {
         self.binding_types
             .insert(for_expr.var_binding_id, elem_ty.clone());
 
-        let typed_body = self.typeck_block(&for_expr.body, None)?;
+        // The body is a loop body (0.0.9 T03, D4): `break` / `continue` are
+        // legal within it, for both iterable shapes (the array / Range split
+        // is a lowering concern, not a typeck one).
+        let typed_body = self.with_loop_depth(self.loop_depth + 1, |s| {
+            s.typeck_block(&for_expr.body, None)
+        })?;
         self.scopes.exit_scope();
 
         Ok(TypedExprHir::For(TypedExprForHir {
@@ -2591,7 +2675,11 @@ impl TypeChecker {
                 None => None,
             };
 
-            let typed_body = self.typeck_block(&arm.body, expected)?;
+            // The arm body is a `choose`-arm boundary (0.0.9 T03, D4):
+            // `break` / `continue` may not cross it to reach a loop outside
+            // the `choose`, so the loop depth is cleared for the arm's
+            // extent; a loop inside the arm re-establishes its own depth.
+            let typed_body = self.with_loop_depth(0, |s| s.typeck_block(&arm.body, expected))?;
 
             self.scopes.exit_scope();
 

@@ -96,6 +96,9 @@ fn collect_block(alloc: &mut SlotAlloc, block: &TypedBlockHir) {
                 }
             },
             TypedStmtHir::Expr(e, _) => collect_expr(alloc, e),
+            // 0.0.9 T03 (D4): `break` / `continue` reference no bindings.
+            TypedStmtHir::Break(_) => {}
+            TypedStmtHir::Continue(_) => {}
             TypedStmtHir::Error => {}
         }
     }

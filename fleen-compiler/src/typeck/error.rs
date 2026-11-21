@@ -296,6 +296,15 @@ pub enum TypeckErrorKind {
     /// A genuine function value as a statement stays legal (the marker is
     /// absent there); full calls as statements are untouched.
     PartialApplicationDiscarded { ty: Box<Type> },
+    // ---- 0.0.9 T03 (D4): loop-jump keywords ----
+    /// `break` outside a loop body of the lexically enclosing function
+    /// (top level, a plain function body, a `choose` arm, or a nested
+    /// function inside the loop — the arm / function boundary blocks the
+    /// enclosing loop).
+    BreakOutsideLoop,
+    /// `continue` outside a loop body of the lexically enclosing function.
+    /// Same rule shape as [`TypeckErrorKind::BreakOutsideLoop`].
+    ContinueOutsideLoop,
 }
 
 impl TypeckErrorKind {
@@ -942,6 +951,23 @@ impl TypeckErrorKind {
                      the callee declares); assign it, pass it on, or supply the \
                      remaining arguments",
                     ty.name_with(curry)
+                )
+            }
+            TypeckErrorKind::BreakOutsideLoop => {
+                write!(
+                    f,
+                    "`break` outside of a loop; help: `break` exits the innermost \
+                     enclosing `while` or `for` body of the current function — \
+                     a `choose` arm or a nested function boundary does not count"
+                )
+            }
+            TypeckErrorKind::ContinueOutsideLoop => {
+                write!(
+                    f,
+                    "`continue` outside of a loop; help: `continue` jumps to the \
+                     next iteration of the innermost enclosing `while` or `for` \
+                     body of the current function — a `choose` arm or a nested \
+                     function boundary does not count"
                 )
             }
         }
