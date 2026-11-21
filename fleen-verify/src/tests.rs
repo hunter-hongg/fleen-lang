@@ -2108,3 +2108,42 @@ fn partial_apply_rejected_below_v8() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.9 T07 regression: two Result-`choose`s with `otherwise` in one body
+// ---------------------------------------------------------------------------
+
+/// The T07 example bug: the second Result `choose`'s `IsErr` conditional is
+/// emitted into the first choose's merge block, which is not physically last
+/// (the first choose's fallback/err-entry blocks follow it in creation
+/// order). Without a spill the untaken (Ok) edge fell through into the
+/// earlier fallback body, and the verifier rightly reported a
+/// StackDepthMismatch. `spill_for_fallthrough` at the Result dispatch fixes
+/// the layout; this test pins it at the compile→verify boundary.
+#[test]
+fn t07_two_result_otherwise_chooses_in_one_body_verifies() {
+    let src = r#"
+func main(): int {
+    r1: Result<int, int> = Ok(7);
+    a = choose r1 {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    print(a as string);
+    r2: Result<int, int> = Ok(9);
+    b = choose r2 {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    print(b as string);
+    0
+}
+"#;
+    let module = fleen_compiler::compile(src).expect("compile");
+    assert_eq!(module.version, MODULE_VERSION);
+    assert!(
+        crate::verify(&module).is_ok(),
+        "{:?}",
+        crate::verify(&module)
+    );
+}

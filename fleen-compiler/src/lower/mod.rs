@@ -2721,6 +2721,16 @@ impl<'a> FnBodyCx<'a> {
                 .all(flat_ident_payload);
 
         self.lower_expr_into(fb, &e.scrutinee)?;
+        // The `IsErr` conditional's untaken (Ok) edge falls through to a
+        // block created below (the simple path's first arm block; the general
+        // path's pre-created `ok_entry`). When the prologue lands in a
+        // pre-existing block — a second `choose` in the same body emits into
+        // the first one's merge, and a nested `choose` scrutinee ends in its
+        // own merge — earlier constructs' not-yet-started blocks can sit
+        // physically between, so spill into a fresh physically-last tail
+        // first (a plain `Jump`, depth-preserving). A no-op when the current
+        // block is already last (the common single-choose shape).
+        fb.spill_for_fallthrough();
         let dk = dup_kind(&e.scrutinee.ty());
         fb.emit(MirInstr::new(dk.clone(), e.scrutinee.span()));
         fb.emit(MirInstr::new(MirInstrKind::IsErr, e.scrutinee.span()));

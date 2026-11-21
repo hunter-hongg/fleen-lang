@@ -1,0 +1,22 @@
+// 0.0.9 T07 regression: TWO Result-`choose`s with `otherwise` in ONE body.
+// The second choose's `IsErr` dispatch is emitted into the first choose's
+// merge block, which is not physically last; without lower's
+// spill_for_fallthrough the untaken (Ok) edge fell into the earlier
+// fallback body and the verifier rejected the module (StackDepthMismatch).
+// Companion fixture to `result_choose_otherwise.fln` (one otherwise-choose
+// per function).
+import std.str;
+
+func main(): int {
+    a = choose std.str.index_of("héllo", "l") {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    print(a as string);
+    b = choose std.str.index_of("hello", "z") {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    print(b as string);
+    0
+}

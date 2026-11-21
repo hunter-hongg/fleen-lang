@@ -1823,6 +1823,57 @@ func f(): int {
 }
 
 #[test]
+fn t07_second_result_choose_ok_entry_is_physically_next() {
+    // 0.0.9 T07 regression: the second Result `choose` in one body emits its
+    // `IsErr` dispatch into the first choose's merge block — which is not
+    // physically last (the first choose's fallback body and err entry follow
+    // it in creation order). Without a spill, the untaken (Ok) edge fell
+    // through into the earlier fallback body instead of the second choose's
+    // ok entry; the verifier caught it as a StackDepthMismatch. The dispatch
+    // must spill first so every choose's ok entry is the block physically
+    // next after its `IsErr` conditional.
+    let src = r#"
+func main(): int {
+    r1: Result<int, int> = Ok(7);
+    a = choose r1 {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    r2: Result<int, int> = Ok(9);
+    b = choose r2 {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    a + b
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "main");
+    let mut hits = 0;
+    for i in 0..f.blocks.len().saturating_sub(1) {
+        let dispatches = matches!(
+            (
+                f.blocks[i].instrs.last().map(|instr| &instr.kind),
+                &f.blocks[i].terminator
+            ),
+            (Some(MirInstrKind::IsErr), Terminator::JumpIfTrue(_))
+        );
+        if dispatches {
+            let next = &f.blocks[i + 1];
+            assert!(
+                matches!(
+                    next.instrs.first().map(|instr| &instr.kind),
+                    Some(MirInstrKind::UnwrapOk)
+                ),
+                "the block physically next after a Result choose's IsErr dispatch must be its ok entry"
+            );
+            hits += 1;
+        }
+    }
+    assert_eq!(hits, 2, "both chooses' dispatches must be checked");
+}
+
+#[test]
 fn t02_result_choose_first_wildcard_arm_wins() {
     // Several always-matching arms: the first one wins — the scalar path's
     // sequential first-match semantics. The partition must not let a later
