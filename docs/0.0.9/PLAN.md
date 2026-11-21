@@ -1,8 +1,9 @@
 # 0.0.9 — Small Repairs: Pattern Fix, Result-`choose` Completion, `break`/`continue`, std.str Batch
 
-> **Codename**: TBD (holder's call; lineage 0.0.1 Swift Fox 🦊, 0.0.2 Hermit
-> Crab 🐚, 0.0.3 Busy Beaver 🦫, 0.0.4 Patient Ants 🐜, 0.0.5 Careful
-> Hedgehog 🦔, 0.0.7 Mantis Shrimp 🦐, 0.0.8 Cheeky Hamster 🐹).
+> **Codename**: **Mending Weaverbird 🪡** (settled at the release gate,
+> holder's call; lineage 0.0.1 Swift Fox 🦊, 0.0.2 Hermit Crab 🐚, 0.0.3 Busy
+> Beaver 🦫, 0.0.4 Patient Ants 🐜, 0.0.5 Careful Hedgehog 🦔, 0.0.7 Mantis
+> Shrimp 🦐, 0.0.8 Cheeky Hamster 🐹).
 >
 > **Goal**: a repair-and-fill milestone. One real bug fix (BUG-2), one
 > long-deferred semantic completion (Result-`choose` `otherwise`), two

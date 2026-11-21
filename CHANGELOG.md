@@ -1,9 +1,8 @@
 ## [0.0.9] - 2026-11-21
 
-Small repairs (PLAN D1–D7; codename TBD — settled at the release gate,
-holder's call). Breaking set: `break` / `continue` become reserved words.
-No bytecode change (D6): the version stays v8, no new opcodes, no table
-changes.
+Small repairs (PLAN D1–D7; codename **Mending Weaverbird 🪡**). Breaking set:
+`break` / `continue` become reserved words. No bytecode change (D6): the
+version stays v8, no new opcodes, no table changes.
 
 ### Added
 - **Zero-payload variant patterns are variant references** (BUG-2 fix, D1):

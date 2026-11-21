@@ -1,9 +1,9 @@
 # 0.0.9 demo — the small-repairs milestone
 
 One single-file program exercising the 0.0.9 feature set (PLAN D1–D7;
-codename TBD at the T07 gate, settled before the release tag). No bytecode
-change this milestone (D6): everything here runs on the 0.0.8 v8 VM rules,
-and a file that encodes no partial call stays bytecode-v7.
+codename **Mending Weaverbird 🪡**). No bytecode change this milestone (D6):
+everything here runs on the 0.0.8 v8 VM rules, and a file that encodes no
+partial call stays bytecode-v7.
 
 - **`repairs_demo.fln`** — the four repair fronts in one `main`:
   1. **BUG-2 fix (D1/D7)** — a zero-payload variant pattern is a variant

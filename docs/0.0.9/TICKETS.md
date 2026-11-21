@@ -673,7 +673,9 @@ hash check.
 **As-built note (codename deferred)**: the holder chose at the T07 session
 to keep the codename **TBD** and settle it at the release gate (the card
 allows "before the release commit"); the CHANGELOG header and the
-`examples/0.0.9/README.md` carry the TBD note.
+`examples/0.0.9/README.md` carry the TBD note. **Settled at the release
+gate: Mending Weaverbird 🪡** (PLAN header, CHANGELOG `[0.0.9]`,
+`examples/0.0.9/README.md`, `release/0.0.9/RELEASE_NOTES.md`).
 
 ---
 
