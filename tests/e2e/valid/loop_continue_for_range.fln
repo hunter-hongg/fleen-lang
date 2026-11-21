@@ -1,0 +1,13 @@
+// 0.0.9 T04: `continue` in a `for` over a Range skips to the next iteration
+// (the index still advances — no infinite loop).
+import std.collection.range;
+
+func main(): int {
+    t = 0;
+    for i in range_from(0, 6) {
+        if i % 2 == 0 { continue; }
+        t = t + i;
+    }
+    print(t as string);
+    0
+}

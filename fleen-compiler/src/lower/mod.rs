@@ -318,6 +318,7 @@ impl LowerCtx {
                 lcx: &mut *self,
                 slots,
                 is_async: f.is_async,
+                loop_edges: Vec::new(),
             };
             // 0.0.4 T05: an `async func`'s code begins with `AsyncStart`, the
             // call boundary that packages the frame's parameters into a
@@ -907,6 +908,49 @@ impl InlineIterKind {
     }
 }
 
+/// Active jump edges of the innermost enclosing loop (0.0.9 T04, D6).
+///
+/// `break` exits the loop, `continue` jumps to its next-iteration edge.
+/// Both target blocks are created **after** the body is lowered — the head's
+/// conditional fallthrough must land on the physically-next block (the body,
+/// cfg.rs §6.3), so nothing may be created between head and body. The jumps
+/// are therefore deferred: `lower_block` records each jumping block via
+/// `jump_later`, and the loop lowering `resolve`s them once the target
+/// blocks exist (the `lower_if` `branch_jumps` mechanism).
+#[derive(Default)]
+struct LoopEdges {
+    /// Blocks terminated with a pending `Jump` on `break`, resolved to the
+    /// loop's exit block.
+    breaks: Vec<BlockId>,
+    /// Blocks terminated with a pending `Jump` on `continue`, resolved to
+    /// the next-iteration edge (a `while`'s condition head; a `for`'s
+    /// index-advance block).
+    continues: Vec<BlockId>,
+}
+
+impl LoopEdges {
+    /// Resolve the deferred edge jumps once the loop's target blocks exist
+    /// (0.0.9 T04): every recorded `break` lands on `exit`; every `continue`
+    /// on `next_iter` (a `while`'s condition head; a `for`'s index-advance
+    /// block). `next_iter` is `None` only when no `continue` was recorded —
+    /// a `for` without one keeps the inline increment, so no advance block
+    /// exists to resolve to.
+    fn resolve(self, fb: &mut FnBuilder, exit: BlockId, next_iter: Option<BlockId>) {
+        for b in self.breaks {
+            fb.resolve(b, exit);
+        }
+        debug_assert!(
+            next_iter.is_some() || self.continues.is_empty(),
+            "a recorded `continue` implies an advance block to resolve to"
+        );
+        if let Some(target) = next_iter {
+            for c in self.continues {
+                fb.resolve(c, target);
+            }
+        }
+    }
+}
+
 /// Per-function lowering context.
 struct FnBodyCx<'a> {
     lcx: &'a mut LowerCtx,
@@ -915,6 +959,14 @@ struct FnBodyCx<'a> {
     /// builtins (`std.io.sleep` / `std.async.yield_now`) lower to a trailing
     /// `Suspend` only inside an async body; in a sync body they are no-ops.
     is_async: bool,
+    /// Stack of active loop edges (0.0.9 T04): each `while`/`for` pushes its
+    /// edges before lowering its body and pops them after, so `break`/
+    /// `continue` bind to the innermost loop. Typeck clears its loop depth at
+    /// `choose` arms and nested function declarations (D4's lexical
+    /// containment rule), so no boundary crossing ever reaches lower — a
+    /// failed body lowering aborts the whole compile (`?`), so the popped
+    /// state cannot leak into a later function.
+    loop_edges: Vec<LoopEdges>,
 }
 
 impl<'a> FnBodyCx<'a> {
@@ -1001,28 +1053,11 @@ impl<'a> FnBodyCx<'a> {
                         fb.emit(MirInstr::new(MirInstrKind::Pop, e.span()));
                     }
                 }
-                // 0.0.9 T03 (D4): interim defensive arms — T04 owns the loop
-                // exit / continue edges, so a *legal* program containing the
-                // keywords passes typeck and fails here until then (the T02
-                // defensive-arm precedent: a named, actionable error beats a
-                // dropped statement). No bytecode change (D6 holds trivially:
-                // nothing new reaches codegen yet).
-                TypedStmtHir::Break(span) => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "`break` (loop exit edges are not implemented yet)",
-                        },
-                        *span,
-                    ));
-                }
-                TypedStmtHir::Continue(span) => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::UnsupportedFeature {
-                            feature: "`continue` (loop exit edges are not implemented yet)",
-                        },
-                        *span,
-                    ));
-                }
+                // 0.0.9 T04 (D4/D6): both keyword statements defer a jump on
+                // the innermost loop's edges and open the dead continuation
+                // block (see `lower_loop_jump`).
+                TypedStmtHir::Break(_) => self.lower_loop_jump(fb, false),
+                TypedStmtHir::Continue(_) => self.lower_loop_jump(fb, true),
                 TypedStmtHir::Error => {}
             }
         }
@@ -1031,6 +1066,56 @@ impl<'a> FnBodyCx<'a> {
             None => fb.emit(MirInstr::new(MirInstrKind::Unit, block.span)),
         }
         Ok(())
+    }
+
+    /// Lower a `break` / `continue` statement (0.0.9 T04, D4/D6): record a
+    /// deferred jump on the innermost loop's exit / next-iteration edge, then
+    /// open a fresh block for whatever the emission still produces.
+    ///
+    /// Typeck guarantees the keyword reaches lower only inside a loop body
+    /// (`BreakOutsideLoop` / `ContinueOutsideLoop` otherwise), so the
+    /// innermost loop's edges are on the stack. `break`/`continue` are
+    /// statements: the current depth equals the body-entry depth, which is
+    /// exactly the entry depth of the edge target (its other predecessors —
+    /// the condition's resolved jump, the body's normal fall-out — sit at
+    /// the same depth), so both edges are verify-clean by construction. The
+    /// target blocks are created after the body (fallthrough discipline, see
+    /// `LoopEdges`), so the jump is deferred and resolved there.
+    ///
+    /// The jump terminates the current block; lowering continues into a
+    /// fresh block, which is unreachable (nothing jumps to it). Everything
+    /// this block still emits (a trailing unit, the caller's continuation —
+    /// body-value `Pop`, back edge, merge resolution) lands in that dead
+    /// subgraph instead of after a live terminator, where codegen would run
+    /// it on the reachable path — and instead of overwriting the just-
+    /// emitted jump (a caller like `lower_if` ends each branch with its own
+    /// jump to the merge).
+    fn lower_loop_jump(&mut self, fb: &mut FnBuilder, is_continue: bool) {
+        let jump = fb.jump_later();
+        let edges = match self.loop_edges.last_mut() {
+            Some(edges) => edges,
+            // Typeck rejects the keyword outside a loop body, and every
+            // `while`/`for` pushes its edges before lowering its body.
+            None => unreachable!("loop-edge statement outside a loop body"),
+        };
+        if is_continue {
+            edges.continues.push(jump);
+        } else {
+            edges.breaks.push(jump);
+        }
+        let dead = fb.new_block();
+        fb.start(dead);
+    }
+
+    /// Pop the edges of the loop whose body just finished lowering (0.0.9
+    /// T04). Each `while`/`for` pushes immediately before `lower_block` and
+    /// pops right after; a body error aborts the whole compile (`?`) before
+    /// this point, so the stack top is always this loop's edges.
+    fn pop_loop_edges(&mut self) -> LoopEdges {
+        match self.loop_edges.pop() {
+            Some(edges) => edges,
+            None => unreachable!("loop edges pushed before the body lowering"),
+        }
     }
 
     /// Lower an expression; its value is left on the stack.
@@ -1302,13 +1387,24 @@ impl<'a> FnBodyCx<'a> {
                 let c = fb.jump_if_false_later();
                 let body = fb.new_block();
                 fb.start(body);
+                // 0.0.9 T04: while the body lowers, `break`/`continue` jump
+                // to this loop's edges (`continue` re-enters the condition
+                // head). Every edge is entered at the head depth — the body
+                // value's push/pop stays inside the body-tail flow below, so
+                // it never contributes to an edge entry.
+                self.loop_edges.push(LoopEdges::default());
                 self.lower_block(fb, &e.body)?;
+                let edges = self.pop_loop_edges();
                 fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
                 fb.jump(head);
                 let end = fb.new_block();
                 fb.start(end);
                 fb.emit(MirInstr::new(MirInstrKind::Unit, e.span));
                 fb.resolve(c, end);
+                // The exit block exists only now (created after the body so
+                // the head's conditional fallthrough lands on it) — patch the
+                // deferred edge jumps into it.
+                edges.resolve(fb, end, Some(head));
             }
             // 0.0.3 V04: `for` — desugared here (never in the parser: parse
             // emits a real `ExprFor` node, so no phase is skipped).
@@ -1909,16 +2005,25 @@ impl<'a> FnBodyCx<'a> {
     /// <eval iterable>; StoreLocal __it      ; evaluated once (DESIGN.md §6)
     /// __i = <start>; __count = <bound>      ; hoisted out of the loop
     /// L_head: LoadLocal __i; LoadLocal __count; Lt; JumpIfFalse L_end
-    /// L_body: x = <element copy>; <body>; Pop
-    ///         LoadLocal __i; Const 1; IAdd; StoreLocal __i; Jump L_head
+    /// L_body: x = <element copy>; <body>; Pop; <advance>; Jump L_head
     /// L_end:  Unit
     /// ```
+    ///
+    /// `<advance>` is `LoadLocal __i; Const 1; IAdd; StoreLocal __i`. It
+    /// stays inline in the body's tail flow — the 0.0.8 layout, so a
+    /// `continue`-free loop's bytes are unchanged — unless the body contains
+    /// a `continue`, in which case it becomes its own block: `Jump L_incr`
+    /// ends the tail flow and `L_incr: <advance>; Jump L_head` (0.0.9 T04).
     ///
     /// The head block is dedicated (exactly like `while`) so that the back
     /// edge re-enters only the bound check — otherwise the first entry
     /// (carrying the merge value of the surrounding context) and a back-edge
     /// entry would disagree on stack depth and the verifier would rightly
     /// report `StackDepthMismatch`.
+    ///
+    /// 0.0.9 T04: `L_incr` (when present) is also the `continue` edge and
+    /// `L_end` the `break` edge (`LoopEdges`); both are entered at the head
+    /// depth.
     fn lower_for(&mut self, fb: &mut FnBuilder, e: &TypedExprForHir) -> Result<(), LowerError> {
         // Synthetic slots are allocated by *number* (`fresh`), never by name,
         // so a user binding can never collide with them — the `__`-prefixed
@@ -1994,10 +2099,35 @@ impl<'a> FnBodyCx<'a> {
             }
         }
         fb.emit(MirInstr::new(MirInstrKind::StoreLocal(var_slot), e.span));
+        // 0.0.9 T04: while the body lowers, `break`/`continue` jump to this
+        // loop's edges. `continue` re-enters the index advance — its own
+        // block below, shared with the body's normal fall-out (jumping
+        // straight to the head would skip the increment and loop forever).
+        // Both entries sit at the head depth: the body value's push/pop
+        // stays inside the body-tail flow, so any statement boundary in the
+        // body is at the body-entry depth.
+        self.loop_edges.push(LoopEdges::default());
         self.lower_block(fb, &e.body)?;
+        let edges = self.pop_loop_edges();
         // The body's value (its tail expression) is discarded: `for` is a
         // statement whose value is `unit`.
         fb.emit(MirInstr::new(MirInstrKind::Pop, e.span));
+        // Content-driven layout (0.0.9 T04): the index advance gets its own
+        // block only when the body recorded a `continue` — that edge must
+        // land on the increment (jumping straight to the head would skip it
+        // and loop forever), which means splitting it out of the body's tail
+        // flow. A `continue`-free body keeps the 0.0.8 layout: the advance
+        // stays in the tail flow and the module's bytes are unchanged.
+        let incr = if edges.continues.is_empty() {
+            None
+        } else {
+            let incr = fb.new_block();
+            fb.jump(incr);
+            fb.start(incr);
+            Some(incr)
+        };
+        // The advance itself: entered at the head depth from the body's
+        // normal fall-out and from every `continue`.
         fb.emit(MirInstr::new(MirInstrKind::LoadLocal(idx), e.span));
         fb.emit(MirInstr::new(MirInstrKind::ConstInt(1), e.span));
         fb.emit(MirInstr::new(MirInstrKind::IAdd, e.span));
@@ -2008,6 +2138,10 @@ impl<'a> FnBodyCx<'a> {
         fb.start(end);
         fb.emit(MirInstr::new(MirInstrKind::Unit, e.span));
         fb.resolve(cond, end);
+        // The exit / advance blocks exist only now (created after the body
+        // so the head's conditional fallthrough lands on it) — patch the
+        // deferred `break` / `continue` jumps into them.
+        edges.resolve(fb, end, incr);
         Ok(())
     }
 

@@ -1,0 +1,10 @@
+// 0.0.9 T04: `continue` in a `for` over an array skips to the next element.
+func main(): int {
+    t = 0;
+    for x in [1, 2, 3, 4] {
+        if x == 2 { continue; }
+        t = t + x;
+    }
+    print(t as string);
+    0
+}

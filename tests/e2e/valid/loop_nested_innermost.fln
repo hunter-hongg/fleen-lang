@@ -1,0 +1,19 @@
+// 0.0.9 T04: a `break` inside a `for` nested in a `while` binds to the
+// innermost loop — the `while` still runs all its iterations.
+import std.collection.range;
+
+func main(): int {
+    hits = 0;
+    i = 0;
+    while i < 3 {
+        i = i + 1;
+        for j in range_from(0, 10) {
+            if j == 2 { break; }
+            hits = hits + 10;
+        }
+        hits = hits + 1;
+    };
+    print(i as string);
+    print(hits as string);
+    0
+}

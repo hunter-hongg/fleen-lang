@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D6 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T03 implemented and green; T04–T07 not started.**
+> **Status: T01–T04 implemented and green; T05–T07 not started.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -288,27 +288,121 @@ unchanged and green.
 
 ## T04 — Lower: loop exit / continue edges (F3; D6)
 
-- [ ] `lower_while` and both `lower_for` skeletons (array / Range) pre-create
+- [x] `lower_while` and both `lower_for` skeletons (array / Range) pre-create
       an exit block and a continue-edge target; `break` → `Jump` exit,
       `continue` → `Jump` continue edge. Innermost loop binds (nested loops
       each carry their own edges; a stack of active edges in the `FnBuilder`
       or the typeck-checked context carries through).
-- [ ] Stack discipline: at both edges the stack depth equals the loop-head
+- [x] Stack discipline: at both edges the stack depth equals the loop-head
       depth; apply the BUG-1 spill rule (`spill_for_fallthrough`) at every
       conditional terminator inside a loop body — verify-clean by
       construction, proven by the e2e set.
-- [ ] Inline-iter expanded loops (`map`/`filter`/`foldl`/`foldr`/`take` /
+- [x] Inline-iter expanded loops (`map`/`filter`/`foldl`/`foldr`/`take` /
       Range inline lowering): `break`/`continue` inside the closure-shaped
       expansion either work (edges threaded) or are a clean typeck rejection
       — decide by implementation shape, record the outcome here, no silent
       behavior.
-- [ ] Loop-as-expression: loops are unit-valued (0.0.1 posture) — `break`
+- [x] Loop-as-expression: loops are unit-valued (0.0.1 posture) — `break`
       exits produce unit; the merge block after the loop is unchanged.
-- [ ] Tests: lower unit tests for while/array-for/Range-for shapes; e2e
+- [x] Tests: lower unit tests for while/array-for/Range-for shapes; e2e
       valid — `break` in `while`, `continue` in `for`-over-Range,
       `continue` in `for`-over-array, nested loops (innermost wins),
       `break` inside `if` inside `while`; e2e invalid — the T03 set
       end-to-end.
+
+**As-built note (deferred edges, not literal pre-creation)**: the card's
+"pre-create an exit block" cannot be done *physically* for the exit (and the
+`for` advance) target — cfg.rs §6.3 pins a conditional's untaken edge to the
+*physically next* block, so nothing may be created between the loop head and
+its body, or the condition-true path would fall into the wrong block. The
+edges are instead **deferred** (the `lower_if` `branch_jumps` mechanism,
+D6's "resolve-after-the-fact terminator patching"): the `break`/`continue`
+arm terminates its block with `jump_later()` and records the block in
+`LoopEdges { breaks, continues }` (a stack field on `FnBodyCx`, pushed
+before the body lowering and popped after — innermost binding; lower is
+fail-fast so an error mid-body cannot leak state into a later function);
+after the body, `lower_while` creates the exit block and resolves breaks →
+exit and continues → head, and `lower_for` creates the exit block and —
+**content-driven** — the advance block (`L_incr` =
+`[LoadLocal __i; Const 1; IAdd; StoreLocal __i]`, split out of the body's
+tail flow) only when the body actually recorded a `continue`: that edge
+must land on the increment (jumping straight to the head would skip it and
+loop forever), and only the split makes that landing possible. A
+`continue`-free body keeps the 0.0.8 layout — the advance stays inline in
+the tail flow — so such modules stay byte-identical to their pre-0.0.9
+encoding (0.0.8 D16's content-driven rule applied to the layout).
+`L_incr` is entered at the head depth from both the body's fall-out and
+every `continue` (the body value's push/pop stays inside the body-tail
+flow). The shared mechanics live in three helpers: `lower_loop_jump` (one
+body for the `Break`/`Continue` arms — deferred jump, edge record, dead
+continuation), `pop_loop_edges` (the push/pop discipline, its
+typeck-guarantee invariants stated as `unreachable!` per SPEC §4 — the
+interim `.expect`s are gone, SPEC §11 clean), and `LoopEdges::resolve`
+(the patch step shared by `lower_while` and `lower_for`).
+
+**As-built note (the dead-continuation rule)**: the `break`/`continue` jump
+is a block terminator; everything the same block still emits (a trailing
+unit, the caller's continuation — body-value `Pop`, back edge, a caller
+like `lower_if` ending each branch with its own jump to the merge) must
+never follow a live terminator — codegen places block instructions before
+the terminator's bytes, so trailing instructions would execute on the
+reachable path, and a later jump would **overwrite** the break jump
+entirely (silently turning `break` into a jump back into the loop). The
+arm therefore opens a fresh block immediately after the jump; nothing
+reaches it, the verifier's worklist (propagation from pc 0) never visits
+it, and the dead subgraph absorbs the rest of the emission. Pinned by
+`t04_statements_after_break_land_in_dead_code` (the live block is
+instruction-free; the dead statement exists in the unreachable block) and
+`t04_break_jumps_to_while_exit_block` (the jump is the block's whole
+terminator).
+
+**As-built note (inline-iter decision)**: no edges threaded — by
+implementation shape there is nothing to thread. `lower_inline_iter`
+emits only expressions and a `Call` to the callback function value; no
+user statement is ever lowered inside the closure-shaped expansion, so
+`TypedStmtHir::Break`/`Continue` cannot reach it. The callback body is its
+own function, where typeck's lexical-containment rule (D4) rejects the
+keywords as `BreakOutsideLoop`/`ContinueOutsideLoop` — the clean typeck
+rejection. No defensive arm needed (no reachable path), no silent
+behavior.
+
+**As-built note (loop-as-expression + fixtures)**: unchanged — the exit
+block still emits one `Unit` (the loop's value), entered at the head depth
+from the condition's resolved jump and every `break`. e2e valid:
+`tests/e2e/valid/loop_break_while.fln` (4), `loop_continue_for_range.fln`
+(9), `loop_continue_for_array.fln` (8), `loop_nested_innermost.fln`
+(`for`-over-Range inside `while`, innermost binding: 3/63),
+`loop_break_inside_if.fln` (`break` two `if` levels deep: 3); the T03
+e2e invalid set (`break_outside_loop`, `continue_in_choose_arm`,
+`break_across_function_boundary`, `break_as_identifier`,
+`break_as_value`) already pins the rejection shapes end-to-end. Lower unit
+tests: the five `t04_*` above plus
+`t04_for_range_continue_targets_index_advance_block` (Range skeleton,
+imported `range_from`), and the three new functions in
+`lower_block_entry_stack_depths_are_consistent` (`break_while`,
+`continue_for`, `nested_loops`) put every edge entry through the
+entry-depth worklist proof. The two pre-existing `for` shape tests
+(`lower_for_array_desugar_instruction_by_instruction`,
+`lower_for_range_desugar_uses_range_bounds_once`) keep their 0.0.8
+expectations — their loops record no `continue`, so the inline advance is
+the pinned layout (the split shape is pinned by the `t04_for_*` tests
+above). The committed v3 compat fixture
+`tests/fixtures/v3/aggregate.flnc` needed **no** regeneration: its two
+`for` loops record no `continue`, so the content-driven layout keeps the
+module byte-identical to its committed bytes (a re-run of
+`regenerate_fixtures` diffs empty; v2 fixture untouched — no loops).
+Bytecode gate (PLAN §9): no version bump —
+`fleen-vm/tests/loop_bytecode.rs` compiles the loop fixtures in-process
+and pins `MODULE_VERSION` (v7, 0.0.8 D13's content-driven rule). §9's
+"writers emit v8" and D6's "writers keep emitting v8" resolve to that
+default for these fixtures: none encodes a `PartialApply`, so lifting to
+v8 would misdescribe the content; the rule D6 keeps is exactly 0.0.8's
+content-driven bump (recorded deviation, no new opcode reaches the
+stream).
+
+All gates green: `cargo fmt -- --check`, `cargo clippy --all-targets -D
+warnings`, `cargo test`, `cargo doc --no-deps`; the 0.0.8 both-mode e2e
+matrix unchanged and green.
 
 **Depends on**: T03.
 **Refs**: PLAN §1 D4/D6, §3.3.

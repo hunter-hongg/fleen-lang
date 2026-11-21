@@ -1,0 +1,13 @@
+// 0.0.9 T04: `break` two `if` levels deep inside a `while` — the jump edges
+// stay verify-clean through the nested conditional terminators.
+func main(): int {
+    x = 0;
+    while x < 100 {
+        x = x + 1;
+        if x == 3 {
+            if true { break; }
+        }
+    };
+    print(x as string);
+    0
+}

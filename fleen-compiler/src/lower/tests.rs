@@ -899,6 +899,41 @@ func total_all(xs: [int]): int {
     }
     t
 }
+
+// 0.0.9 T04: the loop exit / continue edges must hold the same discipline —
+// every edge entry sits at the loop-head depth.
+func break_while(limit: int): int {
+    x = 0;
+    while x < limit {
+        if x == 2 { break; }
+        x = x + 1;
+    };
+    x
+}
+
+func continue_for(xs: [int]): int {
+    t = 0;
+    for x in xs {
+        if x == 2 { continue; }
+        t = t + x;
+    }
+    t
+}
+
+func nested_loops(xs: [int]): int {
+    hits = 0;
+    i = 0;
+    while i < 3 {
+        i = i + 1;
+        for x in xs {
+            if x == 1 { continue; }
+            if x == 2 { break; }
+            hits = hits + x;
+        }
+        hits = hits + 1;
+    };
+    hits
+}
 "#;
     let mir = lower_src(src);
     let func_params: std::collections::HashMap<FuncId, u16> =
@@ -999,6 +1034,274 @@ func f(): int {
                 | Terminator::JumpIfTrue(_)
         ));
     }
+}
+
+// =========================================================================
+// 0.0.9 T04: loop exit / continue edges (D6)
+// =========================================================================
+
+#[test]
+fn t04_break_jumps_to_while_exit_block() {
+    let src = r#"
+func f(): int {
+    x = 0;
+    while x < 10 {
+        break;
+    };
+    x
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    // The exit is the block the condition's JumpIfFalse resolves to.
+    let exit = f
+        .blocks
+        .iter()
+        .find_map(|b| match b.terminator {
+            Terminator::JumpIfFalse(t) => Some(t),
+            _ => None,
+        })
+        .expect("while exit via JumpIfFalse");
+    // The `break` is an unconditional Jump to the same exit block, deferred
+    // (`LoopEdges`) and resolved once the exit block exists.
+    let breaks: Vec<&MirBlock> = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == exit))
+        .collect();
+    assert_eq!(
+        breaks.len(),
+        1,
+        "exactly one `break` edge (unconditional Jump) targets the exit block"
+    );
+    // The jump is the block terminator: nothing may follow it in its own
+    // block (the trailing unit and the body-value `Pop` go to the dead
+    // continuation, or codegen would run them on the reachable path).
+    assert!(
+        breaks[0].instrs.is_empty(),
+        "the `break` jump must be its block's terminator, with no trailing instructions"
+    );
+}
+
+#[test]
+fn t04_continue_jumps_to_while_condition_head() {
+    let src = r#"
+func f(): int {
+    x = 0;
+    while x < 10 {
+        x = x + 1;
+        if x == 2 { continue; }
+    };
+    x
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    // The head is the (only) condition block.
+    let head = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Terminator::JumpIfFalse(_)))
+        .expect("while condition block")
+        .id;
+    // Three unconditional entries re-evaluate the condition: the pre-loop
+    // jump, the body's normal fall-out, and `continue`.
+    let to_head = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == head))
+        .count();
+    assert_eq!(
+        to_head, 3,
+        "pre-loop, body fall-out and `continue` must all jump to the condition head"
+    );
+}
+
+/// The index-advance block of a `for` lowering: exactly
+/// `[LoadLocal, ConstInt(1), IAdd, StoreLocal]` ending in `Jump`.
+fn find_for_incr_block(f: &MirFunc) -> &MirBlock {
+    f.blocks
+        .iter()
+        .find(|b| {
+            matches!(
+                b.instrs.as_slice(),
+                [
+                    MirInstr {
+                        kind: MirInstrKind::LoadLocal(_),
+                        ..
+                    },
+                    MirInstr {
+                        kind: MirInstrKind::ConstInt(1),
+                        ..
+                    },
+                    MirInstr {
+                        kind: MirInstrKind::IAdd,
+                        ..
+                    },
+                    MirInstr {
+                        kind: MirInstrKind::StoreLocal(_),
+                        ..
+                    },
+                ]
+            ) && matches!(b.terminator, Terminator::Jump(_))
+        })
+        .expect("for index-advance block")
+}
+
+#[test]
+fn t04_for_array_continue_targets_index_advance_block() {
+    let src = r#"
+func f(xs: [int]): int {
+    t = 0;
+    for x in xs {
+        if x == 2 { continue; }
+        t = t + x;
+    }
+    t
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let incr = find_for_incr_block(f).id;
+    // Two unconditional entries advance the index: the body's normal
+    // fall-out and `continue`. Jumping straight to the head instead would
+    // skip the increment and loop forever.
+    let to_incr = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == incr))
+        .count();
+    assert_eq!(
+        to_incr, 2,
+        "body fall-out and `continue` must both jump to the index-advance block"
+    );
+}
+
+#[test]
+fn t04_for_range_continue_targets_index_advance_block() {
+    let src = r#"
+import std.collection.range;
+
+func f(): int {
+    t = 0;
+    for i in range_from(0, 10) {
+        if i == 2 { continue; }
+        t = t + i;
+    }
+    t
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let incr = find_for_incr_block(f).id;
+    let to_incr = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == incr))
+        .count();
+    assert_eq!(
+        to_incr, 2,
+        "body fall-out and `continue` must both jump to the index-advance block"
+    );
+}
+
+#[test]
+fn t04_nested_break_binds_innermost_loop() {
+    let src = r#"
+func f(): int {
+    x = 0;
+    while x < 3 {
+        x = x + 1;
+        while true {
+            break;
+        };
+        x = 20;
+    };
+    x = 100;
+    x
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    // The inner exit continues into `x = 20` (same block, fallthrough); the
+    // outer exit continues into `x = 100`.
+    let inner_exit = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ConstInt(20)))
+        })
+        .expect("inner exit block (falls into `x = 20`)")
+        .id;
+    let outer_exit = f
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ConstInt(100)))
+        })
+        .expect("outer exit block (falls into `x = 100`)")
+        .id;
+    // The `break` targets the inner exit; the outer exit is reachable only
+    // through its condition's resolved JumpIfFalse, never a plain Jump.
+    let inner_breaks = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == inner_exit))
+        .count();
+    assert_eq!(inner_breaks, 1, "the `break` binds to the innermost loop");
+    let outer_breaks = f
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == outer_exit))
+        .count();
+    assert_eq!(
+        outer_breaks, 0,
+        "no unconditional jump may target the outer exit from inside the inner loop"
+    );
+}
+
+#[test]
+fn t04_statements_after_break_land_in_dead_code() {
+    let src = r#"
+func f(): int {
+    x = 0;
+    while x < 10 {
+        break;
+        x = 10;
+    };
+    x
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let exit = f
+        .blocks
+        .iter()
+        .find_map(|b| match b.terminator {
+            Terminator::JumpIfFalse(t) => Some(t),
+            _ => None,
+        })
+        .expect("while exit via JumpIfFalse");
+    let break_block = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Terminator::Jump(t) if t == exit))
+        .expect("break edge");
+    assert!(
+        break_block.instrs.is_empty(),
+        "the statement after `break` must not follow the live jump in its block"
+    );
+    // The dead statement still exists — in the unreachable continuation.
+    assert!(
+        flat(f)
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::StoreLocal(_))),
+        "the dead statement after `break` is emitted into the unreachable block"
+    );
 }
 
 // =========================================================================
@@ -2046,7 +2349,11 @@ fn lower_for_array_desugar_instruction_by_instruction() {
         &bk[..4],
         ["LoadLocal(2)", "LoadLocal(3)", "ArrGet", "StoreLocal(1)"]
     );
-    // The increment closes the body and jumps back to the head.
+    // The increment closes the body and jumps back to the head (0.0.9 T04,
+    // content-driven: this loop has no `continue`, so the 0.0.8 inline
+    // layout is kept; a `for` body containing a `continue` splits the
+    // increment into its own block — pinned by the t04_for_*_continue_*
+    // tests below).
     assert_eq!(
         &bk[bk.len() - 4..],
         ["LoadLocal(3)", "ConstInt(1)", "IAdd", "StoreLocal(3)"]
@@ -2199,6 +2506,10 @@ fn lower_for_range_desugar_uses_range_bounds_once() {
     );
     let bk = kinds_of(body);
     assert_eq!(&bk[..2], ["LoadLocal(3)", "StoreLocal(1)"]);
+    // The increment closes the body and jumps back to the head (0.0.9 T04,
+    // content-driven: this loop has no `continue`, so the 0.0.8 inline
+    // layout is kept — a `for` body containing a `continue` splits the
+    // increment into its own block).
     assert_eq!(
         &bk[bk.len() - 4..],
         ["LoadLocal(3)", "ConstInt(1)", "IAdd", "StoreLocal(3)"]

@@ -1,0 +1,10 @@
+// 0.0.9 T04: `break` exits a `while` loop.
+func main(): int {
+    x = 0;
+    while true {
+        x = x + 1;
+        if x > 3 { break; }
+    };
+    print(x as string);
+    0
+}
