@@ -586,6 +586,14 @@ e2e matrix, examples + CHANGELOG); T11 synced the docs and bumped the version to
 (`Cargo.toml` / `std/VERSION`).
 Version 0.0.8 Cheeky Hamster 🐹 (release published — tag and archives cut).**
 
+**0.0.9 goal: small repairs — zero-payload variant patterns resolve as variant references
+(the BUG-2 fix, D1, with the joint-coverage exhaustiveness disjunct recorded as D7),
+Result-`choose` completion (`otherwise` and general arms, D2 — `ChooseResultNeedsOkErrArms`
+retired), the `break` / `continue` keywords with loop-bound lowering (D4 — the source
+breaking set), and a std.str intrinsic batch (eight, D3). No bytecode change (D6): the
+version stays v8, no new opcodes, no table changes. T01–T06 implemented and green (T07 is
+the release gate); see `docs/0.0.9/PLAN.md` decisions D1–D7 and `docs/0.0.9/TICKETS.md`.**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -721,9 +729,11 @@ add(1);              // error: the partial's value is discarded
 > and their captures are deep-copied by `clone` / assignment (D11). Bytecode v8 is
 > content-driven: a module reaches v8 only if a `PartialApply` was actually encoded
 > (D14), so a flag-on file without partials stays v7 and every flag-off module is
-> byte-identical to 0.0.7. Known limit: a partial over an inline-lowered builtin (for
-> example `range_from(0)`) compiles but fails at runtime until the captured-builtin gap
-> is closed (`docs/0.0.8/TICKETS.md` T09 deviations). See `docs/DESIGN.md` §5/§9/§10.8
+> byte-identical to 0.0.7. The 0.0.8 known limitation (a partial over an
+> inline-lowered builtin, for example `range_from(0)`, failed at runtime with
+> `UnknownBuiltin`) was fixed by commit `8dbbc8b` — inside the `v0.0.8` tag:
+> captured builtins run end to end (fix record: CHANGELOG `[0.0.8]`).
+> See `docs/DESIGN.md` §5/§9/§10.8
 > and `docs/0.0.8/PLAN.md` D1–D16.
 
 ### Aggregation Types (0.0.3) and Enums (0.0.6)
@@ -1005,45 +1015,46 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 |
-|---------|-------|-------|-------|-------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag) |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ |
-| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ |
-| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ | ✅ |
-| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ | ✅ |
-| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ | ✅ |
-| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) | ✅ |
-| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) | ✅ |
-| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) | ✅ |
-| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01: `#feature` header directive, per-file `FeatureSet`, D1/D6) |
-| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) |
-| Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) |
-| Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 |
+|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag) | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) | ✅ (+ `std.str` batch: 8 intrinsics) |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ | ✅ | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ | ✅ | ✅ |
+| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) | ✅ | ✅ |
+| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) | ✅ | ✅ |
+| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) | ✅ | ✅ |
+| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01: `#feature` header directive, per-file `FeatureSet`, D1/D6) | ✅ |
+| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) | ✅ |
+| Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) | ✅ |
+| Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) | ✅ (stays content-driven — no new opcode in 0.0.9, D6) |
+| `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04: reserved words, loop-exit/continue lowering, no new opcode, D4) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,

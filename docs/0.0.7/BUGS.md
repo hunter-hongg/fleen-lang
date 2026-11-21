@@ -7,10 +7,20 @@
 > is written first.** Note that any compiler fix makes the published
 > `v0.0.7` archives stale — the fix should land in the next milestone's
 > version, not by re-cutting `v0.0.7`.
+>
+> **Status (updated 0.0.9 T06; the findings below stay verbatim)**: both
+> bugs are **fixed**. BUG-1 by commit `a5b8bd7` (inside the `v0.0.8` tag);
+> BUG-2 in 0.0.9 (T01, `docs/0.0.9/PLAN.md` D1/D7). Per-bug status lines at
+> the top of each section; the repro/observed/expected text is history.
 
 ---
 
 ## BUG-1 — `choose` over an enum scrutinee rejects an arm ending in `if`/`else` (verify failure)
+
+> **Status (0.0.9 T06): FIXED** — commit `a5b8bd7` ("fix: spill before every
+> conditional terminator in a choose arm"), inside the `v0.0.8` tag; the
+> regression fixture `tests/e2e/valid/choose_arm_if_else.fln` is green. The
+> text below is the verbatim finding (history).
 
 **Severity**: compile-time hard failure on legal source; blocks the natural
 "dispatch inside a match arm" pattern.
@@ -69,6 +79,15 @@ the full suite.
 ---
 
 ## BUG-2 — a bare name may appear only once within one pattern (zero-payload variants occupy the binding namespace)
+
+> **Status (0.0.9 T06): FIXED in 0.0.9** — option (a) adopted (`docs/0.0.9/PLAN.md`
+> D1: zero-payload variant patterns resolve as variant references, not bindings;
+> the lookup order and the still-standing `DuplicateBinding` rule for repeated
+> *binding* names are recorded there). As-built deviation D7: accepting the
+> repro's jointly-covering arms required an additive exhaustiveness-disjunct
+> (constructor splitting over the coverage matrix). T01; regression fixture
+> `tests/e2e/valid/pair_zero_payload_variants.fln` (the repro below, verbatim).
+> The text below is the verbatim finding (history).
 
 **Severity**: expressiveness wart, not a crash. Currently worked around with
 `otherwise`; documented as a rule in `lang_docs/0.0.7/{zh,en}` ch. 06/15.

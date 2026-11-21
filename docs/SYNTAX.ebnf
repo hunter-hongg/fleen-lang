@@ -1,5 +1,5 @@
 (* ============================================ *)
-(* Fleen EBNF Grammar v0.0.8                    *)
+(* Fleen EBNF Grammar v0.0.9                    *)
 (* New in 0.0.2: box/deref/move/clone prefix    *)
 (* expressions, the ? suffix, Ok/Err patterns,  *)
 (* deref assignment targets, the as cast layer, *)
@@ -53,6 +53,15 @@
 (* enables curried arrow types `T -> T` (D4).     *)
 (* Arrow types require the flag; flag-off files   *)
 (* keep the v0.0.7 type grammar exactly.          *)
+(* New in 0.0.9: the loop-jump statements — the   *)
+(* reserved words `break` / `continue` (D4, the   *)
+(* source breaking set of 0.0.9): statements,     *)
+(* never expressions, legal only inside a loop    *)
+(* body (typeck: BreakOutsideLoop /               *)
+(* ContinueOutsideLoop); `choose` patterns treat  *)
+(* zero-payload variant names as variant          *)
+(* references, not bindings (D1 — resolver work;  *)
+(* the pattern grammar below is unchanged).       *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -93,6 +102,8 @@ declaration     = [ "pub" ] , ( const_decl
                 | struct_decl
                 | enum_decl
                 | var_binding )
+                | break_stmt
+                | continue_stmt
                 | expr_stmt ;
 
 (* 0.0.3 V02: user-defined aggregate declaration; a struct declaration takes
@@ -252,6 +263,22 @@ func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 (* ---------- Statements / Expressions ---------- *)
 
 expr_stmt       = expr , [ ";" ] ;
+
+(* 0.0.9 T03 (D4): the loop-jump keyword statements — unit-valued statements,
+   never expressions (the grammar has no `break <value>` form; `x = break`
+   dies in the expression parser). Legal only inside a `while` / `for` body
+   (typeck: BreakOutsideLoop / ContinueOutsideLoop; a `choose` arm body and a
+   nested `func` / `async func` declaration clear the loop context — D4's
+   lexical containment). A top-level `break` parses (an Item, like a top-level
+   `while`) and is rejected by typeck, which owns the position check. The
+   trailing `;` is optional (the ASI pass ends the line; rule 2 never inserts
+   before `}`, so `{ break }` is legal); the keywords sit in both
+   `can_start_stmt` and `can_end_stmt`, so `break` ⏎ `x = 1` splits at the
+   line break (DESIGN.md §3.9). Both appear as `declaration` alternatives, so
+   they parse at top level and inside every block. *)
+break_stmt      = "break" , [ ";" ] ;
+
+continue_stmt   = "continue" , [ ";" ] ;
 (* Note: 0.0.1 requires an explicit trailing semicolon on expression statements;
    from 0.0.2 on, ASI is in place and semicolons are optional *)
 (* (the parser decides via a "may continue" whitelist; explicit semicolons are

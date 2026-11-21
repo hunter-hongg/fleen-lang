@@ -68,13 +68,17 @@ true / false // bool
 ### Keywords
 
 ```
-func  const  struct  if  elif  else  while  for  in  choose
-when  otherwise  return  import  pub  unsafe  trusted
+func  const  struct  enum  if  elif  else  while  for  in  choose
+when  otherwise  import  pub  unsafe  trusted
 box  ref  deref  move  clone  as  true  false
-async  await  channel
+int  float  bool  string  unit  Result
+async  await  channel  ptr  addr  deref_ptr
+break  continue  or  and  not
 ```
 
-> `deref` is a new keyword in 0.0.2 (reads/writes the value inside a box, see §10.3);
+> The list is the lexer's keyword table (`fleen-compiler/src/lexer/lexer_impl.rs`)
+> as of 0.0.9 — Fleen has **no `return` keyword** (a function's value is its
+> last expression). `deref` is a new keyword in 0.0.2 (reads/writes the value inside a box, see §10.3);
 > `as` is a new reserved word in 0.0.2 (type conversion, see §9 "Type Conversion `as`").
 > `struct` (V02) / `for` / `in` (V04) / `pub` (V05) are new reserved words in 0.0.3 —
 > programs using them as identifiers are the **only** source breaking change of 0.0.3
@@ -83,7 +87,10 @@ async  await  channel
 > 0.0.3 programs using them as identifiers must rename (the CHANGELOG ⚠️ Breaking list;
 > see `docs/0.0.4/PLAN.md` §11). Note `Future` is **not** reserved: only the `Future<T>`
 > type form is recognized in type position, and a bare `Future` identifier still names a
-> user struct.
+> user struct. `ptr` / `addr` / `deref_ptr` / `unsafe` / `trusted` joined in 0.0.5 and
+> `enum` in 0.0.6 (each that milestone's source breaking set). `break` / `continue` are
+> the new reserved words of 0.0.9 (the source breaking set of that milestone, D4 —
+> see §6 "break / continue").
 
 ---
 
@@ -592,6 +599,48 @@ for i in range_from(0, 10) {
 - `for` yields `unit` (it is a statement, not an expression with a return value)
 - Assignment to an outer mutable variable inside the loop body works like a `while` body (§4.5)
 - `for` and `in` are now **reserved keywords** (breaking change from 0.0.2)
+
+### break / continue (0.0.9, D4)
+
+```fleen
+x = 0;
+while true {
+    x = x + 1;
+    if x > 3 { break; }        // exit the innermost enclosing loop
+};
+
+for i in range_from(0, 10) {
+    if i % 2 == 0 { continue; }  // jump to the next-iteration edge
+    print(i as string);
+};
+```
+
+**Rules:**
+- **Statements, not expressions** (D4): `break` / `continue` are unit-valued
+  statements — the grammar has no `break <value>` form (`x = break` is a parse
+  error), and there is no labeled break (`break outer` rejected; nested loops
+  use a flag or a helper function). `break` exits the innermost enclosing loop
+  (`while` or `for`); `continue` jumps to the innermost loop's next-iteration
+  edge (for `for` that is the index advance — skipping the body's remainder
+  but never the increment)
+- **Loop context only**: legal inside `while` bodies and `for` bodies (over
+  arrays and `Range` alike); a typeck check rejects them at top level, in a
+  function body without a lexically enclosing loop, and inside `choose` arm
+  bodies (`BreakOutsideLoop` / `ContinueOutsideLoop` with the containment
+  rule spelled out in the help text)
+- **No boundary crossing** (D4's lexical containment): a `break`/`continue`
+  may not escape the function that lexically contains the loop — nested
+  `func` / `async func` declarations clear the loop context for their extent,
+  so the keywords inside them are rejected the same way
+- **Lowering**: both lower to `Jump` — no new opcode (D6). The loop's exit /
+  continue edges are resolved after the body is lowered (the deferred-terminator
+  patching `lower_if` uses); at both edges the stack depth equals the loop-head
+  depth (the BUG-1 spill rule applies at every conditional terminator in the body)
+- **ASI**: the keywords are statements like any other — they start and end a
+  statement, so `break` ⏎ `x = 1` inserts the semicolon at the line break and
+  `{ break }` needs none before `}` (rule 2 never inserts before a closing brace)
+- `break` and `continue` are **reserved words** — the source breaking set of
+  0.0.9 (programs using them as identifiers must rename; the 0.0.5/0.0.6 precedent)
 
 ### async / await (0.0.4)
 
@@ -1199,13 +1248,15 @@ func main(): int {
   for a Bool scrutinee: a guard may evaluate false at runtime, so it cannot cover its pattern. Therefore
   `when Ok(v) if g {…}` + `when Err(e) {…}` is rejected by typeck as missing an Ok arm
   (`ChooseNotExhaustive { missing_patterns: ["Ok"] }`). To write a guard, you must pair it with
-  another **unguarded duplicate** `Ok` / `Err` arm, or fall back to `otherwise`. Lowering of guard arms and
-  `otherwise` is **deferred to U09 / a separate ticket** (U07 decided to keep it deferred; see
-  `docs/0.0.2/TICKETS.md` U07 "scope decision"): this requires refactoring Result-choose from
-  "an Ok/Err pair of arms with no fallback block" into a general arm chain + no-match fallback, while
-  preserving the payload before the guard is evaluated. Until then, the U06/U07 lower only lowers unguarded
-  `when Ok(..)` / `when Err(..)` arms and reports `UnsupportedFeature` on encountering a guard or `otherwise`
-  (`ChooseResultNeedsOkErrArms` is a defensive check behind the typeck gate).
+  another **unguarded duplicate** `Ok` / `Err` arm, or an `otherwise`. Guard arms themselves
+  **lower and run**: the 0.0.7 attempt-chain lowering accepts them (`when Ok(x) if x > 3 {…}`
+  compiles and runs today — the 0.0.2-era "lowering deferred to U09" note was stale, corrected
+  by 0.0.9 T06; only the exhaustiveness rule above was ever the gate). **`otherwise` is legal
+  from 0.0.9** (T02, `docs/0.0.9/PLAN.md` D2): `lower_choose_result` routes non-`Ok`/`Err`
+  arms into the attempt-chain structure — `otherwise` occupies the defensive-tail slot (its
+  body runs after the parked payload is popped), or-pattern arms expand into one attempt per
+  alternative, and the old `ChooseResultNeedsOkErrArms` defensive error is retired
+  (exhaustiveness for Result scrutinees is typeck's `ChooseNotExhaustive`, as for every other type).
 - **When a ref argument is a global**: the borrow must point to a local slot. When U06 lowers a call **inside a
   function body** that passes a global ref argument, it uses a temporary slot `CloneGlobal; StoreLocal tmp; MakeRefLocal tmp` to receive it;
   a **global initializer** (`lower_global_init`) has no frame that could borrow its slot, so a global-initializer
@@ -1359,6 +1410,17 @@ func main() {
   (`map` / `filter` / `fold` / `take`, V07), `std.os`, `std.time`. `std/` is written in Fleen
   and embedded into the compiler binary; only VM-irreducible primitives are intrinsics.
   std is always compiled and exercised by `cargo test`, so it cannot rot.
+- **std.str batch (0.0.9 T05, D3)**: eight VM intrinsics documented in `std/str.fln` —
+  `parse_int` / `parse_float` (`Result`-valued parsers: non-numeric input, i64 overflow,
+  the empty string, and surrounding whitespace are `Err` values, never panics or wraps),
+  `trim` / `contains` / `starts_with` / `ends_with` (total, `bool`-valued), `index_of`
+  (`Result<int, string>`; not-found is `Err`, never a `-1` sentinel — the same rule that
+  rejected out-of-band sentinels in `std.arr.get`), and `replace`. Every position index
+  counts **Unicode scalar values** (the `std.str.len` unit, never a byte offset), and
+  `replace` with an empty pattern is a no-op (deliberately not Rust's
+  insert-at-every-boundary behavior). Zero opcodes: they ride the builtin table (the
+  0.0.6 T07 mechanism), and every module's leading builtin table grows by the eight
+  names (T05 as-built; the content-driven version rule is unchanged).
 
 ### Design decisions settled in 0.0.3 (D1–D10)
 
@@ -1545,43 +1607,44 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 |
-|---------|-------|-------|-------|-------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ | ✅ (+ recursive patterns) | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag, §9) |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ |
-| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ | ✅ |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ | ✅ | ✅ |
-| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ |
-| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) | ✅ | ✅ | ✅ | ✅ |
-| Pointers `ptr` / `addr` / `deref_ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §10.7) | ✅ | ✅ | ✅ |
-| `unsafe` / `trusted` | ❌ | ❌ | ❌ | ❌ | ✅ (T03, §12) | ✅ | ✅ | ✅ |
-| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §9.8) | ✅ | ✅ |
-| Parameterized enums (`enum Option<T>`, D1–D3) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§9.8) | ✅ |
-| Nested / or / type-guard patterns (D4–D7) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§7) | ✅ |
-| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01, §5; D1/D6) |
-| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03, §5/§9; D2–D4) |
-| Implicit partial application (captures, §10.8) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06; D5/D9–D11) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Generics (function-level) | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 |
+|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag, §9) | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ | ✅ (+ std.str batch: 8 intrinsics, §11) |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ | ✅ | ✅ |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Channels (`channel<T>` + `std.concurrent.split`) | ❌ | ❌ | ❌ | ✅ (T07, §9.7) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Pointers `ptr` / `addr` / `deref_ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §10.7) | ✅ | ✅ | ✅ | ✅ |
+| `unsafe` / `trusted` | ❌ | ❌ | ❌ | ❌ | ✅ (T03, §12) | ✅ | ✅ | ✅ | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06, §9.8) | ✅ | ✅ | ✅ |
+| Parameterized enums (`enum Option<T>`, D1–D3) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§9.8) | ✅ | ✅ |
+| Nested / or / type-guard patterns (D4–D7) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (§7) | ✅ | ✅ |
+| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01, §5; D1/D6) | ✅ |
+| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03, §5/§9; D2–D4) | ✅ |
+| Implicit partial application (captures, §10.8) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06; D5/D9–D11) | ✅ |
+| `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04, §6; D4) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics (function-level) | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **0.0.1 goal: Fibonacci runs.**
 
@@ -1629,6 +1692,14 @@ a module is v8 only when a partial call was actually encoded, so every flag-off 
 byte-identical to 0.0.7 (D14/D16). Non-breaking additive. T01–T10 implemented (T11 is this
 docs sync); see `docs/0.0.8/PLAN.md` decisions D1–D16 and `docs/0.0.8/TICKETS.md`.**
 
+**0.0.9 goal: small repairs — zero-payload variant patterns resolve as variant references
+(the BUG-2 fix, D1; the additive joint-coverage exhaustiveness disjunct recorded as D7),
+Result-`choose` completion (`otherwise` and general arms, D2 — `ChooseResultNeedsOkErrArms`
+retired), the `break` / `continue` keywords with loop-bound lowering (D4, the source
+breaking set), and a std.str intrinsic batch (eight, D3). No bytecode change (D6): the
+version stays v8, no new opcodes, no table changes. T01–T06 implemented and green (T07 is
+the release gate); see `docs/0.0.9/PLAN.md` decisions D1–D7 and `docs/0.0.9/TICKETS.md`.**
+
 ---
 
 ## 18. Roadmap
@@ -1642,6 +1713,7 @@ docs sync); see `docs/0.0.8/PLAN.md` decisions D1–D16 and `docs/0.0.8/TICKETS.
 | 0.0.6 | `enum` declarations with typed payloads (T01–T04) + generalized `choose` exhaustiveness and lowering (T05) + bytecode v6 `EnumNew`/`EnumIs`/`EnumPayload` and the `enum_defs` table (T06) + array library completion `concat`/`flatten`, `fold`→`foldl` + `foldr` (T07) — **implemented (T01–T08)**; see `docs/0.0.6/PLAN.md` (D1–D6) and `docs/0.0.6/TICKETS.md` |
 | 0.0.7 | parameterized enums — user-defined type constructors (`enum Option<T>`, fully applied at every use, no bare `Option`), argument-dependent `is_copy` — plus pattern matching completion: full multi-payload destructuring, nested patterns, or-patterns `p₁ \| p₂`, type guards `when v: T`; bytecode v7 (`enum_defs` gains one `type_param_count: u32` per enum, no new opcodes). `Result[T, E]` stays builtin — **implemented (T01–T10; T11 docs sync)**; see `docs/0.0.7/PLAN.md` (D1–D10) and `docs/0.0.7/TICKETS.md` |
 | 0.0.8 | per-file feature flags (`#feature curry`, D1/D6) + two-part curried declarations behind the flag (§5, D2/D3) + curried arrow function types (§9, D4) + implicit partial application with Copy, deep-copied captures (§10.8, D5/D9–D11) + bytecode v8 `PartialApply` 0xCE, content-driven (only modules that encode a partial reach v8, D13/D14) — **implemented (T01–T10; T11 docs sync)**; non-breaking additive (D16). See `docs/0.0.8/PLAN.md` (D1–D16) and `docs/0.0.8/TICKETS.md` |
+| 0.0.9 | small repairs: zero-payload variant patterns resolve as variant references (BUG-2, D1; joint-coverage exhaustiveness D7) + Result-`choose` accepts `otherwise` / general arms (D2) + `break` / `continue` reserved words with loop-bound lowering (§6, D4) + std.str intrinsic batch — eight VM intrinsics, zero opcodes (§11, D3); no bytecode change (D6, version stays v8) — **implemented (T01–T05; T06 docs sync)**; the only source breaking set is the two new reserved words. See `docs/0.0.9/PLAN.md` (D1–D7) and `docs/0.0.9/TICKETS.md` |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks

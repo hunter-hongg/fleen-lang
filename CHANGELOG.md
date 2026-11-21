@@ -1,3 +1,63 @@
+## [0.0.9] - 2026-11-21
+
+> Drafted by T06 (docs sync); **finalized at the T07 release gate** (codename
+> and publication pending — `docs/0.0.9/PLAN.md`). No bytecode change (D6):
+> the version stays v8, no new opcodes, no table changes.
+
+### Added
+- **Zero-payload variant patterns are variant references** (BUG-2 fix, D1):
+  inside a pattern a bare identifier naming a zero-payload variant no longer
+  occupies the binding namespace — `when P(None, None)` compiles and matches
+  (repeated **binding** names still `DuplicateBinding`; lookup order:
+  same-pattern earlier bindings → enclosing locals → zero-payload variant →
+  unresolved). Exhaustiveness gains a strictly-additive second disjunct (D7):
+  guard-free arms covering one variant **jointly** are accepted via
+  constructor splitting over the coverage matrix — every program exhaustive
+  under 0.0.7 stays exhaustive, and cross-position coverage holes are still
+  rejected (`P(Some, None)` + `P(None, Some)` is not exhaustive).
+- **Result-`choose` accepts `otherwise` / general arms** (D2): the 0.0.2-era
+  `UnsupportedFeature "… deferred to U07"` branch is deleted — `otherwise`
+  occupies the attempt-chain tail slot, or-pattern arms route per
+  alternative, and `ChooseResultNeedsOkErrArms` is retired (the
+  exhaustiveness gate is typeck's `ChooseNotExhaustive`, as for every other
+  scrutinee type). Guard arms are documented (they lower via 0.0.7's attempt
+  chain; a guarded arm still needs an unguarded duplicate or an `otherwise`).
+- **`break` / `continue`** (D4): reserved-word statements (unit-valued, not
+  expressions — `x = break` is a parse error), binding to the innermost
+  enclosing `while` / `for` (both skeletons). Lowered to deferred `Jump`s to
+  the loop exit / continue edges; `for` splits out the index-advance block
+  only when the body records a `continue` (content-driven layout —
+  `continue`-free bodies stay byte-identical). `BreakOutsideLoop` /
+  `ContinueOutsideLoop` reject top level, loop-free bodies, `choose` arm
+  bodies, and every function/`async` boundary (lexical containment). No
+  labeled break, no `break <value>` (D4).
+- **std.str intrinsic batch** (D3, eight VM intrinsics — zero opcodes):
+  `parse_int` / `parse_float` (`Result`-valued parsers; overflow and
+  non-numeric input are `Err` values), `trim`, `contains`, `starts_with`,
+  `ends_with`, `index_of` (`Result`; not-found is `Err`, indices count
+  Unicode scalar values), `replace` (an empty pattern is a no-op — not
+  Rust's boundary insertion). Documented in `std/str.fln`.
+
+### Changed
+- ⚠️ **Breaking**: `break` and `continue` are reserved words — programs
+  using them as identifiers must rename (the only source breaking set;
+  the 0.0.5/0.0.6 precedent).
+- Every compiled module's leading builtin table carries the eight new
+  builtin names, so module streams grow (~+323 bytes on the pinned probes)
+  and the two 0.0.8 flag-off/std byte-identity pins became self-pins —
+  re-captured from this milestone's own output, because the stream grows by
+  design now and cross-version byte identity no longer holds (T05 as-built). The content-driven version rule is unchanged: no new opcode
+  reaches the stream, so touched modules stay v7 unless a `PartialApply`
+  is encoded.
+
+### Fixed
+- BUG-2 (`docs/0.0.7/BUGS.md`): `when P(None, None)` no longer a
+  `DuplicateBinding` resolve error (see Added).
+- Docs debt recorded at planning time (T06): BUG-1 and the captured-builtin
+  gap were already fixed **inside the `v0.0.8` tag** (`a5b8bd7` /
+  `8dbbc8b`); the stale "known limitation" wording in this CHANGELOG,
+  SPEC.md, `docs/0.0.8/TICKETS.md`, and the 0.0.8 examples is corrected.
+
 ## [0.0.8] - 2026-11-18
 
 Codename: **Cheeky Hamster 🐹** (per `docs/0.0.8/PLAN.md`). Non-breaking additive (D16).
@@ -92,13 +152,15 @@ Codename: **Cheeky Hamster 🐹** (per `docs/0.0.8/PLAN.md`). Non-breaking addit
   too-few-args calls in flag-off files keep `ArityMismatch`, and std is
   untouched — written flag-off, compiled flag-off, full-arity call sites
   only.
-- **Known limitation (recorded, not silently dropped)**: a partial over an
-  **inline-lowered builtin** (`range`/`range_from`/`map`/`filter`/
-  `foldl`/`foldr`/`take`) lowers through the D8 reroute but fails at
-  runtime with `UnknownBuiltin` — captured function values for
-  inline-lowered builtins are the recorded T08 gap
-  (`docs/0.0.8/TICKETS.md`, T09 deviations). Partials over user functions
-  (local or imported) run end to end.
+- **Known limitation — fixed within this release** (corrected 0.0.9 T06): a
+  partial over an **inline-lowered builtin** (`range`/`range_from`/`map`/
+  `filter`/`foldl`/`foldr`/`take`) originally failed at runtime with
+  `UnknownBuiltin` (the recorded T08 gap, `docs/0.0.8/TICKETS.md` T09
+  deviations). Commit `8dbbc8b` ("VM runtime for captured range /
+  inline-iter builtins") — inside the `v0.0.8` tag — closed it: captured
+  function values for the inline-lowered builtins run end to end
+  (`range_from(0)` partials included). Partials over user functions ran
+  end to end from the release onward.
 
 ## [0.0.7] - 2026-11-14
 

@@ -4,10 +4,10 @@
 // Everything in this file is behind the per-file `#feature curry` directive
 // (D1): the two-part curried declarations (D2/D3), the curried arrow types
 // (D4), and implicit partial application at the call site (D5). The partials
-// here apply **user** functions only — a partial over an inline-lowered
-// builtin (e.g. `range_from(0)`) compiles but fails at runtime until the
-// captured-builtin gap is closed (see docs/0.0.8/TICKETS.md T09 deviations).
-// std is imported flag-off and called at full arity (D16).
+// here apply **user** functions — a demo-scope choice (corrected 0.0.9 T06:
+// the inline-lowered-builtin runtime gap was closed by commit `8dbbc8b`,
+// inside the v0.0.8 tag, so partials over e.g. `range_from(0)` run end to
+// end today). std is imported flag-off and called at full arity (D16).
 import std.collection.iter;
 import std.io;
 

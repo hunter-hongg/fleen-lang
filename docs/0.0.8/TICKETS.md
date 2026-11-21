@@ -484,6 +484,11 @@
   `partial_flow.fln` pins the e2e property that *is* sound today: a
   partial over a **user** function flows through flag-off std `map` and is
   called there — the T08 copy-soundness property, end to end.
+  **Correction (0.0.9 T06)**: that gap was closed **inside this same
+  release** — commit `8dbbc8b` is inside the `v0.0.8` tag, and
+  `range_from(0)` partials run end to end (full record: CHANGELOG
+  `[0.0.8]`). The paragraph above describes the as-built
+  state of the T09 commit only, not the released 0.0.8.
 
 **Depends on**: T05, T06, T08.
 **Refs**: PLAN §9, D16.

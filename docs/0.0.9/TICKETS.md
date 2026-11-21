@@ -4,7 +4,8 @@
 > with tests.  Decisions D1–D6 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T05 implemented and green; T06–T07 not started.**
+> **Status: T01–T06 implemented and green (T06 is the docs sync); T07 not
+> started.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -501,29 +502,106 @@ because the invalid harness compares stderr only.
 
 ## T06 — Docs sync: debt corrections + BUGS.md status (F5)
 
-- [ ] `docs/0.0.7/BUGS.md`: header + BUG-1 marked **fixed** (commit
+- [x] `docs/0.0.7/BUGS.md`: header + BUG-1 marked **fixed** (commit
       `a5b8bd7`, v0.0.8 tag, fixture path); BUG-2 marked **fixed in 0.0.9**
       (T01, PLAN D1) — the file keeps its verbatim findings (append-only
       posture), status lines added.
-- [ ] CHANGELOG.md §0.0.8 "Known limitation" + SPEC.md §0.0.8 known-limit
+- [x] CHANGELOG.md §0.0.8 "Known limitation" + SPEC.md §0.0.8 known-limit
       sentence + `docs/0.0.8/TICKETS.md` T09 deviation text + README:
       replace the captured-builtin "fails at runtime with `UnknownBuiltin`"
       wording with the fixed-at-`8dbbc8b` record (all four verified stale).
-- [ ] DESIGN.md §10.5: guard-arm lowering no longer "deferred to U09/U07" —
+- [x] DESIGN.md §10.5: guard-arm lowering no longer "deferred to U09/U07" —
       guards work (0.0.7 attempt chain); `otherwise` legal from 0.0.9
       (cross-ref `docs/0.0.9/PLAN.md` D2).
-- [ ] DESIGN.md / SYNTAX.ebnf: `break` / `continue` grammar + reserved-word
+- [x] DESIGN.md / SYNTAX.ebnf: `break` / `continue` grammar + reserved-word
       notes; std.str section gains the eight intrinsics; DESIGN.md §14
       Feature Scope matrix row for 0.0.9; §18 Roadmap row for 0.0.9.
-- [ ] SPEC.md §14 0.0.7 known-limit sentence (2) (flagged in the T01
+- [x] SPEC.md §14 0.0.7 known-limit sentence (2) (flagged in the T01
       review): `when P(None, None)` no longer trips `DuplicateBinding` —
       fixed in 0.0.9 by T01 (zero-payload variant patterns are variant
       references, PLAN D1/D7); rewrite the limit as resolved. (The same
       block's (1) is fixed by `a5b8bd7`, already recorded in the header
       above.)
-- [ ] BYTECODE.md: no edits — confirm and record in the card that no row
+- [x] BYTECODE.md: no edits — confirm and record in the card that no row
       changed (D6).
-- [ ] New CHANGELOG `[0.0.9]` section drafted (T07 finalizes).
+- [x] New CHANGELOG `[0.0.9]` section drafted (T07 finalizes).
+
+**As-built note (the card's "all four verified stale" was wrong about
+README)**: the root `README.md` never carried the captured-builtin wording
+(grepped: no "UnknownBuiltin" / "fails at runtime" hit). The actual stale
+copies live in **`examples/0.0.8/README.md`** ("Known limitation (honest
+scope)" section — retitled and corrected, the demo's user-function-only
+scope re-explained as a pedagogical choice, not a workaround) and
+**`examples/0.0.8/curry_demo.fln`** (the header comment; comments never
+reach the bytecode, so no fixture changes). Both corrected to the
+fixed-at-`8dbbc8b` record; the root README was left untouched.
+
+**As-built note (SPEC §14 choose known-limits block already done)**: the
+block (SPEC.md "choose (Pattern Matching)" → Known limits) already marks
+(1) fixed in 0.0.8 (`a5b8bd7`) and (2) fixed in 0.0.9 (T01, D1/D7) — it
+landed with the T01 review pass. Verified at HEAD, no further edit; the
+stale sentence this card did correct in SPEC.md is the §14 0.0.8 known-limit
+line inside "Feature Flags and Curried Declarations" (the
+`range_from(0)` runtime-gap wording → fixed-at-`8dbbc8b`).
+
+**As-built note (the card's "DESIGN.md §14 Feature Scope matrix" is a
+mislabel, same as 0.0.8's T11 card)**: DESIGN.md §14 is *Explicit
+Rejections*; the feature matrix is **§17** and the roadmap **§18**. The
+0.0.9 column was added there (§17 also gained the 0.0.9 goal paragraph,
+matching 0.0.1–0.0.8; new `break` / `continue` row; the `choose` / `Result` /
+std rows annotated with the 0.0.9 additions). DESIGN.md §6 gained the
+`break / continue (0.0.9, D4)` subsection and §2 the reserved-word note; the
+std.str batch is recorded under §11's std bullet (there is no standalone
+std.str section in DESIGN.md).
+
+**As-built note (§2 Keywords block corrected as one unit)**: the block the
+break/continue note attaches to was stale in both directions — it listed
+`return` (not a Fleen keyword; the lexer table has no "return" match) and
+missed `enum` (0.0.6), `ptr` / `addr` / `deref_ptr` (0.0.5), `or` / `and` /
+`not`, and the type keywords (`int` / `float` / `bool` / `string` / `unit` /
+`Result`, `box` / `ref`). The block now mirrors the lexer keyword table
+(`fleen-compiler/src/lexer/lexer_impl.rs`) and says so; the per-milestone
+reserved-word notes carry forward.
+
+**As-built note (BYTECODE.md: one prose bullet corrected — the card's "no
+edits" holds for format rows)**: D6 verified directly — no opcode row, no
+table, no version statement changed (writers still emit ≤8; T04 lowered
+`break`/`continue` to plain `Jump` opcodes and T05 added
+VM-intrinsic arms, none of which is a format row). But §5.6's rule bullet
+"no `break` / `continue`" (a 0.0.3-era source-construct note, not a format
+row) became a falsehood when T04 landed — leaving it would make the format
+spec assert that the keywords do not compile. The bullet was rewritten in
+place to the Jump-based lowering with the correction recorded in the bullet
+itself; recorded here as a card deviation. No other BYTECODE.md text
+touched.
+
+**As-built note (CHANGELOG `[0.0.9]` draft content)**: drafted from the
+T01–T05 as-built cards, not the PLAN's pre-implementation wording — the D7
+coverage-algebra deviation (joint coverage via constructor splitting), the
+`ChooseResultNeedsOkErrArms` retirement, the content-driven `for`-advance
+split, the two new reserved words as the only breaking set, the +~323-byte
+module-stream growth with the two byte pins re-captured as self-pins (T05),
+and the corrected-in-place §0.0.8 limitation bullet. The section header
+carries a "drafted by T06 / finalized at the T07 release gate" note; the
+codename stays TBD (PLAN header: holder's call).
+
+**As-built note (SYNTAX.ebnf header)**: the version banner comment was bumped
+v0.0.8 → v0.0.9 and a "New in 0.0.9" block added (`break` / `continue`,
+Result-`choose` `otherwise`) — part of the grammar-notes bullet, recorded here
+because the card text names only the productions.
+
+**As-built note (pre-commit review pass)**: the BYTECODE.md note above carried a
+wrong "0xC0-region" opcode-region claim — corrected (Jump is plain; the region
+claim dropped; control flow lives in 0x50–0x5F, and the note's point is only
+"not a format row"). The `8dbbc8b` commit-title parenthetical collapsed to the
+canonical records (CHANGELOG `[0.0.8]` keeps the title; BUGS.md's BUG-1 status
+line keeps the `a5b8bd7` title — summary references elsewhere stay SHA-only).
+"self-pins" is glossed in the CHANGELOG draft. BYTECODE.md's §2 version-field
+comment (0.0.7-era "writes 7, readers accept {1..7}") synced to the
+content-driven rule (writers emit 7 or 8; readers accept {1..8}). SPEC gained
+the 0.0.9 goal paragraph (§13) and the 0.0.9 matrix column (§15) — T07's
+SPEC-matrix sync pre-completed here; DESIGN §17's 0.0.9 goal status updated to
+match (T01–T06 green).
 
 **Depends on**: T01–T05 (records their as-built state).
 **Refs**: PLAN §0, §1 D1–D6, §8.

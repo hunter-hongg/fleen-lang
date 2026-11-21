@@ -54,13 +54,16 @@ randomness. The `cargo test` examples sweep
 | Partials are Copy — the same partial serves several calls | D11 | `curry_demo` §5 |
 | No discarded partials: every partial is bound or passed as an argument | D10 | both |
 
-## Known limitation (honest scope)
+## Known limitation — fixed in the release (corrected 0.0.9 T06)
 
-A partial over an **inline-lowered builtin** (e.g. `range_from(0)`) lowers
-correctly (the D8 reroute) but fails at runtime with `UnknownBuiltin` —
-captured function values for inline-lowered builtins are the recorded T08
-gap (`docs/0.0.8/TICKETS.md`, T09 deviations). The demos therefore apply
-**user functions** (local or imported) and call std at full arity.
+A partial over an **inline-lowered builtin** (e.g. `range_from(0)`) lowered
+correctly (the D8 reroute) but originally failed at runtime with
+`UnknownBuiltin` — the recorded T08 gap (`docs/0.0.8/TICKETS.md`, T09
+deviations). Commit `8dbbc8b`, inside the `v0.0.8` tag, closed it: captured
+inline-lowered builtins run end to end (full record: the CHANGELOG
+`[0.0.8]` entry). The demos still apply **user
+functions** (local or imported) and call std at full arity — that is a
+pedagogical choice, not a workaround.
 
 The static rejections also have no runtime demo here: `func` in a flag-on
 file (`FuncFormForbiddenInCurryFile`), a partial of a

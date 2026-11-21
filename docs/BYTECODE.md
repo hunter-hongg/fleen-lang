@@ -54,7 +54,7 @@ Rules:
 
 ```rust
 pub struct Module {
-    pub version: u16,          // bytecode version: 0.0.7 writes 7, readers accept {1, 2, 3, 4, 5, 6, 7}
+    pub version: u16,          // bytecode version: content-driven since 0.0.8 — writers emit 8 when a PartialApply is encoded, else 7 (0.0.9: unchanged, D6); readers accept {1, ..., 8}
     pub constants: Vec<Const>, // constant pool
     pub functions: Vec<Func>,  // function table
     pub globals: Vec<Global>,  // global variable table
@@ -458,7 +458,12 @@ The jump operand `u16` is the **absolute byte offset of the target instruction**
 Rules:
 - Jump targets must **land on instruction boundaries** (misaligned → VM error); `fleen-verify` performs the static check
 - `JumpIfTrue` is used for `or` short-circuiting; `JumpIfFalse` for `if` conditions and `and` short-circuiting
-- `for` desugars to indexed iteration + control-flow jumps (see §5.13–5.14 v0.0.3); no `break` / `continue`
+- `for` desugars to indexed iteration + control-flow jumps (see §5.13–5.14 v0.0.3)
+- `break` / `continue` (v0.0.9 T04, D4) lower to plain `Jump` — to the loop's
+  exit / next-iteration edge, resolved after the body is lowered. No new opcode
+  and no format change (D6): this bullet replaces the 0.0.3-era "no
+  `break` / `continue`" wording (corrected by 0.0.9 T06; no opcode/table/version
+  row changed)
 
 ### 5.7 Function Calls
 
