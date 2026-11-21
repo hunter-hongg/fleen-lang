@@ -5,8 +5,9 @@
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
 > **Status: T01–T07 implemented and green (T07: example + CHANGELOG +
-> version bump + the full gate suite; release publication — tag/archives —
-> is separate and pending).**
+> version bump + the full gate suite). Release published — the `v0.0.9`
+> tag and the six target archives are cut; `release/0.0.9/` mirrors the
+> 0.0.8 layout.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -623,7 +624,7 @@ match (T01–T06 green).
 - [x] Full gates green: `cargo fmt -- --check`, `cargo clippy -- -D
       warnings`, `cargo test`, `cargo doc --no-deps`; the 0.0.8 both-mode
       e2e matrix still passes byte-identically.
-- [ ] Release publication (tag `v0.0.9` + six-target archives) via the
+- [x] Release publication (tag `v0.0.9` + six-target archives) via the
       existing pipeline; codename settled in PLAN header before the release
       commit (holder's call).
 
