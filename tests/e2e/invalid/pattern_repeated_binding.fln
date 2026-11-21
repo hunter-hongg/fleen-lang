@@ -1,0 +1,21 @@
+// 0.0.9 T01: the D1 fix must not weaken the binding rule — a repeated
+// *binding* name inside one pattern is still `DuplicateBinding` (the name
+// enters the pattern's binding namespace; only zero-payload variant
+// references may repeat, PLAN D1).
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Pair<A, B> {
+    P(A, B),
+}
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.Some(1), Option.None);
+    choose p {
+        when P(z, z) { print(z as string); }   // repeated binding, not a variant
+        when P(_, None) { print("none"); }
+    }
+    0
+}

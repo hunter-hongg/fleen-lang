@@ -2304,6 +2304,31 @@ impl Resolver {
                 Ok(PatternHir::Literal(Box::new(hir_expr)))
             }
             Pattern::Ident(name, span) => {
+                // 0.0.9 T01 (BUG-2, PLAN D1): a bare identifier pattern is a
+                // *variant reference* — not a binding — iff no binding of the
+                // name is visible (same-pattern earlier bindings and enclosing
+                // locals all live on the scope chain; the scope-first
+                // precedence is the same one `resolve_ident` applies on the
+                // value side) and the name is a zero-payload variant of a
+                // reachable enum. The name then never enters the pattern's
+                // binding namespace, so `when P(None, None)` no longer trips
+                // `DuplicateBinding`. The HIR shape is unchanged: typeck
+                // reclassifies the unshadowed bare identifier into
+                // `TypedPatternHir::EnumVariant` via the scrutinee's type (the
+                // 0.0.6 T05 path), so coverage and lowering are unchanged.
+                if self.scopes.get(&name).is_none() && self.is_zero_payload_variant(&name) {
+                    // The ids are still allocated (ids stay contiguous) so a
+                    // typeck fall-back to the binding path (a scrutinee of a
+                    // non-enum type) keeps a coherent `binding_id`.
+                    let binding_id = self.next_binding_id();
+                    let hir_id = self.next_hir_id();
+                    return Ok(PatternHir::Ident {
+                        name,
+                        binding_id,
+                        hir_id,
+                        span,
+                    });
+                }
                 let (binding_id, hir_id) = self.declare_pattern_binding(&name, span)?;
                 Ok(PatternHir::Ident {
                     name,
@@ -2378,6 +2403,19 @@ impl Resolver {
                 })
             }
         }
+    }
+
+    /// Whether `name` is a zero-payload variant of an enum reachable in scope.
+    /// The registry is the same `variant_to_enum` / `enum_table` pair the
+    /// value-side bare-variant constructor resolution uses (0.0.6 T04, D3),
+    /// so pattern and value positions always agree on what a bare name can
+    /// refer to. 0.0.9 T01 (BUG-2, PLAN D1).
+    fn is_zero_payload_variant(&self, name: &str) -> bool {
+        self.variant_to_enum
+            .get(name)
+            .and_then(|enum_name| self.enum_table.get(enum_name))
+            .and_then(|decl| decl.variants.iter().find(|v| v.name == name))
+            .is_some_and(|variant| variant.payload_types.is_empty())
     }
 
     /// Register a pattern binding (identifier or Result-payload binding) in

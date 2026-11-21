@@ -235,3 +235,62 @@ fn owned_enum_requires_explicit_transfer() {
         "expected OwnedArgRequiresMove, got {errs:?}"
     );
 }
+
+// ========== 0.0.9 T01: complementary arms compose (BUG-2 exhaustiveness) ==========
+
+#[test]
+fn complementary_zero_payload_arms_are_exhaustive() {
+    // The BUG-2 repro's four arms jointly cover `Pair<Option<int>,
+    // Option<int>>` although no single arm is individually total (0.0.9
+    // T01): per payload position, the sub-patterns across the variant's
+    // arms jointly cover `Option<int>` (Some via a binding payload, None
+    // via the variant reference).
+    let hir = typeck_str(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.None, Option.None);
+    choose p {
+        when P(None, None) { print("empty"); }
+        when P(Some(z), Some(w)) { print("both"); }
+        when P(Some(z2), None) { print(z2 as string); }
+        when P(None, Some(w2)) { print(w2 as string); }
+    }
+    0
+}
+"#,
+    )
+    .expect("complementary arms of one variant must jointly cover it");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn joint_coverage_with_a_gap_is_rejected() {
+    // Composition is position-wise: both arms are `None` in position 1, so
+    // `Some` is uncovered there and the choose is still not exhaustive.
+    let errs = typeck_str(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.None, Option.None);
+    choose p {
+        when P(Some(z), None) { print(z as string); }
+        when P(None, None) { print("empty"); }
+    }
+    0
+}
+"#,
+    )
+    .expect_err("a payload position covered by `None` only must stay rejected");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            fleen_compiler::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}

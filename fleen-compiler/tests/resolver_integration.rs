@@ -1634,6 +1634,160 @@ fn resolve_curried_import_cross_module() {
     assert_eq!(func.params.len(), 2);
 }
 
+// ========== 0.0.9 T01: zero-payload variant patterns are variant references (BUG-2, D1) ==========
+
+#[test]
+fn resolve_zero_payload_variant_pattern_repeats() {
+    // BUG-2 regression (docs/0.0.7/BUGS.md repro, resolver level): a bare
+    // zero-payload variant name inside a payload pattern is a variant
+    // reference, not a binding — `when P(None, None)` must not trip
+    // `DuplicateBinding` (PLAN D1).
+    let hir = resolve_str(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.None, Option.None);
+    choose p {
+        when P(None, None) { print("empty"); }
+        when P(Some(z), Some(w)) { print("both"); }
+        when P(Some(z2), None) { print(z2 as string); }
+        when P(None, Some(w2)) { print(w2 as string); }
+    }
+    0
+}
+"#,
+    )
+    .expect("zero-payload variant references may repeat within one pattern");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn resolve_zero_payload_variant_in_or_pattern() {
+    // D1 / PLAN §3.1: or-pattern alternatives compose; `None | Some(0)`
+    // binds nothing and resolves.
+    let hir = resolve_str(
+        r#"
+enum Option<T> { Some(T), None }
+
+func main(): int {
+    o = Option.Some(1);
+    choose o {
+        when None | Some(0) { print("zero-ish"); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect("or-pattern over a variant reference and a payloadful variant resolves");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn error_repeated_binding_pattern_name_with_local() {
+    // D1 lookup order: a local binding of the name wins over the variant, so
+    // both occurrences take the binding path and the repetition still trips
+    // `DuplicateBinding` (PLAN §9 shadowing fixture).
+    let errs = resolve_str(
+        r#"
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    x = 1;
+    choose x {
+        when P(x, x) { print("same"); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect_err("repeated binding names still collide");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding, got {errs:?}"
+    );
+}
+
+#[test]
+fn error_repeated_fresh_binding_pattern_name() {
+    // Same rule without a local: the first `z` binds, the second is a
+    // duplicate declaration.
+    let errs = resolve_str(
+        r#"
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p = Pair.P(1, 2);
+    choose p {
+        when P(z, z) { print(z as string); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect_err("repeated binding names still collide");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::DuplicateBinding { .. })),
+        "expected DuplicateBinding, got {errs:?}"
+    );
+}
+
+#[test]
+fn resolve_local_shadows_zero_payload_variant_in_pattern() {
+    // D1 order: an enclosing local named like a zero-payload variant wins —
+    // the pattern takes the binding path (shadowing the local) instead of
+    // becoming a variant reference.
+    let hir = resolve_str(
+        r#"
+enum Option<T> { Some(T), None }
+
+func main(): int {
+    None = 1;
+    choose None {
+        when None { print(None as string); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect("a visible local binding beats the variant classification");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn error_const_local_shadow_of_variant_name_in_pattern() {
+    // The binding path engages the shadow checks a variant reference skips:
+    // a `const` local beaten only by the pattern's mutable binding is the
+    // usual mutability mismatch (proves the local really won the lookup).
+    let errs = resolve_str(
+        r#"
+enum Option<T> { Some(T), None }
+
+func main(): int {
+    const None = 1;
+    choose None {
+        when None { print("hit"); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect_err("const outer + mutable pattern binding is a shadow mismatch");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::ShadowingMutabilityMismatch { .. })),
+        "expected ShadowingMutabilityMismatch, got {errs:?}"
+    );
+}
+
 // ========== Directory-based tests ==========
 
 #[test]

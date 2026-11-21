@@ -419,6 +419,75 @@ fn pattern_covers_variant(p: &TypedPatternHir, info: &EnumInfo, args: &[Type], i
     }
 }
 
+/// Whether the guard-free arms matching enum variant `idx` jointly cover it
+/// by composing their payload sub-patterns (0.0.9 T01): for each payload
+/// position, the sub-patterns contributed by every `Enum` arm of that
+/// variant must jointly be total over the payload type. This is what lets
+/// the BUG-2 repro drop its `otherwise` — the four complementary
+/// `P(Some/None, …)` arms cover the Pair, although no single arm is
+/// individually total. Soundness: position-wise totality means no payload
+/// combination falls through, so lower's defensive tail stays unreachable
+/// for arms the compiler accepts.
+fn variant_arms_jointly_total(
+    arms: &[TypedChooseArmHir],
+    info: &EnumInfo,
+    args: &[Type],
+    idx: usize,
+) -> bool {
+    let skel = match info.payloads.get(idx) {
+        Some(s) if !s.is_empty() => s,
+        // Zero-payload variants are covered outright by the per-arm rule
+        // (`EnumVariant` matches its variant); an empty joint group must not
+        // read as coverage.
+        _ => return false,
+    };
+    let mut groups: Vec<Vec<&TypedPatternHir>> = vec![Vec::new(); skel.len()];
+    for arm in arms.iter().filter(|arm| arm.guard.is_none()) {
+        collect_variant_payloads(&arm.pattern, idx, &mut groups);
+    }
+    groups
+        .iter()
+        .zip(skel.iter())
+        .all(|(group, ty)| patterns_are_total(group, &substitute_params(ty, args)))
+}
+
+/// Contribute an arm's payload sub-patterns for variant `idx` to the
+/// per-position coverage groups: `Enum` arms of the variant contribute
+/// positionally; or-patterns and type guards contribute whatever their
+/// alternatives / inner pattern contribute. Other shapes (bindings, bare
+/// variant references) contribute nothing — they cover the variant outright
+/// through the per-arm rule instead.
+fn collect_variant_payloads<'a>(
+    p: &'a TypedPatternHir,
+    idx: usize,
+    groups: &mut [Vec<&'a TypedPatternHir>],
+) {
+    match p {
+        TypedPatternHir::Enum {
+            variant_index,
+            payloads,
+            ..
+        } => {
+            if *variant_index as usize == idx {
+                for (i, sub) in payloads.iter().enumerate() {
+                    if let Some(group) = groups.get_mut(i) {
+                        group.push(sub);
+                    }
+                }
+            }
+        }
+        TypedPatternHir::Or(alts, _) => {
+            for alt in alts {
+                collect_variant_payloads(alt, idx, groups);
+            }
+        }
+        TypedPatternHir::TypeGuard { pattern, .. } => {
+            collect_variant_payloads(pattern, idx, groups)
+        }
+        _ => {}
+    }
+}
+
 /// Type inference context.
 pub struct TypeChecker {
     /// Scope stack for type lookup.
@@ -2748,9 +2817,18 @@ impl TypeChecker {
             let variants = &self.enums.entries[info.id.0 as usize].variants;
             let mut missing: Vec<String> = Vec::new();
             for (idx, variant) in variants.iter().enumerate() {
+                // 0.0.7 rule stays: one guard-free arm whose pattern covers
+                // the variant (total payloads, or a bare variant reference)
+                // suffices. 0.0.9 T01 adds composition: complementary arms of
+                // the *same* variant jointly cover it when, per payload
+                // position, their sub-patterns jointly are total — the BUG-2
+                // repro's four `P(Some/None, …)` arms cover
+                // `Pair<Option<int>, Option<int>>` although no single arm is
+                // individually total. Strictly additive: any program
+                // exhaustive under the 0.0.7 rule still is.
                 let is_covered = arms.iter().any(|arm| {
                     arm.guard.is_none() && pattern_covers_variant(&arm.pattern, info, args, idx)
-                });
+                }) || variant_arms_jointly_total(arms, info, args, idx);
                 if !is_covered {
                     missing.push(variant.name.clone());
                 }

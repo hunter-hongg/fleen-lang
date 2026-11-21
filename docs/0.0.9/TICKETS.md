@@ -1,0 +1,253 @@
+# 0.0.9 — Small Repairs: Pattern Fix, Result-`choose` Completion, `break`/`continue`, std.str Batch (Tickets)
+
+> Companion to `docs/0.0.9/PLAN.md`.  One card = one unit of work, closed
+> with tests.  Decisions D1–D6 referenced here are **settled at planning
+> level** (see PLAN §1); a card may reopen one only by adding a new decision
+> entry, not by editing it silently.
+> **Status: T01 implemented and green; T02–T07 not started.**
+> **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
+> version stays v8, no new opcodes, no table changes. Every card that
+> touches a shared path keeps flag-off behavior unchanged; the 0.0.8
+> both-mode e2e gate stays green throughout.
+>
+> **Planning-time corrections this milestone owns** (verified against git
+> history and live compiles, not memory):
+> - BUG-1 (`docs/0.0.7/BUGS.md`) is already fixed — commit `a5b8bd7`, inside
+>   the `v0.0.8` tag; fixture `tests/e2e/valid/choose_arm_if_else.fln` green.
+> - The 0.0.8 captured-builtin "known limitation" is already fixed — commit
+>   `8dbbc8b`, inside the `v0.0.8` tag; `range_from(0)` partials run e2e.
+> - Result-`choose` guards already lower via 0.0.7's attempt chain;
+>   `when Ok(x) if x > 3 { … }` compiles and runs today.
+> T06 is the docs-sync card that records all three.
+
+---
+
+## T01 — Resolver: zero-payload variant patterns are variant references (F1; D1)
+
+- [x] Resolver: over each `choose` pattern subtree, classify a bare
+      identifier pattern as a **variant reference** iff it names a
+      zero-payload variant of an enum reachable in scope and no binding of
+      that name was registered earlier in the same pattern (lookup order
+      PLAN D1: same-pattern earlier bindings → enclosing locals →
+      zero-payload variant → unresolved). The parser keeps emitting bare
+      identifiers; classification is resolver work.
+- [x] The classified reference reuses the existing `EnumVariant` typed
+      pattern path (zero bindings, discriminant-check lowering unchanged);
+      `collect_pattern_bindings_into` already returns nothing for it.
+- [x] Errors: `DuplicateBinding` still fires for repeated **binding** names
+      (`when P(x, x)` with a local `x`); unresolved bare names unchanged;
+      non-variant repeated bare names (`when P(1, 1)` literal arms) unchanged.
+- [x] Exhaustiveness unchanged: a zero-payload variant arm covers exactly
+      its variant; or-pattern alternatives `None | Some(0)` compose.
+- [x] Tests: resolver unit tests (variant-vs-binding precedence, shadow
+      order); e2e valid — the BUG-2 repro verbatim (`when P(None, None)` +
+      `Some`/`None` mix, mirrors `examples/0.0.7/pair_demo.fln` case 5 with
+      the `otherwise` workaround removed); e2e invalid — `DuplicateBinding`
+      on repeated bindings preserved.
+- [x] Regression-test-first per SPEC §7 (BUGS.md's recorded fix rule).
+
+**As-built note (exhaustiveness)**: the resolver classification alone still
+rejects the card's own acceptance fixture — the repro's four complementary
+arms cover `P` only *jointly*, and 0.0.7's per-arm rule
+(`pattern_covers_variant` per arm) requires each arm to be individually
+total, so `when P(None, None)` + the `Some`/`None` mix was
+`ChooseNotExhaustive` as soon as `DuplicateBinding` stopped firing (the
+path was unreachable before, which is why 0.0.7 never saw it). As recorded
+here (not by silently editing PLAN D1): the 0.0.7 per-arm rule stays first
+(`pattern_covers_variant` unchanged), and `check_exhaustiveness` gains a
+second, additive disjunct — `variant_arms_jointly_total` composes the
+guard-free arms matching one variant position-wise
+(`collect_variant_payloads` gathers each `Enum` arm's sub-patterns, through
+or-patterns/type-guards; `patterns_are_total` judges each position's joint
+group). Strictly additive: every program exhaustive under the 0.0.7 rule
+stays exhaustive; zero-payload variants keep their outright
+`EnumVariant` coverage. The D1 sentence "no change to the coverage
+algebra" is read as scoped to the variant-reference classification — the
+composition is what the card's "with the `otherwise` workaround removed"
+acceptance test requires. Tests: `typeck_integration.rs`
+`complementary_zero_payload_arms_are_exhaustive` (positive) +
+`joint_coverage_with_a_gap_is_rejected` (position-wise negative);
+resolver-level T01 tests in `resolver_integration.rs`; e2e
+`tests/e2e/valid/pair_zero_payload_variants.fln` (repro verbatim, written
+first and red) + `tests/e2e/invalid/pattern_repeated_binding.fln`.
+
+**Depends on**: nothing.
+**Refs**: PLAN §1 D1, §3.1; `docs/0.0.7/BUGS.md` BUG-2.
+
+---
+
+## T02 — Lower: Result-`choose` accepts `otherwise` / general arms (F2; D2)
+
+- [ ] Typeck: an `otherwise` arm on a Result scrutinee makes the choose
+      exhaustive (same coverage rule as scalar scrutinees); a guarded arm
+      still does not count toward coverage (§10.5 rule unchanged).
+- [ ] Lower: delete the `UnsupportedFeature "non-Ok/Err arm … deferred to
+      U07"` branch in `lower_choose_result`; route non-ResultCtor arms into
+      the attempt-chain structure — `otherwise` occupies the defensive-tail
+      slot (its body replaces the pop+unit tail; the tail's Pop of the
+      parked payload still happens before the body runs).
+- [ ] `ChooseResultNeedsOkErrArms` retired: remove the variant and its
+      diagnostics; exhaustive-choose errors now come from typeck
+      (`ChooseNotExhaustive`) for Result scrutinees as for every other type.
+- [ ] Guard arms: no lowering change (already work); add the tests that
+      document the behavior (`when Ok(x) if g { … }` + unguarded duplicate
+      arm; + `otherwise`).
+- [ ] Tests: e2e valid — guard + `otherwise`; multiple Ok arms + Err arm +
+      `otherwise`; nested payload `when Ok(Some(y))` + `otherwise`; e2e
+      invalid — Result choose missing both coverage paths (typeck error);
+      lower unit tests for the tail-slot arm shape (payload popped once).
+
+**Depends on**: nothing.
+**Refs**: PLAN §1 D2, §3.2; DESIGN.md §10.5 (T06 corrects its deferral text).
+
+---
+
+## T03 — Frontend: `break` / `continue` reserved words + loop-context checks (F3; D4)
+
+- [ ] Lexer: `break` / `continue` keywords (two new token kinds); reserved
+      word lists updated (source breaking change of 0.0.9, D4).
+- [ ] Parser: `break_stmt` / `continue_stmt` keyword statements (ASI
+      handles the trailing semicolon; they take no value).
+- [ ] Typeck: loop-context tracking — legal inside `while` bodies and `for`
+      bodies (both array and Range skeletons, including inline-iter expanded
+      loops); `BreakOutsideLoop` / `ContinueOutsideLoop` at top level, in
+      plain function bodies without a lexically enclosing loop, inside
+      `choose` arm bodies, and across any function/`async` boundary (D4's
+      lexical containment rule); `x = break` / break-as-expression rejected
+      (statements, not expressions).
+- [ ] Errors: the two new variants with actionable spans (which loop is
+      missing) + hint text.
+- [ ] Tests: typeck unit tests per position above; parser tests (statement
+      shape, ASI interaction); e2e invalid set per PLAN §9.
+
+**Depends on**: nothing.
+**Refs**: PLAN §1 D4, §3.3.
+
+---
+
+## T04 — Lower: loop exit / continue edges (F3; D6)
+
+- [ ] `lower_while` and both `lower_for` skeletons (array / Range) pre-create
+      an exit block and a continue-edge target; `break` → `Jump` exit,
+      `continue` → `Jump` continue edge. Innermost loop binds (nested loops
+      each carry their own edges; a stack of active edges in the `FnBuilder`
+      or the typeck-checked context carries through).
+- [ ] Stack discipline: at both edges the stack depth equals the loop-head
+      depth; apply the BUG-1 spill rule (`spill_for_fallthrough`) at every
+      conditional terminator inside a loop body — verify-clean by
+      construction, proven by the e2e set.
+- [ ] Inline-iter expanded loops (`map`/`filter`/`foldl`/`foldr`/`take` /
+      Range inline lowering): `break`/`continue` inside the closure-shaped
+      expansion either work (edges threaded) or are a clean typeck rejection
+      — decide by implementation shape, record the outcome here, no silent
+      behavior.
+- [ ] Loop-as-expression: loops are unit-valued (0.0.1 posture) — `break`
+      exits produce unit; the merge block after the loop is unchanged.
+- [ ] Tests: lower unit tests for while/array-for/Range-for shapes; e2e
+      valid — `break` in `while`, `continue` in `for`-over-Range,
+      `continue` in `for`-over-array, nested loops (innermost wins),
+      `break` inside `if` inside `while`; e2e invalid — the T03 set
+      end-to-end.
+
+**Depends on**: T03.
+**Refs**: PLAN §1 D4/D6, §3.3.
+
+---
+
+## T05 — std.str intrinsic batch (F4; D3)
+
+- [ ] `fleen-compiler/src/typeck/builtins.rs`: eight `BuiltinSpec` entries
+      per PLAN D3's table (names, signatures, intrinsic lowering).
+- [ ] `fleen-vm/src/vm.rs` `exec_builtin`: eight arms —
+      `parse_int` (`str::parse::<i64>`, overflow/non-numeric → `Err(string)`,
+      optional leading `-`/`+`, decimal only), `parse_float` (non-numeric →
+      `Err`), `trim` (Unicode whitespace), `contains`, `starts_with`,
+      `ends_with` (all bool), `index_of` (first occurrence by **Unicode
+      scalar value**, not found → `Err`), `replace` (all occurrences,
+      scalar-indexed pattern).
+- [ ] `std/str.fln`: doc-comment entries for the eight (VM intrinsics stay
+      doc-only per 0.0.3 D8); indexing-unit contract stated per function.
+- [ ] No opcodes, no bytecode version change (D6); no new `Value` variants.
+- [ ] Tests: VM unit tests per function (empty needle for `contains`/
+      `index_of`/`replace`/`starts_with` — decide empty-needle semantics:
+      Rust-consistent, `index_of("")` = `Ok(0)`, `replace("", x, y)` no-op —
+      and pin them in the doc comments); e2e valid fixture exercising all
+      eight; e2e invalid — `parse_int` overflow caught as a **value** (`Err`
+      extracted by `choose`, program prints the error, exits 0).
+
+**Depends on**: nothing.
+**Refs**: PLAN §1 D3, §3.4, §4.
+
+---
+
+## T06 — Docs sync: debt corrections + BUGS.md status (F5)
+
+- [ ] `docs/0.0.7/BUGS.md`: header + BUG-1 marked **fixed** (commit
+      `a5b8bd7`, v0.0.8 tag, fixture path); BUG-2 marked **fixed in 0.0.9**
+      (T01, PLAN D1) — the file keeps its verbatim findings (append-only
+      posture), status lines added.
+- [ ] CHANGELOG.md §0.0.8 "Known limitation" + SPEC.md §0.0.8 known-limit
+      sentence + `docs/0.0.8/TICKETS.md` T09 deviation text + README:
+      replace the captured-builtin "fails at runtime with `UnknownBuiltin`"
+      wording with the fixed-at-`8dbbc8b` record (all four verified stale).
+- [ ] DESIGN.md §10.5: guard-arm lowering no longer "deferred to U09/U07" —
+      guards work (0.0.7 attempt chain); `otherwise` legal from 0.0.9
+      (cross-ref `docs/0.0.9/PLAN.md` D2).
+- [ ] DESIGN.md / SYNTAX.ebnf: `break` / `continue` grammar + reserved-word
+      notes; std.str section gains the eight intrinsics; DESIGN.md §14
+      Feature Scope matrix row for 0.0.9; §18 Roadmap row for 0.0.9.
+- [ ] BYTECODE.md: no edits — confirm and record in the card that no row
+      changed (D6).
+- [ ] New CHANGELOG `[0.0.9]` section drafted (T07 finalizes).
+
+**Depends on**: T01–T05 (records their as-built state).
+**Refs**: PLAN §0, §1 D1–D6, §8.
+
+---
+
+## T07 — Examples + CHANGELOG + version bump + release gate (F5/F6)
+
+- [ ] `examples/0.0.9/`: single-file demo (BUG-2 pattern spelling,
+      Result-`choose` guard + `otherwise`, `break`/`continue` in both loop
+      forms, the eight std.str calls) runnable with `cargo fln`; README
+      line per the 0.0.7/0.0.8 layout.
+- [ ] CHANGELOG `[0.0.9]` finalized (Added: pattern fix, `otherwise`,
+      `break`/`continue`, std.str batch; Changed: two new reserved words —
+      the breaking set; Fixed: BUG-2 with BUGS.md ref).
+- [ ] Version bump: `Cargo.toml` workspace `version` + `std/VERSION` →
+      `0.0.9`; `Cargo.lock` regenerated by the build.
+- [ ] Full gates green: `cargo fmt -- --check`, `cargo clippy -- -D
+      warnings`, `cargo test`, `cargo doc --no-deps`; the 0.0.8 both-mode
+      e2e matrix still passes byte-identically.
+- [ ] Release publication (tag `v0.0.9` + six-target archives) via the
+      existing pipeline; codename settled in PLAN header before the release
+      commit (holder's call).
+
+**Depends on**: T06.
+**Refs**: PLAN §10.
+
+---
+
+## Dependency graph
+
+```
+T01 ──┐
+T02 ──┼──→ T06 ──→ T07
+T03 ──→ T04 ──┘
+T05 ──┘
+```
+
+- T01, T02, T03, T05 are independent roots.
+- T04 depends on T03; T06 depends on T01–T05; T07 depends on T06 and is the
+  release gate.
+
+---
+
+## Out of scope reminders (from PLAN §8)
+
+No BUG-1 re-work (already fixed), no captured-builtin re-work (already
+fixed), no `substring`/`slice`/`chars`, no `for` over `string`, no labeled
+`break`, no `break <value>`, no generics / traits / operator overloading /
+closures (0.1.0), no channel `close`/`select`, no `async {}` blocks, no
+file I/O, no bytecode version change. Any of these needs a new decision
+entry in PLAN §1 first.
