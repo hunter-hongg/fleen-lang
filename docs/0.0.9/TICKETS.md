@@ -52,24 +52,48 @@ arms cover `P` only *jointly*, and 0.0.7's per-arm rule
 (`pattern_covers_variant` per arm) requires each arm to be individually
 total, so `when P(None, None)` + the `Some`/`None` mix was
 `ChooseNotExhaustive` as soon as `DuplicateBinding` stopped firing (the
-path was unreachable before, which is why 0.0.7 never saw it). As recorded
-here (not by silently editing PLAN D1): the 0.0.7 per-arm rule stays first
-(`pattern_covers_variant` unchanged), and `check_exhaustiveness` gains a
-second, additive disjunct — `variant_arms_jointly_total` composes the
-guard-free arms matching one variant position-wise
-(`collect_variant_payloads` gathers each `Enum` arm's sub-patterns, through
-or-patterns/type-guards; `patterns_are_total` judges each position's joint
-group). Strictly additive: every program exhaustive under the 0.0.7 rule
-stays exhaustive; zero-payload variants keep their outright
-`EnumVariant` coverage. The D1 sentence "no change to the coverage
-algebra" is read as scoped to the variant-reference classification — the
-composition is what the card's "with the `otherwise` workaround removed"
-acceptance test requires. Tests: `typeck_integration.rs`
+path was unreachable before, which is why 0.0.7 never saw it). Recorded as
+decision **D7** (the composition reopens D1's "no change to the coverage
+algebra" sentence, per the reopen-by-new-entry rule): the 0.0.7 per-arm
+rule stays first (`pattern_covers_variant` unchanged), and
+`check_exhaustiveness` gains a second, additive disjunct —
+`variant_arms_jointly_total` composes the guard-free arms matching one
+variant over a coverage **matrix**: each `Enum` arm of the variant
+contributes its payload sub-patterns as a row (`collect_variant_rows`,
+through or-patterns/type-guards; zero-payload `EnumVariant` rows are
+empty), and `pattern_rows_cover` splits the rows
+constructor-by-constructor across the positions, recursing on the rows
+that survive each specialization. Strictly additive: every program
+exhaustive under the 0.0.7 rule stays exhaustive; zero-payload variants
+keep their outright `EnumVariant` coverage.
+
+**Soundness note (corrected from the first draft)**: the draft composed
+arms per payload *position* and asked `patterns_are_total` per pooled
+group, claiming "position-wise totality means no payload combination falls
+through". That claim is false — position-wise totality ignores the
+correlation between positions: `P(Some, None)` + `P(None, Some)` pools
+total per position while `P(Some, Some)` matches neither arm and silently
+falls through (compiles at the draft, rejected at the merge-base); the
+same pooling hid a `Result`-payload hole (`P(Ok(a), x)` + `P(Err(e), 5)`)
+and a scalar-head hole (`P(x, 1)` + `P(2, y)`). The splitting engine
+replaced it: each specialization keeps only rows matching *all* values of
+the split constructor, so the surviving rows stay correlated with the
+tuples they matched, and per-position totality is never used as a verdict.
+
+Tests: `typeck_integration.rs`
 `complementary_zero_payload_arms_are_exhaustive` (positive) +
-`joint_coverage_with_a_gap_is_rejected` (position-wise negative);
-resolver-level T01 tests in `resolver_integration.rs`; e2e
-`tests/e2e/valid/pair_zero_payload_variants.fln` (repro verbatim, written
-first and red) + `tests/e2e/invalid/pattern_repeated_binding.fln`.
+`joint_coverage_with_a_gap_is_rejected` (single-position negative) +
+`cross_position_pattern_gap_is_rejected` /
+`result_payload_position_gap_is_rejected` /
+`binding_head_does_not_cover_other_arms_tuples` (soundness negatives) +
+`or_pattern_alternatives_compose_in_joint_coverage` (D6 inside the
+matrix); resolver-level T01 tests in `resolver_integration.rs` (incl.
+`resolve_literal_payload_arms_bind_no_names` for the literal-arms
+checklist item); e2e `tests/e2e/valid/pair_zero_payload_variants.fln`
+(repro verbatim, written first and red) +
+`tests/e2e/invalid/choose_payload_cross_position_gap.fln` (soundness pin)
++ `tests/e2e/invalid/pattern_repeated_binding.fln` (`DuplicateBinding`
+preserved).
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D1, §3.1; `docs/0.0.7/BUGS.md` BUG-2.
@@ -196,6 +220,12 @@ first and red) + `tests/e2e/invalid/pattern_repeated_binding.fln`.
 - [ ] DESIGN.md / SYNTAX.ebnf: `break` / `continue` grammar + reserved-word
       notes; std.str section gains the eight intrinsics; DESIGN.md §14
       Feature Scope matrix row for 0.0.9; §18 Roadmap row for 0.0.9.
+- [ ] SPEC.md §14 0.0.7 known-limit sentence (2) (flagged in the T01
+      review): `when P(None, None)` no longer trips `DuplicateBinding` —
+      fixed in 0.0.9 by T01 (zero-payload variant patterns are variant
+      references, PLAN D1/D7); rewrite the limit as resolved. (The same
+      block's (1) is fixed by `a5b8bd7`, already recorded in the header
+      above.)
 - [ ] BYTECODE.md: no edits — confirm and record in the card that no row
       changed (D6).
 - [ ] New CHANGELOG `[0.0.9]` section drafted (T07 finalizes).

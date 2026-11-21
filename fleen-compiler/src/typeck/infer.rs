@@ -419,49 +419,228 @@ fn pattern_covers_variant(p: &TypedPatternHir, info: &EnumInfo, args: &[Type], i
     }
 }
 
+/// One row of the coverage matrix for a variant's payload product space:
+/// `None` is a wildcard slot (matches every value of the position — a
+/// binding pattern, or a slot synthesized when a wildcard-headed row
+/// specializes into a constructor's payloads), `Some(p)` a concrete
+/// sub-pattern.
+type CoverageRow<'a> = Vec<Option<&'a TypedPatternHir>>;
+
 /// Whether the guard-free arms matching enum variant `idx` jointly cover it
-/// by composing their payload sub-patterns (0.0.9 T01): for each payload
-/// position, the sub-patterns contributed by every `Enum` arm of that
-/// variant must jointly be total over the payload type. This is what lets
-/// the BUG-2 repro drop its `otherwise` — the four complementary
-/// `P(Some/None, …)` arms cover the Pair, although no single arm is
-/// individually total. Soundness: position-wise totality means no payload
-/// combination falls through, so lower's defensive tail stays unreachable
-/// for arms the compiler accepts.
+/// (0.0.9 T01): constructor splitting over the arms' coverage matrix (the
+/// [`pattern_rows_cover`] engine). This is what lets the BUG-2 repro drop
+/// its `otherwise` — the four complementary `P(Some/None, …)` arms cover
+/// `Pair<Option<int>, Option<int>>` although no single arm is individually
+/// total. The 0.0.7 per-arm rule stays first at the call site, so this
+/// disjunct only ever adds coverage.
 fn variant_arms_jointly_total(
     arms: &[TypedChooseArmHir],
     info: &EnumInfo,
     args: &[Type],
     idx: usize,
 ) -> bool {
-    let skel = match info.payloads.get(idx) {
-        Some(s) if !s.is_empty() => s,
-        // Zero-payload variants are covered outright by the per-arm rule
-        // (`EnumVariant` matches its variant); an empty joint group must not
-        // read as coverage.
-        _ => return false,
+    let Some(skel) = info.payloads.get(idx) else {
+        // Arity is checked before exhaustiveness; a missing skeleton entry
+        // is a malformed tree.
+        return false;
     };
-    let mut groups: Vec<Vec<&TypedPatternHir>> = vec![Vec::new(); skel.len()];
+    let mut rows: Vec<CoverageRow<'_>> = Vec::new();
     for arm in arms.iter().filter(|arm| arm.guard.is_none()) {
-        collect_variant_payloads(&arm.pattern, idx, &mut groups);
+        collect_variant_rows(&arm.pattern, idx, &mut rows);
     }
-    groups
-        .iter()
-        .zip(skel.iter())
-        .all(|(group, ty)| patterns_are_total(group, &substitute_params(ty, args)))
+    // Payload arity is checked before exhaustiveness, so every row matches
+    // the declared arity; a shorter row would desync the matrix (SPEC §4).
+    debug_assert!(
+        rows.iter().all(|row| row.len() == skel.len()),
+        "variant pattern rows must match the declared payload arity"
+    );
+    let types: Vec<Type> = skel.iter().map(|ty| substitute_params(ty, args)).collect();
+    pattern_rows_cover(&rows, &types)
 }
 
-/// Contribute an arm's payload sub-patterns for variant `idx` to the
-/// per-position coverage groups: `Enum` arms of the variant contribute
-/// positionally; or-patterns and type guards contribute whatever their
-/// alternatives / inner pattern contribute. Other shapes (bindings, bare
-/// variant references) contribute nothing — they cover the variant outright
-/// through the per-arm rule instead.
-fn collect_variant_payloads<'a>(
-    p: &'a TypedPatternHir,
-    idx: usize,
-    groups: &mut [Vec<&'a TypedPatternHir>],
-) {
+/// Whether `rows` jointly match every value of the tuple space `types` —
+/// the engine behind [`variant_arms_jointly_total`]. `row[i]` describes
+/// position `i`; a `None` slot matches any value there. Constructor
+/// splitting: specialize every row on position 0's constructors, keep only
+/// the rows that can match each constructor, recurse on the remaining
+/// positions.
+///
+/// Soundness: a surviving row matches *all* values whose position-0 top
+/// constructor is the split target, so each recursion stays correlated with
+/// the values the rows matched. Per-position totality alone — which ignores
+/// that correlation — is never used, and would be unsound:
+/// `P(Some, None)` + `P(None, Some)` pools total per position while
+/// `P(Some, Some)` falls through. Termination: each split replaces
+/// position 0 with the matched constructor's payload types; enums are
+/// non-recursive (`RecursiveEnum`), so payload types strictly shrink.
+fn pattern_rows_cover(rows: &[CoverageRow<'_>], types: &[Type]) -> bool {
+    let Some((t0, rest)) = types.split_first() else {
+        // Every position consumed: the rows that survived all splits match
+        // the whole tuple path — coverage iff one did.
+        return !rows.is_empty();
+    };
+    let mut expanded: Vec<CoverageRow<'_>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        expand_row(row, &mut expanded);
+    }
+    match t0 {
+        Type::Enum(info) | Type::App(info, _) => {
+            let args: &[Type] = match t0 {
+                Type::App(_, args) => args,
+                _ => &[],
+            };
+            (0..info.payloads.len()).all(|v| {
+                // The matched constructor's payloads become the next columns.
+                let ptys: Vec<Type> = info.payloads[v]
+                    .iter()
+                    .map(|ty| substitute_params(ty, args))
+                    .collect();
+                let mut spec: Vec<CoverageRow<'_>> = Vec::new();
+                for row in &expanded {
+                    match row.first().copied().flatten() {
+                        // A wildcard-headed row matches every value of the
+                        // split position: its slots for the constructor's
+                        // payloads stay wildcards.
+                        None => spec.push(
+                            ptys.iter()
+                                .map(|_| None)
+                                .chain(row[1..].iter().copied())
+                                .collect(),
+                        ),
+                        Some(TypedPatternHir::Enum {
+                            variant_index,
+                            payloads,
+                            ..
+                        }) if *variant_index as usize == v => spec.push(
+                            payloads
+                                .iter()
+                                .map(Some)
+                                .chain(row[1..].iter().copied())
+                                .collect(),
+                        ),
+                        // Zero-payload bare variant reference: matches
+                        // variant `v`, contributes no payload slots.
+                        Some(TypedPatternHir::EnumVariant { variant_index, .. })
+                            if *variant_index as usize == v =>
+                        {
+                            spec.push(row[1..].to_vec())
+                        }
+                        // Any other head cannot match variant `v` — dropped.
+                        _ => {}
+                    }
+                }
+                pattern_rows_cover(
+                    &spec,
+                    &ptys
+                        .into_iter()
+                        .chain(rest.iter().cloned())
+                        .collect::<Vec<_>>(),
+                )
+            })
+        }
+        Type::Result(t, e) => {
+            // Result's two constructors split the space the same way; each
+            // side keeps only the rows that can match it.
+            let mut ok_rows: Vec<CoverageRow<'_>> = Vec::new();
+            let mut err_rows: Vec<CoverageRow<'_>> = Vec::new();
+            for row in &expanded {
+                match row.first().copied().flatten() {
+                    None => {
+                        ok_rows.push(
+                            std::iter::once(None)
+                                .chain(row[1..].iter().copied())
+                                .collect(),
+                        );
+                        err_rows.push(
+                            std::iter::once(None)
+                                .chain(row[1..].iter().copied())
+                                .collect(),
+                        );
+                    }
+                    Some(TypedPatternHir::ResultCtor { ctor, payload, .. }) => {
+                        let side = match ctor {
+                            ast::ResultCtor::Ok => &mut ok_rows,
+                            ast::ResultCtor::Err => &mut err_rows,
+                        };
+                        side.push(
+                            std::iter::once(Some(&**payload))
+                                .chain(row[1..].iter().copied())
+                                .collect(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            pattern_rows_cover(
+                &ok_rows,
+                &std::iter::once(t.as_ref().clone())
+                    .chain(rest.iter().cloned())
+                    .collect::<Vec<_>>(),
+            ) && pattern_rows_cover(
+                &err_rows,
+                &std::iter::once(e.as_ref().clone())
+                    .chain(rest.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+        }
+        // Non-enumerable position (scalars, arrays, ...): only a wildcard
+        // slot — a binding — matches every value; literal- or
+        // constructor-headed rows match a strict subset and are dropped,
+        // which can only shrink coverage (conservative, like
+        // `patterns_are_total` everywhere else in this file).
+        _ => {
+            let surviving: Vec<CoverageRow<'_>> = expanded
+                .iter()
+                .filter(|row| row.first().copied().flatten().is_none())
+                .map(|row| row[1..].to_vec())
+                .collect();
+            !surviving.is_empty() && pattern_rows_cover(&surviving, rest)
+        }
+    }
+}
+
+/// Normalize one row's head before splitting: or-patterns fan out into one
+/// row per alternative (D6 — an or contributes the union of its
+/// alternatives' coverage), type guards unwrap to their inner pattern (D7
+/// — the ascription is compile-time only), bindings become wildcard slots.
+fn expand_row<'a>(row: &CoverageRow<'a>, out: &mut Vec<CoverageRow<'a>>) {
+    match row.first().copied().flatten() {
+        // Exhausted row or an already-wildcard head: keep as is.
+        None => out.push(row.clone()),
+        Some(TypedPatternHir::Or(alts, _)) => {
+            for alt in alts {
+                let mut r: CoverageRow<'_> = Vec::with_capacity(row.len());
+                r.push(Some(alt));
+                r.extend(row[1..].iter().copied());
+                expand_row(&r, out);
+            }
+        }
+        Some(TypedPatternHir::TypeGuard { pattern, .. }) => {
+            let mut r: CoverageRow<'_> = Vec::with_capacity(row.len());
+            r.push(Some(&**pattern));
+            r.extend(row[1..].iter().copied());
+            expand_row(&r, out);
+        }
+        Some(TypedPatternHir::Ident { .. }) => {
+            let mut r: CoverageRow<'_> = Vec::with_capacity(row.len());
+            r.push(None);
+            r.extend(row[1..].iter().copied());
+            expand_row(&r, out);
+        }
+        // Literal, constructor patterns, `Error`: keep the head; the split
+        // decides whether the row can match.
+        Some(_) => out.push(row.clone()),
+    }
+}
+
+/// The coverage rows an arm contributes for variant `idx`: an `Enum` arm of
+/// the variant contributes its payloads positionally; a zero-payload bare
+/// variant reference (`EnumVariant`) contributes an empty row; or-patterns
+/// contribute each alternative's rows (D6); type guards their inner
+/// pattern's rows (D7). Other shapes contribute nothing — bindings cover
+/// the variant outright through the per-arm rule, and literals cannot
+/// match a variant.
+fn collect_variant_rows<'a>(p: &'a TypedPatternHir, idx: usize, rows: &mut Vec<CoverageRow<'a>>) {
     match p {
         TypedPatternHir::Enum {
             variant_index,
@@ -469,21 +648,20 @@ fn collect_variant_payloads<'a>(
             ..
         } => {
             if *variant_index as usize == idx {
-                for (i, sub) in payloads.iter().enumerate() {
-                    if let Some(group) = groups.get_mut(i) {
-                        group.push(sub);
-                    }
-                }
+                rows.push(payloads.iter().map(Some).collect());
+            }
+        }
+        TypedPatternHir::EnumVariant { variant_index, .. } => {
+            if *variant_index as usize == idx {
+                rows.push(Vec::new());
             }
         }
         TypedPatternHir::Or(alts, _) => {
             for alt in alts {
-                collect_variant_payloads(alt, idx, groups);
+                collect_variant_rows(alt, idx, rows);
             }
         }
-        TypedPatternHir::TypeGuard { pattern, .. } => {
-            collect_variant_payloads(pattern, idx, groups)
-        }
+        TypedPatternHir::TypeGuard { pattern, .. } => collect_variant_rows(pattern, idx, rows),
         _ => {}
     }
 }

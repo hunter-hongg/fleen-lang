@@ -943,10 +943,14 @@ choose x {
 > **Known limits (post-release findings, see `docs/0.0.7/BUGS.md`)**:
 > (1) a `choose` arm over an **enum** scrutinee whose block ends in an
 > `if`/`else` expression fails bytecode verification (stack-depth mismatch);
-> the scalar-scrutinee path is unaffected. (2) Within one pattern a bare name
-> may appear at most once — zero-payload variant patterns occupy their name,
-> so `when P(None, None)` is a `DuplicateBinding` resolve error (use
-> `otherwise` or split the arms).
+> the scalar-scrutinee path is unaffected — **fixed in 0.0.8** (commit
+> `a5b8bd7`, inside the `v0.0.8` tag; fixture
+> `tests/e2e/valid/choose_arm_if_else.fln`). (2) Within one pattern a bare
+> name may appear at most once — zero-payload variant patterns occupied
+> their name, so `when P(None, None)` was a `DuplicateBinding` resolve
+> error — **fixed in 0.0.9** (T01: zero-payload variant patterns are
+> variant references, not bindings; `docs/0.0.9/PLAN.md` D1/D7). Repeated
+> *binding* names still error.
 
 ```fleen
 choose value {

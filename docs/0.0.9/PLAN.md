@@ -19,6 +19,8 @@
 > **Status**: planning. Decisions D1–D6 below are settled at planning level;
 > each names the alternative it rejected and what the choice locks. They may
 > be revised only by a new entry here, not silently in a ticket card.
+> D7 was added as-built while implementing T01 (it reopens a sentence of
+> D1's scope), per exactly that rule.
 >
 > **What this is not**: no generics, no traits, no closures, no operator
 > overloading, no channel `close`/`select`, no `async {}` blocks, no file
@@ -58,7 +60,7 @@ The only source breaking set of 0.0.9 is **two new reserved words**
 
 ---
 
-## 1. Settled decisions (D1–D6)
+## 1. Settled decisions (D1–D7)
 
 ### D1 — BUG-2: a zero-payload variant pattern is a variant reference, not a binding
 
@@ -183,6 +185,44 @@ at each loop-body conditional terminator); std.str is pure VM intrinsics.
 `BYTECODE.md` gains no rows; writers keep emitting v8; readers accept
 `{1..=8}` unchanged. Any future opcode need is a new PLAN decision first.
 
+### D7 — Exhaustiveness composition changes the coverage algebra (as-built, T01)
+
+D1's scope sentence "no change to the coverage algebra" (§3.1) turned out
+to be unimplementable as written: the resolver classification alone still
+rejects T01's own acceptance fixture, because the BUG-2 repro's four
+complementary arms cover `P` only *jointly* and 0.0.7's per-arm rule
+(`pattern_covers_variant`) requires each arm to be individually total.
+Accepting jointly-covering arms **is** a change to the coverage algebra,
+recorded here rather than by silently re-reading D1.
+
+- **The rule (strictly additive over 0.0.7)**: the per-arm rule stays
+  first; `check_exhaustiveness` gains a second disjunct — the guard-free
+  arms matching one variant jointly cover it when constructor splitting
+  over their coverage matrix accepts (`variant_arms_jointly_total` +
+  `pattern_rows_cover`): each arm contributes its payload sub-patterns as
+  a row, rows are specialized constructor-by-constructor across the
+  positions, and a recursion level survives only when every constructor
+  choice keeps some row. Every program exhaustive under 0.0.7 stays
+  exhaustive; zero-payload variants keep their outright `EnumVariant`
+  coverage.
+- **Soundness (corrected from the first draft)**: the draft composed arms
+  per payload *position* and asked `patterns_are_total` per pooled group.
+  Position-wise totality does not imply joint coverage — `P(Some, None)` +
+  `P(None, Some)` pools total per position while `P(Some, Some)` matches
+  neither arm and silently falls through to lower's defensive tail; the
+  same pooling also hid a `Result`-payload hole (`P(Ok(a), x)` +
+  `P(Err(e), 5)`) and a scalar-head hole (`P(x, 1)` + `P(2, y)`), all
+  accepted by the draft but rejected at the merge-base. Splitting keeps
+  the surviving rows correlated with the tuples they matched, so the
+  per-position argument is never made. Pinned by
+  `cross_position_pattern_gap_is_rejected`,
+  `result_payload_position_gap_is_rejected`,
+  `binding_head_does_not_cover_other_arms_tuples`, and e2e invalid
+  `choose_payload_cross_position_gap.fln`.
+- **What this locks**: D6 holds unchanged — exhaustiveness is a
+  compile-time verdict only; no bytecode, no opcode, no table change. The
+  0.0.7 per-arm rule and its verdicts are untouched.
+
 ---
 
 ## 2. Feature list
@@ -218,7 +258,9 @@ choose move p {
   binding earlier in the same pattern (D1 order). Everything else keeps the
   existing Ident path.
 - Exhaustiveness: a zero-payload variant arm covers its variant exactly as
-  today's enum-variant arms do (no change to the coverage algebra).
+  today's enum-variant arms do; jointly-covering complementary arms compose
+  through the splitting engine (as-built deviation from this bullet's
+  original "no change to the coverage algebra" — recorded as D7).
 - Or-patterns compose: `when None | Some(0)` binds nothing and covers both
   alternatives (binding-consistency already trivial for empty sets).
 

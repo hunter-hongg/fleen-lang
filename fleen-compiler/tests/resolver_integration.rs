@@ -2361,3 +2361,27 @@ fn param_enum_private_cross_module_is_error() {
         "expected PrivateAccess, got {errs:?}"
     );
 }
+
+#[test]
+fn resolve_literal_payload_arms_bind_no_names() {
+    // T01 checklist: literal payload arms (`when P(1, 1)`) never enter the
+    // binding namespace — no `DuplicateBinding`, no bindings — and are
+    // untouched by the variant-reference classification, which only
+    // considers bare identifiers (PLAN D1).
+    let hir = resolve_str(
+        r#"
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p = Pair.P(1, 1);
+    choose p {
+        when P(1, 1) { print("ones"); }
+        otherwise { print("other"); }
+    };
+    0
+}
+"#,
+    )
+    .expect("literal payload arms bind no names");
+    assert_eq!(hir.items.len(), 1);
+}

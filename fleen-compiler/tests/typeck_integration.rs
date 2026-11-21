@@ -294,3 +294,125 @@ func main(): int {
         "expected ChooseNotExhaustive, got {errs:?}"
     );
 }
+
+// ========== 0.0.9 T01: sound joint coverage (constructor splitting) ==========
+
+#[test]
+fn cross_position_pattern_gap_is_rejected() {
+    // The soundness hole this matrix composition closed (found reviewing
+    // T01, rejected at `114c76c`, silently accepted by the first draft's
+    // position-wise rule): both arms pool total per payload position, yet
+    // `Pair.P(Some(1), Some(2))` matches neither and would fall through to
+    // lower's defensive tail at runtime. The splitting engine must keep it
+    // rejected — per-position totality is never the verdict.
+    let errs = typeck_str(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.Some(1), Option.Some(2));
+    choose p {
+        when P(Some(z), None) { print("left"); }
+        when P(None, Some(w)) { print("right"); }
+    }
+    0
+}
+"#,
+    )
+    .expect_err("a cross-position hole must stay rejected");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            fleen_compiler::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}
+
+#[test]
+fn result_payload_position_gap_is_rejected() {
+    // A `Result` payload position splits by its constructors like any
+    // other: `Ok` values are matched only by the first arm, so the
+    // uncovered `Ok(…, non-5)` tuples must not hide behind a pooled
+    // "each side has a binding" verdict.
+    let errs = typeck_str(
+        r#"
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Result<int, string>, int> = Pair.P(Ok(1), 2);
+    choose move p {
+        when P(Ok(a), x) { print(a as string); }
+        when P(Err(e), 5) { print(e); }
+    }
+    0
+}
+"#,
+    )
+    .expect_err("an Ok-side payload gap must stay rejected");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            fleen_compiler::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}
+
+#[test]
+fn binding_head_does_not_cover_other_arms_tuples() {
+    // Position-wise totality would accept these two arms: position 0 pools
+    // a binding plus `2`, position 1 pools `1` plus a binding. But each arm
+    // matches a strict subset of the tuple space — `(3, 3)` matches
+    // neither — so the binding head must not lend its coverage to the
+    // literal-headed arm.
+    let errs = typeck_str(
+        r#"
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<int, int> = Pair.P(3, 3);
+    choose p {
+        when P(x, 1) { print(x as string); }
+        when P(2, y) { print(y as string); }
+    }
+    0
+}
+"#,
+    )
+    .expect_err("a literal arm's tuples must not be covered by a binding arm");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            fleen_compiler::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}
+
+#[test]
+fn or_pattern_alternatives_compose_in_joint_coverage() {
+    // D6 composition inside the coverage matrix: the or contributes both
+    // alternatives (`None` covers the zero variant, `Some(0)` the payload
+    // variant at one value), and together with the fully-binding second
+    // arm the choose is exhaustive — although no single arm is individually
+    // total, so only the joint path can accept it.
+    let hir = typeck_str(
+        r#"
+enum Option<T> { Some(T), None }
+enum Pair<A, B> { P(A, B) }
+
+func main(): int {
+    p: Pair<Option<int>, Option<int>> = Pair.P(Option.None, Option.None);
+    choose p {
+        when P(None | Some(0), x) { print("hit"); }
+        when P(Some(y), y2) { print("rest"); }
+    }
+    0
+}
+"#,
+    )
+    .expect("or-pattern alternatives compose in the coverage matrix");
+    assert_eq!(hir.items.len(), 1);
+}
