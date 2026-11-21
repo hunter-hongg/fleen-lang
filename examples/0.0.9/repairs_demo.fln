@@ -1,0 +1,96 @@
+// 0.0.9 demo — the small-repairs milestone (TICKETS.md T07):
+//   §1  BUG-2 fix (PLAN D1/D7): a zero-payload variant pattern is a variant
+//       reference — `when P(None, None)` compiles (0.0.7 rejected it as
+//       DuplicateBinding because the second `None` occupied the binding
+//       namespace). Repeated *bindings* are still an error.
+//   §2  Result-`choose` completion (D2): a guard on an `Ok` arm falls
+//       through to a general `otherwise` tail; no `Ok`+`Err` pair is
+//       forced anymore.
+//   §3  `break` / `continue` (D4): reserved-word statements in `while` and
+//       `for`, each binding to the innermost enclosing loop.
+//   §4  std.str batch (D3): the eight new intrinsics — failure is an `Err`
+//       value extracted with `choose`, never a crash.
+//
+// Run: cargo fln examples/0.0.9/repairs_demo.fln
+import std.str;
+
+enum Opt {
+    Some(int),
+    None,
+}
+
+enum Pair {
+    P(Opt, Opt),
+}
+
+// §1 — both payload positions name zero-payload variants.
+func classify(p: Pair): string {
+    choose p {
+        when P(None, None) { "empty" }
+        when P(Some(x), None) { "left" }
+        when P(None, Some(y)) { "right" }
+        when P(Some(a), Some(b)) { "both" }
+    }
+}
+
+// §2 — guard + otherwise: a failed guard (or an `Err` value) lands in the
+// otherwise tail.
+func parse_age(raw: string): int {
+    choose std.str.parse_int(raw) {
+        when Ok(v) if v >= 0 { v }
+        otherwise { 0 }
+    }
+}
+
+// §3 — both loop forms in one function: the `while` skips 2 and exits at 4,
+// the `for` does the same over an array; innermost binding throughout.
+func count_skips(): int {
+    total = 0;
+    i = 0;
+    while i < 5 {
+        i = i + 1;
+        if i == 2 { continue; }
+        if i == 4 { break; }
+        total = total + i;
+    };
+    for c in [1, 2, 3, 4, 5] {
+        if c == 2 { continue; }
+        if c == 4 { break; }
+        total = total + c;
+    };
+    total
+}
+
+func main(): int {
+    // §1
+    print(classify(Pair.P(Opt.None, Opt.None)));
+    print(classify(Pair.P(Opt.Some(3), Opt.None)));
+    print(classify(Pair.P(Opt.None, Opt.Some(4))));
+    print(classify(Pair.P(Opt.Some(1), Opt.Some(2))));
+
+    // §2
+    print(parse_age("42") as string);
+    print(parse_age("-7") as string);
+    print(parse_age("x7") as string);
+
+    // §3
+    print(count_skips() as string);
+
+    // §4 — the remaining seven intrinsics (parse_int ran in §2)
+    f = choose std.str.parse_float("2.5") {
+        when Ok(v) { v }
+        otherwise { 0.0 }
+    };
+    print(f as string);
+    print(std.str.trim("  hi  "));
+    print(std.str.contains("hello", "ell") as string);
+    print(std.str.starts_with("hello", "he") as string);
+    print(std.str.ends_with("hello", "lo") as string);
+    i = choose std.str.index_of("héllo", "l") {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    print(i as string);
+    print(std.str.replace("aaa", "a", "b"));
+    0
+}
