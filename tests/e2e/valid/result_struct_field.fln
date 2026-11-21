@@ -1,0 +1,27 @@
+// 0.0.10 T03 integration matrix: a struct field of type `Result<int, string>`
+// (parity for `FieldTypeTag::Result = 6`, D1). The field is initialized from
+// a Result-returning call, read back out into `?` / choose flows, and
+// reassigned — the storage encoding is the pre-migration builtin one.
+import std.io;
+
+struct Slot {
+    r: Result<int, string>,
+}
+
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func main(): int {
+    s = Slot { r: div(6, 2) };
+    std.io.println(choose s.r {
+        when Ok(v) { v as string }
+        otherwise { "err" }
+    });
+    s.r = div(1, 0);
+    std.io.println(choose s.r {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    0
+}

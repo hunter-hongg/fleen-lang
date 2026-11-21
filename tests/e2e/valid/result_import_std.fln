@@ -1,0 +1,29 @@
+// 0.0.10 T03 integration matrix: the explicit `import std.result;` spelling
+// (D2 — the documented provenance form; it hands over the same prelude
+// trio). The type spelling stays the bare `Result` — the dotted
+// `std.result.Result<...>` type spelling is not syntax (T02 parity).
+import std.result;
+import std.io;
+
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func unwrap(r: Result<int, string>): Result<int, string> {
+    v = r?;
+    Ok(v)
+}
+
+func main(): int {
+    ok = unwrap(div(9, 3));
+    err = unwrap(div(2, 0));
+    std.io.println(choose move ok {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    std.io.println(choose move err {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    0
+}

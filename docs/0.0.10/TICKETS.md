@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 done; T03–T08 open.**
+> **Status: T01 done; T02 done; T03 done; T04–T08 open.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
@@ -225,28 +225,85 @@ machinery).
 
 ## T03 — Typeck: type-position mapping + F1 integration matrix (F1; D1/D3)
 
-- [ ] Typeck: a parameterized type use resolving to `std.result.Result`
+- [x] Typeck: a parameterized type use resolving to `std.result.Result`
       maps to the internal `Type::Result(ok, err)`; `unify`, `is_copy`
       (argument-dependent), `type_contains_ref`, and the async/channel
       boundary checks see the same `Type::Result` as today — **no rule
       changes**.
-- [ ] Builtins untouched: `std.arr.get`, `std.str.parse_int` /
+- [x] Builtins untouched: `std.arr.get`, `std.str.parse_int` /
       `parse_float` / `index_of`, channel `recv`, and every other
       signature speaking `Type::Result` keep their entries as-is
       (`typeck/builtins.rs`).
-- [ ] `?` and choose-on-Result: no lowering change (D3) — attempt chains,
+- [x] `?` and choose-on-Result: no lowering change (D3) — attempt chains,
       `otherwise`, and guards keep their 0.0.9 semantics; confirm by
       running the 0.0.9 Result-choose fixtures unchanged.
-- [ ] Error parity sweep: `typeck/error.rs` texts unchanged; all invalid
+- [x] Error parity sweep: `typeck/error.rs` texts unchanged; all invalid
       fixtures' stderr assertions pass as-is.
-- [ ] Integration matrix (new fixtures): explicit `import std.result;`;
+- [x] Integration matrix (new fixtures): explicit `import std.result;`;
       prelude trio without import; `Result[T, E]` bracket spelling; a
       struct field of type `Result<int, string>` (parity for
       `FieldTypeTag::Result = 6`); `?` propagation; choose with
       `otherwise`; `await?` flow.
-- [ ] Full suite green with unchanged stdout/stderr (108 valid fixtures);
+- [x] Full suite green with unchanged stdout/stderr (108 valid fixtures);
       recorded expectation that Result-using programs' bytecode is
       unchanged (no hash gate).
+
+**As-built notes (T03)**:
+
+- **Zero production-code change.** The card's first item was satisfied by
+  construction: the type-position mapping landed in the resolver in T02
+  (`resolve_type`'s `Named` arm, `resolver/mod.rs`), so typeck / lower /
+  codegen see the pre-migration internal `Type::Result` in every type
+  position. T03's deliverable is the proof, not a change: two pipeline
+  -level typeck tests pin that the prelude spelling feeds the *unchanged*
+  rules — `result_prelude_is_copy_argument_dependent` (0.0.7 D2's
+  argument-dependent `is_copy`: `Result<int, bool>` re-reads without
+  `move`, `Result<int, string>` after a move is the pre-migration
+  `UseAfterMove`) and `result_prelude_unify_reports_mapped_type_in_text`
+  (`ArgTypeMismatch` names the mapped type — typeck's `Type::name` renders
+  the bracket spelling `Result[int, string]`). The async/channel boundary
+  side is pinned at e2e level by the `await?` fixture (async func returning
+  `Result`, driven through `await?`); the `ref`-rejection side keeps its
+  0.0.4 tests.
+- **`type_contains_ref` placement recorded**: the card's Refs list it among
+  the typeck checks, but the helper lives in the **resolver**
+  (`resolver/mod.rs`, the struct-field / return-type guards) — its
+  `Type::Result` arm predates the migration, and since the resolver maps
+  the prelude spelling onto the internal shape before any consumer, the
+  checker sees the same tree as pre-0.0.10. No change; recorded here
+  because the placement differs from the card's wording.
+- **Integration matrix**: five new e2e valid fixtures —
+  `result_prelude_no_import` (trio + `print`, zero imports),
+  `result_import_std` (the documented provenance spelling; the type use
+  stays the bare `Result` — the dotted `std.result.Result<…>` type spelling
+  remains unparseable, T02 parity), `result_bracket_type` (`Result[T, E]`
+  in return/param/annotation positions, flowing through angle-spelled
+  signatures), `result_struct_field` (the only fixture that reaches the
+  `FieldTypeTag::Result = 6` storage path: init from a call, field read
+  into a choose, field reassignment), and `await_question` (the first e2e
+  fixture for `await?` — previously only exercised by the 0.0.4 tour
+  example). The `?` and choose-with-`otherwise` matrix items are covered by
+  the standing fixtures (`question.fln`, `result_choose_otherwise*.fln`)
+  and were not duplicated.
+- **Fixture-authoring parity fact (recorded, not a behavior change)**:
+  passing an owned local as a call argument needs the explicit `move` at
+  the call site (`unwrap(move a)`, `choose move r`) — the pre-migration
+  rule, already visible in the pre-0.0.10 fixtures (`enum_demo.fln`'s
+  `describe(move p)`). Field reads deep-copy, so `choose s.r` needs no
+  `move` (`result_struct_field`).
+- **Recorded bytecode expectation (no hash gate)**: the new Session-level
+  pin `result_usage_adds_no_enum_defs_entry` — a Result-using program that
+  *also* declares a user enum carries exactly that enum in `enum_defs`
+  (complements T01/T02's empty-table pins with the mixed case); the
+  version assertion rides on `std_result_import_compiles_with_no_enum_defs`
+  and the standing `fleen-vm/tests/std_byte_identity.rs` pin (green,
+  unchanged).
+- **Gates**: `cargo fmt -- --check`, `cargo clippy --all-targets -- -D
+  warnings`, `cargo test` (all targets), `cargo doc --no-deps` — all
+  green; all 59 e2e valid fixtures (54 standing + 5 new) pass with their
+  expected stdout byte-for-byte, and every invalid fixture's stderr
+  assertion passes as-is (`typeck/error.rs` has zero diff since the
+  0.0.10 merge-base `0f601be`, verified by `git diff`).
 
 **Depends on**: T02.
 **Refs**: PLAN §1 D1/D3, §3.1, §9; `lower/mod.rs:1492` (`PackOk`

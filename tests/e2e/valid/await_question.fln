@@ -1,0 +1,28 @@
+// 0.0.10 T03 integration matrix: the `await?` flow (0.0.4) over the
+// std-declared Result (D1) — the postfix chain drives the future and then
+// propagates the Err through the enclosing Result-returning function; the
+// lowering keeps its 0.0.9 shape (D3, zero bytecode change, D7).
+import std.io;
+
+async func half(n: int): Result<int, string> {
+    if n % 2 == 0 { Ok(n / 2) } else { Err("odd input") }
+}
+
+func halve(n: int): Result<int, string> {
+    v = half(n) await?;
+    Ok(v)
+}
+
+func main(): int {
+    a = halve(10);
+    b = halve(7);
+    std.io.println(choose move a {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    std.io.println(choose move b {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    0
+}

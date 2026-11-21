@@ -106,6 +106,45 @@ func main(): int {
     );
 }
 
+/// 0.0.10 T03 (recorded expectation, no hash gate — 0.0.9 T05 posture): a
+/// Result-using program that *also* declares a user enum carries exactly
+/// that user enum in `enum_defs` — the std-declared `Result` contributes no
+/// entry (D1 declaration-only), so the table shape is what a pre-0.0.10
+/// compile of the same source produced. Complements the empty-table pins
+/// above with the mixed case.
+#[test]
+fn result_usage_adds_no_enum_defs_entry() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        r#"
+enum Color { Red, Green }
+
+func paint(c: Color): Result<int, string> {
+    choose c {
+        when Red { Ok(1) }
+        when Green { Err("green") }
+    }
+}
+
+func main(): int {
+    r = paint(Color.Red);
+    v = choose move r {
+        when Ok(n) { n }
+        otherwise { 0 - 1 }
+    };
+    v
+}
+"#,
+    );
+    let module = session.compile(root).expect("should compile");
+    assert_eq!(
+        module.enum_defs.len(),
+        1,
+        "only the user enum reaches enum_defs; std.result.Result adds no entry (D1)"
+    );
+}
+
 /// An `enum Result` in a user project is rejected at compile time (D2
 /// groundwork): only `std/result.fln` may declare it.
 #[test]

@@ -1,0 +1,31 @@
+// 0.0.10 T03 integration matrix: the 0.0.7 D9 bracket spelling
+// `Result[T, E]` in type position — the parser emits the ordinary
+// parameterized type use and the resolver maps it onto the internal
+// `Type::Result` (D1), so bracket and angle spellings are the same type:
+// a bracket-annotated value flows into an angle-annotated parameter.
+import std.io;
+
+func parse_flag(s: string): Result[bool, string] {
+    if s == "yes" { Ok(true) } else { Err("not a flag") }
+}
+
+func unwrap(r: Result<bool, string>): Result[bool, string] {
+    v = r?;
+    Ok(v)
+}
+
+func main(): int {
+    a: Result[bool, string] = parse_flag("yes");
+    b: Result[bool, string] = parse_flag("nope");
+    ua = unwrap(move a);
+    ub = unwrap(move b);
+    std.io.println(choose move ua {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    std.io.println(choose move ub {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    });
+    0
+}

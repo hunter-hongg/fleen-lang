@@ -3918,3 +3918,46 @@ fn choose_arm_depth_is_restored_after_an_arm_error() {
         TypeckErrorKind::TypeMismatch { .. }
     ));
 }
+
+// ========== 0.0.10 T03: the mapped prelude spelling sees the same rules ==========
+
+#[test]
+fn result_prelude_is_copy_argument_dependent() {
+    // 0.0.7 D2's argument-dependent `is_copy`, pinned at the pipeline level
+    // through the 0.0.10 prelude spelling: `Result<int, bool>` is Copy
+    // (both arguments Copy) so a second read needs no `move`...
+    compile_ok("func go() {\n    r: Result<int, bool> = Ok(1);\n    r2 = r;\n    r3 = r;\n}");
+    // ...while `Result<int, string>` is owned (string is not Copy): after
+    // the move, a second read is the pre-migration `UseAfterMove`. The
+    // ownership rule sees the mapped internal `Type::Result` — no rule
+    // change (T03), the resolver mapping is what feeds it (T02). (Inside a
+    // function: a top-level binding is a global, and `move` off a global is
+    // its own pre-migration rejection — `MoveOutOfGlobal`.)
+    let errs = compile_err(
+        "func go() {\n    r: Result<int, string> = Ok(1);\n    r2 = move r;\n    r3 = move r;\n}",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UseAfterMove { .. })),
+        "expected UseAfterMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn result_prelude_unify_reports_mapped_type_in_text() {
+    // Error-parity item: `unify` (here via a call argument) sees the
+    // internal `Type::Result`, so the `ArgTypeMismatch` text names the
+    // mapped type exactly as before the migration (typeck's `Type::name`
+    // renders the bracket spelling) — `typeck/error.rs` is untouched since
+    // the 0.0.10 merge-base (recorded expectation).
+    let errs = compile_err("func f(r: Result<int, string>): int = 0\nf(42);");
+    let hit = errs.iter().any(|e| {
+        matches!(e.kind, TypeckErrorKind::ArgTypeMismatch { index: 0, .. })
+            && e.to_string().contains("Result[int, string]")
+    });
+    assert!(
+        hit,
+        "expected ArgTypeMismatch naming `Result[int, string]`, got {errs:?}"
+    );
+}

@@ -1,0 +1,24 @@
+// 0.0.10 T03 integration matrix: the prelude trio without any import (D2) —
+// `Result` / `Ok` / `Err` and `print` are prelude names; the type use maps
+// onto the internal builtin representation (D1). `?` and choose keep their
+// pre-0.0.10 semantics (D3).
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func safe_div(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;
+    Ok(q)
+}
+
+func main(): int {
+    print(choose safe_div(8, 2) {
+        when Ok(v) { v as string }
+        otherwise { "unreachable" }
+    });
+    print(choose safe_div(1, 0) {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    });
+    0
+}
