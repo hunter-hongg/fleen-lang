@@ -591,8 +591,13 @@ Version 0.0.8 Cheeky Hamster 🐹 (release published — tag and archives cut).*
 Result-`choose` completion (`otherwise` and general arms, D2 — `ChooseResultNeedsOkErrArms`
 retired), the `break` / `continue` keywords with loop-bound lowering (D4 — the source
 breaking set), and a std.str intrinsic batch (eight, D3). No bytecode change (D6): the
-version stays v8, no new opcodes, no table changes. T01–T06 implemented and green (T07 is
-the release gate); see `docs/0.0.9/PLAN.md` decisions D1–D7 and `docs/0.0.9/TICKETS.md`.**
+version stays v8, no new opcodes, no table changes. T01–T07 implemented and green (T07:
+the example, CHANGELOG, version bump and the full gate suite landed; release publication —
+tag/archives — is separate and pending). The T07 sweep found and fixed a latent
+Result-`choose` dispatch bug — two general-path Result `choose`s (`otherwise`/guards/
+nested payloads) in one function body failed bytecode verification; the dispatch now
+spills before its conditional (CHANGELOG `[0.0.9]` Fixed). See `docs/0.0.9/PLAN.md`
+decisions D1–D7 and `docs/0.0.9/TICKETS.md`.**
 
 ---
 

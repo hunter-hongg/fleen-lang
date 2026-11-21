@@ -1,8 +1,9 @@
 ## [0.0.9] - 2026-11-21
 
-> Drafted by T06 (docs sync); **finalized at the T07 release gate** (codename
-> and publication pending — `docs/0.0.9/PLAN.md`). No bytecode change (D6):
-> the version stays v8, no new opcodes, no table changes.
+Small repairs (PLAN D1–D7; codename TBD — settled at the release gate,
+holder's call). Breaking set: `break` / `continue` become reserved words.
+No bytecode change (D6): the version stays v8, no new opcodes, no table
+changes.
 
 ### Added
 - **Zero-payload variant patterns are variant references** (BUG-2 fix, D1):
@@ -46,13 +47,28 @@
   builtin names, so module streams grow (~+323 bytes on the pinned probes)
   and the two 0.0.8 flag-off/std byte-identity pins became self-pins —
   re-captured from this milestone's own output, because the stream grows by
-  design now and cross-version byte identity no longer holds (T05 as-built). The content-driven version rule is unchanged: no new opcode
-  reaches the stream, so touched modules stay v7 unless a `PartialApply`
-  is encoded.
+  design now and cross-version byte identity no longer holds (T05 as-built).
+  The content-driven version rule is unchanged: no new opcode reaches the
+  stream, so touched modules stay v7 unless a `PartialApply` is encoded.
 
 ### Fixed
 - BUG-2 (`docs/0.0.7/BUGS.md`): `when P(None, None)` no longer a
   `DuplicateBinding` resolve error (see Added).
+- **Result-`choose` dispatch spill** (found by the T07 example sweep): two
+  general-path Result `choose`s (`otherwise`, guards, nested payloads) in
+  **one** function body failed bytecode verification with
+  `StackDepthMismatch` — the second choose's `IsErr` conditional is emitted
+  into the first choose's merge block, which is not physically last (the
+  first choose's fallback body and err entry follow it in creation order),
+  so the untaken (Ok) edge fell through into the earlier fallback body
+  instead of the second choose's ok entry. The dispatch now calls
+  `spill_for_fallthrough` first (a depth-preserving `Jump`; a no-op for the
+  common single-choose shape, so every choose in one body verifies).
+  Latent since 0.0.7's attempt-chain generalization; surfaced by the 0.0.9
+  `otherwise` completion making the unguarded shape common. Regression
+  fixtures: `tests/e2e/valid/result_choose_otherwise_twice.fln`, the
+  `t07_second_result_choose_ok_entry_is_physically_next` lower test, and the
+  `t07_two_result_otherwise_chooses_in_one_body_verifies` verify test.
 - Docs debt recorded at planning time (T06): BUG-1 and the captured-builtin
   gap were already fixed **inside the `v0.0.8` tag** (`a5b8bd7` /
   `8dbbc8b`); the stale "known limitation" wording in this CHANGELOG,
