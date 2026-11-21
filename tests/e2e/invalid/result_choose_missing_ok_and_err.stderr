@@ -1,0 +1,1 @@
+choose is not exhaustive for type `Result[int, string]`: missing Ok, Err

@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D6 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01 implemented and green; T02–T07 not started.**
+> **Status: T01–T02 implemented and green; T03–T07 not started.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -102,24 +102,80 @@ preserved).
 
 ## T02 — Lower: Result-`choose` accepts `otherwise` / general arms (F2; D2)
 
-- [ ] Typeck: an `otherwise` arm on a Result scrutinee makes the choose
+- [x] Typeck: an `otherwise` arm on a Result scrutinee makes the choose
       exhaustive (same coverage rule as scalar scrutinees); a guarded arm
       still does not count toward coverage (§10.5 rule unchanged).
-- [ ] Lower: delete the `UnsupportedFeature "non-Ok/Err arm … deferred to
+- [x] Lower: delete the `UnsupportedFeature "non-Ok/Err arm … deferred to
       U07"` branch in `lower_choose_result`; route non-ResultCtor arms into
       the attempt-chain structure — `otherwise` occupies the defensive-tail
       slot (its body replaces the pop+unit tail; the tail's Pop of the
       parked payload still happens before the body runs).
-- [ ] `ChooseResultNeedsOkErrArms` retired: remove the variant and its
+- [x] `ChooseResultNeedsOkErrArms` retired: remove the variant and its
       diagnostics; exhaustive-choose errors now come from typeck
       (`ChooseNotExhaustive`) for Result scrutinees as for every other type.
-- [ ] Guard arms: no lowering change (already work); add the tests that
+- [x] Guard arms: no lowering change (already work); add the tests that
       document the behavior (`when Ok(x) if g { … }` + unguarded duplicate
       arm; + `otherwise`).
-- [ ] Tests: e2e valid — guard + `otherwise`; multiple Ok arms + Err arm +
+- [x] Tests: e2e valid — guard + `otherwise`; multiple Ok arms + Err arm +
       `otherwise`; nested payload `when Ok(Some(y))` + `otherwise`; e2e
       invalid — Result choose missing both coverage paths (typeck error);
       lower unit tests for the tail-slot arm shape (payload popped once).
+
+**As-built note (fallback shape)**: the two attempt chains share **one**
+fallback body block — each chain's tail emits its `Pop` (the parked
+payload) and jumps to it, so the body is emitted exactly once and always
+runs at the function's base stack depth (both tails pop before jumping;
+the block is entered only via explicit edges, so the BUG-1 fallthrough
+spill rule adds nothing new). The simple 0.0.6/U06 fast path is preserved
+for exactly its original shape, now gated on `fallback.is_none()` and
+both chains non-empty — an empty chain takes the general path, where the
+chain's single attempt block *is* the tail (`Err`-arm + `otherwise` and
+bare-`otherwise` chooses lower and run). **First-wins on duplicate
+always-matching arms**: when several guard-free wildcard arms (`when _`)
+are present, the partition keeps the **first** — later duplicates are dead
+arms whose body is never emitted — matching the scalar path's sequential
+first-match semantics (the first partition draft was last-wins, which
+silently overwrote the first arm's body and disagreed with the scalar
+scrutinee path; pinned by `t02_result_choose_first_wildcard_arm_wins`).
+
+**As-built note (or-arms)**: deleting the rejection branch wholesale would
+have *silently dropped* top-level or-pattern arms (`when Ok(1) | Ok(2) { … }`
+passes typeck — the payload patterns join the side's coverage group), so
+they are routed per D2's "route non-ResultCtor arms": the arm expands into
+one attempt per alternative sharing the arm's guard and body (a mixed-ctor
+or-arm contributes to both chains; only one chain can run for a given
+value). Typeck already unified the alternatives' binding ids onto the
+first alternative's (D6 first-wins), so every attempt stores the same
+slot. Any other non-ResultCtor, non-or, non-wildcard arm shape keeps a
+defensive `UnsupportedFeature`. Literals and enum patterns are
+typeck-rejected upstream, but bare bindings and guarded wildcard/binding
+forms (`when w { … }`, `when _ if g { … }`) pass typeck when an
+`otherwise` makes the choose exhaustive and reach lower, which rejects
+them there (as in HEAD; routing a binding arm would need a decision on
+how the bound name receives the scrutinee value at the popped-payload
+fallback — not made by this ticket). The generic (non-Result) choose's
+ResultCtor pattern site becomes the same defensive error now that the
+dedicated variant is gone.
+
+Tests: `typeck_integration.rs` `result_choose_otherwise_is_exhaustive` +
+`result_choose_guarded_arm_without_otherwise_is_not_exhaustive` +
+`result_choose_err_arm_with_otherwise_is_exhaustive`; lower unit tests
+`t02_result_choose_otherwise_occupies_tail_slot` (shared block, one body,
+both tails Pop-then-jump) + `t02_result_choose_empty_ok_chain_lowers_with_
+otherwise` + `t02_result_choose_otherwise_only_lowers` +
+`t02_result_choose_or_arm_routes_into_attempt_chain` +
+`t02_result_choose_guard_with_unguarded_duplicate_lowers` +
+`t02_result_choose_otherwise_after_ok_err_is_not_dropped` (the U06
+"rejected not dropped" pin flipped: the body is emitted once, never
+dropped) + `t02_result_choose_first_wildcard_arm_wins` (duplicate `when _`
+arms: the first wins, matching scalar) + the stale `u06_choose_result_*`
+comments updated; e2e valid
+`tests/e2e/valid/result_choose_otherwise.fln` (guard-fail → otherwise,
+multi-Ok + Err + otherwise, nested payload, empty ok/err chains, all
+runtime-checked) and e2e invalid `result_choose_missing_ok_and_err.fln`
+(`ChooseNotExhaustive` missing both sides); the U06 invalid fixture
+`choose_result_otherwise.*` (which pinned the old rejection) deleted —
+its shape is now a valid-program case covered by the e2e valid fixture.
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D2, §3.2; DESIGN.md §10.5 (T06 corrects its deferral text).

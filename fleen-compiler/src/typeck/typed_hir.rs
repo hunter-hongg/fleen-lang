@@ -1146,4 +1146,15 @@ impl TypedPatternHir {
             TypedPatternHir::Error => Span::SYNTHETIC,
         }
     }
+
+    /// Whether this pattern is the always-matching wildcard form (`_` or
+    /// `otherwise`, both parsed as an identifier pattern) — the fallback arm
+    /// shape shared by typeck's exhaustiveness check, the ownership scan and
+    /// lower's Result-`choose` partition, so the three cannot drift apart.
+    pub fn is_wildcard(&self) -> bool {
+        matches!(
+            self,
+            TypedPatternHir::Ident { name, .. } if name == "_" || name == "otherwise"
+        )
+    }
 }

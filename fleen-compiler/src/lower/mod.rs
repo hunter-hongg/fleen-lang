@@ -91,9 +91,6 @@ pub enum LowerErrorKind {
     /// 0.0.2 U06: a `ref` argument passed to a global initializer call.
     /// Global init has no frame to host a temp slot for global ref args.
     RefArgInGlobalInit { name: String },
-    /// 0.0.2 U06: a `choose` on a Result scrutinee must have both
-    /// `when Ok(..)` and `when Err(..)` arms (no catchall/wildcard).
-    ChooseResultNeedsOkErrArms,
     /// 0.0.2 U06: defensive: typeck rejects deref-assign of global boxes.
     /// This ensures lower stays total for malformed trees.
     GlobalBoxDerefAssign { name: String },
@@ -131,12 +128,6 @@ impl std::fmt::Display for LowerError {
                 write!(
                     f,
                     "global initializer cannot take a `ref` argument ({name})"
-                )
-            }
-            LowerErrorKind::ChooseResultNeedsOkErrArms => {
-                write!(
-                    f,
-                    "a `choose` on a Result requires both `when Ok(..)` and `when Err(..)` arms"
                 )
             }
             LowerErrorKind::GlobalBoxDerefAssign { name } => {
@@ -731,6 +722,42 @@ struct EnumScr<'a> {
 struct FailEdge {
     on_fail: BlockId,
     extra_below: u32,
+}
+
+/// One attempt of a Result `choose` chain (0.0.9 T02): an arm's pattern,
+/// guard and body. Top-level or-pattern arms expand into one attempt per
+/// alternative sharing the arm's guard and body — typeck has already unified
+/// the alternatives' binding ids onto the first alternative's (D6), so every
+/// attempt stores the same slot.
+struct ResultAttempt<'a> {
+    pattern: &'a TypedPatternHir,
+    guard: Option<&'a TypedExprHir>,
+    body: &'a TypedBlockHir,
+}
+
+/// Route one attempt into its constructor's chain: `Ok` arms join the ok
+/// chain, `Err` arms the err chain — shared by plain ctor arms and by each
+/// alternative of an or-arm (0.0.9 T02).
+fn push_attempt_by_ctor<'a>(
+    ctor: ResultCtor,
+    attempt: ResultAttempt<'a>,
+    ok_arms: &mut Vec<ResultAttempt<'a>>,
+    err_arms: &mut Vec<ResultAttempt<'a>>,
+) {
+    if matches!(ctor, ResultCtor::Ok) {
+        ok_arms.push(attempt);
+    } else {
+        err_arms.push(attempt);
+    }
+}
+
+/// Where a Result chain's tail goes: `merge` is the choose's result block;
+/// `fallback` is the shared `otherwise` body block (0.0.9 T02/D2) when the
+/// choose has one — the tail pops the parked payload and jumps there instead
+/// of yielding a defensive unit.
+struct ResultChainTail {
+    merge: BlockId,
+    fallback: Option<BlockId>,
 }
 
 /// Emit the failure-cleanup block a mismatched subject copy jumps to: pop
@@ -2375,8 +2402,15 @@ impl<'a> FnBodyCx<'a> {
                         }
                     }
                     TypedPatternHir::ResultCtor { span, .. } => {
+                        // Defensive: typeck rejects an Ok/Err pattern against
+                        // a non-Result scrutinee before lower sees it.
+                        // (`ChooseResultNeedsOkErrArms` was retired in
+                        // 0.0.9 T02 — exhaustive-choose errors for Result
+                        // scrutinees come from typeck alone.)
                         return Err(LowerError::new(
-                            LowerErrorKind::ChooseResultNeedsOkErrArms,
+                            LowerErrorKind::UnsupportedFeature {
+                                feature: "`Ok`/`Err` pattern on a non-Result `choose`",
+                            },
                             *span,
                         ));
                     }
@@ -2437,32 +2471,98 @@ impl<'a> FnBodyCx<'a> {
         Ok(())
     }
 
-    /// Lower a `choose` on a Result scrutinee (0.0.2 U06, generalized in 0.0.7 T06).
+    /// Lower a `choose` on a Result scrutinee (0.0.2 U06, generalized in
+    /// 0.0.7 T06; 0.0.9 T02/D2 accepts `otherwise` and general arms).
+    ///
+    /// Arms are partitioned into `Ok`-ctor attempts, `Err`-ctor attempts and
+    /// the always-matching `otherwise` fallback (a guard-free wildcard
+    /// ident — the same predicate typeck's exhaustiveness check uses). A
+    /// top-level or-pattern arm expands into one attempt per alternative.
+    /// When several always-matching arms are present the first one wins (the
+    /// scalar path's sequential first-match semantics); later duplicates are
+    /// dead arms. Exhaustiveness is typeck's verdict, so an empty chain is
+    /// legal: its single attempt block is the defensive tail.
     fn lower_choose_result(
         &mut self,
         fb: &mut FnBuilder,
         e: &TypedExprChooseHir,
     ) -> Result<(), LowerError> {
+        let mut ok_arms: Vec<ResultAttempt> = Vec::new();
+        let mut err_arms: Vec<ResultAttempt> = Vec::new();
+        let mut fallback: Option<&TypedChooseArmHir> = None;
         for arm in &e.arms {
-            if !matches!(&arm.pattern, TypedPatternHir::ResultCtor { .. }) {
-                return Err(LowerError::new(
-                    LowerErrorKind::UnsupportedFeature {
-                        feature: "non-`Ok`/`Err` arm in a Result `choose` (deferred to U07)",
-                    },
-                    choose_arm_span(arm),
-                ));
+            match &arm.pattern {
+                TypedPatternHir::ResultCtor { ctor, .. } => {
+                    let attempt = ResultAttempt {
+                        pattern: &arm.pattern,
+                        guard: arm.guard.as_deref(),
+                        body: &arm.body,
+                    };
+                    push_attempt_by_ctor(*ctor, attempt, &mut ok_arms, &mut err_arms);
+                }
+                TypedPatternHir::Or(alts, _) => {
+                    for alt in alts {
+                        let attempt = ResultAttempt {
+                            pattern: alt,
+                            guard: arm.guard.as_deref(),
+                            body: &arm.body,
+                        };
+                        match alt {
+                            TypedPatternHir::ResultCtor { ctor, .. } => {
+                                push_attempt_by_ctor(*ctor, attempt, &mut ok_arms, &mut err_arms);
+                            }
+                            // A non-ctor alternative cannot match a Result
+                            // value; typeck rejects the pattern before lower.
+                            _ => {
+                                return Err(LowerError::new(
+                                    LowerErrorKind::UnsupportedFeature {
+                                        feature: "non-`Ok`/`Err` alternative in a Result `choose` or-arm",
+                                    },
+                                    alt.span(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                TypedPatternHir::Ident { .. }
+                    if arm.guard.is_none() && arm.pattern.is_wildcard() =>
+                {
+                    // First always-matching arm wins — the scalar path's
+                    // sequential first-match semantics; a later duplicate is
+                    // a dead arm whose body is never emitted.
+                    if fallback.is_none() {
+                        fallback = Some(arm);
+                    }
+                }
+                _ => {
+                    return Err(LowerError::new(
+                        LowerErrorKind::UnsupportedFeature {
+                            feature: "unsupported arm shape in a Result `choose`: only `Ok`/`Err` constructor arms, or-patterns of them, and a guard-free `_`/`otherwise` are supported",
+                        },
+                        choose_arm_span(arm),
+                    ));
+                }
             }
         }
 
-        // Simple fast path: all arms are unguarded Ok/Err with plain Ident payloads.
-        let simple = e.arms.iter().all(|arm| {
-            arm.guard.is_none()
+        // Simple fast path: no fallback, both chains non-empty, every
+        // attempt an unguarded ctor with a plain Ident payload. (0.0.6/U06
+        // structure is preserved for exactly the shape it was built for.)
+        let flat_ident_payload = |a: &ResultAttempt| {
+            a.guard.is_none()
                 && matches!(
-                    &arm.pattern,
+                    a.pattern,
                     TypedPatternHir::ResultCtor { payload, .. }
                         if matches!(payload.as_ref(), TypedPatternHir::Ident { .. })
                 )
-        });
+        };
+        let simple = fallback.is_none()
+            && !ok_arms.is_empty()
+            && !err_arms.is_empty()
+            && ok_arms
+                .iter()
+                .chain(err_arms.iter())
+                .all(flat_ident_payload);
 
         self.lower_expr_into(fb, &e.scrutinee)?;
         let dk = dup_kind(&e.scrutinee.ty());
@@ -2471,62 +2571,45 @@ impl<'a> FnBodyCx<'a> {
         let jump_err = fb.jump_if_true_later();
 
         if simple {
-            // Preserve 0.0.6/U06 structure for compatibility.
+            // Preserve 0.0.6/U06 structure for compatibility. Both chains
+            // are non-empty and every attempt is an unguarded ctor with a
+            // plain Ident payload (gated above), so `first_err` is set.
             let mut ok_jumps: Vec<BlockId> = Vec::new();
-            let mut has_ok_arm = false;
-            for arm in &e.arms {
-                if let TypedPatternHir::ResultCtor {
-                    ctor: ResultCtor::Ok,
-                    payload,
-                    span,
-                    ..
-                } = &arm.pattern
-                {
-                    has_ok_arm = true;
-                    if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
-                        let slot = self.slots.slot_for(*binding_id);
-                        let arm_ok = fb.new_block();
-                        fb.start(arm_ok);
-                        fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
-                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                        self.lower_block(fb, &arm.body)?;
-                        ok_jumps.push(fb.jump_later());
-                    }
-                }
+            for attempt in &ok_arms {
+                let TypedPatternHir::ResultCtor { payload, span, .. } = attempt.pattern else {
+                    unreachable!("simple attempts are ResultCtor");
+                };
+                let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() else {
+                    unreachable!("simple payloads are Ident");
+                };
+                let slot = self.slots.slot_for(*binding_id);
+                let arm_ok = fb.new_block();
+                fb.start(arm_ok);
+                fb.emit(MirInstr::new(MirInstrKind::UnwrapOk, *span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                self.lower_block(fb, attempt.body)?;
+                ok_jumps.push(fb.jump_later());
             }
 
             let mut err_jumps: Vec<BlockId> = Vec::new();
             let mut first_err: Option<BlockId> = None;
-            let mut has_err_arm = false;
-            for arm in &e.arms {
-                if let TypedPatternHir::ResultCtor {
-                    ctor: ResultCtor::Err,
-                    payload,
-                    span,
-                    ..
-                } = &arm.pattern
-                {
-                    has_err_arm = true;
-                    if let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() {
-                        let slot = self.slots.slot_for(*binding_id);
-                        let arm_err = fb.new_block();
-                        if first_err.is_none() {
-                            first_err = Some(arm_err);
-                        }
-                        fb.start(arm_err);
-                        fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
-                        fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
-                        self.lower_block(fb, &arm.body)?;
-                        err_jumps.push(fb.jump_later());
-                    }
+            for attempt in &err_arms {
+                let TypedPatternHir::ResultCtor { payload, span, .. } = attempt.pattern else {
+                    unreachable!("simple attempts are ResultCtor");
+                };
+                let TypedPatternHir::Ident { binding_id, .. } = payload.as_ref() else {
+                    unreachable!("simple payloads are Ident");
+                };
+                let slot = self.slots.slot_for(*binding_id);
+                let arm_err = fb.new_block();
+                if first_err.is_none() {
+                    first_err = Some(arm_err);
                 }
-            }
-
-            if !has_ok_arm || !has_err_arm {
-                return Err(LowerError::new(
-                    LowerErrorKind::ChooseResultNeedsOkErrArms,
-                    e.span,
-                ));
+                fb.start(arm_err);
+                fb.emit(MirInstr::new(MirInstrKind::UnwrapErr, *span));
+                fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), *span));
+                self.lower_block(fb, attempt.body)?;
+                err_jumps.push(fb.jump_later());
             }
 
             let merge = fb.new_block();
@@ -2538,55 +2621,17 @@ impl<'a> FnBodyCx<'a> {
                 fb.resolve(j, merge);
             }
             let Some(first_err) = first_err else {
-                // The `!has_err_arm` check above guarantees an Err arm was
-                // visited and set `first_err`.
-                unreachable!("Err arm visited, so first_err is set");
+                // The `simple` gate above guarantees a non-empty err chain.
+                unreachable!("err chain is non-empty, so first_err is set");
             };
             fb.resolve(jump_err, first_err);
             return Ok(());
         }
 
-        // General path: nested payloads / guards / multiple arms per ctor.
-        // Fallthrough (IsErr false) goes to ok_entry (must be physically next).
+        // General path: nested payloads / guards / multiple arms per ctor /
+        // or-arms / `otherwise`. Fallthrough (IsErr false) goes to ok_entry
+        // (must be physically next).
         let scr_ty = e.scrutinee.ty();
-        let ok_arms: Vec<&TypedChooseArmHir> = e
-            .arms
-            .iter()
-            .filter(|a| {
-                matches!(
-                    &a.pattern,
-                    TypedPatternHir::ResultCtor {
-                        ctor: ResultCtor::Ok,
-                        ..
-                    }
-                )
-            })
-            .collect();
-        if ok_arms.is_empty() {
-            return Err(LowerError::new(
-                LowerErrorKind::ChooseResultNeedsOkErrArms,
-                e.span,
-            ));
-        }
-        let err_arms: Vec<&TypedChooseArmHir> = e
-            .arms
-            .iter()
-            .filter(|a| {
-                matches!(
-                    &a.pattern,
-                    TypedPatternHir::ResultCtor {
-                        ctor: ResultCtor::Err,
-                        ..
-                    }
-                )
-            })
-            .collect();
-        if err_arms.is_empty() {
-            return Err(LowerError::new(
-                LowerErrorKind::ChooseResultNeedsOkErrArms,
-                e.span,
-            ));
-        }
 
         // ok_entry must be physically next after the IsErr conditional: its
         // untaken (Ok) edge falls through. The attempt chains and merge are
@@ -2595,9 +2640,17 @@ impl<'a> FnBodyCx<'a> {
 
         // Pre-create the attempt chains and merge so failure edges have targets.
         // Each chain is `arms.len()` attempt blocks plus the defensive tail.
+        // 0.0.9 T02 (D2): with `otherwise`, the tails route into one shared
+        // fallback block (created here so the tail edges have a target); the
+        // body is emitted after both chains are lowered.
         let ok_attempts: Vec<BlockId> = (0..=ok_arms.len()).map(|_| fb.new_block()).collect();
         let err_attempts: Vec<BlockId> = (0..=err_arms.len()).map(|_| fb.new_block()).collect();
         let merge = fb.new_block();
+        let fallback_block = fallback.map(|_| fb.new_block());
+        let tail = ResultChainTail {
+            merge,
+            fallback: fallback_block,
+        };
 
         fb.start(ok_entry);
         let ok_inner_ty = result_payload_ty(&scr_ty, ResultCtor::Ok);
@@ -2608,7 +2661,7 @@ impl<'a> FnBodyCx<'a> {
             &ok_arms,
             &ok_inner_ty,
             &ok_attempts,
-            merge,
+            &tail,
             e.scrutinee.span(),
         )?;
 
@@ -2624,9 +2677,18 @@ impl<'a> FnBodyCx<'a> {
             &err_arms,
             &err_inner_ty,
             &err_attempts,
-            merge,
+            &tail,
             e.scrutinee.span(),
         )?;
+
+        // The shared `otherwise` body (0.0.9 T02, D2): each chain's tail
+        // popped its parked payload before jumping here, so the body runs at
+        // the function's base stack depth from either side.
+        if let (Some(arm), Some(fblk)) = (fallback, fallback_block) {
+            fb.start(fblk);
+            self.lower_block(fb, &arm.body)?;
+            fb.jump(merge);
+        }
 
         fb.start(merge);
         Ok(())
@@ -2636,28 +2698,34 @@ impl<'a> FnBodyCx<'a> {
     /// payload parked on the stack. Each attempt works on a `Dup`/`DupDeep`
     /// copy so a pattern or guard failure leaves the payload parked for the
     /// next arm; the parked payload is popped only when an arm is taken.
-    /// `attempts` holds one block per arm plus the defensive tail (index
-    /// `arms.len()`): if every attempt fails — typeck guarantees
-    /// exhaustiveness, so this is defensive — the tail pops the payload and
-    /// yields unit.
+    /// `attempts` holds one block per arm plus the tail (index `arms.len()`).
+    /// With `otherwise` (`fallback_block`, 0.0.9 T02/D2) the tail is the
+    /// fallback's entry edge — the parked payload is popped first, then the
+    /// shared fallback block runs the body. Without it, typeck guarantees
+    /// exhaustiveness, so the tail is defensive-only: pop the payload and
+    /// yield unit.
     fn lower_result_ctor_arms(
         &mut self,
         fb: &mut FnBuilder,
-        arms: &[&TypedChooseArmHir],
+        arms: &[ResultAttempt],
         payload_ty: &Type,
         attempts: &[BlockId],
-        merge: BlockId,
+        tail: &ResultChainTail,
         span: Span,
     ) -> Result<(), LowerError> {
         for (i, arm) in arms.iter().enumerate() {
             let on_fail = attempts[i + 1];
             fb.start(attempts[i]);
-            self.lower_result_single_arm(fb, arm, payload_ty, merge, on_fail)?;
+            self.lower_result_single_arm(fb, arm, payload_ty, tail.merge, on_fail)?;
         }
         fb.start(attempts[arms.len()]);
         fb.emit(MirInstr::new(MirInstrKind::Pop, span));
-        fb.emit(MirInstr::new(MirInstrKind::Unit, span));
-        fb.jump(merge);
+        if let Some(fblk) = tail.fallback {
+            fb.jump(fblk);
+        } else {
+            fb.emit(MirInstr::new(MirInstrKind::Unit, span));
+            fb.jump(tail.merge);
+        }
         Ok(())
     }
 
@@ -2667,14 +2735,16 @@ impl<'a> FnBodyCx<'a> {
     fn lower_result_single_arm(
         &mut self,
         fb: &mut FnBuilder,
-        arm: &TypedChooseArmHir,
+        arm: &ResultAttempt,
         payload_ty: &Type,
         merge: BlockId,
         on_fail: BlockId,
     ) -> Result<(), LowerError> {
-        let (payload_pat, span) = match &arm.pattern {
+        let (payload_pat, span) = match arm.pattern {
             TypedPatternHir::ResultCtor { payload, span, .. } => (payload.as_ref(), *span),
-            _ => unreachable!("result ctor arms are pre-filtered"),
+            // Or-arm alternatives are pre-filtered to ResultCtor shapes by
+            // the partition in `lower_choose_result`.
+            _ => unreachable!("result ctor attempts are pre-filtered"),
         };
         let pat = strip_type_guard(payload_pat);
         if arm.guard.is_none()
@@ -2684,7 +2754,7 @@ impl<'a> FnBodyCx<'a> {
             // parked payload (consumed) and run the body.
             let slot = self.slots.slot_for(*binding_id);
             fb.emit(MirInstr::new(MirInstrKind::StoreLocal(slot), span));
-            self.lower_block(fb, &arm.body)?;
+            self.lower_block(fb, arm.body)?;
             fb.jump(merge);
             return Ok(());
         }
@@ -2698,7 +2768,7 @@ impl<'a> FnBodyCx<'a> {
             extra_below: 0,
         };
         self.lower_subpattern_match(fb, payload_pat, payload_ty, &fail, span)?;
-        if let Some(guard) = &arm.guard {
+        if let Some(guard) = arm.guard {
             fb.spill_for_fallthrough();
             self.lower_expr_into(fb, guard)?;
             let guard_fail = fb.jump_if_false_later();
@@ -2709,7 +2779,7 @@ impl<'a> FnBodyCx<'a> {
         } else {
             fb.emit(MirInstr::new(MirInstrKind::Pop, span));
         }
-        self.lower_block(fb, &arm.body)?;
+        self.lower_block(fb, arm.body)?;
         fb.jump(merge);
         // Pattern mismatch: the copy is cleaned up, the payload is still parked.
         fb.start(pattern_fail);

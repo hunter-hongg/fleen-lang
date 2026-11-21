@@ -39,6 +39,40 @@ fn flat(func: &MirFunc) -> Vec<&MirInstr> {
     func.blocks.iter().flat_map(|b| b.instrs.iter()).collect()
 }
 
+/// Assert the shared-fallback shape of a Result `choose` with `otherwise`
+/// (0.0.9 T02/D2): exactly the fallback block carries `marker`, both chain
+/// tails jump to it, and each tail ends in `Pop` — the parked payload is
+/// popped before the shared body runs at the function's base stack depth.
+/// The caller asserts the body was emitted exactly once (`flat` count).
+fn assert_shared_fallback_block(func: &MirFunc, marker: i64) {
+    let fallback = func
+        .blocks
+        .iter()
+        .find(|b| {
+            b.instrs
+                .iter()
+                .any(|i| matches!(i.kind, MirInstrKind::ConstInt(c) if c == marker))
+        })
+        .map(|b| b.id)
+        .expect("fallback body block");
+    let tails: Vec<&MirBlock> = func
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Terminator::Jump(t) if t == fallback))
+        .collect();
+    assert_eq!(
+        tails.len(),
+        2,
+        "both chain tails (ok and err) must jump to the shared fallback block"
+    );
+    for t in &tails {
+        assert!(
+            matches!(t.instrs.last().map(|i| &i.kind), Some(MirInstrKind::Pop)),
+            "each tail pops the parked payload before entering the fallback"
+        );
+    }
+}
+
 #[test]
 fn lower_fib_structure() {
     let src = r#"
@@ -1236,8 +1270,9 @@ func main(): int { 0 }
 #[test]
 fn u06_choose_result_missing_ok_arm_is_rejected() {
     // typeck enforces exhaustivity first (U04), so `lower` never sees a
-    // Result choose lacking an Ok arm. This pins the typeck gate that makes
-    // lower's `ChooseResultNeedsOkErrArms` check defensive-only.
+    // Result choose lacking an Ok arm. 0.0.9 T02: this typeck gate is the
+    // only exhaustive-choose error for Result scrutinees — lower's
+    // `ChooseResultNeedsOkErrArms` was retired with it.
     let tokens = tokenize(
         r#"
 func f(): int {
@@ -1289,11 +1324,12 @@ func f(): int {
 }
 
 #[test]
-fn u06_choose_result_guard_stays_deferred() {
-    // DESIGN §10.5 / TICKETS.md U07: guarded Result arms are rejected by
-    // typeck (a guarded arm does not count for exhaustivity) and their
-    // lowering stays deferred to U09 — U07 explicitly kept it out of scope
-    // rather than silently widening (TICKETS.md U07 "scope decision").
+fn u06_choose_result_guarded_arm_alone_is_not_exhaustive() {
+    // A guarded Result arm does not count toward exhaustivity (the §10.5
+    // rule, unchanged in 0.0.9 T02): with no unguarded duplicate arm and no
+    // `otherwise`, typeck rejects the choose before lower sees it. Guards
+    // themselves DO lower through the attempt chain when coverage is
+    // complete — see `t02_result_choose_guard_with_unguarded_duplicate`.
     let tokens = tokenize(
         r#"
 func f(): int {
@@ -1308,8 +1344,7 @@ func f(): int {
     .unwrap();
     let ast = parse(tokens).unwrap();
     let hir = resolve(ast).unwrap();
-    let errs =
-        typeck(hir).expect_err("guarded Result arm is currently rejected by typeck, not lowered");
+    let errs = typeck(hir).expect_err("a guarded Ok arm alone leaves the choose non-exhaustive");
     assert!(
         errs.iter().any(|e| matches!(
             &e.kind,
@@ -1320,47 +1355,147 @@ func f(): int {
 }
 
 #[test]
-fn u06_result_choose_otherwise_is_rejected_not_dropped() {
-    // `otherwise` short-circuits typeck's exhaustivity check, so it reaches
-    // lower. The Result lowering is the IsErr-branch shape with no fallback
-    // block, so the arm must be rejected rather than silently dropped.
-    // Without Ok+Err both present this used to report the misleading
-    // `ChooseResultNeedsOkErrArms`.
+fn t02_result_choose_guard_with_unguarded_duplicate_lowers() {
+    // Guards lower through the attempt chain unchanged (0.0.9 T02): a
+    // guarded Ok arm plus the unguarded duplicate that carries coverage
+    // compiles, and both attempts exist on the ok chain.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Ok(v) if v > 0 { 100 }
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    // The guarded body (100) and the duplicate's body both emit.
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(100)))
+            .count(),
+        1,
+        "the guarded arm's body must be present"
+    );
+}
+
+#[test]
+fn t02_result_choose_otherwise_occupies_tail_slot() {
+    // 0.0.9 T02 (D2): the `otherwise` body replaces the pop+unit defensive
+    // tail of both attempt chains — one shared body block, emitted exactly
+    // once; each tail pops the parked payload and jumps to it, so the body
+    // always runs at the function's base stack depth.
     let src = r#"
 func f(): int {
     r: Result<int, string> = Ok(5);
     choose clone r {
         when Ok(v) if v > 0 { v }
-        otherwise { 0 }
+        otherwise { 12345 }
     }
 }
 "#;
-    let err = lower_err(src);
-    match err.kind {
-        super::LowerErrorKind::UnsupportedFeature { feature } => {
-            assert!(
-                feature.contains("non-`Ok`/`Err` arm"),
-                "message should name the unsupported arm, got {feature:?}"
-            );
-        }
-        other => {
-            panic!("expected UnsupportedFeature for `otherwise` in a Result choose, got {other:?}")
-        }
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(12345)))
+            .count(),
+        1,
+        "the otherwise body must be emitted exactly once (shared fallback block)"
+    );
+    assert_shared_fallback_block(f, 12345);
+}
+
+#[test]
+fn t02_result_choose_empty_ok_chain_lowers_with_otherwise() {
+    // Err arm + `otherwise`: the ok chain has no arms, so its single
+    // attempt block IS the tail — an Ok value unwraps, pops, and runs the
+    // otherwise body from the err-side shape too.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when Err(e) { 0 - 1 }
+        otherwise { 12345 }
     }
-    // The error must point at the offending arm (a non-degenerate span).
-    assert!(
-        err.span.start < err.span.end,
-        "error span should cover the arm: start={}, end={}",
-        err.span.start,
-        err.span.end
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(12345)))
+            .count(),
+        1,
+        "the otherwise body must be emitted exactly once"
     );
 }
 
 #[test]
-fn u06_result_choose_otherwise_after_ok_err_is_rejected() {
-    // Even when Ok and Err arms are both present (so exhaustivity is
-    // satisfied), an extra `otherwise` arm was silently dropped. It must be
-    // rejected: dropped user code is a miscompile waiting to happen.
+fn t02_result_choose_otherwise_only_lowers() {
+    // A bare `otherwise` (no Ok/Err arms at all) is exhaustive per typeck's
+    // wildcard rule and lowers with both chains empty: every value runs the
+    // fallback through its chain's tail.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        otherwise { 12345 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(12345)))
+            .count(),
+        1,
+        "the otherwise body must be emitted exactly once"
+    );
+}
+
+#[test]
+fn t02_result_choose_or_arm_routes_into_attempt_chain() {
+    // A top-level or-arm on a Result scrutinee is expanded into one attempt
+    // per alternative (0.0.9 T02), sharing the arm's body — it used to be
+    // rejected as `UnsupportedFeature` after passing typeck.
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(1);
+    choose clone r {
+        when Ok(1) | Ok(2) { 99 }
+        when Ok(x) { x }
+        when Err(e) { 0 - 1 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    // One lowered copy of the shared body per alternative (two attempts).
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(99)))
+            .count(),
+        2,
+        "the or-arm expands into one attempt per alternative"
+    );
+}
+
+#[test]
+fn t02_result_choose_otherwise_after_ok_err_is_not_dropped() {
+    // 0.0.9 T02 (D2): even when Ok and Err arms are both present (so
+    // exhaustivity is satisfied), an extra `otherwise` arm used to be
+    // silently dropped — dropped user code, a miscompile waiting to happen.
+    // It now occupies the defensive-tail slot: the body is emitted once into
+    // a shared fallback block both tails jump to, never dropped.
     let src = r#"
 func f(): int {
     r: Result<int, string> = Ok(5);
@@ -1371,11 +1506,46 @@ func f(): int {
     }
 }
 "#;
-    let err = lower_err(src);
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    assert_eq!(
+        flat(f)
+            .iter()
+            .filter(|i| matches!(i.kind, MirInstrKind::ConstInt(99)))
+            .count(),
+        1,
+        "the otherwise body must be emitted exactly once, not dropped"
+    );
+    assert_shared_fallback_block(f, 99);
+}
+
+#[test]
+fn t02_result_choose_first_wildcard_arm_wins() {
+    // Several always-matching arms: the first one wins — the scalar path's
+    // sequential first-match semantics. The partition must not let a later
+    // duplicate silently overwrite the first arm's body (the T02 partition
+    // used to be last-wins, disagreeing with the scalar scrutinee path).
+    let src = r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    choose clone r {
+        when _ { 11 }
+        when _ { 22 }
+    }
+}
+"#;
+    let mir = lower_src(src);
+    let f = find_func(&mir, "f");
+    let ins = flat(f);
     assert!(
-        matches!(err.kind, super::LowerErrorKind::UnsupportedFeature { .. }),
-        "expected UnsupportedFeature, got {:?}",
-        err.kind
+        ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::ConstInt(11))),
+        "the first always-matching arm's body is emitted"
+    );
+    assert!(
+        !ins.iter()
+            .any(|i| matches!(i.kind, MirInstrKind::ConstInt(22))),
+        "the duplicate arm is dead: its body is never lowered"
     );
 }
 

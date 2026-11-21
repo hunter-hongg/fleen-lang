@@ -1,0 +1,78 @@
+// 0.0.9 T02 (PLAN D2): a Result-scrutinee `choose` accepts `otherwise` as
+// the always-matching fallback arm; it occupies lower's defensive-tail slot
+// of both attempt chains (the parked payload is popped before the body).
+// Guards on Ok/Err arms keep working through the same attempt chains.
+import std.io;
+
+enum Opt { Some(int), None }
+
+// Guard + otherwise: a failed guard falls through the ok attempt chain to
+// the otherwise tail.
+func guarded(n: int): int {
+    r: Result<int, string> = Ok(n);
+    v = choose move r {
+        when Ok(x) if x > 3 { x }
+        otherwise { 0 }
+    };
+    v
+}
+
+// Multiple Ok arms + Err arm + otherwise, all on the attempt chains.
+func multi(n: int): int {
+    r: Result<int, string> = Ok(n);
+    v = choose move r {
+        when Ok(1) { 10 }
+        when Ok(2) { 20 }
+        when Ok(x) { x }
+        when Err(e) { 0 - 1 }
+        otherwise { 99 }
+    };
+    v
+}
+
+// Nested payload + otherwise.
+func nested(o: Opt): int {
+    r: Result<Opt, string> = Ok(o);
+    v = choose move r {
+        when Ok(Some(y)) { y }
+        when Ok(None) { 0 }
+        otherwise { 0 - 7 }
+    };
+    v
+}
+
+// The same shape reached with an Err value: the err chain has no arms, so
+// the err tail runs the otherwise body.
+func nested_err(): int {
+    r: Result<Opt, string> = Err("gone");
+    v = choose move r {
+        when Ok(Some(y)) { y }
+        when Ok(None) { 0 }
+        otherwise { 0 - 7 }
+    };
+    v
+}
+
+// Err arm + otherwise: the ok chain is empty; an Ok value runs the ok
+// chain's tail into the otherwise body.
+func err_only(n: int): int {
+    r: Result<int, string> = Ok(n);
+    v = choose move r {
+        when Err(e) { 0 - 1 }
+        otherwise { 5 }
+    };
+    v
+}
+
+func main(): int {
+    std.io.println(guarded(5) as string);
+    std.io.println(guarded(2) as string);
+    std.io.println(multi(1) as string);
+    std.io.println(multi(2) as string);
+    std.io.println(multi(7) as string);
+    std.io.println(nested(Opt.Some(8)) as string);
+    std.io.println(nested(Opt.None) as string);
+    std.io.println(nested_err() as string);
+    std.io.println(err_only(1) as string);
+    0
+}

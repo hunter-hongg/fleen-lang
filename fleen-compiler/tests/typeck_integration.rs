@@ -416,3 +416,71 @@ func main(): int {
     .expect("or-pattern alternatives compose in the coverage matrix");
     assert_eq!(hir.items.len(), 1);
 }
+#[test]
+fn result_choose_otherwise_is_exhaustive() {
+    // 0.0.9 T02 (PLAN D2): an `otherwise` arm makes a Result scrutinee
+    // exhaustive exactly as on scalar scrutinees — the same `has_otherwise`
+    // early return covers every scrutinee type. The guard in the Ok arm does
+    // not count toward coverage (the §10.5 rule is unchanged); `otherwise`
+    // carries the exhaustiveness, so guard + `otherwise` typechecks.
+    let hir = typeck_str(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    v = choose move r {
+        when Ok(x) if x > 3 { x }
+        otherwise { 0 }
+    };
+    v
+}
+"#,
+    )
+    .expect("guard + otherwise is exhaustive on a Result scrutinee");
+    assert_eq!(hir.items.len(), 1);
+}
+
+#[test]
+fn result_choose_guarded_arm_without_otherwise_is_not_exhaustive() {
+    // 0.0.9 T02: a guarded arm still does not count toward coverage — with
+    // no `otherwise` and no unguarded duplicate, the choose is rejected.
+    let errs = typeck_str(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    v = choose move r {
+        when Ok(x) if x > 3 { x }
+    };
+    v
+}
+"#,
+    )
+    .expect_err("a guarded Ok arm alone leaves both sides uncovered");
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.kind,
+            fleen_compiler::typeck::error::TypeckErrorKind::ChooseNotExhaustive { .. }
+        )),
+        "expected ChooseNotExhaustive, got {errs:?}"
+    );
+}
+
+#[test]
+fn result_choose_err_arm_with_otherwise_is_exhaustive() {
+    // 0.0.9 T02: `otherwise` composes with a one-sided arm set — the Err
+    // arm + `otherwise` (no Ok arm) is exhaustive, so lower sees an empty
+    // ok chain.
+    let hir = typeck_str(
+        r#"
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    v = choose move r {
+        when Err(e) { 0 - 1 }
+        otherwise { 5 }
+    };
+    v
+}
+"#,
+    )
+    .expect("Err arm + otherwise is exhaustive on a Result scrutinee");
+    assert_eq!(hir.items.len(), 1);
+}

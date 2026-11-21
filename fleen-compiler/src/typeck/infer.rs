@@ -2939,10 +2939,9 @@ impl TypeChecker {
         };
 
         // Check for otherwise (parsed as wildcard pattern `_`)
-        let has_otherwise = arms.iter().any(|arm| {
-            arm.guard.is_none()
-                && matches!(&arm.pattern, TypedPatternHir::Ident { name, .. } if name == "_" || name == "otherwise")
-        });
+        let has_otherwise = arms
+            .iter()
+            .any(|arm| arm.guard.is_none() && arm.pattern.is_wildcard());
 
         if has_otherwise {
             return Ok(());
@@ -2998,9 +2997,13 @@ impl TypeChecker {
                 // 0.0.7 rule stays: one guard-free arm whose pattern covers
                 // the variant (total payloads, or a bare variant reference)
                 // suffices. 0.0.9 T01 adds composition: complementary arms of
-                // the *same* variant jointly cover it when, per payload
-                // position, their sub-patterns jointly are total — the BUG-2
-                // repro's four `P(Some/None, …)` arms cover
+                // the *same* variant jointly cover it when every payload
+                // value tuple is matched by some arm — checked by
+                // constructor splitting across the positions
+                // (`variant_arms_jointly_total`), never by per-position
+                // totality, which would accept `P(Some, None)` +
+                // `P(None, Some)` while `P(Some, Some)` falls through. The
+                // BUG-2 repro's four `P(Some/None, …)` arms cover
                 // `Pair<Option<int>, Option<int>>` although no single arm is
                 // individually total. Strictly additive: any program
                 // exhaustive under the 0.0.7 rule still is.

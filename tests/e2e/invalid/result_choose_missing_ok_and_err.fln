@@ -1,0 +1,15 @@
+// 0.0.9 T02: `ChooseResultNeedsOkErrArms` is retired — exhaustive-choose
+// errors for Result scrutinees come from typeck, as for every other type.
+// Neither coverage path is present: the literal `Ok(1)` does not cover the
+// `int` payload and there is no Err arm, so both Ok and Err are missing.
+func f(): int {
+    r: Result<int, string> = Ok(5);
+    v = choose move r {
+        when Ok(1) { 1 }
+    };
+    v
+}
+
+func main(): int {
+    f()
+}
