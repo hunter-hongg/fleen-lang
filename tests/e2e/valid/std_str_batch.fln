@@ -1,0 +1,66 @@
+// 0.0.9 T05 e2e: the eight std.str intrinsics (D3). Failure is a value —
+// `parse_int` overflow and `index_of` not-found are extracted with `choose`
+// and printed, not crashed on. Index positions are Unicode scalar values
+// ("héllo": h=0, é=1, l=2), never bytes.
+import std.str;
+
+func main() {
+    n = choose std.str.parse_int("42") {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    print(n as string);
+    neg = choose std.str.parse_int("-17") {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    print(neg as string);
+    bad = choose std.str.parse_int("4x2") {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    };
+    print(bad);
+    over = choose std.str.parse_int("9223372036854775808") {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    };
+    print(over);
+    f = choose std.str.parse_float("2.5") {
+        when Ok(v) { v }
+        when Err(e) { 0.0 }
+    };
+    print(f as string);
+    badf = choose std.str.parse_float("x1") {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    };
+    print(badf);
+    print(std.str.trim("  hi  "));
+    print(std.str.contains("hello", "ell") as string);
+    print(std.str.contains("hello", "z") as string);
+    print(std.str.contains("hello", "") as string);
+    print(std.str.starts_with("hello", "he") as string);
+    print(std.str.starts_with("hello", "el") as string);
+    print(std.str.starts_with("hello", "") as string);
+    print(std.str.ends_with("hello", "lo") as string);
+    print(std.str.ends_with("hello", "he") as string);
+    print(std.str.ends_with("hello", "") as string);
+    i = choose std.str.index_of("héllo", "l") {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    print(i as string);
+    nf = choose std.str.index_of("hello", "z") {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    };
+    print(nf);
+    z = choose std.str.index_of("hello", "") {
+        when Ok(v) { v }
+        when Err(e) { 0 - 1 }
+    };
+    print(z as string);
+    print(std.str.replace("aaa", "a", "b"));
+    print(std.str.replace("héllo", "é", "e"));
+    print(std.str.replace("abc", "", "X"));
+}

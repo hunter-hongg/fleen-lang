@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D6 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new decision
 > entry, not by editing it silently.
-> **Status: T01–T04 implemented and green; T05–T07 not started.**
+> **Status: T01–T05 implemented and green; T06–T07 not started.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D6) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps flag-off behavior unchanged; the 0.0.8
@@ -411,24 +411,83 @@ matrix unchanged and green.
 
 ## T05 — std.str intrinsic batch (F4; D3)
 
-- [ ] `fleen-compiler/src/typeck/builtins.rs`: eight `BuiltinSpec` entries
+- [x] `fleen-compiler/src/typeck/builtins.rs`: eight `BuiltinSig` entries
       per PLAN D3's table (names, signatures, intrinsic lowering).
-- [ ] `fleen-vm/src/vm.rs` `exec_builtin`: eight arms —
+- [x] `fleen-vm/src/vm.rs` `exec_builtin`: eight arms —
       `parse_int` (`str::parse::<i64>`, overflow/non-numeric → `Err(string)`,
       optional leading `-`/`+`, decimal only), `parse_float` (non-numeric →
       `Err`), `trim` (Unicode whitespace), `contains`, `starts_with`,
       `ends_with` (all bool), `index_of` (first occurrence by **Unicode
       scalar value**, not found → `Err`), `replace` (all occurrences,
       scalar-indexed pattern).
-- [ ] `std/str.fln`: doc-comment entries for the eight (VM intrinsics stay
+- [x] `std/str.fln`: doc-comment entries for the eight (VM intrinsics stay
       doc-only per 0.0.3 D8); indexing-unit contract stated per function.
-- [ ] No opcodes, no bytecode version change (D6); no new `Value` variants.
-- [ ] Tests: VM unit tests per function (empty needle for `contains`/
+- [x] No opcodes, no bytecode version change (D6); no new `Value` variants.
+- [x] Tests: VM unit tests per function (empty needle for `contains`/
       `index_of`/`replace`/`starts_with` — decide empty-needle semantics:
       Rust-consistent, `index_of("")` = `Ok(0)`, `replace("", x, y)` no-op —
       and pin them in the doc comments); e2e valid fixture exercising all
       eight; e2e invalid — `parse_int` overflow caught as a **value** (`Err`
       extracted by `choose`, program prints the error, exits 0).
+
+**As-built note (empty-needle semantics)**: `contains` / `starts_with` /
+`ends_with` with the empty needle answer `true` and `index_of(s, "")` is
+`Ok(0)` — Rust-consistent, no special-casing needed. `replace(s, "", y)`
+is a **no-op** (the string returned unchanged), pinned by
+`std_str_replace_empty_pattern_is_no_op` and in `std/str.fln`'s doc
+comment — this **deviates from Rust**, whose `str::replace` inserts `to`
+at every char boundary for an empty pattern; the ticket's named outcome
+wins, and the deviation is documented where the contract lives. Error
+payloads: `parse_int` → `"invalid int: <s>"` (PLAN §3.4's example),
+`parse_float` → `"invalid float: <s>"`, `index_of` → `"substring not
+found: <needle>"`. `parse_int` does **not** trim whitespace (Rust's
+`i64::from_str` grammar; ` 42` is an `Err` — documented in
+`std/str.fln`).
+
+**As-built note (scalar index conversion)**: `str::find` returns a **byte
+offset**, so the D3 scalar-index contract needs an explicit conversion —
+`s[..byte].chars().count()` (pinned by
+`std_str_index_of_reports_scalar_index`: `"héllo"` finds `"l"` at byte 3
+but scalar index 2). The e2e valid fixture verifies the same case through
+the full pipeline.
+
+**As-built note (module bytes grow — the two 0.0.8 byte pins re-captured)**:
+PLAN §9's parenthetical "intrinsics change VM behavior only, module
+bytecode unchanged" is wrong as written: `lower/mod.rs` gives **every**
+builtin a leading `FuncId` + name constant in every module, so eight new
+entries grow every compiled stream (probe: 1859 → 2182 bytes, flag-off
+pin: 1385 → 1708; +323 each, and decoding both dumps before re-capturing
+confirmed the delta is exactly the eight new names + their placeholder
+function records — no other byte changed, version stays 7 by the
+content-driven rule). Consequence: the two 0.0.8 D16 byte-identity pins
+could not stay green and were re-captured from HEAD as self-pins —
+`fleen-vm/tests/std_byte_identity.rs`
+(`std_module_is_byte_identical_with_0_0_7` → `std_probe_dump_is_pinned`)
+and `codegen/tests.rs`
+(`flag_off_v7_output_is_byte_identical_with_0_0_7` →
+`flag_off_v7_output_is_pinned`), each with the history recorded in its
+doc comment. This matches PLAN §9's actual verdict ("std byte-identity
+not required … recorded expectation, not a hash gate") — corrected as
+built: the byte stream does grow, which is why the gate is a self-pin
+now, not a cross-version identity claim. The third recompile-and-compare
+consumer, the committed v3 compat fixture
+`tests/fixtures/v3/aggregate.flnc` (`v3_fixture_is_committed_byte_identical`
+compiles the fixture source through the current pipeline), was
+regenerated with the repo's own `regenerate_fixtures` tool: 2830 → 3153
+bytes, the same +323 delta (eight builtin names + placeholder records,
+version still pinned to 3 after compile; `v3_fixture_verifies_and_executes`
+re-confirms the instruction groups, verification, and stdout). The v2
+fixture is hand-built (no compiler pass) and stayed byte-identical; the
+v1 fixture is a genuine 0.0.1 artifact, decoded only — both untouched.
+
+**As-built note (test plumbing)**: the eight arms take plain string
+arguments (strings cannot carry a Future/Channel), so — unlike the
+`std.arr.*` group — no deep-fork guard is needed; ordinary arms after
+`std.str.split`. VM unit tests share one `str_call` helper (string args
+only). The e2e invalid fixture `str_parse_int_overflow_caught.fln` pins
+`.exit` = 0 (the error-as-value program must not crash); its printed
+message is stdout-verified in `tests/e2e/valid/std_str_batch.fln`
+because the invalid harness compares stderr only.
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D3, §3.4, §4.

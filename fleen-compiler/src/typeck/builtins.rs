@@ -74,6 +74,16 @@ pub struct BuiltinSig {
 /// - `std.str.len`: `(string) -> int`
 /// - `std.str.concat`: `(string, string) -> string`
 /// - `std.str.split`: `(string, string) -> [string]` — split on a separator
+/// - `std.str.parse_int`: `(string) -> Result<int, string>` — decimal i64
+///   parse (0.0.9 T05, D3)
+/// - `std.str.parse_float`: `(string) -> Result<float, string>` (0.0.9 T05)
+/// - `std.str.trim`: `(string) -> string` — Unicode whitespace
+/// - `std.str.contains` / `starts_with` / `ends_with`:
+///   `(string, string) -> bool` (0.0.9 T05)
+/// - `std.str.index_of`: `(string, string) -> Result<int, string>` — first
+///   occurrence by Unicode scalar value (0.0.9 T05, D3)
+/// - `std.str.replace`: `(string, string, string) -> string` — all
+///   occurrences (0.0.9 T05)
 /// - `std.num.sqrt`: `(float) -> float` — square root
 /// - `std.num.floor`: `(float) -> int` — floor to integer
 /// - `std.os.args`: `() -> [string]` — command-line arguments (without `argv[0]`)
@@ -190,6 +200,59 @@ pub fn builtins() -> Vec<BuiltinSig> {
             name: "std.str.split",
             param: BuiltinParam::Fixed(vec![string(), string()]),
             ret: strings(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        // 0.0.9 T05 (D3): the std.str batch — Result-valued where failure is
+        // possible (overflow / non-numeric input / not-found are Err values,
+        // never panics or out-of-band sentinels); the index unit is Unicode
+        // scalar values, matching `std.str.len`. Empty-needle semantics are
+        // pinned in `std/str.fln`'s doc comments and the VM arms.
+        BuiltinSig {
+            name: "std.str.parse_int",
+            param: BuiltinParam::Fixed(vec![string()]),
+            ret: Type::Result(Box::new(int()), Box::new(string())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.parse_float",
+            param: BuiltinParam::Fixed(vec![string()]),
+            ret: Type::Result(Box::new(float()), Box::new(string())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.trim",
+            param: BuiltinParam::Fixed(vec![string()]),
+            ret: string(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.contains",
+            param: BuiltinParam::Fixed(vec![string(), string()]),
+            ret: bool(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.starts_with",
+            param: BuiltinParam::Fixed(vec![string(), string()]),
+            ret: bool(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.ends_with",
+            param: BuiltinParam::Fixed(vec![string(), string()]),
+            ret: bool(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.index_of",
+            param: BuiltinParam::Fixed(vec![string(), string()]),
+            ret: Type::Result(Box::new(int()), Box::new(string())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.str.replace",
+            param: BuiltinParam::Fixed(vec![string(), string(), string()]),
+            ret: string(),
             lowering: BuiltinLowering::Intrinsic,
         },
         // std.num — math intrinsics (`abs`/`min`/`max` are Fleen source).

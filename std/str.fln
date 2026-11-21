@@ -24,3 +24,38 @@ pub func from_bool(v: bool): string = v as string
 // `split` returns the substrings of `s` between every occurrence of `sep`,
 // keeping empty parts (`split("a,,b", ",") == ["a", "", "b"]`). VM
 // intrinsic `std.str.split`.
+
+// 0.0.9 T05 (D3): the batch below is VM intrinsics only (no Fleen syntax
+// reaches the operations). Every position index is a Unicode scalar value
+// — the same unit `len` counts, never a byte offset. Failure is a value
+// (`Err`), never a crash; extract it with `choose` (or `?`).
+
+// `parse_int` parses a decimal integer with an optional leading `-` or `+`
+// (`parse_int("42") == Ok(42)`). Non-numeric input, i64 overflow, the empty
+// string, and surrounding whitespace are `Err("invalid int: <s>")` — trim
+// first if whitespace is possible. VM intrinsic `std.str.parse_int`.
+
+// `parse_float` parses a decimal float in Rust's float grammar (`"1.5"`,
+// `"-2e3"`); non-numeric input is `Err("invalid float: <s>")`. VM
+// intrinsic `std.str.parse_float`.
+
+// `trim` removes leading and trailing Unicode whitespace. VM intrinsic
+// `std.str.trim`.
+
+// `contains` reports whether `needle` occurs in `s`. The empty needle is
+// contained in every string (`contains("hello", "") == true`). VM
+// intrinsic `std.str.contains`.
+
+// `starts_with` / `ends_with` report prefix / suffix membership. The empty
+// needle matches every string (`starts_with("hello", "") == true`). VM
+// intrinsics `std.str.starts_with` / `std.str.ends_with`.
+
+// `index_of` returns the first occurrence of `needle` in `s` as `Ok(i)`,
+// where `i` counts Unicode scalar values (`index_of("héllo", "l") ==
+// Ok(2)`); not found is `Err("substring not found: <needle>")`. The empty
+// needle is found at `Ok(0)`. VM intrinsic `std.str.index_of`.
+
+// `replace` returns `s` with every occurrence of `from` replaced by `to`
+// (matches never split a scalar). An empty `from` is a no-op — the string
+// is returned unchanged (deliberately not Rust's insert-at-every-boundary
+// behavior). VM intrinsic `std.str.replace`.

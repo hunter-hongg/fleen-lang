@@ -998,6 +998,109 @@ impl Vm {
                 }
                 _ => Err(RuntimeErrorKind::StackShape),
             },
+            // 0.0.9 T05 (D3): the std.str batch. Arguments are plain strings
+            // (they cannot carry a Future/Channel), so — unlike the
+            // `std.arr.*` group — no deep-fork guard is needed here. Failure
+            // is a value (`Value::Err`), never a panic or a runtime error.
+            // The index unit is Unicode scalar values, matching
+            // `std.str.len`.
+            "std.str.parse_int" => match self.read_ref(&args[0])?.as_value() {
+                // Rust's `i64::from_str` grammar: optional leading `-`/`+`,
+                // decimal only, no surrounding whitespace. Overflow and
+                // non-numeric input are `Err` values (IAdd's
+                // checked-overflow posture), never a wrap.
+                Value::Str(s) => match s.parse::<i64>() {
+                    Ok(n) => Ok(Value::Ok(Box::new(Value::Int(n)))),
+                    Err(_) => Ok(Value::Err(Box::new(Value::Str(
+                        format!("invalid int: {s}").into(),
+                    )))),
+                },
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.parse_float" => match self.read_ref(&args[0])?.as_value() {
+                Value::Str(s) => match s.parse::<f64>() {
+                    Ok(x) => Ok(Value::Ok(Box::new(Value::Float(x)))),
+                    Err(_) => Ok(Value::Err(Box::new(Value::Str(
+                        format!("invalid float: {s}").into(),
+                    )))),
+                },
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            // Unicode whitespace (`char::is_whitespace` — the set Rust's
+            // `str::trim` uses).
+            "std.str.trim" => match self.read_ref(&args[0])?.as_value() {
+                Value::Str(s) => Ok(Value::Str(s.trim().into())),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.contains" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
+                // The empty needle is contained in every string.
+                (Value::Str(s), Value::Str(needle)) => Ok(Value::Bool(s.contains(needle.as_ref()))),
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.starts_with" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
+                // The empty needle matches every string.
+                (Value::Str(s), Value::Str(needle)) => {
+                    Ok(Value::Bool(s.starts_with(needle.as_ref())))
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.ends_with" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
+                // The empty needle matches every string.
+                (Value::Str(s), Value::Str(needle)) => {
+                    Ok(Value::Bool(s.ends_with(needle.as_ref())))
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.index_of" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+            ) {
+                (Value::Str(s), Value::Str(needle)) => {
+                    let (s, needle) = (s.as_ref(), needle.as_ref());
+                    // D3: the result counts Unicode scalar values (the same
+                    // unit as `std.str.len`), so the byte offset `find`
+                    // returns is converted through the chars preceding the
+                    // match. The empty needle is found at `Ok(0)`.
+                    match s.find(needle) {
+                        Some(byte) => Ok(Value::Ok(Box::new(Value::Int(
+                            s[..byte].chars().count() as i64,
+                        )))),
+                        None => Ok(Value::Err(Box::new(Value::Str(
+                            format!("substring not found: {needle}").into(),
+                        )))),
+                    }
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
+            "std.str.replace" => match (
+                self.read_ref(&args[0])?.as_value(),
+                self.read_ref(&args[1])?.as_value(),
+                self.read_ref(&args[2])?.as_value(),
+            ) {
+                (Value::Str(s), Value::Str(from), Value::Str(to)) => {
+                    // Empty-needle decision (T05): an empty pattern replaces
+                    // nothing — the string is returned unchanged. This
+                    // deliberately deviates from Rust's `str::replace`,
+                    // which would insert `to` at every char boundary; the
+                    // insertion surprise is not wanted here (pinned by
+                    // `std_str_replace_empty_pattern_is_no_op`).
+                    if from.is_empty() {
+                        Ok(Value::Str(s.clone()))
+                    } else {
+                        Ok(Value::Str(s.replace(from.as_ref(), to.as_ref()).into()))
+                    }
+                }
+                _ => Err(RuntimeErrorKind::StackShape),
+            },
             "std.num.sqrt" => match self.read_ref(&args[0])?.as_value() {
                 Value::Float(x) => Ok(Value::Float(x.sqrt())),
                 _ => Err(RuntimeErrorKind::StackShape),

@@ -2298,6 +2298,187 @@ fn std_str_split_keeps_empty_segments() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 0.0.9 T05 (D3): the std.str intrinsic batch. All eight take string
+// arguments, so one helper drives `exec_builtin` for every case; Result
+// returns are asserted as Ok/Err values.
+// ---------------------------------------------------------------------------
+
+/// Run one std.str builtin over string arguments and return the result
+/// value (arg[0] pushed first, matching `Call`'s pop-and-reverse).
+fn str_call(name: &str, args: &[&str]) -> Value {
+    let mut constants = vec![Const::Str(name.into())];
+    let mut code: Vec<(Opcode, Vec<u8>)> = Vec::new();
+    for a in args {
+        constants.push(Const::Str((*a).into()));
+        code.push((Opcode::Const, u32b(constants.len() as u32 - 1)));
+    }
+    code.push((Opcode::Call, u16b(1)));
+    code.push((Opcode::Return, vec![]));
+    let m = builtin_call_module(enc(&code), args.len() as u16, constants);
+    Vm::new(m).run().unwrap()
+}
+
+#[test]
+fn std_str_parse_int_accepts_decimal_with_sign() {
+    assert_eq!(
+        str_call("std.str.parse_int", &["42"]),
+        Value::Ok(Box::new(Value::Int(42)))
+    );
+    assert_eq!(
+        str_call("std.str.parse_int", &["-17"]),
+        Value::Ok(Box::new(Value::Int(-17)))
+    );
+    assert_eq!(
+        str_call("std.str.parse_int", &["+5"]),
+        Value::Ok(Box::new(Value::Int(5)))
+    );
+}
+
+#[test]
+fn std_str_parse_int_errors_are_values() {
+    // Non-numeric input, the empty string, surrounding whitespace, and i64
+    // overflow are all `Err` values with an actionable message — never a
+    // panic or a wrap (D3's checked-overflow posture).
+    assert_eq!(
+        str_call("std.str.parse_int", &["4x2"]),
+        Value::Err(Box::new(Value::Str("invalid int: 4x2".into())))
+    );
+    assert!(matches!(
+        str_call("std.str.parse_int", &[""]),
+        Value::Err(_)
+    ));
+    assert!(matches!(
+        str_call("std.str.parse_int", &[" 42"]),
+        Value::Err(_)
+    ));
+    assert_eq!(
+        str_call("std.str.parse_int", &["9223372036854775808"]),
+        Value::Err(Box::new(Value::Str(
+            "invalid int: 9223372036854775808".into()
+        )))
+    );
+}
+
+#[test]
+fn std_str_parse_float_ok_and_err() {
+    assert_eq!(
+        str_call("std.str.parse_float", &["2.5"]),
+        Value::Ok(Box::new(Value::Float(2.5)))
+    );
+    assert_eq!(
+        str_call("std.str.parse_float", &["x1"]),
+        Value::Err(Box::new(Value::Str("invalid float: x1".into())))
+    );
+}
+
+#[test]
+fn std_str_trim_removes_unicode_whitespace() {
+    assert_eq!(
+        str_call("std.str.trim", &["  hi  "]),
+        Value::Str("hi".into())
+    );
+    // NBSP is Unicode whitespace (`char::is_whitespace`).
+    assert_eq!(
+        str_call("std.str.trim", &["\u{a0}héllo\u{a0}"]),
+        Value::Str("héllo".into())
+    );
+}
+
+#[test]
+fn std_str_contains_reports_membership() {
+    assert_eq!(
+        str_call("std.str.contains", &["hello", "ell"]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        str_call("std.str.contains", &["hello", "z"]),
+        Value::Bool(false)
+    );
+    // Empty needle: contained in every string (Rust-consistent, T05).
+    assert_eq!(
+        str_call("std.str.contains", &["hello", ""]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn std_str_starts_with_and_ends_with() {
+    assert_eq!(
+        str_call("std.str.starts_with", &["hello", "he"]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        str_call("std.str.starts_with", &["hello", "el"]),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        str_call("std.str.starts_with", &["hello", ""]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        str_call("std.str.ends_with", &["hello", "lo"]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        str_call("std.str.ends_with", &["hello", "he"]),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        str_call("std.str.ends_with", &["hello", ""]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn std_str_index_of_reports_scalar_index() {
+    // "héllo" finds "l" at byte offset 3 but scalar index 2 — the result
+    // unit is Unicode scalar values, not bytes (D3).
+    assert_eq!(
+        str_call("std.str.index_of", &["héllo", "l"]),
+        Value::Ok(Box::new(Value::Int(2)))
+    );
+}
+
+#[test]
+fn std_str_index_of_not_found_is_err() {
+    assert_eq!(
+        str_call("std.str.index_of", &["hello", "z"]),
+        Value::Err(Box::new(Value::Str("substring not found: z".into())))
+    );
+}
+
+#[test]
+fn std_str_index_of_empty_needle_is_zero() {
+    assert_eq!(
+        str_call("std.str.index_of", &["hello", ""]),
+        Value::Ok(Box::new(Value::Int(0)))
+    );
+}
+
+#[test]
+fn std_str_replace_replaces_all_occurrences() {
+    assert_eq!(
+        str_call("std.str.replace", &["aaa", "a", "b"]),
+        Value::Str("bbb".into())
+    );
+    assert_eq!(
+        str_call("std.str.replace", &["héllo", "é", "e"]),
+        Value::Str("hello".into())
+    );
+}
+
+#[test]
+fn std_str_replace_empty_pattern_is_no_op() {
+    // T05 empty-needle decision: an empty pattern replaces nothing. Rust's
+    // `str::replace` would insert "X" at every char boundary — deliberately
+    // not that (pinned here and in `std/str.fln`'s doc comment).
+    assert_eq!(
+        str_call("std.str.replace", &["abc", "", "X"]),
+        Value::Str("abc".into())
+    );
+}
+
 #[test]
 fn std_num_sqrt_of_225_is_1_5() {
     let m = builtin_call_module(

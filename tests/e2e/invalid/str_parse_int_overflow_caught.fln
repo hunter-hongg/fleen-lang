@@ -1,0 +1,14 @@
+// 0.0.9 T05 (PLAN §9): `parse_int` overflow is an Err VALUE, not a crash.
+// The program extracts the error with `choose`, prints it, and exits 0 —
+// the pinned exit code fails if the VM ever turns overflow into a panic or
+// a runtime error. The printed message is verified in the valid suite
+// (`tests/e2e/valid/std_str_batch.fln`).
+import std.str;
+
+func main() {
+    msg = choose std.str.parse_int("9223372036854775808") {
+        when Ok(v) { v as string }
+        when Err(e) { e }
+    };
+    print(msg);
+}
