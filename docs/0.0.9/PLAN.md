@@ -351,9 +351,11 @@ t = std.str.replace("aaa", "a", "b");  // "bbb"
 
 ## 7. Bytecode impact
 
-None (D6). Version stays 8; no opcode rows; no table changes;
-`BYTECODE.md` untouched except (optionally) nothing — T06 confirms and
-records the confirmation.
+None (D6). No opcode rows; no table changes; the module version follows
+0.0.8's content-driven rule — the std.str arms add no opcode, so affected
+modules stay at v7 unless a `PartialApply` was encoded (as-built: T05's
+pinned dumps read `version=7`). `BYTECODE.md` untouched except
+(optionally) nothing — T06 confirms and records the confirmation.
 
 ## 8. Explicitly out of scope (0.0.9)
 
@@ -385,10 +387,12 @@ records the confirmation.
   word), `break`-as-value.
 - std.str: one e2e valid fixture exercising all eight; invalid fixtures for
   `parse_int` overflow → `Err` value path; `index_of` not-found `Err`.
-- Bytecode gate: no version bump asserted (a test pins writers emit v8 for
-  the new fixtures); std byte-identity not required (intrinsics change VM
-  behavior only, module bytecode unchanged) — recorded expectation, not a
-  hash gate.
+- Bytecode gate: no version bump asserted — no new fixture is v8 (none
+  encodes a partial; the content-driven rule keeps them at v7); std
+  byte-identity not required: every builtin occupies a leading `FuncId` +
+  name constant, so the eight intrinsics grow every module stream and the
+  0.0.8 byte pins became self-pins (T05 as-built) — recorded expectation,
+  not a hash gate.
 
 ## 10. Versioning
 

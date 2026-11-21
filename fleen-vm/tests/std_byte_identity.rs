@@ -5,17 +5,15 @@
 //!
 //! History: the pin originally asserted byte-identity with the released
 //! v0.0.7 compiler (0.0.8 D16: flag-off modules stay byte-identical). That
-//! premise ended with 0.0.8: 0.0.9 T05 (PLAN D3) adds eight std.str
-//! intrinsics to the builtin table, and every builtin occupies a leading
-//! `FuncId` + name constant in EVERY module (`lower/mod.rs`), so the stream
-//! legitimately grew (`len=1859` → `len=2182`; the only delta is the eight
-//! new builtin names and their placeholder function records — verified by
-//! decoding both dumps before re-pinning; the version stays 7 by the
-//! content-driven rule). 0.0.9 PLAN §9 records the consequence: "std
-//! byte-identity not required … recorded expectation, not a hash gate" —
-//! corrected as-built: intrinsics DO change module bytes (via the leading
-//! builtin table), which is why the gate is a self-pin now, not a
-//! cross-version identity claim.
+//! premise ended when 0.0.9 T05 (PLAN D3) added eight std.str intrinsics
+//! to the builtin table: every builtin occupies a leading `FuncId` + name
+//! constant in EVERY module (`lower/mod.rs`), so the stream legitimately
+//! grew (`len=1859` → `len=2182`, version still 7 by the content-driven
+//! rule) and the gate became a self-pin instead of a cross-version
+//! identity claim. The delta account (both dumps decoded: exactly the
+//! eight new builtin names + their placeholder function records) and the
+//! corrected PLAN §9 reading are recorded once, in the T05 as-built note
+//! (`docs/0.0.9/TICKETS.md`).
 //!
 //! Mechanism unchanged: register a root file `import std.io` +
 //! `func main(): int = 0`, run `Session::compile_project`, hex-encode the
@@ -31,7 +29,8 @@ const ROOT_SRC: &str = "import std.io\nfunc main(): int = 0\n";
 
 /// `<len=N version=V>` followed directly by the probe module's hex stream,
 /// as produced by HEAD's compiler with the 0.0.9 T05 builtin table (38
-/// builtins + the stub, captured and delta-verified per the module doc).
+/// builtins + the stub; the capture/delta verification is recorded in the
+/// T05 as-built note, `docs/0.0.9/TICKETS.md`).
 const STD_PROBE_EXPECTED: &str = concat!(
     "len=2182 version=7",
     "464c4e4307002e00000002050000007072696e74020e0000007374642e696f2e707269",

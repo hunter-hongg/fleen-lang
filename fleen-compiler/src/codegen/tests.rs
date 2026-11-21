@@ -1743,12 +1743,12 @@ main() {{ add(1, 2) }}\n"
 /// compiler (0.0.8 D16). That premise ended when 0.0.9 T05 (PLAN D3) added
 /// eight std.str intrinsics: every builtin occupies a leading `FuncId` +
 /// name constant in EVERY module (`lower/mod.rs`), so the stream
-/// legitimately grew (1385 → 1708 bytes; decoding both dumps before
-/// re-pinning showed exactly the eight new builtin names + their
-/// placeholder function records, nothing else). The snapshot now guards
-/// HEAD's own flag-off encoding — any future change to the encoder
-/// (opcode numbering, const-pool layout, span map, version field) still
-/// breaks this test loudly instead of silently desyncing.
+/// legitimately grew (1385 → 1708 bytes; the decoded-dumps delta account
+/// is recorded once in the T05 as-built note, `docs/0.0.9/TICKETS.md`).
+/// The snapshot now guards HEAD's own flag-off encoding — any future
+/// change to the encoder (opcode numbering, const-pool layout, span map,
+/// version field) still breaks this test loudly instead of silently
+/// desyncing.
 const FLAG_OFF_V7_EXPECTED_HEX: &str = concat!(
     "464c4e4307002a00000002050000007072696e74020e0000007374642e696f2e707269",
     "6e746c6e02100000007374642e696f2e726561645f6c696e65020c0000007374642e69",

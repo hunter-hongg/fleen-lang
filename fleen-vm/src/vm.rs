@@ -914,6 +914,38 @@ impl Vm {
         Ok(())
     }
 
+    /// Runs `f` with the string payload of `args[0]` — the argument shape
+    /// of every one-string builtin; any other shape is `StackShape`. The
+    /// closure keeps the borrow inside this call: a `ref` argument whose
+    /// pointee is a promoted `Cell` resolves to an owned temporary in
+    /// `read_ref`, so a `&str` cannot be returned past this frame.
+    fn with_str(
+        &self,
+        args: &[Value],
+        f: impl FnOnce(&str) -> Result<Value, RuntimeErrorKind>,
+    ) -> Result<Value, RuntimeErrorKind> {
+        match self.read_ref(&args[0])?.as_value() {
+            Value::Str(s) => f(s.as_ref()),
+            _ => Err(RuntimeErrorKind::StackShape),
+        }
+    }
+
+    /// Runs `f` with the string payloads of `args[0]` / `args[1]` — the
+    /// argument shape of every two-string builtin; any other shape is
+    /// `StackShape`. Same borrow rule as `with_str`.
+    fn with_two_strs(
+        &self,
+        args: &[Value],
+        f: impl FnOnce(&str, &str) -> Result<Value, RuntimeErrorKind>,
+    ) -> Result<Value, RuntimeErrorKind> {
+        let a = self.read_ref(&args[0])?;
+        let b = self.read_ref(&args[1])?;
+        match (a.as_value(), b.as_value()) {
+            (Value::Str(s), Value::Str(needle)) => f(s.as_ref(), needle.as_ref()),
+            _ => Err(RuntimeErrorKind::StackShape),
+        }
+    }
+
     fn exec_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeErrorKind> {
         match name {
             "print" => {
@@ -969,118 +1001,67 @@ impl Vm {
                     Err(_) => Ok(Value::Str("".into())),
                 }
             }
-            "std.str.len" => match self.read_ref(&args[0])?.as_value() {
-                Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.concat" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                (Value::Str(a), Value::Str(b)) => {
-                    let mut joined = String::with_capacity(a.len() + b.len());
-                    joined.push_str(a);
-                    joined.push_str(b);
-                    Ok(Value::Str(joined.into()))
-                }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.split" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                (Value::Str(s), Value::Str(sep)) => {
-                    let parts: Vec<Value> = s
-                        .split(sep.as_ref())
-                        .map(|p| Value::Str(p.into()))
-                        .collect();
-                    Ok(Value::Arr(parts.into_boxed_slice()))
-                }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
+            "std.str.len" => self.with_str(&args, |s| Ok(Value::Int(s.chars().count() as i64))),
+            "std.str.concat" => self.with_two_strs(&args, |a, b| {
+                let mut joined = String::with_capacity(a.len() + b.len());
+                joined.push_str(a);
+                joined.push_str(b);
+                Ok(Value::Str(joined.into()))
+            }),
+            "std.str.split" => self.with_two_strs(&args, |s, sep| {
+                let parts: Vec<Value> = s.split(sep).map(|p| Value::Str(p.into())).collect();
+                Ok(Value::Arr(parts.into_boxed_slice()))
+            }),
             // 0.0.9 T05 (D3): the std.str batch. Arguments are plain strings
             // (they cannot carry a Future/Channel), so — unlike the
             // `std.arr.*` group — no deep-fork guard is needed here. Failure
             // is a value (`Value::Err`), never a panic or a runtime error.
             // The index unit is Unicode scalar values, matching
             // `std.str.len`.
-            "std.str.parse_int" => match self.read_ref(&args[0])?.as_value() {
-                // Rust's `i64::from_str` grammar: optional leading `-`/`+`,
-                // decimal only, no surrounding whitespace. Overflow and
-                // non-numeric input are `Err` values (IAdd's
-                // checked-overflow posture), never a wrap.
-                Value::Str(s) => match s.parse::<i64>() {
-                    Ok(n) => Ok(Value::Ok(Box::new(Value::Int(n)))),
-                    Err(_) => Ok(Value::Err(Box::new(Value::Str(
-                        format!("invalid int: {s}").into(),
-                    )))),
-                },
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.parse_float" => match self.read_ref(&args[0])?.as_value() {
-                Value::Str(s) => match s.parse::<f64>() {
-                    Ok(x) => Ok(Value::Ok(Box::new(Value::Float(x)))),
-                    Err(_) => Ok(Value::Err(Box::new(Value::Str(
-                        format!("invalid float: {s}").into(),
-                    )))),
-                },
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
+            // Rust's `i64::from_str` grammar: optional leading `-`/`+`,
+            // decimal only, no surrounding whitespace. Overflow and
+            // non-numeric input are `Err` values (IAdd's checked-overflow
+            // posture), never a wrap.
+            "std.str.parse_int" => self.with_str(&args, |s| match s.parse::<i64>() {
+                Ok(n) => Ok(Value::Ok(Box::new(Value::Int(n)))),
+                Err(_) => Ok(Value::Err(Box::new(Value::Str(
+                    format!("invalid int: {s}").into(),
+                )))),
+            }),
+            "std.str.parse_float" => self.with_str(&args, |s| match s.parse::<f64>() {
+                Ok(x) => Ok(Value::Ok(Box::new(Value::Float(x)))),
+                Err(_) => Ok(Value::Err(Box::new(Value::Str(
+                    format!("invalid float: {s}").into(),
+                )))),
+            }),
             // Unicode whitespace (`char::is_whitespace` — the set Rust's
             // `str::trim` uses).
-            "std.str.trim" => match self.read_ref(&args[0])?.as_value() {
-                Value::Str(s) => Ok(Value::Str(s.trim().into())),
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.contains" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                // The empty needle is contained in every string.
-                (Value::Str(s), Value::Str(needle)) => Ok(Value::Bool(s.contains(needle.as_ref()))),
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.starts_with" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                // The empty needle matches every string.
-                (Value::Str(s), Value::Str(needle)) => {
-                    Ok(Value::Bool(s.starts_with(needle.as_ref())))
+            "std.str.trim" => self.with_str(&args, |s| Ok(Value::Str(s.trim().into()))),
+            // The empty needle is contained in every string.
+            "std.str.contains" => {
+                self.with_two_strs(&args, |s, needle| Ok(Value::Bool(s.contains(needle))))
+            }
+            // The empty needle matches every string.
+            "std.str.starts_with" => {
+                self.with_two_strs(&args, |s, needle| Ok(Value::Bool(s.starts_with(needle))))
+            }
+            "std.str.ends_with" => {
+                self.with_two_strs(&args, |s, needle| Ok(Value::Bool(s.ends_with(needle))))
+            }
+            "std.str.index_of" => self.with_two_strs(&args, |s, needle| {
+                // D3: the result counts Unicode scalar values (the same
+                // unit as `std.str.len`), so the byte offset `find`
+                // returns is converted through the chars preceding the
+                // match. The empty needle is found at `Ok(0)`.
+                match s.find(needle) {
+                    Some(byte) => Ok(Value::Ok(Box::new(Value::Int(
+                        s[..byte].chars().count() as i64
+                    )))),
+                    None => Ok(Value::Err(Box::new(Value::Str(
+                        format!("substring not found: {needle}").into(),
+                    )))),
                 }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.ends_with" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                // The empty needle matches every string.
-                (Value::Str(s), Value::Str(needle)) => {
-                    Ok(Value::Bool(s.ends_with(needle.as_ref())))
-                }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
-            "std.str.index_of" => match (
-                self.read_ref(&args[0])?.as_value(),
-                self.read_ref(&args[1])?.as_value(),
-            ) {
-                (Value::Str(s), Value::Str(needle)) => {
-                    let (s, needle) = (s.as_ref(), needle.as_ref());
-                    // D3: the result counts Unicode scalar values (the same
-                    // unit as `std.str.len`), so the byte offset `find`
-                    // returns is converted through the chars preceding the
-                    // match. The empty needle is found at `Ok(0)`.
-                    match s.find(needle) {
-                        Some(byte) => Ok(Value::Ok(Box::new(Value::Int(
-                            s[..byte].chars().count() as i64,
-                        )))),
-                        None => Ok(Value::Err(Box::new(Value::Str(
-                            format!("substring not found: {needle}").into(),
-                        )))),
-                    }
-                }
-                _ => Err(RuntimeErrorKind::StackShape),
-            },
+            }),
             "std.str.replace" => match (
                 self.read_ref(&args[0])?.as_value(),
                 self.read_ref(&args[1])?.as_value(),

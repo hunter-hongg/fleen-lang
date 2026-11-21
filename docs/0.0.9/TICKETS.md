@@ -480,6 +480,11 @@ re-confirms the instruction groups, verification, and stdout). The v2
 fixture is hand-built (no compiler pass) and stayed byte-identical; the
 v1 fixture is a genuine 0.0.1 artifact, decoded only — both untouched.
 
+PLAN §7's "Version stays 8" and §9's "writers emit v8 / module bytecode
+unchanged" wording were corrected to this reality in the post-T05 review
+pass (the content-driven rule keeps the touched modules at v7, and the
+intrinsics do grow every module stream via the leading builtin table).
+
 **As-built note (test plumbing)**: the eight arms take plain string
 arguments (strings cannot carry a Future/Channel), so — unlike the
 `std.arr.*` group — no deep-fork guard is needed; ordinary arms after
