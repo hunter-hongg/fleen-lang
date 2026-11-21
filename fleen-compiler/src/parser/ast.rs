@@ -702,6 +702,10 @@ pub struct ExprWhile {
 pub struct ExprFor {
     /// Loop variable name (bound immutable, scoped to `body`).
     pub var: String,
+    /// Span of the loop-variable identifier itself: the diagnostic location
+    /// for a reserved loop-variable name (0.0.10 T02 review — the
+    /// whole-`for` span points too wide for a name-level error).
+    pub var_span: Span,
     /// The iterable expression (evaluated once, before the loop).
     pub iterable: Box<Expr>,
     pub body: Block,

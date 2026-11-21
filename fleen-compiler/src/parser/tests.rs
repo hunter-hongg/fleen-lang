@@ -1387,6 +1387,26 @@ func main() {
     }
 
     #[test]
+    fn parse_ctor_call_is_ordinary_call_expr() {
+        // 0.0.10 T02 (D1): `Ok(...)` / `Err(...)` in *expression* position
+        // parse as ordinary calls of bare identifiers — the parser special
+        // case existed only in patterns, the value side is untouched (the
+        // T02 card's "generic AST shape for ctor calls" item). The resolver
+        // classifies these back onto the ResultCtor-tagged HIR nodes.
+        let ast = parse_str("Ok(3); Err(msg);");
+        assert!(matches!(
+            &ast.items[0],
+            Item::Expr(Expr::Call(f, args))
+                if matches!(&**f, Expr::Ident(n, _) if n == "Ok") && args.len() == 1
+        ));
+        assert!(matches!(
+            &ast.items[1],
+            Item::Expr(Expr::Call(f, args))
+                if matches!(&**f, Expr::Ident(n, _) if n == "Err") && args.len() == 1
+        ));
+    }
+
+    #[test]
     fn parse_ok_err_without_paren_is_ident_pattern() {
         // `Ok` without `(` stays an ordinary identifier pattern
         let ast = parse_str("choose r { when Ok { 1 } } ;");

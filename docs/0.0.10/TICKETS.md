@@ -186,6 +186,36 @@
   tests above), and the standing byte-level pin
   (`fleen-vm/tests/std_byte_identity.rs`) passes unchanged, as do all 108
   e2e valid fixtures' stdout/stderr comparisons.
+- **Post-review sweep (recorded)**: the two-axis review of `509eaee`
+  surfaced findings, all addressed in the follow-up commit —
+  (1) the card's "parser unit tests for ctor calls" item is now fully
+  pinned: `parse_ctor_call_is_ordinary_call_expr` asserts `Ok(3)` /
+  `Err(msg)` in *expression* position parse as ordinary calls of bare
+  identifiers (patterns and the type use already had shape tests);
+  (2) the bare-ctor rejection is pinned in `typeck/tests.rs`, not the
+  resolver's unit tests — the resolver keeps emitting `ExprHir::Ident` for
+  the prelude constructor names, so the verdict fires in typeck's
+  name-based interception; the card's "resolver unit tests" wording is
+  satisfied by the shadow-rejection tests, placement recorded here;
+  (3) process note: the regression-first pins and the change land in one
+  squashed commit, so "pin at the merge-base *before touching anything*" is
+  order-recorded in these notes rather than archaeologically verifiable
+  from history — the pins themselves are verifiable
+  (`check_bare_ok_is_not_a_value`, the e2e `bare_ctor_not_a_value` /
+  `enum_result_reserved` fixtures); (4) review hygiene: the five per-site
+  Session shadow tests collapsed into one data-driven test
+  (`reserved_ctor_name_declarations_are_rejected_at_every_site`), the
+  shadow-flip narrative lives canonically at `check_reserved_binding_name`
+  (code) and in this card (docs) with the call sites and
+  `resolver/error.rs` pointing at it, and `Scope::declare` carries a note
+  on why the D2 check is per-site (the scope layer has no span for the
+  error, SPEC §4, and the resolver's own seeding declares through it
+  discarding errors); (5) `ExprFor` gained `var_span`, so the
+  `for Ok in …` diagnostic points at the loop variable (pinned by
+  `reserved_for_var_error_points_at_the_loop_variable`), and the
+  prelude-ctor pattern classification no longer clones the payload —
+  output shapes are unaffected (no fixture pins those spans; the
+  classification behavior is unchanged).
 
 **Depends on**: T01.
 **Refs**: PLAN §1 D1/D2, §3.1; 0.0.9 PLAN D1 (variant-reference

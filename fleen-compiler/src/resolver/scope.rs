@@ -55,6 +55,18 @@ impl Scope {
     /// A builtin binding may be *overwritten* by a user binding of the same
     /// name (Python-style builtin shadowing). Any other existing binding is
     /// reported back so the caller can produce a `DuplicateBinding` error.
+    ///
+    /// Note (0.0.10 T02, D2): the reserved prelude constructor names
+    /// (`Ok` / `Err`) are **not** rejected here, even though every user
+    /// declaration site flows through this method — the check lives at the
+    /// declaration sites (`Resolver::check_reserved_binding_name`):
+    /// (a) this layer has no span, so a rejection raised here could not
+    /// carry the declaration's location (SPEC §4: every error carries a
+    /// Span), and (b) the resolver's own seeding (`register_builtins`,
+    /// imported intrinsics) also declares through this method and discards
+    /// its errors (`let _ =`), so a guard here could be silently swallowed.
+    /// The type name `Result` is rejected even earlier (lexer keyword +
+    /// `collect_enums`).
     pub fn declare(&mut self, name: String, binding: Binding) -> Result<(), Binding> {
         match self.bindings.get(&name) {
             Some(existing) if !existing.builtin => Err(existing.clone()),

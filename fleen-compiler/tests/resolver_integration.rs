@@ -2445,7 +2445,7 @@ func main(): int {
 
 // ========== 0.0.10 T02: the prelude trio (D1/D2) ==========
 
-use fleen_compiler::resolver::hir::{ExprHir, FuncBodyHir, HirItem, PatternHir, StmtHir};
+use fleen_compiler::resolver::hir::{ExprHir, FuncBodyHir, HirItem, PatternHir};
 
 #[test]
 fn prelude_ctor_patterns_classify_to_result_ctor() {
@@ -2628,4 +2628,22 @@ fn reserved_ctor_name_rejections() {
             "src {src:?}: expected ReservedBuiltinName({name}), got {errs:?}"
         );
     }
+}
+
+#[test]
+fn reserved_for_var_error_points_at_the_loop_variable() {
+    // 0.0.10 T02 review: `ExprFor.var_span` lets the `ReservedBuiltinName`
+    // diagnostic point at the loop variable itself, not the whole `for`
+    // expression.
+    let src = "for Ok in [1] { }";
+    let errs = resolve_str(src).expect_err("the declaration must be rejected");
+    let err = errs
+        .iter()
+        .find(|e| matches!(e.kind, ResolveErrorKind::ReservedBuiltinName { .. }))
+        .expect("the reserved-name error must be present");
+    assert_eq!(
+        (err.span.start, err.span.end),
+        (4, 6),
+        "the diagnostic must point at the `Ok` identifier itself"
+    );
 }

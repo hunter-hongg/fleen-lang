@@ -5,7 +5,6 @@ use crate::codegen;
 use crate::lexer::{TokenKind, tokenize};
 use crate::parser::ParseErrorKind;
 use crate::resolver::error::ResolveErrorKind;
-use crate::resolver::modules::build_module_table;
 use crate::resolver::{CrateDef, ExportKind, STD_CRATE_NAME, STD_RESULT_MODULE_NAME};
 use crate::source_map::SourceMap;
 use crate::typeck::error::TypeckErrorKind;
@@ -131,111 +130,66 @@ fn user_enum_named_result_is_a_compile_error() {
 // ========== 0.0.10 T02: the prelude trio is non-shadowable (D2) ==========
 
 // **Recorded behavior flip (T02 as-built)**: at the 0.0.9 merge-base these
-// declarations were LEGAL — `Ok` / `Err` were shadowable builtins (§4.3's
-// Python-style builtin overwrite in `Scope::declare`; pinned empirically
-// before this change: `func Ok` / local `Ok = 42` / param `Ok` /
-// `const Err` all compiled). D2's normative rule is non-shadowable, so the
-// declarations are now `ReservedBuiltinName` rejections. The parity
-// sweep's one-directional constraint holds: every program rejected before
-// is still rejected. The flips are recorded in `docs/0.0.10/TICKETS.md`
-// T02, never silent.
+// declarations were LEGAL — `Ok` / `Err` were shadowable builtins. D2's
+// normative rule is non-shadowable, so they are now `ReservedBuiltinName`
+// rejections. Canonical rationale: `check_reserved_binding_name` in
+// `resolver/mod.rs`; the full record lives in the T02 card of
+// `docs/0.0.10/TICKETS.md`, never silent.
 
-/// A user function named `Ok` is rejected (D2; was legal at the merge-base).
+/// A declaration named `Ok` / `Err` is rejected at every declaration site
+/// the resolver checks (D2; each case was legal at the merge-base): a
+/// top-level `func`, a local binding, a `const`, a parameter, and a
+/// pattern binding (a bare `when Ok` arm). One data-driven test — the
+/// assert shape is shared, like `reserved_ctor_name_rejections` in
+/// `tests/resolver_integration.rs`, which pins the same sites at the
+/// resolver level.
 #[test]
-fn user_func_named_ok_is_rejected() {
-    let mut session = Session::new();
-    let root = session.add_file(
-        "src/main.fln",
-        "func Ok(x: int): int = x + 1\nfunc main(): int = Ok(3)\n",
-    );
-    let err = session
-        .compile(root)
-        .expect_err("a `func Ok` must be rejected (D2 non-shadowable)");
-    assert!(matches!(
-        err,
-        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
-            &e.kind,
-            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
-        ))
-    ));
-}
-
-/// A binding named `Ok` is rejected (D2; was legal at the merge-base).
-#[test]
-fn user_binding_named_ok_is_rejected() {
-    let mut session = Session::new();
-    let root = session.add_file(
-        "src/main.fln",
-        "func main(): int {\n    Ok = 42\n    Ok\n}\n",
-    );
-    let err = session
-        .compile(root)
-        .expect_err("a binding named `Ok` must be rejected (D2 non-shadowable)");
-    assert!(matches!(
-        err,
-        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
-            &e.kind,
-            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
-        ))
-    ));
-}
-
-/// A `const Err` is rejected (D2; was legal at the merge-base).
-#[test]
-fn user_const_named_err_is_rejected() {
-    let mut session = Session::new();
-    let root = session.add_file("src/main.fln", "const Err = 42\nfunc main(): int = Err\n");
-    let err = session
-        .compile(root)
-        .expect_err("a `const Err` must be rejected (D2 non-shadowable)");
-    assert!(matches!(
-        err,
-        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
-            &e.kind,
-            ResolveErrorKind::ReservedBuiltinName { name } if name == "Err"
-        ))
-    ));
-}
-
-/// A parameter named `Ok` is rejected (D2; was legal at the merge-base).
-#[test]
-fn user_param_named_ok_is_rejected() {
-    let mut session = Session::new();
-    let root = session.add_file(
-        "src/main.fln",
-        "func f(Ok: int): int = Ok\nfunc main(): int = f(1)\n",
-    );
-    let err = session
-        .compile(root)
-        .expect_err("a parameter named `Ok` must be rejected (D2 non-shadowable)");
-    assert!(matches!(
-        err,
-        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
-            &e.kind,
-            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
-        ))
-    ));
-}
-
-/// A pattern binding named `Ok` (a bare `when Ok` arm) is rejected (D2;
-/// was legal at the merge-base on a non-Result scrutinee).
-#[test]
-fn user_pattern_binding_named_ok_is_rejected() {
-    let mut session = Session::new();
-    let root = session.add_file(
-        "src/main.fln",
-        "func main(): int {\n    r = choose 5 { when Ok { 1 } otherwise { 2 } }\n    r\n}\n",
-    );
-    let err = session
-        .compile(root)
-        .expect_err("a pattern binding named `Ok` must be rejected (D2 non-shadowable)");
-    assert!(matches!(
-        err,
-        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
-            &e.kind,
-            ResolveErrorKind::ReservedBuiltinName { name } if name == "Ok"
-        ))
-    ));
+fn reserved_ctor_name_declarations_are_rejected_at_every_site() {
+    const CASES: &[(&str, &str, &str)] = &[
+        // (label, source, reserved name)
+        (
+            "func Ok",
+            "func Ok(x: int): int = x + 1\nfunc main(): int = Ok(3)\n",
+            "Ok",
+        ),
+        (
+            "binding Ok",
+            "func main(): int {\n    Ok = 42\n    Ok\n}\n",
+            "Ok",
+        ),
+        (
+            "const Err",
+            "const Err = 42\nfunc main(): int = Err\n",
+            "Err",
+        ),
+        (
+            "param Ok",
+            "func f(Ok: int): int = Ok\nfunc main(): int = f(1)\n",
+            "Ok",
+        ),
+        (
+            "pattern binding Ok",
+            "func main(): int {\n    r = choose 5 { when Ok { 1 } otherwise { 2 } }\n    r\n}\n",
+            "Ok",
+        ),
+    ];
+    for &(label, source, name) in CASES {
+        let mut session = Session::new();
+        let root = session.add_file("src/main.fln", source);
+        let err = session
+            .compile(root)
+            .expect_err("a declaration named `Ok` / `Err` must be rejected (D2 non-shadowable)");
+        assert!(
+            matches!(
+                err,
+                CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+                    &e.kind,
+                    ResolveErrorKind::ReservedBuiltinName { name: reserved } if reserved == name
+                ))
+            ),
+            "case {label}: expected ReservedBuiltinName({name})"
+        );
+    }
 }
 
 /// The T01 ticket's "yields the `Ok` / `Err` / `Result` names" pin, at the

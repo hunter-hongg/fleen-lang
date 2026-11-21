@@ -111,8 +111,9 @@ pub enum ResolveErrorKind {
     /// `Result` keyword made an `enum Result` a parse error — the parity
     /// rationale lives canonically at `collect_enums` in
     /// `resolver/mod.rs`. For `Ok` / `Err` the rejection is a recorded
-    /// behavior change: the names were §4.3-shadowable before 0.0.10 (see
-    /// the T02 as-built notes).
+    /// behavior change; the canonical rationale lives at
+    /// `check_reserved_binding_name` (the flip is recorded in the T02
+    /// as-built notes).
     ReservedBuiltinName { name: String },
 }
 

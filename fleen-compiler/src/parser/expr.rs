@@ -509,9 +509,10 @@ impl Parser {
         self.expect(&TokenKind::For, "`for`")?;
 
         // The loop variable is a single identifier.
-        let var = if let TokenKind::Ident(name) = self.current_kind().clone() {
+        let (var, var_span) = if let TokenKind::Ident(name) = self.current_kind().clone() {
+            let var_span = self.current().span;
             self.advance();
-            name
+            (name, var_span)
         } else {
             let found = self.current_kind().clone();
             let span = self.current().span;
@@ -534,6 +535,7 @@ impl Parser {
         let end = self.prev_span_end();
         Ok(Expr::For(ExprFor {
             var,
+            var_span,
             iterable,
             body,
             span: self.span(start, end),

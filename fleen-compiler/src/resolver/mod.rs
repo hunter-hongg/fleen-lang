@@ -312,6 +312,10 @@ impl Resolver {
     /// program *rejected* before is still rejected (the parity sweep's
     /// one-directional constraint); the flip is recorded in
     /// `docs/0.0.10/TICKETS.md` T02, never silent.
+    ///
+    /// This doc comment is the **canonical rationale** for the shadow flip:
+    /// the call sites and tests point here instead of restating it (review
+    /// note: one copy, not six).
     fn check_reserved_binding_name(&mut self, name: &str, span: Span) {
         if RESERVED_CTOR_NAMES.contains(&name) {
             self.add_error(
@@ -725,9 +729,8 @@ impl Resolver {
                 }
                 _ => continue,
             };
-            // 0.0.10 T02 (D2): the prelude constructor names are not
-            // shadowable — a `func Ok` (or curried signature `Ok: ...`) is a
-            // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
+            // 0.0.10 T02 (D2): the prelude ctor names are not shadowable —
+            // a `func Ok` (or curried signature `Ok: ...`) is rejected (see
             // `check_reserved_binding_name`).
             self.check_reserved_binding_name(name, span);
             let binding_id = self.next_binding_id();
@@ -1091,9 +1094,8 @@ impl Resolver {
         for param in params {
             let binding_id = self.next_binding_id();
             let hir_id = self.next_hir_id();
-            // 0.0.10 T02 (D2): a parameter named `Ok` / `Err` is a
-            // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
-            // `check_reserved_binding_name`).
+            // 0.0.10 T02 (D2): a parameter named `Ok` / `Err` is rejected
+            // (see `check_reserved_binding_name`).
             self.check_reserved_binding_name(&param.name, param.span);
             let binding = Binding {
                 id: binding_id,
@@ -1253,9 +1255,8 @@ impl Resolver {
 
         // New binding. If it shadows an outer name, mutability must match
         // (DESIGN.md §4.3); parameters, functions and builtins are exempt.
-        // 0.0.10 T02 (D2): the prelude constructor names are not shadowable
-        // — a binding named `Ok` / `Err` is a `ReservedBuiltinName` rejection
-        // (was legal before 0.0.10; see `check_reserved_binding_name`).
+        // 0.0.10 T02 (D2): a binding named `Ok` / `Err` is rejected (see
+        // `check_reserved_binding_name`).
         self.check_reserved_binding_name(&var.name, var.span);
         let new_mutable = true; // plain bindings are mutable
         if let Some(outer) = self.scopes.find_shadow_domain(&var.name)
@@ -1352,8 +1353,7 @@ impl Resolver {
 
         // Shadow-check up to the function boundary only (DESIGN.md §4.3:
         // "functions have no effect"); parameters/functions/builtins are exempt.
-        // 0.0.10 T02 (D2): a `const` named `Ok` / `Err` is a
-        // `ReservedBuiltinName` rejection (was legal before 0.0.10; see
+        // 0.0.10 T02 (D2): a `const` named `Ok` / `Err` is rejected (see
         // `check_reserved_binding_name`).
         self.check_reserved_binding_name(&c.name, c.span);
         let new_mutable = false; // const is immutable
@@ -2384,10 +2384,10 @@ impl Resolver {
         self.scopes.enter_loop_scope();
         let var_binding_id = self.next_binding_id();
         let var_hir_id = self.next_hir_id();
-        // 0.0.10 T02 (D2): the loop variable is a fresh binding, so a `for
-        // Ok in …` is a `ReservedBuiltinName` rejection (see
-        // `check_reserved_binding_name`).
-        self.check_reserved_binding_name(&for_expr.var, for_expr.span);
+        // 0.0.10 T02 (D2): the loop variable is a fresh binding, so `for
+        // Ok in …` is rejected (see `check_reserved_binding_name`); the
+        // diagnostic points at the loop variable, not the whole `for`.
+        self.check_reserved_binding_name(&for_expr.var, for_expr.var_span);
         if let Err(existing) = self.scopes.declare(
             for_expr.var.clone(),
             Binding {
@@ -2559,14 +2559,22 @@ impl Resolver {
                         .get(&name)
                         .and_then(|enum_name| self.enum_table.get(enum_name))
                         .is_some_and(Self::is_builtin_result_enum);
-                if let ([payload], true) = (payloads.as_slice(), is_prelude_ctor) {
+                if is_prelude_ctor && payloads.len() == 1 {
                     let hir_id = self.next_hir_id();
                     let ctor = if name == "Ok" {
                         ResultCtor::Ok
                     } else {
                         ResultCtor::Err
                     };
-                    let payload_hir = self.resolve_pattern(payload.clone())?;
+                    // `payloads.len() == 1` holds (checked above), so the
+                    // iterator yields exactly one payload — the `else` is an
+                    // invariant violation (SPEC §4), not a user error. The
+                    // move replaces the old `payload.clone()` (review note,
+                    // SPEC §9).
+                    let Some(payload) = payloads.into_iter().next() else {
+                        unreachable!("single payload checked above");
+                    };
+                    let payload_hir = self.resolve_pattern(payload)?;
                     return Ok(PatternHir::ResultCtor {
                         ctor,
                         payload: Box::new(payload_hir),
@@ -2639,10 +2647,8 @@ impl Resolver {
     /// functions and builtins are exempt (DESIGN.md §4.3).
     ///
     /// 0.0.10 T02 (D2): a pattern binding named `Ok` / `Err` is a
-    /// `ReservedBuiltinName` rejection — a bare `when Ok { … }` arm used to
-    /// bind a variable of that name (legal before 0.0.10 on a non-Result
-    /// scrutinee); the prelude constructor names are constructors, not
-    /// bindable values (see `check_reserved_binding_name`).
+    /// `ReservedBuiltinName` rejection — the prelude constructor names are
+    /// constructors, not bindable values (see `check_reserved_binding_name`).
     ///
     /// A `ref` parameter is not merely exempt — re-declaring its name is an
     /// `AssignToRefParam` error (0.0.2 U05, DESIGN §10.4), mirroring the
