@@ -13,6 +13,74 @@ fn compiles_valid_source() {
     assert!(module.functions.iter().any(|f| f.params == 0));
 }
 
+// ========== 0.0.10 T01: the std `Result` declaration module (D1) ==========
+
+/// `import std.result;` compiles end to end through the legacy user-side
+/// path (`Ok` / `Err` constructors, `Result<T, E>` in type position, the
+/// attempt-chain `choose`), and the compiled module carries **no
+/// `enum_defs` entry** — the declaration is declaration-only (D1): the
+/// compiler maps `std.result.Result` onto its internal builtin
+/// representation and the runtime keeps the 0.0.2 encoding. Recorded
+/// expectation (0.0.9 T05 posture, not a hash gate): std today declares no
+/// enums anywhere, so an std-using module's `enum_defs` stays empty; std's
+/// other modules' bytecode being unchanged is pinned by the e2e/std stdout
+/// fixtures, which must stay green throughout.
+#[test]
+fn std_result_import_compiles_with_no_enum_defs() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        r#"
+import std.result;
+import std.io;
+
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func main(): int {
+    r = choose div(10, 2) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    std.io.println(r as string);
+    0
+}
+"#,
+    );
+    let module = session.compile(root).expect("should compile");
+    assert!(
+        module.enum_defs.is_empty(),
+        "std.result.Result must not reach enum_defs (D1 declaration-only)"
+    );
+    assert_eq!(
+        module.version,
+        codegen::MODULE_VERSION,
+        "no bytecode change (D7): the module stays at the content-driven version"
+    );
+}
+
+/// An `enum Result` in a user project is rejected at compile time (D2
+/// groundwork): only `std/result.fln` may declare it.
+#[test]
+fn user_enum_named_result_is_a_compile_error() {
+    let mut session = Session::new();
+    let root = session.add_file(
+        "src/main.fln",
+        "enum Result<T, E> { Ok(T), Err(E) }\nfunc main(): int = 0\n",
+    );
+    let err = session
+        .compile(root)
+        .expect_err("an `enum Result` outside std.result must be rejected");
+    assert!(matches!(
+        err,
+        CompileError::Resolve(ref errors) if errors.iter().any(|e| matches!(
+            &e.kind,
+            ResolveErrorKind::ReservedBuiltinName { name } if name == "Result"
+        ))
+    ));
+}
+
 #[test]
 fn stops_at_first_failing_stage() {
     // Lex failure: an invalid character aborts before parsing.

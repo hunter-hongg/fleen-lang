@@ -1,0 +1,49 @@
+// 0.0.10 T01 std test: the std.result declaration module (PLAN D1).
+//
+// The language-level source of truth for `Result` is `std/result.fln`;
+// this fixture proves the module is importable and that every pre-0.0.10
+// Result flow compiles and runs unchanged against it: constructors, `?`
+// propagation, and the attempt-chain `choose` (0.0.9 D2 `otherwise`).
+import std.result;
+import std.io;
+
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func safe_half(a: int): Result<int, string> {
+    d = div(a, 2)?;
+    Ok(d)
+}
+
+func must_div(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;
+    Ok(q)
+}
+
+func main(): int {
+    r = choose div(10, 2) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    std.io.println(r as string);
+
+    e = choose div(1, 0) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    std.io.println(e as string);
+
+    h = choose safe_half(8) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    std.io.println(h as string);
+
+    p = choose must_div(1, 0) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    std.io.println(p as string);
+    0
+}

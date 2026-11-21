@@ -7,6 +7,9 @@
 pub fn files() -> Vec<(&'static str, &'static str)> {
     vec![
         ("std/mod.fln", include_str!("../../std/mod.fln")),
+        // 0.0.10 T01 (D1): the `Result` declaration module — declaration-only
+        // by compiler recognition, no enum_defs entry (see std/result.fln).
+        ("std/result.fln", include_str!("../../std/result.fln")),
         ("std/io.fln", include_str!("../../std/io.fln")),
         ("std/str.fln", include_str!("../../std/str.fln")),
         ("std/num.fln", include_str!("../../std/num.fln")),

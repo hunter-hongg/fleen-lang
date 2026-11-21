@@ -102,6 +102,12 @@ pub enum ResolveErrorKind {
         /// Parameter count written on the body line.
         body_params: usize,
     },
+    /// 0.0.10 T01 (D2 groundwork): a declaration uses a builtin name the
+    /// language reserves. `Result` is declared in `std.result` and cannot
+    /// be shadowed or re-declared (`Ok` / `Err` follow in T02). Before
+    /// 0.0.10 the `Result` keyword made an `enum Result` a parse error —
+    /// the rejection verdict is unchanged, only its stage moved here.
+    ReservedBuiltinName { name: String },
 }
 
 impl fmt::Display for ResolveErrorKind {
@@ -252,6 +258,13 @@ impl fmt::Display for ResolveErrorKind {
                      its body takes {body_params} — the arrow count in the \
                      signature must equal the body's parameter count",
                     if *sig_params == 1 { "" } else { "s" }
+                )
+            }
+            ResolveErrorKind::ReservedBuiltinName { name } => {
+                write!(
+                    f,
+                    "`{name}` is a builtin name (declared in `std.result`) and \
+                     cannot be shadowed — choose a different name"
                 )
             }
         }

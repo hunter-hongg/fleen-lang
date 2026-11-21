@@ -930,6 +930,61 @@ fn resolve_import() {
     assert_eq!(hir.items.len(), 1);
 }
 
+// ========== 0.0.10 T01: the std `Result` declaration module (D1/D2) ==========
+
+/// `Result` names the std.result builtin type (D1). The declaration in
+/// `std/result.fln` is the only legal one; a user module's `enum Result` is
+/// rejected (parity: the `Result` keyword made it a parse error before
+/// 0.0.10 — same verdict, the stage moved to the resolver).
+#[test]
+fn resolve_rejects_user_enum_named_result() {
+    let errs = resolve_str("enum Result<T, E> { Ok(T), Err(E) }\n").expect_err("should fail");
+    assert!(errs.iter().any(
+        |e| matches!(e.kind, ResolveErrorKind::ReservedBuiltinName { ref name } if name == "Result")
+    ));
+}
+
+#[test]
+fn resolve_rejects_non_parameterized_user_enum_named_result() {
+    let errs = resolve_str("enum Result { Something }\n").expect_err("should fail");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, ResolveErrorKind::ReservedBuiltinName { .. }))
+    );
+}
+
+/// `import std.result;` resolves; the module's only export is the enum.
+#[test]
+fn resolve_import_std_result() {
+    let hir = resolve_str("import std.result;").expect("should resolve");
+    assert_eq!(hir.items.len(), 1);
+}
+
+/// The prelude trio stays untouched at T01: `Ok` / `Err` still resolve
+/// through the parser's Result constructors, `Result<T, E>` still resolves
+/// through the builtin type — a program shaped like every pre-0.0.10
+/// Result user compiles unchanged.
+#[test]
+fn resolve_result_programs_unchanged_at_t01() {
+    let hir = resolve_str(
+        r#"
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+func main(): int {
+    r = choose div(1, 0) {
+        when Ok(v) { v }
+        otherwise { 0 - 1 }
+    };
+    0
+}
+"#,
+    )
+    .expect("should resolve");
+    assert_eq!(hir.items.len(), 2);
+}
+
 #[test]
 fn resolve_empty_program() {
     let hir = resolve_str("").expect("should resolve");

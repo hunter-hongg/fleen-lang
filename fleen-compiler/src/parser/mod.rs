@@ -713,7 +713,20 @@ impl Parser {
     fn parse_enum_decl(&mut self) -> Result<ast::EnumDecl, ParseError> {
         let start = self.current().span.start;
         self.expect(&crate::lexer::TokenKind::Enum, "`enum`")?;
-        let name = self.parse_ident()?;
+        // 0.0.10 T01 (D1): `Result` stays a lexer keyword, but the enum-name
+        // position accepts it so the std declaration (`enum Result<T, E>` in
+        // std/result.fln) parses through the ordinary parameterized-enum
+        // frontend. Same shape as the 0.0.4 `parse_namespace_segment`
+        // precedent (`async`/`await`/`channel` legal in namespace positions
+        // only): every other identifier position still rejects the keyword,
+        // and the resolver rejects an `enum Result` outside `std.result`.
+        let name = match self.current_kind() {
+            crate::lexer::TokenKind::ResultType => {
+                self.advance();
+                "Result".to_string()
+            }
+            _ => self.parse_ident()?,
+        };
         let type_params = if self.check(&crate::lexer::TokenKind::Lt) {
             self.parse_enum_type_params()?
         } else {

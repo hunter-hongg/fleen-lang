@@ -2451,6 +2451,61 @@ func main() {
         }
     }
 
+    // ========== 0.0.10 T01: the std `Result` declaration parses ==========
+
+    /// The exact declaration from std/result.fln (D1): `Result` stays a
+    /// lexer keyword, but the enum-name position accepts it (the 0.0.4
+    /// `parse_namespace_segment` precedent) so the declaration parses
+    /// through the ordinary 0.0.7 parameterized-enum frontend.
+    #[test]
+    fn parse_enum_decl_named_result_with_two_type_params() {
+        let ast = parse_str("pub enum Result<T, E> { Ok(T), Err(E) }\n");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.name, "Result");
+            assert!(e.is_pub, "`pub` travels to the declaration (D1 export)");
+            assert_eq!(type_param_names(e), vec!["T", "E"]);
+            assert_eq!(e.variants.len(), 2);
+            assert_eq!(e.variants[0].name, "Ok");
+            assert!(
+                matches!(e.variants[0].payload_types.as_slice(), [Type::Named { name, args, .. }] if name == "T" && args.is_empty())
+            );
+            assert_eq!(e.variants[1].name, "Err");
+            assert_eq!(e.variants[1].payload_types.len(), 1);
+        } else {
+            panic!("expected Enum decl, got {:?}", ast.items[0]);
+        }
+    }
+
+    /// The shipped std/result.fln parses with exactly the expected shape:
+    /// one item, the `Result` enum, two variants. Guarding the embedded
+    /// source (not a copy) keeps the declaration and its parse contract in
+    /// lockstep.
+    #[test]
+    fn parse_shipped_std_result_module() {
+        let source = crate::std_src::files()
+            .into_iter()
+            .find(|(name, _)| *name == "std/result.fln")
+            .map(|(_, source)| source)
+            .expect("std/result.fln must be embedded (0.0.10 T01)");
+        let tokens = tokenize(source).expect("std/result.fln lexes");
+        let ast = parse(tokens).expect("std/result.fln parses");
+        assert_eq!(ast.items.len(), 1, "the module is declaration-only");
+        if let Item::Decl(Decl::Enum(e)) = &ast.items[0] {
+            assert_eq!(e.name, "Result");
+            assert!(e.is_pub);
+            assert_eq!(e.type_params.len(), 2);
+            assert_eq!(
+                e.variants
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Ok", "Err"]
+            );
+        } else {
+            panic!("expected the Result enum decl, got {:?}", ast.items[0]);
+        }
+    }
+
     #[test]
     fn parse_named_type_with_angle_args() {
         let ast = parse_str("x: Option<int> = make();\n");

@@ -33,7 +33,9 @@ use hir::{
     HirId, HirItem, ImportDeclHir, ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir,
     VarBindingHir,
 };
-pub use modules::{CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE};
+pub use modules::{
+    CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE, STD_CRATE_NAME,
+};
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
 
@@ -1884,17 +1886,51 @@ impl Resolver {
         Ok(None)
     }
 
+    /// 0.0.10 T01 (D1): whether this module is the shipped std `result`
+    /// module — the only place `enum Result` may be declared. The
+    /// declaration's mangled name is exactly `std.result.Result`, the
+    /// canonical builtin path the compiler maps onto its internal
+    /// `Type::Result`; user crates cannot contribute a module of that path
+    /// (the `std` crate name is reserved), so the crate check keeps a
+    /// project's own `src/std/result.fln` from ever claiming the name.
+    fn is_std_result_module(&self, module: &ModuleDef) -> bool {
+        module.path.len() == 2
+            && module.path[0] == "std"
+            && module.path[1] == "result"
+            && self
+                .table
+                .crates
+                .get(module.crate_id)
+                .is_some_and(|c| c.name == STD_CRATE_NAME)
+    }
+
     /// 0.0.6 T03 pre-pass: collect every top-level `enum` declaration in
     /// declaration order, mangling names for the module table and checking
     /// collisions (duplicate enum, enum vs function/var, variant names).
     /// Returns the HIR enum table for typeck (T04).
     fn collect_enums(&mut self, ast: &Ast) -> Vec<EnumDeclHir> {
         let module = self.table.modules[self.cur_module].clone();
+        let std_result_module = self.is_std_result_module(&module);
         let mut enums: Vec<EnumDeclHir> = Vec::new();
         for item in &ast.items {
             let Item::Decl(Decl::Enum(e)) = item else {
                 continue;
             };
+            // 0.0.10 T01 (D2 groundwork): `Result` names the std.result
+            // builtin type and cannot be shadowed or re-declared. The
+            // declaration inside `std/result.fln` is the only legal one;
+            // everywhere else it is rejected. (Before 0.0.10 the `Result`
+            // keyword made this a parse error — the rejection verdict is
+            // unchanged, only its stage moved here.)
+            if e.name == "Result" && !std_result_module {
+                self.errors.push(ResolveError {
+                    kind: ResolveErrorKind::ReservedBuiltinName {
+                        name: e.name.clone(),
+                    },
+                    span: e.span,
+                });
+                continue;
+            }
             let mangled = module.mangled_name(&e.name);
             if let Some(first) = enums.iter().find(|d| d.name == mangled) {
                 self.errors.push(ResolveError {
@@ -2018,7 +2054,15 @@ impl Resolver {
                     .entry(v.name.clone())
                     .or_insert_with(|| e.name.clone());
             }
-            enums.push(decl);
+            // 0.0.10 T01 (D1): the std `Result` declaration is
+            // declaration-only. It stays in the resolution-time tables (the
+            // 0.0.9 D1 variant-reference machinery classifies `Ok` / `Err`
+            // through it from T02 on), but it never enters the output HIR —
+            // typeck/lower/codegen see no entry, so no `enum_defs` row is
+            // emitted and the 0.0.2 Result encoding stays the runtime form.
+            if !std_result_module {
+                enums.push(decl);
+            }
         }
         enums
     }

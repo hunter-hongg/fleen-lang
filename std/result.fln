@@ -1,0 +1,29 @@
+// 0.0.10 T01 std library: `result` module — the `Result` declaration.
+//
+//     pub enum Result<T, E> {
+//         Ok(T),
+//         Err(E),
+//     }
+//
+// This declaration is the **language-level source of truth** (0.0.10 PLAN
+// D1): it parses through the ordinary 0.0.7 parameterized-enum frontend,
+// and the compiler recognizes `std.result.Result` by canonical path and
+// maps it onto its internal builtin representation. The runtime keeps the
+// 0.0.2 encoding unchanged (`PackOk` / `PackErr` / `IsErr` / `UnwrapOk` /
+// `UnwrapErr`, 0xA0–0xA4; `FieldTypeTag::Result = 6`; the VM's
+// `Value::Ok` / `Value::Err`) — no `enum_defs` entry is emitted for this
+// declaration and no variant codegen runs: the module is declaration-only.
+//
+// `Ok`, `Err`, and the type name `Result` are prelude names (0.0.10 D2):
+// every file has them without an import. `import std.result;` also works
+// — it imports the same names — and remains the documented spelling for
+// readers who want the provenance explicit. The declaration cannot be
+// shadowed or re-declared: an `enum Result` anywhere outside this module
+// is rejected.
+//
+// The module holds no functions. `?` propagation and choose-on-Result keep
+// their exact 0.0.2/0.0.9 semantics and lowering (0.0.10 D3).
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
