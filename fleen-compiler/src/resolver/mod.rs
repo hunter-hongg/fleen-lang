@@ -35,6 +35,7 @@ use hir::{
 };
 pub use modules::{
     CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE, STD_CRATE_NAME,
+    STD_RESULT_MODULE_NAME,
 };
 use scope::{Binding, BindingKind, ScopeKind, ScopeStack};
 use std::collections::HashMap;
@@ -1895,8 +1896,8 @@ impl Resolver {
     /// project's own `src/std/result.fln` from ever claiming the name.
     fn is_std_result_module(&self, module: &ModuleDef) -> bool {
         module.path.len() == 2
-            && module.path[0] == "std"
-            && module.path[1] == "result"
+            && module.path[0] == STD_CRATE_NAME
+            && module.path[1] == STD_RESULT_MODULE_NAME
             && self
                 .table
                 .crates
@@ -1910,7 +1911,7 @@ impl Resolver {
     /// Returns the HIR enum table for typeck (T04).
     fn collect_enums(&mut self, ast: &Ast) -> Vec<EnumDeclHir> {
         let module = self.table.modules[self.cur_module].clone();
-        let std_result_module = self.is_std_result_module(&module);
+        let declaring_std_result = self.is_std_result_module(&module);
         let mut enums: Vec<EnumDeclHir> = Vec::new();
         for item in &ast.items {
             let Item::Decl(Decl::Enum(e)) = item else {
@@ -1922,7 +1923,7 @@ impl Resolver {
             // everywhere else it is rejected. (Before 0.0.10 the `Result`
             // keyword made this a parse error — the rejection verdict is
             // unchanged, only its stage moved here.)
-            if e.name == "Result" && !std_result_module {
+            if e.name == "Result" && !declaring_std_result {
                 self.errors.push(ResolveError {
                     kind: ResolveErrorKind::ReservedBuiltinName {
                         name: e.name.clone(),
@@ -2060,7 +2061,7 @@ impl Resolver {
             // through it from T02 on), but it never enters the output HIR —
             // typeck/lower/codegen see no entry, so no `enum_defs` row is
             // emitted and the 0.0.2 Result encoding stays the runtime form.
-            if !std_result_module {
+            if !declaring_std_result {
                 enums.push(decl);
             }
         }

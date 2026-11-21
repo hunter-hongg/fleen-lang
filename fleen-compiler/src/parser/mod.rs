@@ -98,6 +98,20 @@ fn merge_arrow_return(mut params: Vec<ast::Type>, ret: ast::Type) -> ast::Type {
     }
 }
 
+/// The spelling of a keyword the parser accepts in a name position — the
+/// enum-name position for `Result` (0.0.10 T01, D1) and the namespace
+/// segments for `async` / `await` / `channel` (0.0.4). `TokenKind::
+/// keyword_str` is the single spelling source; only keyword kinds reach
+/// this helper, and `keyword_str` maps every keyword kind to `Some`.
+fn keyword_name(kind: crate::lexer::TokenKind) -> String {
+    match kind.keyword_str() {
+        Some(name) => name.to_string(),
+        None => unreachable!(
+            "only keyword kinds are passed, and keyword_str maps every keyword kind to Some"
+        ),
+    }
+}
+
 /// Recursive descent parser with precedence climbing for expressions.
 pub struct Parser {
     tokens: Vec<Token>,
@@ -723,7 +737,7 @@ impl Parser {
         let name = match self.current_kind() {
             crate::lexer::TokenKind::ResultType => {
                 self.advance();
-                "Result".to_string()
+                keyword_name(crate::lexer::TokenKind::ResultType)
             }
             _ => self.parse_ident()?,
         };
@@ -1395,15 +1409,15 @@ impl Parser {
             }
             crate::lexer::TokenKind::Async => {
                 self.advance();
-                Ok("async".to_string())
+                Ok(keyword_name(crate::lexer::TokenKind::Async))
             }
             crate::lexer::TokenKind::Await => {
                 self.advance();
-                Ok("await".to_string())
+                Ok(keyword_name(crate::lexer::TokenKind::Await))
             }
             crate::lexer::TokenKind::Channel => {
                 self.advance();
-                Ok("channel".to_string())
+                Ok(keyword_name(crate::lexer::TokenKind::Channel))
             }
             _ => {
                 let found = self.current().kind.clone();

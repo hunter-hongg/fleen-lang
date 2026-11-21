@@ -934,8 +934,8 @@ fn resolve_import() {
 
 /// `Result` names the std.result builtin type (D1). The declaration in
 /// `std/result.fln` is the only legal one; a user module's `enum Result` is
-/// rejected (parity: the `Result` keyword made it a parse error before
-/// 0.0.10 — same verdict, the stage moved to the resolver).
+/// rejected (pre-0.0.10 parity rationale: canonical note at `collect_enums`
+/// in `resolver/mod.rs`).
 #[test]
 fn resolve_rejects_user_enum_named_result() {
     let errs = resolve_str("enum Result<T, E> { Ok(T), Err(E) }\n").expect_err("should fail");
@@ -954,6 +954,10 @@ fn resolve_rejects_non_parameterized_user_enum_named_result() {
 }
 
 /// `import std.result;` resolves; the module's only export is the enum.
+/// The export's contents — the `Result` name with the `Ok` / `Err` variant
+/// names and the type-parameter arity — are pinned at the table level by
+/// `std_result_module_exports_result_with_ok_err_variants` in `src/tests.rs`
+/// (this crate-external test cannot reach the module table).
 #[test]
 fn resolve_import_std_result() {
     let hir = resolve_str("import std.result;").expect("should resolve");

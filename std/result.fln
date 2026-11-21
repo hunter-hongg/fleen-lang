@@ -14,12 +14,11 @@
 // `Value::Ok` / `Value::Err`) — no `enum_defs` entry is emitted for this
 // declaration and no variant codegen runs: the module is declaration-only.
 //
-// `Ok`, `Err`, and the type name `Result` are prelude names (0.0.10 D2):
-// every file has them without an import. `import std.result;` also works
-// — it imports the same names — and remains the documented spelling for
-// readers who want the provenance explicit. The declaration cannot be
-// shadowed or re-declared: an `enum Result` anywhere outside this module
-// is rejected.
+// `import std.result;` imports the `Result` name; its `Ok` / `Err`
+// variants travel with the export. The declaration cannot be shadowed or
+// re-declared: an `enum Result` anywhere outside this module is rejected
+// (D1 "What this locks"). Prelude registration of the trio is 0.0.10 D2 /
+// T02 territory and is documented there when it lands.
 //
 // The module holds no functions. `?` propagation and choose-on-Result keep
 // their exact 0.0.2/0.0.9 semantics and lowering (0.0.10 D3).

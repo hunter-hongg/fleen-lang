@@ -104,9 +104,10 @@ pub enum ResolveErrorKind {
     },
     /// 0.0.10 T01 (D2 groundwork): a declaration uses a builtin name the
     /// language reserves. `Result` is declared in `std.result` and cannot
-    /// be shadowed or re-declared (`Ok` / `Err` follow in T02). Before
-    /// 0.0.10 the `Result` keyword made an `enum Result` a parse error —
-    /// the rejection verdict is unchanged, only its stage moved here.
+    /// be shadowed or re-declared (`Ok` / `Err` follow in T02). The verdict
+    /// is unchanged from 0.0.10's predecessor, where the `Result` keyword
+    /// made an `enum Result` a parse error — the parity rationale lives
+    /// canonically at `collect_enums` in `resolver/mod.rs`.
     ReservedBuiltinName { name: String },
 }
 

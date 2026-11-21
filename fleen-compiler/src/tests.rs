@@ -2,8 +2,12 @@
 
 use super::{CompileError, FileId, Session, compile};
 use crate::codegen;
+use crate::lexer::{TokenKind, tokenize};
 use crate::parser::ParseErrorKind;
 use crate::resolver::error::ResolveErrorKind;
+use crate::resolver::modules::build_module_table;
+use crate::resolver::{CrateDef, ExportKind, STD_CRATE_NAME, STD_RESULT_MODULE_NAME};
+use crate::source_map::SourceMap;
 use crate::typeck::error::TypeckErrorKind;
 
 #[test]
@@ -79,6 +83,79 @@ fn user_enum_named_result_is_a_compile_error() {
             ResolveErrorKind::ReservedBuiltinName { name } if name == "Result"
         ))
     ));
+}
+
+/// The T01 ticket's "yields the `Ok` / `Err` / `Result` names" pin, at the
+/// table level: the export `import std.result;` hands the importer carries
+/// the `pub` enum `Result` with its variant names travelling alongside
+/// (0.0.6 T03 export machinery) and the fully-applied-use-site arity
+/// (0.0.7 D1). The Session test above exercises the same names only end to
+/// end — there `Ok` / `Err` / `Result` would resolve through the builtin
+/// parser paths even without the import, so this is the assertion that
+/// actually ties the export to the import.
+#[test]
+fn std_result_module_exports_result_with_ok_err_variants() {
+    let mut sources = SourceMap::new();
+    let root = sources.add_file("src/main.fln", "import std.result;\nfunc main(): int = 0\n");
+    let sources = super::with_std_sources(&sources).expect("std sources resolve");
+    let asts = super::parse_all(&sources).expect("std sources parse");
+    let std_root = super::std_crate_root(&sources).expect("std sources appended");
+    let crates = vec![
+        CrateDef::root_crate(root),
+        CrateDef::dependency(STD_CRATE_NAME, std_root),
+    ];
+    let table = crate::resolver::modules::build_module_table(&crates, &sources, &asts)
+        .expect("module table builds");
+    let result_module = table
+        .find(&[
+            STD_CRATE_NAME.to_string(),
+            STD_RESULT_MODULE_NAME.to_string(),
+        ])
+        .expect("std.result is in the module table");
+    let export = table.modules[result_module]
+        .items
+        .get("Result")
+        .expect("`import std.result;` yields the `Result` name");
+    assert!(export.is_pub, "`pub enum Result` is importable (D1)");
+    assert!(
+        matches!(export.kind, ExportKind::Enum),
+        "the export is the enum declaration"
+    );
+    assert_eq!(
+        export.enum_variants,
+        ["Ok", "Err"],
+        "the import yields the `Ok` / `Err` names"
+    );
+    assert_eq!(
+        export.type_param_count, 2,
+        "the fully-applied-use-site arity (0.0.7 D1)"
+    );
+}
+
+/// Recorded expectation for the T01 ticket's "no `enum_defs` growth occurs
+/// anywhere" (0.0.9 T05 posture, not a hash gate), at the source level: no
+/// std module other than `std/result.fln` declares an enum at all, and the
+/// result module declares exactly the one `Result` enum. A lexer-level scan
+/// is exact — comments and string literals never produce an `enum` token.
+/// The Session test above pins the pipeline end (the merged compilation's
+/// `enum_defs` stays empty for a std-importing program); this pins the
+/// invariant for every shipped std module, imported or not.
+#[test]
+fn std_declares_no_enums_outside_result() {
+    for (name, source) in crate::std_src::files() {
+        let tokens =
+            tokenize(source).unwrap_or_else(|e| panic!("{name} must lex (std gate): {e:?}"));
+        let enum_decls = tokens.iter().filter(|t| t.kind == TokenKind::Enum).count();
+        if name == "std/result.fln" {
+            assert_eq!(enum_decls, 1, "{name}: exactly the Result declaration (D1)");
+        } else {
+            assert!(
+                enum_decls == 0,
+                "{name}: std declares no enums outside std.result (D1); \
+                 a new std enum must revisit the no-enum_defs-growth posture"
+            );
+        }
+    }
 }
 
 #[test]

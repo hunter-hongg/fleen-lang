@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: planning (T01–T08 all open).**
+> **Status: T01 done; T02–T08 open.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
@@ -20,24 +20,42 @@
 
 ## T01 — std: the `Result` declaration module (F1; D1)
 
-- [ ] `std/result.fln`: declare `pub enum Result[T, E] { Ok(T), Err(E) }`
+- [x] `std/result.fln`: declare `pub enum Result<T, E> { Ok(T), Err(E) }`
       with module docs stating the D1 contract (this declaration is the
       language-level source of truth; the compiler maps
       `std.result.Result` onto its internal builtin representation; the
       runtime keeps the 0.0.2 encoding; no `enum_defs` entry is emitted
       for this declaration).
-- [ ] Compiler recognition: `std.result.Result` is registered as the
+- [x] Compiler recognition: `std.result.Result` is registered as the
       canonical builtin path — the declaration parses through the normal
       0.0.7 parameterized-enum frontend (2 type params, 2 variants:
       `Ok(T)`, `Err(E)`), but std's compilation excludes it from codegen
       (no `enum_defs` entry, no variant codegen — declaration-only, the
       0.0.3 D8 doc-only precedent in spirit).
-- [ ] The module is importable (`import std.result;` resolves and yields
+- [x] The module is importable (`import std.result;` resolves and yields
       the `Ok` / `Err` / `Result` names).
-- [ ] Tests: std compile green; parser unit test that the declaration
+- [x] Tests: std compile green; parser unit test that the declaration
       parses with the expected shape; recorded expectation that std's
       other modules' bytecode is unchanged and no `enum_defs` growth
       occurs anywhere (not a hash gate — 0.0.9 T05 posture).
+
+**As-built notes (T01)**:
+- The declaration is spelled `Result<T, E>`, not the card's
+  `Result[T, E]`: the declaration-site grammar accepts `<` only
+  (`parse_enum_type_params`); `[]` stays the use-site spelling
+  (0.0.7 D9).
+- The resolver rejects `enum Result` outside `std.result`
+  (`ReservedBuiltinName`) — formally T02 shadow-rule territory, landed
+  here because the parser widening (the enum-name position now accepts
+  the keyword) makes the rejection necessary for verdict parity, and
+  PLAN D1 "What this locks" requires it. Recorded here, not silently.
+- The "yields the names" item is pinned at the table level
+  (`std_result_module_exports_result_with_ok_err_variants`: the export
+  carries the `pub` enum with the `Ok` / `Err` variant names and arity
+  2); the "no `enum_defs` growth anywhere" expectation is recorded at
+  the source level too (`std_declares_no_enums_outside_result`: a
+  lexer-level scan — no std module but `std/result.fln` declares an
+  enum), alongside the Session-level empty-`enum_defs` assertion.
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D1, §4; `resolver/mod.rs:42` (prelude note);

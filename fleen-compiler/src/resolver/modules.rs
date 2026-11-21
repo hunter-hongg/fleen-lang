@@ -35,6 +35,12 @@ pub const ROOT_CRATE: CrateId = 0;
 /// The reserved import root for the shipped `std` library.
 pub const STD_CRATE_NAME: &str = "std";
 
+/// The module name of the builtin `Result` declaration (0.0.10 T01, D1).
+/// Together with [`STD_CRATE_NAME`] it forms the canonical builtin path
+/// `std.result` — the only place `enum Result` may be declared, and the
+/// path the compiler maps onto its internal `Type::Result`.
+pub const STD_RESULT_MODULE_NAME: &str = "result";
+
 /// Top-level item classification for visibility checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
