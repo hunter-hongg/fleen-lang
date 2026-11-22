@@ -1,0 +1,12 @@
+// 0.0.10 T04 regression pin (D4): `$` is special only immediately before
+// `{` — in every other position it is an ordinary character of the string
+// literal. This fixture is byte-pinned at the merge-base and must keep
+// compiling with byte-identical output after the lexer change.
+import std.io;
+
+func main() {
+    std.io.println("a$b");
+    std.io.println("100$");
+    std.io.println("cost: 5$, total: 10$");
+    std.io.println("$ { spaced }");
+}

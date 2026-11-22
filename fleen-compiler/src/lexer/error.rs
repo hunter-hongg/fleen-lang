@@ -14,6 +14,8 @@ pub enum LexErrorKind {
     UnterminatedComment,
     /// Invalid escape sequence in string
     InvalidEscape(char),
+    /// Unclosed interpolation: EOF inside `${...}` (0.0.10 T04, D4)
+    UnclosedInterpolation,
     /// Invalid number format
     InvalidNumber(String),
     /// Integer literal out of range
@@ -46,6 +48,12 @@ impl LexError {
         Self::new(LexErrorKind::InvalidEscape(ch), span)
     }
 
+    /// EOF inside an interpolation expression `${...}` (0.0.10 T04, D4).
+    /// `span` covers the opening `${` through the end of the file.
+    pub fn unclosed_interpolation(span: Span) -> Self {
+        Self::new(LexErrorKind::UnclosedInterpolation, span)
+    }
+
     pub fn invalid_number(msg: String, span: Span) -> Self {
         Self::new(LexErrorKind::InvalidNumber(msg), span)
     }
@@ -72,6 +80,9 @@ impl fmt::Display for LexErrorKind {
             LexErrorKind::UnterminatedString => write!(f, "unterminated string literal"),
             LexErrorKind::UnterminatedComment => write!(f, "unterminated multi-line comment"),
             LexErrorKind::InvalidEscape(ch) => write!(f, "invalid escape sequence '\\{}'", ch),
+            LexErrorKind::UnclosedInterpolation => {
+                write!(f, "unclosed interpolation: missing matching '}}' for '{{'")
+            }
             LexErrorKind::InvalidNumber(msg) => write!(f, "invalid number: {}", msg),
             LexErrorKind::IntOverflow => write!(f, "integer literal out of range"),
             LexErrorKind::FloatOverflow => write!(f, "float literal out of range"),

@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 done; T03 done; T04–T08 open.**
+> **Status: T01 done; T02 done; T03 done; T04 done; T05–T08 open.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
@@ -321,28 +321,99 @@ emission), `lower/mod.rs:682` (`result_payload_ty`).
 
 ## T04 — Lexer: string parts + the `\$` escape (F2; D4)
 
-- [ ] **Regression-first**: pin today's behavior — a string containing
+- [x] **Regression-first**: pin today's behavior — a string containing
       `${` is literal characters (e2e fixture with `${` in a string,
       output byte-pinned); `\$` is `invalid_escape` (invalid fixture).
       Both fixtures are written **before** the lexer change; the first
       changes its expectation in the same commit as the lexer work (the
       declared breaking set, D4), the second flips from invalid to valid.
-- [ ] `\$` becomes the eighth valid escape, producing a literal `$`
+- [x] `\$` becomes the eighth valid escape, producing a literal `$`
       (`lexer_impl.rs` escape match, alongside `\n` / `\t` / `\r` / `\\`
       / `\"` / `\'`).
-- [ ] `$` is special only immediately before `{`: on `${` inside a string
+- [x] `$` is special only immediately before `{`: on `${` inside a string
       literal the lexer switches to expression mode with brace-depth
       tracking until the matching `}`; tokens carry absolute file spans;
       the string literal becomes a parts token (literal chunks +
       embedded-expression token runs). A nested string literal inside an
       embedded expression works (recursive scanning).
-- [ ] `$` in any other position is an ordinary character (`"a$b"` compiles
+- [x] `$` in any other position is an ordinary character (`"a$b"` compiles
       byte-identically to the merge-base pin).
-- [ ] Errors: unclosed `${` (EOF inside expression mode) is a lexer error
+- [x] Errors: unclosed `${` (EOF inside expression mode) is a lexer error
       with a span; unterminated-string handling unchanged.
-- [ ] Tests: lexer valid (`\$`, `$`-elsewhere, nested braces, nested
+- [x] Tests: lexer valid (`\$`, `$`-elsewhere, nested braces, nested
       string literal, `$` at end of string via `\$`); lexer invalid
       (unclosed `${` with span; `\` at EOF unchanged).
+
+**As-built notes (T04)**:
+
+- **Token representation**: the parts token is
+  `TokenKind::StringInterp(Vec<StringPart>)` with
+  `StringPart::{Lit(String), Expr { tokens: Vec<Token>, span: Span }}` —
+  the run excludes the `${`/`}` delimiters (they are consumed), each run
+  token carries its absolute file span, and `span` covers `${` through the
+  matching `}` inclusive so a diagnostic can point at the whole
+  interpolation even for an empty run (`"${}"`; the lexer captures the
+  empty run, the parser rejects it — T05). **A literal without `${` stays
+  a plain `StringLit`** — that is the D6 byte-identity posture carried to
+  the token level: the plain path (single const-pool string) is
+  structurally untouched, so nothing downstream changes for `${}`-free
+  strings. Empty literal chunks are never pushed, so adjacent `Lit` parts
+  cannot occur.
+- **Regression-first fixtures (order recorded here, one squashed commit —
+  the T02 precedent)**: written and verified green at the merge-base
+  before the lexer edit — `valid/interp_brace_literal.fln` ran and printed
+  the literal `a${b}c`; `invalid/dollar_escape_invalid.fln` failed with
+  ``invalid escape sequence '\$' at 329..331``; `valid/dollar_elsewhere.fln`
+  printed the literal `$` outputs. In the same commit as the lexer change:
+  the `\$` pin **flipped to valid** (`valid/dollar_escape.fln`, expecting
+  `100$`); the `${`-literal pin **changed its expectation** — moved to
+  `invalid/interp_brace_begins_interp.fln`, pinning the T04-state
+  rejection `expected expression, found interpolated string` (the parts
+  token reaches the parser's expression entry; the parser wiring is T05).
+  T05/T06 flip that program back to valid/ with the interpolated
+  expectation and update the needle accordingly. The `$`-elsewhere pin
+  stayed put; its **final content** was additionally re-verified
+  byte-identical (od -c) at the true merge-base by temporarily reverting
+  the four touched source files (patch saved/restored), then re-verified
+  identical post-change.
+- **Brace-depth tracking is token-level** (`scan_interp_expr` counts
+  `LBrace`/`RBrace` tokens), which is what makes the D4 recursion claims
+  fall out for free: a nested string literal (itself interpolated) is one
+  token in the run — its braces never leak (`interp_nested_string_literal`
+  pins `"a${ "x${1}" }b"` end to end). Expression-mode whitespace
+  (spaces/tabs/CR) is skipped by the scanner itself — `next_token` skips
+  none, that being the `tokenize` loop's job; comments are not recognized
+  inside `${}` (out of scope), and a `$` *inside* the embedded expression
+  is still `invalid_char` — `$`-specialness is a string-literal rule only.
+- **Newline/EOF errors**: `\n` inside the string — literal chunk or
+  embedded expression alike — is `UnterminatedString` (a string literal is
+  a single-line construct; "unterminated-string handling unchanged");
+  EOF inside the expression is the new
+  `LexErrorKind::UnclosedInterpolation` with a span covering `${` through
+  EOF (`error_unclosed_interpolation_at_eof` pins offsets 1..6 on
+  `"${abc`). Invalid-escape spans (backslash..escape-char) and the `\`-at
+  -EOF ('\0') path are byte-for-byte the pre-T04 behavior
+  (`error_backslash_at_eof_unchanged`); the `tokenize` recovery path is
+  untouched.
+- **Metadata consistency** (the load-bearing rule the `tokenize_enum_keyword`
+  test documents): `TokenKind::StringInterp` has its own `Display` arm
+  (renders `interpolated string` — the T04-state parse error reads
+  ``expected expression, found interpolated string``) and a `Hash` arm;
+  it is **not** a keyword (`is_keyword`/`keyword_str` untouched). ASI: it
+  joined `can_start_stmt` and `can_end_stmt` (plus both table tests) so a
+  statement beginning/ending with an interpolated string behaves exactly
+  like a plain one.
+- **Bytecode unchanged (D7, structural argument + standing pins)**: the
+  diff touches only the lexer, token metadata and ASI tables; every
+  `${}`-free program lexes to the identical token stream it produced at
+  the merge-base, so codegen output is unchanged by construction; the
+  standing `fleen-vm/tests/std_byte_identity.rs` pin and all e2e
+  stdout/stderr comparisons pass unchanged. Gates: `cargo fmt -- --check`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo test` (all targets;
+  the e2e valid set is now 61 fixtures — 59 standing + the two new pins,
+  `dollar_escape` and `dollar_elsewhere`; `interp_brace_literal` existed
+  only as an uncommitted merge-base pin and now lives in invalid/),
+  `cargo doc --no-deps` — all green.
 
 **Depends on**: nothing (parallel to T01–T03).
 **Refs**: PLAN §1 D4, §3.2; `lexer_impl.rs:190` (escape table).

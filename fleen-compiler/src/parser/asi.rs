@@ -65,6 +65,11 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
             | TokenKind::StringLit(_)
+            // 0.0.10 T04: an interpolated string literal starts a statement
+            // exactly like a plain one — without this a line beginning with
+            // `"${…}"` trips the statement-separator error instead of the
+            // expression entry.
+            | TokenKind::StringInterp(_)
             | TokenKind::True
             | TokenKind::False
             | TokenKind::BoxType
@@ -140,6 +145,9 @@ fn can_end_stmt(kind: &TokenKind) -> bool {
             | TokenKind::IntLit(_)
             | TokenKind::FloatLit(_)
             | TokenKind::StringLit(_)
+            // 0.0.10 T04: an interpolated string literal can end a statement
+            // exactly like a plain one (the Semi is inserted after it).
+            | TokenKind::StringInterp(_)
             | TokenKind::True
             | TokenKind::False
             | TokenKind::RParen
@@ -384,6 +392,9 @@ mod tests {
             TokenKind::IntLit(0),
             TokenKind::FloatLit(0.0),
             TokenKind::StringLit(String::new()),
+            // 0.0.10 T04: an interpolated string literal starts a statement
+            // exactly like a plain one.
+            TokenKind::StringInterp(Vec::new()),
             TokenKind::True,
             TokenKind::False,
             TokenKind::BoxType,
@@ -569,6 +580,9 @@ mod tests {
         assert!(can_end_stmt(&TokenKind::Ident(String::new())));
         assert!(can_end_stmt(&TokenKind::IntLit(0)));
         assert!(can_end_stmt(&TokenKind::StringLit(String::new())));
+        // 0.0.10 T04: an interpolated string literal ends a statement exactly
+        // like a plain one.
+        assert!(can_end_stmt(&TokenKind::StringInterp(Vec::new())));
         assert!(can_end_stmt(&TokenKind::True));
         assert!(can_end_stmt(&TokenKind::RParen));
         assert!(can_end_stmt(&TokenKind::RBracket));

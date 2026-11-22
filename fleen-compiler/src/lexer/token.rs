@@ -97,6 +97,26 @@ impl fmt::Display for Span {
     }
 }
 
+/// One part of a string literal containing interpolation (0.0.10 T04, D4).
+///
+/// A string literal that contains the sequence `${` is scanned into parts:
+/// literal chunks and embedded-expression token runs. Adjacent literal
+/// chunks never occur — a chunk is flushed exactly when `${` or the closing
+/// quote is reached. A string without `${` stays a plain
+/// [`TokenKind::StringLit`], keeping its pre-0.0.10 compile path
+/// byte-identical (PLAN D6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringPart {
+    /// A literal chunk: escapes already resolved (`\$` folded to `$`, D4).
+    Lit(String),
+    /// An embedded expression `${...}`: the tokens between the delimiters
+    /// (delimiters excluded, brace depth resolved by the lexer), each
+    /// carrying its absolute file span. `span` covers `${` through the
+    /// matching `}` inclusive, so diagnostics can point at the whole
+    /// interpolation even when the run is empty (`"${}"`).
+    Expr { tokens: Vec<Token>, span: Span },
+}
+
 /// Token kinds in the Fleen language.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -229,6 +249,10 @@ pub enum TokenKind {
     FloatLit(f64),
     /// String literal (e.g., `"hello"`)
     StringLit(String),
+    /// String literal with interpolation (0.0.10 T04, D4): produced only
+    /// when the literal contains `${`. A `$` in any other position, and a
+    /// literal without `${` altogether, stays a plain [`TokenKind::StringLit`].
+    StringInterp(Vec<StringPart>),
     /// Identifier (variable/function names)
     Ident(String),
 
@@ -409,6 +433,10 @@ impl fmt::Display for TokenKind {
             TokenKind::IntLit(n) => write!(f, "{}", n),
             TokenKind::FloatLit(n) => write!(f, "{}", n),
             TokenKind::StringLit(s) => write!(f, "\"{}\"", s),
+            // Load-bearing arm (see the `tokenize_enum_keyword` test): the
+            // catch-all below renders keywords via `keyword_str` and panics
+            // on a non-keyword variant that reaches it.
+            TokenKind::StringInterp(_) => write!(f, "interpolated string"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Assign => write!(f, "="),
             TokenKind::Eq => write!(f, "=="),
@@ -459,6 +487,14 @@ impl std::hash::Hash for TokenKind {
             TokenKind::IntLit(n) => n.hash(state),
             TokenKind::FloatLit(n) => n.to_bits().hash(state),
             TokenKind::StringLit(s) => s.hash(state),
+            TokenKind::StringInterp(parts) => {
+                for part in parts {
+                    match part {
+                        StringPart::Lit(s) => s.hash(state),
+                        StringPart::Expr { span, .. } => span.hash(state),
+                    }
+                }
+            }
             TokenKind::Ident(s) => s.hash(state),
             _ => {}
         }

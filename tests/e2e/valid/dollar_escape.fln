@@ -1,0 +1,8 @@
+// 0.0.10 T04 (D4): `\$` is the eighth valid escape — a literal `$`.
+// Escaping is only needed immediately before `{`; every other `$` is a plain
+// character (pinned by dollar_elsewhere). This fixture was written at the
+// merge-base as invalid/dollar_escape_invalid (pinning `invalid_escape`) and
+// flipped to valid/ in the same commit as the lexer change.
+func main() {
+    print("100\$");
+}

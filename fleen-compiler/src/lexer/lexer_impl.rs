@@ -1,7 +1,7 @@
 //! Fleen lexer: converts source code into a stream of tokens.
 
 use crate::lexer::error::LexError;
-use crate::lexer::token::{Span, Token, TokenKind};
+use crate::lexer::token::{Span, StringPart, Token, TokenKind};
 use crate::source_map::FileId;
 
 /// Lexer state for tokenizing Fleen source code.
@@ -170,56 +170,120 @@ impl<'a> Lexer<'a> {
     }
 
     /// Scan a string literal.
+    ///
+    /// 0.0.10 T04 (D4): a `$` immediately followed by `{` opens an embedded
+    /// expression — the lexer switches to expression mode (token scanning
+    /// with brace-depth tracking, [`Self::scan_interp_expr`]) until the
+    /// matching `}`; a literal containing `${` therefore produces a
+    /// [`TokenKind::StringInterp`] parts token. A `$` in any other position
+    /// is an ordinary character, and a literal without `${` still produces a
+    /// plain [`TokenKind::StringLit`] — its pre-0.0.10 compile path stays
+    /// byte-identical (PLAN D6). `\n` terminates the literal in both modes
+    /// (a string literal is a single-line construct — unterminated-string
+    /// handling unchanged); EOF inside an embedded expression is
+    /// `UnclosedInterpolation`. A nested string literal inside an embedded
+    /// expression works by recursion (`scan_string` is re-entered through
+    /// `next_token`).
     fn scan_string(&mut self, start: u32) -> Result<Token, LexError> {
         // Consume opening quote
         self.advance();
 
-        let mut value = String::new();
+        let mut parts: Vec<StringPart> = Vec::new();
+        let mut lit = String::new();
 
         while let Some(ch) = self.current_char {
-            if ch == '"' {
-                // Closing quote found
-                self.advance();
-                return Ok(Token::new(
-                    TokenKind::StringLit(value),
-                    Span::new(self.file, start, self.byte_offset),
-                ));
-            }
-
-            if ch == '\\' {
-                self.advance();
-                match self.current_char {
-                    Some('n') => value.push('\n'),
-                    Some('t') => value.push('\t'),
-                    Some('r') => value.push('\r'),
-                    Some('\\') => value.push('\\'),
-                    Some('"') => value.push('"'),
-                    Some('\'') => value.push('\''),
-                    // Extended string escapes (\0, \b, \f, \xHH, \uXXXX) are
-                    // tracked on the 0.1.0 roadmap (DESIGN §18).
-                    Some(ch) => {
-                        let err_span = Span::new(
-                            self.file,
-                            self.byte_offset - 1,
-                            self.byte_offset + ch.len_utf8() as u32,
-                        );
-                        self.advance();
-                        return Err(LexError::invalid_escape(ch, err_span));
-                    }
-                    None => {
-                        let err_span = Span::new(self.file, self.byte_offset - 1, self.byte_offset);
-                        return Err(LexError::invalid_escape('\0', err_span));
+            match ch {
+                '"' => {
+                    // Closing quote found
+                    self.advance();
+                    let kind = if parts.is_empty() {
+                        // No interpolation: the plain literal path, unchanged.
+                        TokenKind::StringLit(lit)
+                    } else {
+                        if !lit.is_empty() {
+                            parts.push(StringPart::Lit(lit));
+                        }
+                        TokenKind::StringInterp(parts)
+                    };
+                    return Ok(Token::new(
+                        kind,
+                        Span::new(self.file, start, self.byte_offset),
+                    ));
+                }
+                '\\' => {
+                    self.advance();
+                    match self.current_char {
+                        Some('n') => {
+                            lit.push('\n');
+                            self.advance();
+                        }
+                        Some('t') => {
+                            lit.push('\t');
+                            self.advance();
+                        }
+                        Some('r') => {
+                            lit.push('\r');
+                            self.advance();
+                        }
+                        Some('\\') => {
+                            lit.push('\\');
+                            self.advance();
+                        }
+                        Some('"') => {
+                            lit.push('"');
+                            self.advance();
+                        }
+                        Some('\'') => {
+                            lit.push('\'');
+                            self.advance();
+                        }
+                        // 0.0.10 T04 (D4): `\$` is the eighth escape — a
+                        // literal `$`. Escaping is only needed before `{`.
+                        Some('$') => {
+                            lit.push('$');
+                            self.advance();
+                        }
+                        // Extended string escapes (\0, \b, \f, \xHH, \uXXXX)
+                        // are tracked on the 0.1.0 roadmap (DESIGN §18).
+                        Some(bad) => {
+                            let err_span = Span::new(
+                                self.file,
+                                self.byte_offset - 1,
+                                self.byte_offset + bad.len_utf8() as u32,
+                            );
+                            self.advance();
+                            return Err(LexError::invalid_escape(bad, err_span));
+                        }
+                        None => {
+                            let err_span =
+                                Span::new(self.file, self.byte_offset - 1, self.byte_offset);
+                            return Err(LexError::invalid_escape('\0', err_span));
+                        }
                     }
                 }
-            } else if ch == '\n' {
-                // Unterminated string (newline in string not allowed)
-                let err_span = Span::new(self.file, start, self.byte_offset);
-                return Err(LexError::unterminated_string(err_span));
-            } else {
-                value.push(ch);
+                '\n' => {
+                    // Unterminated string (newline in string not allowed) —
+                    // unchanged for literal chunks and embedded expressions
+                    // alike (T04: a string literal is a single-line construct).
+                    let err_span = Span::new(self.file, start, self.byte_offset);
+                    return Err(LexError::unterminated_string(err_span));
+                }
+                '$' if self.next_char == Some('{') => {
+                    // `${` opens an embedded expression; flush the literal
+                    // chunk accumulated so far (empty chunks are never
+                    // pushed, so adjacent Lit parts cannot occur).
+                    if !lit.is_empty() {
+                        parts.push(StringPart::Lit(std::mem::take(&mut lit)));
+                    }
+                    let dollar_start = self.byte_offset;
+                    let expr = self.scan_interp_expr(dollar_start)?;
+                    parts.push(expr);
+                }
+                ch => {
+                    lit.push(ch);
+                    self.advance();
+                }
             }
-
-            self.advance();
         }
 
         // EOF reached without closing quote
@@ -228,6 +292,69 @@ impl<'a> Lexer<'a> {
             start,
             self.byte_offset,
         )))
+    }
+
+    /// Scan an embedded interpolation expression `${ ... }` (0.0.10 T04, D4).
+    ///
+    /// Called positioned at the opening `$` (with `next_char == '{'`);
+    /// consumes through the matching `}`. The delimiters are excluded from
+    /// the token run; the run's tokens carry absolute file spans. Brace
+    /// depth is tracked on the *token* level, so braces inside a nested
+    /// string literal never leak (the nested literal is scanned recursively
+    /// by [`Self::scan_string`] through [`Self::next_token`]). Whitespace
+    /// (spaces/tabs/CR) separates tokens — `next_token` itself skips none,
+    /// that being the `tokenize` loop's job. Comments are not recognized
+    /// inside an embedded expression, and a newline still terminates the
+    /// string literal. EOF inside the expression is `UnclosedInterpolation`
+    /// with a span covering `${` through EOF.
+    fn scan_interp_expr(&mut self, dollar_start: u32) -> Result<StringPart, LexError> {
+        // Consume `${`
+        self.advance(); // $
+        self.advance(); // {
+
+        let mut tokens = Vec::new();
+        let mut depth: u32 = 0;
+
+        loop {
+            while matches!(self.current_char, Some(' ') | Some('\t') | Some('\r')) {
+                self.advance();
+            }
+            if self.current_char == Some('\n') {
+                // The string literal is a single-line construct — same
+                // unterminated-string rule as literal chunks.
+                return Err(LexError::unterminated_string(Span::new(
+                    self.file,
+                    dollar_start,
+                    self.byte_offset,
+                )));
+            }
+            if self.is_eof() {
+                return Err(LexError::unclosed_interpolation(Span::new(
+                    self.file,
+                    dollar_start,
+                    self.byte_offset,
+                )));
+            }
+
+            let tok = self.next_token()?;
+            match tok.kind {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    tokens.push(tok);
+                }
+                TokenKind::RBrace => {
+                    if depth == 0 {
+                        // The matching `}` closes the interpolation; it is
+                        // consumed but not part of the run.
+                        let span = Span::new(self.file, dollar_start, self.byte_offset);
+                        return Ok(StringPart::Expr { tokens, span });
+                    }
+                    depth -= 1;
+                    tokens.push(tok);
+                }
+                _ => tokens.push(tok),
+            }
+        }
     }
 
     /// Scan a number literal (int or float).
@@ -991,5 +1118,211 @@ func fib(n: int): int {
         let tokens = tokenize("1.").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::IntLit(1));
         assert_eq!(tokens[1].kind, TokenKind::Dot);
+    }
+
+    // ===== 0.0.10 T04: string interpolation + the `\$` escape (D4) =====
+
+    #[test]
+    fn dollar_escape_produces_literal_dollar() {
+        // `\$` is the eighth escape (D4). The literals contain no `${`, so
+        // they stay plain StringLit tokens (D6: unchanged compile path).
+        let tokens = tokenize(r#""a\$b" "100\$""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLit("a$b".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::StringLit("100$".to_string()));
+    }
+
+    #[test]
+    fn dollar_elsewhere_is_an_ordinary_character() {
+        // `$` is special only immediately before `{`; in every other
+        // position it is a plain character (D4). `$` at the very end of a
+        // string needs no escape either.
+        let tokens = tokenize(r#""a$b" "100$" "$ {""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLit("a$b".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::StringLit("100$".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::StringLit("$ {".to_string()));
+    }
+
+    #[test]
+    fn interp_string_parts_shape() {
+        // `"a${b}c"` → Lit("a") + Expr(Ident b) + Lit("c"); run tokens and
+        // the part span carry absolute file spans. Offsets in `"a${b}c"`:
+        // `$`=2, `{`=3, `b`=4, `}`=5 — the part span covers `${` (2) through
+        // the matching `}` (6).
+        let tokens = tokenize(r#""a${b}c""#).unwrap();
+        assert_eq!(tokens.len(), 2); // the string + EOF
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], StringPart::Lit("a".to_string()));
+        match &parts[1] {
+            StringPart::Expr { tokens: run, span } => {
+                assert_eq!(run.len(), 1);
+                assert!(matches!(run[0].kind, TokenKind::Ident(ref s) if s == "b"));
+                assert_eq!((run[0].span.start, run[0].span.end), (4, 5));
+                assert_eq!((span.start, span.end), (2, 6));
+            }
+            other => panic!("expected an Expr part, got {other:?}"),
+        }
+        assert_eq!(parts[2], StringPart::Lit("c".to_string()));
+    }
+
+    #[test]
+    fn interp_empty_chunks_are_never_pushed() {
+        // `"${x}"` — the interpolation is the only part (no empty leading or
+        // trailing literal chunk), and `"${}"` — an empty run is captured by
+        // the lexer; the parser (T05) rejects it.
+        let tokens = tokenize(r#""${x}""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 1);
+
+        let tokens = tokenize(r#""${}""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            StringPart::Expr { tokens: run, span } => {
+                assert!(run.is_empty());
+                assert_eq!((span.start, span.end), (1, 4));
+            }
+            other => panic!("expected an Expr part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interp_nested_braces_track_depth() {
+        // A `{` inside the embedded expression opens a brace level; only the
+        // matching top-level `}` closes the interpolation. `"${ {a} }"`:
+        // `$`=1, `{`=2, ` {`=4, `a`=5, `}`=6, ` }`=8 — the part span ends
+        // after the depth-0 `}` at 9.
+        let tokens = tokenize(r#""${ {a} }""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            StringPart::Expr { tokens: run, span } => {
+                assert_eq!(run.len(), 3); // `{` `a` `}`
+                assert_eq!(run[0].kind, TokenKind::LBrace);
+                assert!(matches!(run[1].kind, TokenKind::Ident(ref s) if s == "a"));
+                assert_eq!(run[2].kind, TokenKind::RBrace);
+                assert_eq!((span.start, span.end), (1, 9));
+            }
+            other => panic!("expected an Expr part, got {other:?}"),
+        }
+
+        // A `{` *after* the interpolation is an ordinary literal chunk.
+        let tokens = tokenize(r#""${x}{""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], StringPart::Expr { .. }));
+        assert_eq!(parts[1], StringPart::Lit("{".to_string()));
+    }
+
+    #[test]
+    fn interp_nested_string_literal() {
+        // Recursive scanning (D4): a nested string literal — itself
+        // interpolated — is one token in the outer run, and its braces
+        // never leak into the outer brace-depth tracking. `"a${ "x${1}" }b"`:
+        // the inner string spans 5..12, the outer part 2..14.
+        let tokens = tokenize(r#""a${ "x${1}" }b""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], StringPart::Lit("a".to_string()));
+        match &parts[1] {
+            StringPart::Expr { tokens: run, span } => {
+                assert_eq!(run.len(), 1);
+                let TokenKind::StringInterp(inner) = &run[0].kind else {
+                    panic!("expected a nested StringInterp, got {:?}", run[0].kind)
+                };
+                assert_eq!(inner.len(), 2);
+                assert_eq!(inner[0], StringPart::Lit("x".to_string()));
+                match &inner[1] {
+                    StringPart::Expr {
+                        tokens: inner_run, ..
+                    } => {
+                        assert_eq!(inner_run.len(), 1);
+                        assert_eq!(inner_run[0].kind, TokenKind::IntLit(1));
+                    }
+                    other => panic!("expected an Expr part, got {other:?}"),
+                }
+                assert_eq!((run[0].span.start, run[0].span.end), (5, 12));
+                assert_eq!((span.start, span.end), (2, 14));
+            }
+            other => panic!("expected an Expr part, got {other:?}"),
+        }
+        assert_eq!(parts[2], StringPart::Lit("b".to_string()));
+    }
+
+    #[test]
+    fn interp_free_string_stays_plain_string_lit() {
+        // D6: a literal without `${` keeps the pre-0.0.10 token (and
+        // therefore the byte-identical compile path).
+        let tokens = tokenize(r#""hello\nworld\t!""#).unwrap();
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::StringLit("hello\nworld\t!".to_string())
+        );
+    }
+
+    #[test]
+    fn interp_part_tokens_carry_the_file_id() {
+        // "tokens carry absolute file spans" (T04): run tokens and the part
+        // span are stamped with the lexed file (0.0.3 V01).
+        let tokens = tokenize_in_file(FileId(5), r#""${x}""#).unwrap();
+        let TokenKind::StringInterp(parts) = &tokens[0].kind else {
+            panic!("expected StringInterp, got {:?}", tokens[0].kind)
+        };
+        match &parts[0] {
+            StringPart::Expr { tokens: run, span } => {
+                assert_eq!(run[0].span.file, FileId(5));
+                assert_eq!(span.file, FileId(5));
+            }
+            other => panic!("expected an Expr part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_unclosed_interpolation_at_eof() {
+        // EOF inside the embedded expression (no matching `}`) is the new
+        // lexer error, with a span covering the `${` through EOF.
+        let errors = tokenize(r#""${abc"#).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0].kind,
+            crate::lexer::error::LexErrorKind::UnclosedInterpolation
+        ));
+        assert_eq!((errors[0].span.start, errors[0].span.end), (1, 6));
+    }
+
+    #[test]
+    fn error_newline_inside_interpolation_is_unterminated_string() {
+        // A string literal is a single-line construct — a newline inside the
+        // embedded expression terminates it (unterminated-string handling
+        // unchanged, T04).
+        let errors = tokenize("\"${a\nb}\"").unwrap_err();
+        assert!(matches!(
+            errors[0].kind,
+            crate::lexer::error::LexErrorKind::UnterminatedString
+        ));
+    }
+
+    #[test]
+    fn error_backslash_at_eof_unchanged() {
+        // `\` at EOF keeps the invalid-escape('\0') path — T04 changes
+        // nothing there.
+        let errors = tokenize("\"abc\\").unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0].kind,
+            crate::lexer::error::LexErrorKind::InvalidEscape('\0')
+        ));
     }
 }

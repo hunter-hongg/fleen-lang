@@ -1,0 +1,10 @@
+// 0.0.10 T04 (D4, the declared breaking set): a string literal containing
+// `${` no longer means literal characters — `${` begins interpolation. This
+// fixture was written at the merge-base as valid/interp_brace_literal
+// (pinning the literal output `a${b}c`) and moved to invalid/ in the same
+// commit as the lexer change: until T05 wires the parser, the parts token
+// reaches the expression entry and is rejected there. T05/T06 flip this
+// program back to valid/ with the interpolated expectation.
+func main() {
+    print("a${b}c");
+}
