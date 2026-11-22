@@ -8,8 +8,8 @@
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
-> full e2e suite (108 valid fixtures) is the standing regression net and
-> must stay green with unchanged output throughout.
+> full e2e suite (59 valid fixtures as of T03) is the standing regression net
+> and must stay green with unchanged output throughout.
 >
 > **Regression-test-first rule** (SPEC §7) applies to every behavior
 > change: for the two source-visible changes of this milestone — `${`
@@ -184,7 +184,7 @@
   diff touches only parser/resolver (+tests); the HIR shapes typeck, lower
   and codegen consume are byte-shape-identical (pinned by the HIR-shape
   tests above), and the standing byte-level pin
-  (`fleen-vm/tests/std_byte_identity.rs`) passes unchanged, as do all 108
+  (`fleen-vm/tests/std_byte_identity.rs`) passes unchanged, as do all 54
   e2e valid fixtures' stdout/stderr comparisons.
 - **Post-review sweep (recorded)**: the two-axis review of `509eaee`
   surfaced findings, all addressed in the follow-up commit —
@@ -244,7 +244,8 @@ machinery).
       struct field of type `Result<int, string>` (parity for
       `FieldTypeTag::Result = 6`); `?` propagation; choose with
       `otherwise`; `await?` flow.
-- [x] Full suite green with unchanged stdout/stderr (108 valid fixtures);
+- [x] Full suite green with unchanged stdout/stderr (59 valid fixtures —
+      54 standing + 5 new);
       recorded expectation that Result-using programs' bytecode is
       unchanged (no hash gate).
 
@@ -264,7 +265,14 @@ machinery).
   the bracket spelling `Result[int, string]`). The async/channel boundary
   side is pinned at e2e level by the `await?` fixture (async func returning
   `Result`, driven through `await?`); the `ref`-rejection side keeps its
-  0.0.4 tests.
+  0.0.4 tests. Review follow-up: the mapping into the `type_contains_ref`
+  consumer positions is pinned directly at the resolver boundary — T02's
+  `prelude_result_type_use_maps_to_internal_result` /
+  `struct_field_of_result_type_maps_to_internal_result` cover the
+  plain-return and struct-field positions, and the follow-up added
+  `async_result_return_maps_to_internal_result` for the async return, so
+  all three positions hold the internal `Type::Result`, not a `Named`
+  alias.
 - **`type_contains_ref` placement recorded**: the card's Refs list it among
   the typeck checks, but the helper lives in the **resolver**
   (`resolver/mod.rs`, the struct-field / return-type guards) — its

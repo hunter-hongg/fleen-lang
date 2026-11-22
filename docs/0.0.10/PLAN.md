@@ -119,8 +119,8 @@ the documented spelling for readers who want the provenance explicit.
   if any error text changes, the change is recorded in T02, never silent.
 - **Rejected (explicit import required)**: making `import std.result`
   mandatory. It would break every Result-using program in existence
-  (`?`, `std.arr.get`, `std.str.parse_int`, async `Result` returns — 10 of
-  the 108 e2e valid fixtures alone exercise `Ok`/`Err` directly), for a
+  (`?`, `std.arr.get`, `std.str.parse_int`, async `Result` returns — 6 of
+  the 54 e2e valid fixtures alone exercise `Ok`/`Err` directly), for a
   purity gain the language does not need: `?` already makes Result
   unavoidable boilerplate-free, so the prelude exception is the honest
   description of its status.
@@ -367,8 +367,8 @@ without `${` is byte-identical to 0.0.9 output (D6).
 
 **F1 (Result migration)** — the existing suite is the regression net:
 
-- Full suite green with unchanged stdout/stderr (108 e2e valid fixtures;
-  10 exercise `Ok`/`Err` directly).
+- Full suite green with unchanged stdout/stderr (59 e2e valid fixtures as
+  built at T03 — 54 standing + 5 new; 11 exercise `Ok`/`Err` directly).
 - New valid: explicit `import std.result;`; prelude trio without import;
   `Result[T, E]` bracket spelling in type position; struct field of type
   `Result<int, string>`; `?` / choose-`otherwise` / `await?` flows

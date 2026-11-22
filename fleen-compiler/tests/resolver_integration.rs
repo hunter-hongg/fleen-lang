@@ -2546,6 +2546,42 @@ func main(): int { 0 }
 }
 
 #[test]
+fn async_result_return_maps_to_internal_result() {
+    // T03 (review follow-up): an **async** function's declared `Result<T, E>`
+    // return type also lands as the internal `ast::Type::Result`, so the
+    // resolver's return-type `type_contains_ref` guard walks the mapped shape
+    // on the async side too (the plain-return and struct-field positions are
+    // pinned by the two tests above).
+    use fleen_compiler::parser::ast::{BaseType, Type};
+    use fleen_compiler::resolver::hir::HirItem;
+    let hir = resolve_str(
+        r#"
+async func afar(n: int): Result<int, string> {
+    Ok(n)
+}
+func main(): int { 0 }
+"#,
+    )
+    .expect("async func with a prelude Result return resolves");
+    let afar = hir
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            HirItem::Decl(DeclHir::Func(f)) => Some(f),
+            _ => None,
+        })
+        .find(|f| f.is_async)
+        .expect("the async func resolves");
+    match &afar.ret_type {
+        Some(Type::Result(ok, err)) => {
+            assert!(matches!(ok.as_ref(), Type::Base(BaseType::Int)));
+            assert!(matches!(err.as_ref(), Type::Base(BaseType::String)));
+        }
+        other => panic!("expected the internal Type::Result, got {:?}", other),
+    }
+}
+
+#[test]
 fn prelude_trio_available_without_import() {
     // D2: `Ok` / `Err` / `Result` are prelude names — available in every
     // file without `import std.result;` (`import std.result;` also works
