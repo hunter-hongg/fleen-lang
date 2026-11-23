@@ -880,6 +880,12 @@ pub enum TypedExprHir {
     Float(f64, Span),
     Bool(bool, Span),
     Str(String, Span),
+    /// Interpolated string `"a${e}b"` (0.0.10 T05, D5): each embedded
+    /// expression is converted to `string` — scalar embeds are wrapped
+    /// in `Cast` (the `as string` conversion; `ToStr` at runtime), a
+    /// `string` embed is kept verbatim, and any other type is rejected
+    /// with `InterpUnsupportedType`. The overall node has type `string`.
+    Interp(Vec<TypedInterpPart>, Span),
     /// Identifier (0.0.2: `access` records this use's ownership form)
     Ident {
         name: String,
@@ -978,6 +984,9 @@ impl TypedExprHir {
             TypedExprHir::Float(_, _) => Type::Float,
             TypedExprHir::Bool(_, _) => Type::Bool,
             TypedExprHir::Str(_, _) => Type::String,
+            // Interpolated strings are always `string` (D5); the node's parts
+            // were already converted (or rejected) at typeck time.
+            TypedExprHir::Interp(_, _) => Type::String,
             TypedExprHir::Ident { ty, .. } => ty.clone(),
             TypedExprHir::Block(b) => b.ty.clone(),
             TypedExprHir::ChannelNew { payload_ty, .. } => {
@@ -1034,6 +1043,7 @@ impl TypedExprHir {
             | TypedExprHir::Float(_, s)
             | TypedExprHir::Bool(_, s)
             | TypedExprHir::Str(_, s) => *s,
+            TypedExprHir::Interp(_, s) => *s,
             TypedExprHir::Ident { span, .. } => *span,
             TypedExprHir::ChannelNew { span, .. }
             | TypedExprHir::ChannelSend { span, .. }
@@ -1042,6 +1052,18 @@ impl TypedExprHir {
             TypedExprHir::Block(b) => b.span,
         }
     }
+}
+
+/// One part of an interpolated string after type checking (0.0.10 T05, D5):
+/// a literal chunk, or an embedded expression already converted to `string`
+/// (scalar embeds arrive as [`TypedExprHir::Cast`], a `string` embed as a
+/// plain [`TypedExprHir`] of type `string`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedInterpPart {
+    Lit(String),
+    /// The embedded expression (already `string`) and the span of its
+    /// whole `${...}` (diagnostic target for `InterpUnsupportedType`, D4).
+    Expr(Box<TypedExprHir>, Span),
 }
 
 /// If expression in Typed HIR.

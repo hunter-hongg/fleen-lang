@@ -3440,4 +3440,132 @@ func main() {
         );
         assert_eq!(nested_return.render(true), "int -> (() -> int)");
     }
+
+    // ========== String Interpolation (0.0.10 T05) ==========
+
+    #[test]
+    fn parse_interp_single_lit_no_interp() {
+        // A plain string with no ${...} is a StringLit, not an Interp node.
+        let ast = parse_str(r#""hello";"#);
+        let Item::Expr(Expr::Str(s, _)) = &ast.items[0] else {
+            panic!("expected Str expr, got {:?}", ast.items[0]);
+        };
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn parse_interp_parts_correct() {
+        // "a${x}b" has 3 parts: Lit("a"), Expr(x), Lit("b")
+        let tokens = tokenize(r#"x = "a${x}b";"#).expect("lexer should succeed");
+        let ast = parse(tokens).expect("parser should succeed");
+        let Item::Decl(Decl::Var(v)) = &ast.items[0] else {
+            panic!("expected var decl");
+        };
+        let Expr::Interp(interp) = &*v.init else {
+            panic!("expected Interp, got {:?}", *v.init);
+        };
+        assert_eq!(interp.parts.len(), 3);
+        match &interp.parts[0] {
+            InterpPart::Lit(s) => assert_eq!(s, "a"),
+            _ => panic!("expected Lit"),
+        }
+        match &interp.parts[1] {
+            InterpPart::Expr(e, _) => {
+                assert!(matches!(e, Expr::Ident(s, _) if s == "x"));
+            }
+            _ => panic!("expected Expr"),
+        }
+        match &interp.parts[2] {
+            InterpPart::Lit(s) => assert_eq!(s, "b"),
+            _ => panic!("expected Lit"),
+        }
+    }
+
+    #[test]
+    fn parse_interp_embed_call() {
+        // Embedded expression is a function call
+        let src = r#"func main() { print("d=${double(21)}"); }"#;
+        let tokens = tokenize(src).expect("lexer should succeed");
+        let ast = parse(tokens).expect("parser should succeed");
+        let Item::Decl(Decl::Func(f)) = &ast.items[0] else {
+            panic!("expected func decl");
+        };
+        let block = match &f.body {
+            crate::parser::ast::FuncBody::Block(b) => b,
+            _ => panic!("expected block"),
+        };
+        let Stmt::Expr(expr, _) = &block.stmts[0] else {
+            panic!("expected expr stmt");
+        };
+        let Expr::Call(_callee, args) = expr.as_ref() else {
+            panic!("expected call");
+        };
+        let Expr::Interp(interp) = &args[0] else {
+            panic!("expected Interp arg, got {:?}", args[0]);
+        };
+        // "d=${double(21)}" — 2 parts: Lit("d="), Expr(call)
+        assert_eq!(interp.parts.len(), 2);
+        match &interp.parts[0] {
+            InterpPart::Lit(s) => assert_eq!(s, "d="),
+            _ => panic!("expected Lit"),
+        }
+        match &interp.parts[1] {
+            InterpPart::Expr(e, _) => {
+                assert!(matches!(e, Expr::Call(_, _)));
+            }
+            _ => panic!("expected Expr part"),
+        }
+    }
+
+    #[test]
+    fn parse_interp_format_specifier_rejected() {
+        // `${x:04}` — the `:` after the expr makes the run non-terminating,
+        // so the parser rejects it with "expected end of ${...}".
+        let src = r#"func main() { x = 42; print("${x:04}"); }"#;
+        let err = parse_err(src);
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn parse_interp_empty_run_rejected() {
+        // `${}` — the lexer produces a parts token with an empty expr run;
+        // the parser's parse_expr on an empty stream hits Eof and errors.
+        let src = r#"func main() { print("${}"); }"#;
+        let tokens = tokenize(src).expect("lexer should succeed");
+        let err = parse(tokens).expect_err("parser should fail on empty ${}");
+        assert!(
+            matches!(err.kind, ParseErrorKind::Expected { .. }),
+            "expected Expected error, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn parse_interp_adjacent_embeds() {
+        // "a${x}b${x}c" — two adjacent embeds produce 5 parts
+        let src = r#"func main() { x = 5; print("a${x}b${x}c"); }"#;
+        let tokens = tokenize(src).expect("lexer should succeed");
+        let ast = parse(tokens).expect("parser should succeed");
+        let Item::Decl(Decl::Func(f)) = &ast.items[0] else {
+            panic!("expected func decl");
+        };
+        let block = match &f.body {
+            crate::parser::ast::FuncBody::Block(b) => b,
+            _ => panic!("expected block"),
+        };
+        let Stmt::Expr(expr, _) = &block.stmts[1] else {
+            panic!("expected expr stmt");
+        };
+        let Expr::Call(_callee, args) = expr.as_ref() else {
+            panic!("expected call");
+        };
+        let Expr::Interp(interp) = &args[0] else {
+            panic!("expected Interp arg, got {:?}", args[0]);
+        };
+        assert_eq!(interp.parts.len(), 5);
+    }
 }

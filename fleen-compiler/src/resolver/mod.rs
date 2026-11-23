@@ -30,8 +30,8 @@ use error::{ResolveError, ResolveErrorKind};
 use hir::{
     BindingId, BlockHir, ChooseArmHir, ConstDeclHir, DeclHir, EnumDeclHir, EnumVariantHir,
     ExprChooseHir, ExprForHir, ExprHir, ExprIfHir, ExprWhileHir, FuncBodyHir, FuncDeclHir, Hir,
-    HirId, HirItem, ImportDeclHir, ParamHir, PatternHir, StmtHir, StructDeclHir, StructFieldHir,
-    VarBindingHir,
+    HirId, HirItem, ImportDeclHir, InterpPartHir, ParamHir, PatternHir, StmtHir, StructDeclHir,
+    StructFieldHir, VarBindingHir,
 };
 pub use modules::{
     CrateDef, CrateId, ExportKind, ModuleDef, ModuleId, ModuleTable, ROOT_CRATE, STD_CRATE_NAME,
@@ -1566,6 +1566,23 @@ impl Resolver {
             Expr::Float(f, span) => ExprHir::Float(f, span),
             Expr::Bool(b, span) => ExprHir::Bool(b, span),
             Expr::Str(s, span) => ExprHir::Str(s, span),
+            // 0.0.10 T05 (D4): each embedded expression resolves in the
+            // enclosing scope — no new resolution rule; the stringly-typed
+            // conversion rule is typeck's (F2, D5).
+            Expr::Interp(interp) => {
+                let parts = interp
+                    .parts
+                    .into_iter()
+                    .map(|p| match p {
+                        crate::parser::ast::InterpPart::Lit(s) => Ok(InterpPartHir::Lit(s)),
+                        crate::parser::ast::InterpPart::Expr(e, span) => {
+                            let hir = self.resolve_expr(e)?;
+                            Ok(InterpPartHir::Expr(Box::new(hir), span))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, ()>>()?;
+                ExprHir::Interp(parts, interp.span)
+            }
             Expr::Ident(name, span) => self.resolve_ident(name, span)?,
             Expr::ChannelNew { ty, capacity, span } => {
                 let capacity_hir = self.resolve_expr(*capacity)?;

@@ -26,7 +26,7 @@ use crate::typeck::error::{TypeckError, TypeckErrorKind};
 use crate::typeck::typed_hir::{
     Access, Type, TypedBlockHir, TypedChooseArmHir, TypedDeclHir, TypedExprChooseHir, TypedExprHir,
     TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir, TypedFuncDeclHir, TypedHir, TypedHirItem,
-    TypedPatternHir, TypedStmtHir, TypedVarBindingHir,
+    TypedInterpPart, TypedPatternHir, TypedStmtHir, TypedVarBindingHir,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -460,7 +460,16 @@ impl<'a> Cx<'a> {
             TypedExprHir::Int(..)
             | TypedExprHir::Float(..)
             | TypedExprHir::Bool(..)
+            // A literal is inert — no embedded owned use. Interp's embedded
+            // exprs (0.0.10 D5) are string conversions, i.e. read positions.
             | TypedExprHir::Str(..) => {}
+            TypedExprHir::Interp(parts, _) => {
+                for part in parts {
+                    if let TypedInterpPart::Expr(e, _) = part {
+                        self.walk_expr(e, false);
+                    }
+                }
+            }
             // 0.0.4 T07: channel operations — read-only for the channel
             // handle itself (the payload is produced/consumed separately).
             TypedExprHir::ChannelNew { capacity, .. } => {
@@ -1014,6 +1023,15 @@ fn scan_owned_local_uses(
         }
         TypedExprHir::ChannelRecv { channel, .. } | TypedExprHir::ChannelSplit { channel, .. } => {
             scan_owned_local_uses(channel, out, globals, global_names, entry);
+        }
+        // 0.0.10 T05 (D5): embedded expressions are read positions — recurse
+        // so a moved owned local inside `${...}` is still caught.
+        TypedExprHir::Interp(parts, _) => {
+            for part in parts {
+                if let TypedInterpPart::Expr(e, _) = part {
+                    scan_owned_local_uses(e, out, globals, global_names, entry);
+                }
+            }
         }
         TypedExprHir::Int(..)
         | TypedExprHir::Float(..)

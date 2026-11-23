@@ -29,10 +29,12 @@
 //! (`deref`/`move`/`clone`/`-`/`!`) take a `unary` operand (so
 //! `deref b as string` = `(deref b) as string`).
 
-use crate::lexer::Span;
-use crate::lexer::TokenKind;
+use crate::lexer::token::{StringPart, Token};
+use crate::lexer::{Span, TokenKind};
 use crate::parser::Parser;
-use crate::parser::ast::{Expr, ExprChoose, ExprFor, ExprIf, ExprWhile, Pattern};
+use crate::parser::ast::{
+    Expr, ExprChoose, ExprFor, ExprIf, ExprInterp, ExprWhile, InterpPart, Pattern,
+};
 use crate::parser::error::{ParseError, ParseErrorKind};
 
 /// Parse an expression starting from the current position.
@@ -321,6 +323,11 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Str(val, span))
             }
+            TokenKind::StringInterp(parts) => {
+                let parts = parts.clone();
+                self.advance();
+                self.parse_interp(parts, span)
+            }
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 let name_span = span;
@@ -397,6 +404,49 @@ impl Parser {
                 span,
             }),
         }
+    }
+
+    /// Parse a `StringInterp` parts run into an [`Expr::Interp`] (0.0.10 T05,
+    /// D4). The lexer hands over the literal's parts — literal chunks and
+    /// embedded `${...}` token runs with absolute spans; this reconstructs a
+    /// sub-`Parser` over each run and parses a full expression per D4. The
+    /// trailing `Eof` (from `tokenize`) ends the sub-stream, so trailing
+    /// garbage rejects with an "expected end of `${...}`" (covering a format
+    /// specifier: a stray `:` after a complete expression). A run producing
+    /// no expression (`${}`) is an empty embedded expression.
+    fn parse_interp(&mut self, parts: Vec<StringPart>, span: Span) -> Result<Expr, ParseError> {
+        let mut out: Vec<InterpPart> = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                StringPart::Lit(s) => out.push(InterpPart::Lit(s)),
+                StringPart::Expr { tokens, span } => {
+                    // Append the terminating `Eof` `tokenize` guarantees: the
+                    // sub-parser's `is_at_end` relies on it, and it is what
+                    // makes trailing garbage (a format specifier) reject.
+                    let mut stream = tokens;
+                    stream.push(Token {
+                        kind: TokenKind::Eof,
+                        span,
+                        inserted_by_asi: false,
+                    });
+                    let mut sub = Parser::new(stream);
+                    let expr = sub.parse_expr()?;
+                    if !sub.is_at_end() {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::Expected {
+                                expected: "end of `${...}` (embedded expressions take no \
+                                           format specifier)"
+                                    .to_string(),
+                                found: sub.current().kind.clone(),
+                            },
+                            span,
+                        });
+                    }
+                    out.push(InterpPart::Expr(expr, span));
+                }
+            }
+        }
+        Ok(Expr::Interp(ExprInterp { parts: out, span }))
     }
 
     /// Parse a struct literal after the name was consumed:

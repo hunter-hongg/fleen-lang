@@ -1,0 +1,8 @@
+// 0.0.10 T06 (D6): adjacent literal chunks merge; a "a${x}b${x}c" has
+// three literal chunks ("a", "b", "c") separated by two exprs — the merge
+// only collapses truly adjacent Lits, so all three stay separate and the
+// concat chain is binary-chained.
+func main() {
+    x = 5;
+    print("a${x}b${x}c");
+}

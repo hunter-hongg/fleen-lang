@@ -1152,6 +1152,49 @@ impl<'a> FnBodyCx<'a> {
                 MirInstrKind::ConstStr(v.clone()),
                 expr.span(),
             )),
+            // 0.0.10 T06 (D6): an interpolation lowers to a `std.str.concat`
+            // chain over its parts, evaluated left-to-right, each part exactly
+            // once. Adjacent literal chunks are merged. Scalar embeds were
+            // wrapped in `Cast` by typeck (they lower to `ToStr`); `string`
+            // embeds are read positions, so a user binding auto-clones
+            // (`CloneLocal`) and is never moved. The result is one value.
+            //
+            // `std.str.concat` is a binary 2-arg builtin; for N merged parts
+            // we chain N-1 binary calls. All parts are pushed onto the stack
+            // first; each subsequent `Call` pops the top two (LIFO order keeps
+            // left-to-right string order because `concat(a, b)` = `a + b`).
+            TypedExprHir::Interp(parts, span) => {
+                let merged: Vec<TypedInterpPart> = merge_interp_parts(parts);
+                if merged.is_empty() {
+                    fb.emit(MirInstr::new(MirInstrKind::ConstStr(String::new()), *span));
+                    return Ok(());
+                }
+                // A single merged literal needs no concat call (keeps a
+                // `${}`-free-adjacent string compact).
+                if let [TypedInterpPart::Lit(s)] = &merged[..] {
+                    fb.emit(MirInstr::new(MirInstrKind::ConstStr(s.clone()), *span));
+                    return Ok(());
+                }
+                let concat_fid = self
+                    .lcx
+                    .func_ids
+                    .get("std.str.concat")
+                    .copied()
+                    .ok_or_else(|| LowerError::new(LowerErrorKind::ComplexGlobalInit, *span))?;
+                for part in &merged {
+                    match part {
+                        TypedInterpPart::Lit(s) => {
+                            fb.emit(MirInstr::new(MirInstrKind::ConstStr(s.clone()), *span));
+                        }
+                        TypedInterpPart::Expr(e, _) => {
+                            self.lower_expr_into(fb, e.as_ref())?;
+                        }
+                    }
+                }
+                for _ in 0..(merged.len() - 1) {
+                    fb.emit(MirInstr::new(MirInstrKind::Call(concat_fid), *span));
+                }
+            }
             TypedExprHir::Bool(true, _) => fb.emit(MirInstr::new(MirInstrKind::True, expr.span())),
             TypedExprHir::Bool(false, _) => {
                 fb.emit(MirInstr::new(MirInstrKind::False, expr.span()))
@@ -3551,4 +3594,22 @@ impl<'a> FnBodyCx<'a> {
             TypedPatternHir::TypeGuard { .. } => unreachable!("type guards are stripped at entry"),
         }
     }
+}
+
+/// Merge adjacent literal chunks of an interpolation (0.0.10 T06, D6): two
+/// neighboring `Lit` parts collapse into one so a `"a${x}b${y}c"` never
+/// emits a redundant `concat` over back-to-back string constants. Order is
+/// preserved; embedded expressions are left untouched.
+fn merge_interp_parts(parts: &[TypedInterpPart]) -> Vec<TypedInterpPart> {
+    let mut merged: Vec<TypedInterpPart> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part {
+            TypedInterpPart::Lit(s) => match merged.last_mut() {
+                Some(TypedInterpPart::Lit(prev)) => prev.push_str(s),
+                _ => merged.push(TypedInterpPart::Lit(s.clone())),
+            },
+            TypedInterpPart::Expr(_, _) => merged.push(part.clone()),
+        }
+    }
+    merged
 }

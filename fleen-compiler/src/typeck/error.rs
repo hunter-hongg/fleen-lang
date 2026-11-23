@@ -70,6 +70,10 @@ pub enum TypeckErrorKind {
     InternalError { message: String },
     /// Unsupported `as` cast: 0.0.2 only allows scalar → string.
     UnsupportedCast { from: Type, to: Type },
+    /// A `${...}` embedded expression in a string interpolation has a type
+    /// with no implicit string conversion (0.0.10 T05, D5): only `int`, `float`,
+    /// `bool`, and `string` may be embedded. No format specifiers either.
+    InterpUnsupportedType { found: Type },
     /// `?` used in a function that does not return `Result<T, E>` (D6).
     QuestionOutsideResultFn,
     /// `?` applied to a non-Result operand.
@@ -419,6 +423,16 @@ impl TypeckErrorKind {
                      full conversions arrive with generics (0.1.0)",
                     from.name_with(curry),
                     to.name_with(curry)
+                )
+            }
+            TypeckErrorKind::InterpUnsupportedType { found } => {
+                write!(
+                    f,
+                    "cannot embed a value of type `{}` in a string interpolation — \
+                     only `int`, `float`, `bool`, and `string` may be embedded \
+                     (converted with the same `as string` rule), and there are \
+                     no format specifiers",
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::QuestionOutsideResultFn => {

@@ -606,6 +606,11 @@ pub enum Expr {
     Bool(bool, Span),
     /// String literal
     Str(String, Span),
+    /// Interpolated string `"lit ${expr} lit ${expr}"` (0.0.10 T05, D4).
+    /// Produced only for a literal containing `${`; a plain literal stays
+    /// `Str` (D6). Parts keep source order, at least one; the spans of
+    /// `InterpExpr` cover the whole `${...}` including delimiters.
+    Interp(ExprInterp),
     /// Identifier (with its usage span, so resolver errors can point at the use site)
     Ident(String, Span),
     /// Block expression `{ stmts... }`
@@ -654,6 +659,7 @@ impl Expr {
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Ident(_, s) => *s,
+            Expr::Interp(e) => e.span,
             Expr::If(e) => e.span,
             Expr::While(e) => e.span,
             Expr::For(e) => e.span,
@@ -677,6 +683,44 @@ pub struct ExprStructLit {
 pub struct ExprArrayLit {
     pub elems: Vec<Expr>,
     pub span: Span,
+}
+
+/// An interpolated string: `"lit ${expr} lit ${expr}"` (0.0.10 T05, D4).
+///
+/// The lexer delivers the literal as a token run of `StringPart`s; the
+/// parser resolves each `StringPart::Expr`'s embedded tokens into an AST
+/// subtree here. The node's span covers the whole literal including its
+/// quotes; `InterpExpr` spans cover their `${...}` including delimiters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprInterp {
+    /// Source parts in order; at least one (the lexer never emits an
+    /// empty literal as a `StringInterp` token).
+    pub parts: Vec<InterpPart>,
+    /// Span of the whole `"..."` literal.
+    pub span: Span,
+}
+
+/// One part of an interpolated string, in source order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    /// A literal (non-interpolated) chunk of the string.
+    Lit(String),
+    /// A `${ expr }` chunk: `expr` is the parsed embedded expression,
+    /// `span` covers the whole `${...}` including delimiters (used for
+    /// typeck's `InterpUnsupportedType` diagnostic, D4).
+    Expr(Expr, Span),
+}
+
+impl InterpPart {
+    /// The span of the part itself (literal chunks carry no span of their
+    /// own — they are slices of the enclosing literal; the diagnostic for
+    /// an illegal embedded type points at the whole `${...}`).
+    pub fn span(&self) -> Option<&Span> {
+        match self {
+            InterpPart::Lit(_) => None,
+            InterpPart::Expr(_, span) => Some(span),
+        }
+    }
 }
 
 /// `if` expression.
@@ -852,6 +896,19 @@ impl fmt::Display for Expr {
                 write!(f, "choose {} {{ ... }}", scrutinee)
             }
             Expr::Block(_) => write!(f, "{{ ... }}"),
+            Expr::Interp(l) => {
+                // Render parts inline; nested interpolation shows up as a
+                // plain string in the embedded expression's own Display.
+                let parts: Vec<String> = l
+                    .parts
+                    .iter()
+                    .map(|p| match p {
+                        InterpPart::Lit(s) => s.to_string(),
+                        InterpPart::Expr(_, _) => "${{...}}".to_string(),
+                    })
+                    .collect();
+                write!(f, "\"{}\"", parts.concat())
+            }
         }
     }
 }

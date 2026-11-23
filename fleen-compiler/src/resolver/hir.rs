@@ -330,6 +330,10 @@ pub enum ExprHir {
     Float(f64, Span),
     Bool(bool, Span),
     Str(String, Span),
+    /// Interpolated string `"a${e}b"` (0.0.10 T05, D4): each embedded
+    /// expression is resolved in the enclosing scope (no new rule); the
+    /// stringly-typed conversion rule is typeck's (F2, D5).
+    Interp(Vec<InterpPartHir>, Span),
     /// Identifier (resolved to binding)
     Ident {
         name: String,
@@ -357,6 +361,17 @@ pub enum ExprHir {
     },
     /// Block expression
     Block(BlockHir),
+}
+
+/// One part of an interpolated string after resolution (0.0.10 T05, D4):
+/// a literal chunk, or an embedded expression resolved in the enclosing
+/// scope. Literal chunks are already escape-resolved (`\$` folded to `$`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPartHir {
+    Lit(String),
+    /// The embedded expression and the span of its `${...}` (diagnostic
+    /// target for typeck's `InterpUnsupportedType`, D4).
+    Expr(Box<ExprHir>, Span),
 }
 
 impl ExprHir {
@@ -402,6 +417,7 @@ impl ExprHir {
             ExprHir::Call(f, _) => f.span(),
             ExprHir::Index(_, _, s) => *s,
             ExprHir::Field(o, _) => o.span(),
+            ExprHir::Interp(_, s) => *s,
             ExprHir::Int(_, s)
             | ExprHir::Float(_, s)
             | ExprHir::Bool(_, s)

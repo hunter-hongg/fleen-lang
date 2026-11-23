@@ -1,0 +1,6 @@
+// 0.0.10 T05/T06: `${}` takes no format specifier; a `:` after the embedded
+// expression is a parse error.
+func main() {
+    x = 42;
+    print("${x:04}");
+}

@@ -1,0 +1,6 @@
+// 0.0.10 T05/T06: string interpolation — a valid program that was
+// temporary-pinned in invalid/ at the T04 lexer stage.
+func main() {
+    b = "X";
+    print("a${b}c");
+}

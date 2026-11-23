@@ -1,0 +1,9 @@
+// 0.0.10 T06: a string embed is deep-copied (D5 read-context rule). The
+// same binding is used in two interpolations and a plain print; the value
+// must survive all three uses.
+func main() {
+    s = "hello";
+    print("greet=${s}");
+    print("again=${s}");
+    print(s);
+}

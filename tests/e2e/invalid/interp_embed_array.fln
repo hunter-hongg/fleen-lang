@@ -1,0 +1,5 @@
+// 0.0.10 T05 (D5): arrays are not embeddable.
+func main() {
+    a = [1, 2, 3];
+    print("a=${a}");
+}

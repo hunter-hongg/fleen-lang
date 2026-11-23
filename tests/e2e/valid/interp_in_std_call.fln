@@ -1,0 +1,8 @@
+// 0.0.10 T06: the interpolation result feeds into a std.str call; the
+// embedded value is stringified before the call.
+import std.str;
+func main() {
+    n = 42;
+    s = std.str.concat("n=", n as string);
+    print(s);
+}

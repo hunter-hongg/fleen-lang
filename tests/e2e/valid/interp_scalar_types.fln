@@ -1,0 +1,14 @@
+// 0.0.10 T06 (D5): every D5-convertible type embedded in an interpolation.
+func main() {
+    print("int=${42}");
+    print("float=${3.14}");
+    print("bool=${true}");
+    print("bool=${false}");
+    print("str=${"hi"}");
+    x = 10;
+    print("x=${x}");
+    f = 2.5;
+    print("f=${f}");
+    b = true;
+    print("b=${b}");
+}

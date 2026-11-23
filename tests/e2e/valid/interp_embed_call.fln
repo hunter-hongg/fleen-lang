@@ -1,0 +1,6 @@
+// 0.0.10 T06: embedded expression is a function call; the call result is
+// stringified (int → ToStr) and embedded.
+func double(n: int): int = n * 2;
+func main() {
+    print("d=${double(21)}");
+}

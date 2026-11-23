@@ -1,0 +1,5 @@
+// 0.0.10 T05 (D5): enums are not embeddable.
+enum E { A, B }
+func main() {
+    print("v=${E.A}");
+}

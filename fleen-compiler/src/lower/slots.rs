@@ -190,6 +190,16 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
         }
         TypedExprHir::Not(e) | TypedExprHir::Neg(e) => collect_expr(alloc, e),
         TypedExprHir::Cast(e, _) => collect_expr(alloc, e),
+        // 0.0.10 T05/T06 (D6): an interpolation lowers to a concat chain over
+        // its parts; each embedded expression lands on the stack, so reserve
+        // slots for any locals it introduces (like any other sub-expression).
+        TypedExprHir::Interp(parts, _) => {
+            for part in parts {
+                if let TypedInterpPart::Expr(e, _) = part {
+                    collect_expr(alloc, e);
+                }
+            }
+        }
         TypedExprHir::Question { operand, .. } => collect_expr(alloc, operand),
         TypedExprHir::Await { operand, .. } => collect_expr(alloc, operand),
         TypedExprHir::ResultCtor { value, .. } => collect_expr(alloc, value),

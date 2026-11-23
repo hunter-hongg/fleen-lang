@@ -13,8 +13,8 @@ use crate::typeck::typed_hir::{
     Access, EnumId, EnumInfo, StructId, StructInfo, Type, TypedBlockHir, TypedChooseArmHir,
     TypedConstDeclHir, TypedDeclHir, TypedEnumDef, TypedEnumVariantDef, TypedExprChooseHir,
     TypedExprForHir, TypedExprHir, TypedExprIfHir, TypedExprWhileHir, TypedFuncBodyHir,
-    TypedFuncDeclHir, TypedHir, TypedHirItem, TypedParamHir, TypedPatternHir, TypedStmtHir,
-    TypedStructDef, TypedVarBindingHir, substitute_params, visit_params,
+    TypedFuncDeclHir, TypedHir, TypedHirItem, TypedInterpPart, TypedParamHir, TypedPatternHir,
+    TypedStmtHir, TypedStructDef, TypedVarBindingHir, substitute_params, visit_params,
 };
 use crate::typeck::unify::{as_func_type, as_result_type, unify, unify_arg, unify_assign};
 use std::collections::{HashMap, HashSet};
@@ -2230,6 +2230,44 @@ impl TypeChecker {
             ExprHir::Float(f, span) => Ok(TypedExprHir::Float(f, span)),
             ExprHir::Bool(b, span) => Ok(TypedExprHir::Bool(b, span)),
             ExprHir::Str(s, span) => Ok(TypedExprHir::Str(s, span)),
+            // 0.0.10 T05 (D5, the stringly-typed conversion rule): each
+            // embedded expression must be embeddable as a string. `string`
+            // embeds verbatim; `int`/`float`/`bool` are wrapped in the same
+            // `as string` `Cast` node (lowered to `ToStr` by codegen). Any
+            // other type is `InterpUnsupportedType` with the `${...}` span.
+            ExprHir::Interp(parts, span) => {
+                let mut typed_parts: Vec<TypedInterpPart> = Vec::with_capacity(parts.len());
+                for part in parts {
+                    match part {
+                        InterpPartHir::Lit(s) => typed_parts.push(TypedInterpPart::Lit(s)),
+                        InterpPartHir::Expr(e, part_span) => {
+                            let typed = self.typeck_expr(*e, None)?;
+                            match typed.ty() {
+                                Type::String => {
+                                    typed_parts
+                                        .push(TypedInterpPart::Expr(Box::new(typed), part_span));
+                                }
+                                Type::Int | Type::Float | Type::Bool => {
+                                    // Wrap in the standard `as string` cast so
+                                    // lower emits `ToStr` (0xA5).
+                                    typed_parts.push(TypedInterpPart::Expr(
+                                        Box::new(TypedExprHir::Cast(Box::new(typed), part_span)),
+                                        part_span,
+                                    ));
+                                }
+                                found => {
+                                    self.add_error(
+                                        TypeckErrorKind::InterpUnsupportedType { found },
+                                        part_span,
+                                    );
+                                    return Err(());
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(TypedExprHir::Interp(typed_parts, span))
+            }
 
             ExprHir::Ident {
                 name,

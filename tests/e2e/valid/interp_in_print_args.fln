@@ -1,0 +1,7 @@
+// 0.0.10 T06: interpolation inside a multi-argument print call; each
+// interpolated argument is evaluated independently.
+func main() {
+    x = 1;
+    y = 2;
+    print("x=${x}", "y=${y}");
+}

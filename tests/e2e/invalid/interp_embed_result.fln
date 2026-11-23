@@ -1,0 +1,5 @@
+// 0.0.10 T05 (D5): Result<T, E> is not embeddable.
+func main() {
+    r: Result<int, string> = Ok(42);
+    print("r=${r}");
+}
