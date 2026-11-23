@@ -188,7 +188,10 @@ impl<'a> Lexer<'a> {
         // Consume opening quote
         self.advance();
 
-        let mut parts: Vec<StringPart> = Vec::new();
+        // Preallocate (SPEC §9): most strings have no interpolation and
+        // return on the plain `StringLit` path, so start small rather than
+        // pay for a chunk-per-`${}` guess.
+        let mut parts: Vec<StringPart> = Vec::with_capacity(2);
         let mut lit = String::new();
 
         while let Some(ch) = self.current_char {
@@ -312,7 +315,10 @@ impl<'a> Lexer<'a> {
         self.advance(); // $
         self.advance(); // {
 
-        let mut tokens = Vec::new();
+        // Preallocate (SPEC §9): the run's token count isn't knowable up
+        // front, so seed a small capacity to avoid the first re-allocations
+        // on this hot path.
+        let mut tokens: Vec<Token> = Vec::with_capacity(4);
         let mut depth: u32 = 0;
 
         loop {

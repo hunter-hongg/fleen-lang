@@ -436,6 +436,9 @@ impl fmt::Display for TokenKind {
             // Load-bearing arm (see the `tokenize_enum_keyword` test): the
             // catch-all below renders keywords via `keyword_str` and panics
             // on a non-keyword variant that reaches it.
+            // Render a fixed label, not the run contents: the embedded
+            // tokens have already been consumed, and diagnostics only need
+            // to name the construct ("expected expression, found …").
             TokenKind::StringInterp(_) => write!(f, "interpolated string"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Assign => write!(f, "="),
@@ -488,6 +491,10 @@ impl std::hash::Hash for TokenKind {
             TokenKind::FloatLit(n) => n.to_bits().hash(state),
             TokenKind::StringLit(s) => s.hash(state),
             TokenKind::StringInterp(parts) => {
+                // Hash literal chunks by content but each embedded run only
+                // by its span (not its token contents): equal parts always
+                // carry equal spans, so this stays Eq-consistent while
+                // avoiding a full token-tree walk on every hash.
                 for part in parts {
                     match part {
                         StringPart::Lit(s) => s.hash(state),
