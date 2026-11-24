@@ -1,0 +1,76 @@
+// 0.0.10 demo — `Result` declared in std (TICKETS.md T08; PLAN D1–D3).
+//   §1  declaration provenance (D1): `Result` / `Ok` / `Err` are available in
+//       every file with no import at all — the prelude trio — and the explicit
+//       `import std.result;` spelling imports the very same names.
+//   §2  `?` propagation (D3): the exact 0.0.2 lowering — an `Err` returns the
+//       whole function, an `Ok` yields its payload.
+//   §3  choose-on-Result (D2 for the trio, D3 for the lowering): the 0.0.9
+//       `otherwise` tail still works, and guards on `Ok` arms fall through to it.
+//   §4  non-shadowable (D2): naming a binding/func/struct/enum `Ok`, `Err`, or
+//       `Result` is a `ReservedBuiltinName` error — shown in the README, not
+//       here (it cannot compile).
+//
+// Run: cargo fln examples/0.0.10/result_in_std.fln
+import std.result;   // §1: optional — the trio is already in scope without it
+import std.io;
+
+// §1 — declaration provenance: `Result<int, string>` is the std enum
+// (`std/result.fln` is the language-level source of truth), yet needs no
+// dotted spelling — bare `Result` / `Ok` / `Err` everywhere.
+func div(a: int, b: int): Result<int, string> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+// §2 — `?` propagation: on `Err` the whole function returns that `Err`;
+// on `Ok` the payload is extracted. Unchanged 0.0.2 semantics (D3).
+func safe_div(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;
+    Ok(q)
+}
+
+// §2 — a caller that propagates the `Err` up and inspects the `Ok`.
+func ratio(a: int, b: int): Result<int, string> {
+    q = div(a, b)?;
+    Ok(q * 10)
+}
+
+// §3 — choose-on-Result with a general `otherwise` tail (0.0.9 D2): a guard
+// on the `Ok` arm that fails lands in `otherwise`, and an `Err` value runs
+// the always-matching tail too.
+func describe(r: Result<int, string>): string {
+    choose move r {
+        when Ok(v) if v > 100 { "big" }
+        otherwise { "small or error" }
+    }
+}
+
+// §3 — the classic exhaustive `Ok` + `Err` pair (no `otherwise` needed).
+func show(r: Result<int, string>): string {
+    choose move r {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    }
+}
+
+func main(): int {
+    // §1 — the explicit-import file uses the same bare names.
+    std.io.println(show(div(9, 3)));
+    std.io.println(show(div(2, 0)));
+
+    // §2 — `?` in action: success flows, failure short-circuits.
+    std.io.println(show(safe_div(10, 2)));
+    std.io.println(show(safe_div(10, 0)));
+    std.io.println(show(ratio(3, 1)));
+    std.io.println(show(ratio(3, 0)));
+
+    // §3 — `otherwise` catches both a failed guard and an `Err`. The string
+    // payload makes `Result<int,string>` non-Copy, so `choose` consumes it
+    // with `move` (each is used once).
+    ok_big: Result<int, string> = Ok(250);
+    ok_small: Result<int, string> = Ok(5);
+    failure: Result<int, string> = Err("nope");
+    std.io.println(describe(move ok_big));
+    std.io.println(describe(move ok_small));
+    std.io.println(describe(move failure));
+    0
+}

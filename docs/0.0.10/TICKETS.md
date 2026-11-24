@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 done; T03 done; T04 done; T05 done; T06 done; T07 done; T08 open.**
+> **Status: T01 done; T02 done; T03 done; T04 done; T05 done; T06 done; T07 done; T08 done.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the

@@ -1,0 +1,43 @@
+// 0.0.10 demo — string interpolation (TICKETS.md T08; PLAN D4–D6).
+//   §1  every D5-convertible type: `int` / `float` / `bool` via the `as string`
+//       path, `string` verbatim.
+//   §2  `\$` is a literal `$` (D4); every other `$` before a non-`{` is a plain
+//       character too.
+//   §3  embedded expressions are full expressions: calls, arithmetic, nested
+//       interpolations.
+//   §4  copy semantics: a string binding used in several interpolations and a
+//       plain print survives all of them (D5 read-context deep-copies, never moves).
+//
+// Run: cargo fln examples/0.0.10/interp_demo.fln
+
+func double(n: int): int = n * 2;
+
+func main(): int {
+    // §1 — the four D5-convertible types
+    n = 42;
+    f = 3.14;
+    flag = true;
+    name = "world";
+    print("int=${n}");
+    print("float=${f}");
+    print("bool=${flag}");
+    print("string=${name}");
+
+    // §2 — `\$` gives a literal `$`; a bare `$` before a non-`{` is already literal
+    price = 5;
+    print("cost: \$${price}");       // cost: $5
+    print("total: \$${price * 2}");  // total: $10
+    print("just a dollar: $");       // no interpolation — `$` not before `{`
+
+    // §3 — full expressions inside `${…}`: calls, arithmetic, nested strings
+    print("double(21) = ${double(21)}");
+    print("sum = ${n + 8}");
+    print("nested: ${"inner=${n}"}");
+
+    // §4 — copy semantics: `name` is deep-copied into each interpolation,
+    // so it is still usable here afterwards
+    print("greet=${name}");
+    print("again=${name}");
+    print(name);
+    0
+}

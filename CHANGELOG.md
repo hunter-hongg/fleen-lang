@@ -1,4 +1,8 @@
-## [0.0.10] - 2026-11-24
+## [0.0.10] - 2026-11-25
+
+> Drafted by T06 (docs sync); **finalized at the T08 release gate** (codename
+> and publication pending — `docs/0.0.10/PLAN.md`). No bytecode change (D7):
+> the version stays v8, no new opcodes, no table changes.
 
 `Result` declared in std + string interpolation (PLAN D1–D7). The only source
 breaking set: a **string literal containing the exact sequence `${`** (previously
