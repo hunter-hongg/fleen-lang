@@ -1104,9 +1104,9 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 | Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) | ✅ (stays content-driven — no new opcode in 0.0.9, D6) | ✅ (stays content-driven — no new opcode in 0.0.10, D7; version stays v8) |
 | `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04: reserved words, loop-exit/continue lowering, no new opcode, D4) | ✅ |
 | String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06: `${expr}` + `\$`, lowers to `std.str.concat`, literals without `${` byte-identical; D4–D6) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,

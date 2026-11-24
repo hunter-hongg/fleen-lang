@@ -1704,9 +1704,9 @@ This follows the **concise and clear** principle.
 | Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03, §5/§9; D2–D4) | ✅ | ✅ |
 | Implicit partial application (captures, §10.8) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06; D5/D9–D11) | ✅ | ✅ |
 | `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04, §6; D4) | ✅ |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Generics (function-level) | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Generics (function-level) | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 
 **0.0.1 goal: Fibonacci runs.**
 
@@ -1768,12 +1768,12 @@ source of truth (D1), `Ok`/`Err`/`Result` are available without an import and ar
 **non-shadowable** (`ReservedBuiltinName`, D2 — the one behavior change), `?`/choose-on-Result
 keep their exact 0.0.2/0.0.9 lowering (D3), and the backend is untouched (D7). (2) String
 interpolation `"${expr}"` — `${expr}` embeds a full expression, `\$` is a literal `$`, and
-`${` is special only immediately before `{` (D4); embedded values stringify via the `as string`
+`$` is special only immediately before `{` (D4); embedded values stringify via the `as string`
 path (`int`/`float`/`bool`) or embed verbatim (`string`), no format specifiers (D5); lowering
 desugars to a `std.str.concat` chain, so a literal without `${` compiles byte-identically (D6).
 No bytecode change (D7): the version stays v8, no new opcodes, no table changes — BYTECODE.md
 is untouched. The only source breaking set is a string literal containing the exact sequence
-`${` (previously a literal `$` + `{`). T01–T06 implemented and green; see `docs/0.0.10/PLAN.md`
+`${` (previously a literal `$` + `{`). T01–T06 implemented and green (T07 is this docs sync); see `docs/0.0.10/PLAN.md`
 decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
 
 ---
