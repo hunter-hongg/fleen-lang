@@ -1,0 +1,12 @@
+// expect-typeck: InterpUnsupportedType
+// 0.0.10 T05 (D5): a struct value is not embeddable in a string
+// interpolation — only `int`/`float`/`bool`/`string` are.
+struct P {
+    x: int,
+    y: int,
+}
+
+func main() {
+    p = P { x: 1, y: 2 };
+    print("p=${p}");
+}

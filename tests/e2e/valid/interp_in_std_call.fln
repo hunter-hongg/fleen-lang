@@ -1,8 +1,9 @@
-// 0.0.10 T06: the interpolation result feeds into a std.str call; the
-// embedded value is stringified before the call.
+// 0.0.10 T06: the interpolation result feeds into a std.str call; one side
+// of `concat` is itself a `${}`-interpolated string, so the Interp node is
+// lowered to the concat chain and then concatenated with the literal prefix.
 import std.str;
 func main() {
     n = 42;
-    s = std.str.concat("n=", n as string);
+    s = std.str.concat("n=", "v=${n}");
     print(s);
 }

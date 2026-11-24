@@ -1,0 +1,11 @@
+// expect-typeck: InterpUnsupportedType
+// 0.0.10 T05 (D5): an enum value is not embeddable in a string
+// interpolation — only `int`/`float`/`bool`/`string` are.
+enum E {
+    A,
+    B,
+}
+
+func main() {
+    print("v=${E.A}");
+}

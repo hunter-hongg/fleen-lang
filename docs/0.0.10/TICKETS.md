@@ -475,6 +475,21 @@ rule it reuses).
 **Refs**: PLAN §1 D5/D6, §3.2, §9; BYTECODE.md §5.11 / v0.0.2 row
 (`ToStr` 0xA5).
 
+**As-built note (0.0.10 T05/T06 review)**: D6's concat-chain lowering lands
+on the function-body path (`lower_expr_into`); the flat global-initializer
+path (`lower_global_init`) has **no** `Interp` arm, so a global
+`const s = "x${i}";` falls into the catch-all and is rejected as
+`ComplexGlobalInit` ("global initializer must be a simple expression"). This
+is a recorded decision, not an oversight: global initializers are the
+"simple expression only" posture (the same catch-all rejects if/while/
+choose blocks), and D6/D7 never direct global-init support. The lowering
+error for a missing `std.str.concat` on the body path is a dedicated
+`InterpConcatMissing` invariant-break kind (mirrors the `std.arr.push`
+idiom — reported, not panicked), not the misleading `ComplexGlobalInit` the
+first draft used. Extending global init to an Interp arm is a new PLAN
+decision (it would have to mirror the merge + concat-chain sequence on a
+frameless path); out of scope here.
+
 ---
 
 ## T07 — Docs sync (F3)

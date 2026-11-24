@@ -1,1 +1,1 @@
-cannot embed a value of type
+cannot embed a value of type `[int]` in a string interpolation — only `int`, `float`, `bool`, and `string` may be embedded (converted with the same `as string` rule), and there are no format specifiers

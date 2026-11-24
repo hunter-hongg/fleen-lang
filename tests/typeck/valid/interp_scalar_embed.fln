@@ -1,0 +1,11 @@
+// 0.0.10 T05 (D5): every D5-convertible type embeds in a string
+// interpolation — `string` verbatim, `int`/`float`/`bool` via the implicit
+// `as string` cast. This is the accept side of the per-type matrix.
+func main() {
+    i = 42;
+    f = 3.5;
+    b = true;
+    s = "hi";
+    print("i=${i} f=${f} b=${b} s=${s}");
+    print("${"literal"}");
+}

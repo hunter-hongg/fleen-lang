@@ -98,6 +98,12 @@ pub enum LowerErrorKind {
     /// `PartialApply` operand is a `u8` and cannot hold the arity
     /// (defensive: typeck enforces `k < n` but sets no arity cap).
     PartialArityOverflow,
+    /// 0.0.10 T06: a string interpolation lowers to `std.str.concat` calls,
+    /// but the builtin is not registered in the function table.
+    /// `LowerCtx::new` mirrors the whole builtin table into `func_ids`, so
+    /// this is a compiler-invariant break (mirrors the `std.arr.push` idiom),
+    /// not a complex global initializer.
+    InterpConcatMissing,
 }
 
 impl LowerError {
@@ -137,6 +143,13 @@ impl std::fmt::Display for LowerError {
                 write!(
                     f,
                     "a partial application cannot take more than 255 arguments"
+                )
+            }
+            LowerErrorKind::InterpConcatMissing => {
+                write!(
+                    f,
+                    "string interpolation lowering failed: the `std.str.concat` builtin \
+                     is not registered (a compiler invariant break, not a source error)"
                 )
             }
         }
@@ -1180,7 +1193,7 @@ impl<'a> FnBodyCx<'a> {
                     .func_ids
                     .get("std.str.concat")
                     .copied()
-                    .ok_or_else(|| LowerError::new(LowerErrorKind::ComplexGlobalInit, *span))?;
+                    .ok_or_else(|| LowerError::new(LowerErrorKind::InterpConcatMissing, *span))?;
                 for part in &merged {
                     match part {
                         TypedInterpPart::Lit(s) => {

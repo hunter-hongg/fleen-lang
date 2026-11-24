@@ -1,0 +1,6 @@
+// expect-typeck: InterpUnsupportedType
+// 0.0.10 T05 (D5): an array is not embeddable in a string interpolation.
+func main() {
+    a = [1, 2, 3];
+    print("a=${a}");
+}
