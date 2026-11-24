@@ -4,7 +4,7 @@
 > with tests.  Decisions D1–D7 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 done; T03 done; T04 done; T05–T08 open.**
+> **Status: T01 done; T02 done; T03 done; T04 done; T05 done; T06 done; T07 done; T08 open.**
 > **Posture reminder**: no bytecode change this milestone (PLAN D7) — the
 > version stays v8, no new opcodes, no table changes. Every card that
 > touches a shared path keeps non-feature behavior byte-identical; the
@@ -494,24 +494,64 @@ frameless path); out of scope here.
 
 ## T07 — Docs sync (F3)
 
-- [ ] `docs/DESIGN.md`: §2 (string literal syntax — parts, `\$`, the
+- [x] `docs/DESIGN.md`: §2 (string literal syntax — parts, `\$`, the
       `${` rule); §8 (Error Handling — `Result` is declared in std, D1
       contract summarized); §9 (string type + interpolation; §9.8
       cross-reference); §11 (the prelude rule gains the recorded
       `Ok`/`Err`/`Result` exception, D2); §17 feature-matrix rows;
       §18 roadmap row.
-- [ ] `docs/SYNTAX.ebnf`: the string-literal rule gains the interpolation
+- [x] `docs/SYNTAX.ebnf`: the string-literal rule gains the interpolation
       production and the `\$` escape.
-- [ ] `SPEC.md`: the 0.0.10 goal paragraph + feature-matrix row(s) +
+- [x] `SPEC.md`: the 0.0.10 goal paragraph + feature-matrix row(s) +
       quick-reference section for interpolation.
-- [ ] `docs/BYTECODE.md`: untouched (D7) — record the confirmation here.
-- [ ] `CHANGELOG.md`: `[0.0.10]` entries — Added (interpolation,
+- [x] `docs/BYTECODE.md`: untouched (D7) — record the confirmation here.
+- [x] `CHANGELOG.md`: `[0.0.10]` entries — Added (interpolation,
       `import std.result`, `\$`), Changed (`${` in strings now begins
       interpolation — the milestone's breaking set; `Result` declared in
       std, language-level only, backend identical).
 
 **Depends on**: T01–T06.
 **Refs**: PLAN §1 D1–D7, §3.
+
+### As-built notes
+
+**`docs/BYTECODE.md` untouched (D7) — confirmation**: the file was last
+modified by 0.0.9 T06 (commit `902bb4f`) and was **not touched** by any
+0.0.10 commit (verified via `git log -- docs/BYTECODE.md`). The
+`Result`→std migration is language-level only: the backend opcodes
+(`PackOk`/`PackErr`/`IsErr`/`UnwrapOk`/`UnwrapErr`, 0xA0–0xA4),
+`FieldTypeTag::Result = 6`, and the VM `Value::Ok`/`Value::Err` all stay;
+no `enum_defs` entry is emitted (`std/result.fln` is declaration-only);
+string interpolation lowers to `std.str.concat` with zero new opcodes
+(D6). The version stays **v8**.
+
+**Doc drift corrected** (three "now-wrong" claims found in DESIGN.md,
+all corrected by T07):
+
+1. **§8 Error Handling**: "users may shadow `Ok`/`Err`" → corrected to
+   *non-shadowable* (`ReservedBuiltinName`, D2/T02 behavior change).
+2. **§9.8 enum**: "`Result[T, E]` stays builtin; migration deferred to
+   0.1.0" → corrected: migration happened in 0.0.10; backend untouched.
+3. **§11 prelude**: "the prelude is `print` only" → amended to include the
+   D2 trio exception (`Ok`/`Err`/`Result`, non-shadowable).
+
+**New content written**:
+
+- `docs/DESIGN.md`: §2 string interpolation callout (D4/D5/D6 summary);
+  §8 "0.0.2 semantics" amended to note D1/D2; §9 primitive-types note
+  referencing §9.9; §9.8 corrected + 0.0.10 migration paragraph; **§9.9**
+  new subsection (string interpolation D4–D6 — syntax, typing, lowering,
+  global-init limit, breaking set); §11 prelude amended (D2); §17 feature
+  matrix — 0.0.10 column added, interpolation row, Result cell descriptive;
+  §18 roadmap row.
+- `docs/SYNTAX.ebnf`: header comment block gained a 0.0.10 note; `string_lit`
+  split into `string_char` + `escape` with an interpolation production
+  (`"$" "{" expr "}"`); `escape` now includes `"$"` (the `\$` escape).
+- `SPEC.md`: §13 goal paragraph for 0.0.10; §14 "String Interpolation (0.0.10)"
+  subsection + status note on Result section; §15 feature matrix — 0.0.10
+  column, interpolation row, Result/Bytecode-v8 cells made descriptive.
+- `CHANGELOG.md`: `[0.0.10]` entry with Added / Changed / Fixed sections
+  (Fixed: none — no regressions found).
 
 ---
 

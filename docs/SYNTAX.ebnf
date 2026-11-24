@@ -62,6 +62,19 @@
 (* zero-payload variant names as variant          *)
 (* references, not bindings (D1 — resolver work;  *)
 (* the pattern grammar below is unchanged).       *)
+(* New in 0.0.10 (non-reserved, additive): string *)
+(* interpolation — a string literal containing     *)
+(* `${` is a sequence of literal chunks and        *)
+(* embedded expressions; `\$` is the one new       *)
+(* escape (a literal `$`); `$` is special only     *)
+(* immediately before `{` (D4). Embedded values    *)
+(* stringify via the `as string` path or embed     *)
+(* verbatim (`string`); no format specifiers (D5); *)
+(* lowered to a `std.str.concat` chain (D6).       *)
+(* `Result`/`Ok`/`Err` are now declared in std,    *)
+(* not builtins — the types and `Ok`/`Err`         *)
+(* constructors below are unchanged (D1/D2).       *)
+(* No bytecode change (D7).                        *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -480,7 +493,20 @@ float_lit       = digit , { digit } , "." , digit , { digit } ;
 
 bool_lit        = "true" | "false" ;
 
-string_lit      = '"' , { any_char } , '"' ;
+(* 0.0.10: a string literal containing `${` is lexed into a StringInterp
+   token — literal chunks interleaved with embedded expressions — and
+   lowered to a `std.str.concat` chain over the chunks (D6). A literal
+   without `${` stays a plain string and compiles byte-identically. *)
+string_lit      = '"' , { string_char } , '"' ;
+
+(* an interpolation is `${` expr `}`; a nested string literal (including an
+   interpolating one) may appear inside the embedded expr (D4). *)
+string_char     = "$" , "{" , expr , "}"
+                | "$"                       (* a `$` not followed by `{` *)
+                | escape
+                | any_char - ( '"' | "\" ) ;
+
+escape          = "\" , ( "n" | "t" | "r" | "\" | "'" | '"' | "$" ) ;
 
 
 (* ---------- Identifiers ---------- *)

@@ -600,6 +600,20 @@ nested payloads) in one function body failed bytecode verification; the dispatch
 spills before its conditional (CHANGELOG `[0.0.9]` Fixed). See `docs/0.0.9/PLAN.md`
 decisions D1–D7 and `docs/0.0.9/TICKETS.md`.**
 
+**0.0.10 goal: `Result` declared in std + string interpolation — (1) `Result` migrates from a
+compiler builtin to a **declared parameterized enum** (`std/result.fln` is the language-level
+source of truth, D1); `Ok` / `Err` / `Result` are available in every file without an import and
+are **non-shadowable** (`ReservedBuiltinName`, D2 — the one behavior change); `?` and
+choose-on-Result keep their exact 0.0.2/0.0.9 lowering (D3); the backend is untouched (D7).
+(2) String interpolation `"${expr}"` — `${expr}` embeds a full expression, `\$` is a literal
+`$`, and `$` is special only immediately before `{` (D4); embedded values stringify via the
+`as string` path (`int`/`float`/`bool`) or embed verbatim (`string`), with no format
+specifiers (D5); lowering desugars to a `std.str.concat` chain, so a literal without `${`
+compiles byte-identically (D6). No bytecode change (D7): the version stays v8, no new
+opcodes, no table changes — `docs/BYTECODE.md` is untouched. The only source breaking set is
+a string literal containing the exact sequence `${`. T01–T07 implemented and green; see
+`docs/0.0.10/PLAN.md` decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
+
 ---
 
 ## 14. Fleen Language Quick Reference
@@ -979,7 +993,30 @@ choose value {
 
 **Semicolon rule**: the `when` clauses and the `otherwise` clause themselves take no semicolon; only when the whole `choose` is used as a statement does it take a trailing semicolon.
 
-### Result and `?` Propagation (0.0.2)
+### String Interpolation (0.0.10)
+
+```fleen
+n = 42;
+greeting = "n=${n}!";            // "n=42!" — `${expr}` embeds a full expression
+table = "row ${a + b} of ${n}";  // any expression; nested string literals work too
+price = "cost: $5";              // a `$` NOT before `{` is literal — unchanged
+pay = "owed: \$${amount}";       // `\$` is a literal `$` before an interpolation
+name = "x${i}";                  // type error: `i` must be int/float/bool/string
+```
+
+> **Rules (0.0.10)**: a string literal containing `${` is lexed into an interpolation token —
+> literal chunks interleaved with embedded expressions — and lowered to a `std.str.concat`
+> chain over the chunks (D6), so a literal **without** `${` compiles byte-identically to 0.0.9.
+> `${expr}` embeds a full expression (recursive; nested interpolating strings allowed, D4);
+> `int` / `float` / `bool` stringify via exactly the `as string` path and `string` embeds
+> verbatim (deep-copied, never moved) — any other type is `InterpUnsupportedType`, and there are
+> **no format specifiers** (D5). `\$` is the only new escape (a literal `$`); without it `$` is
+> special **only immediately before `{`**. EOF inside `${…}` is `UnclosedInterpolation`; a stray
+> `\` is `InvalidEscape`. A global initializer cannot interpolate yet (`ComplexGlobalInit`) —
+> interpolate in a function body. The only breaking set: a source string containing the exact
+> sequence `${`. See `docs/DESIGN.md` §2/§9.9 and `docs/0.0.10/PLAN.md` D4–D6.
+
+### Result and `?` Propagation (0.0.2; `Result` declared in std as of 0.0.10)
 
 ```fleen
 func div(a: int, b: int): Result<int, string> {
@@ -1001,6 +1038,14 @@ res = choose safe_half(10) {
 print(res as string);
 ```
 
+> **0.0.10 (implemented)**: `Result` is now a **declared parameterized enum** in std
+> (`std/result.fln`, D1) rather than a compiler builtin; `Ok` / `Err` / `Result` are available
+> in every file **without an import** and are **non-shadowable** (`ReservedBuiltinName`, D2 —
+> a behavior change from ≤0.0.9, where they could be overwritten). The syntax, `?` propagation,
+> choose-on-Result semantics, and lowering are **unchanged** (D3), and the backend is untouched
+> (D7). To import explicitly: `import std.result;`. See `docs/DESIGN.md` §8 and
+> `docs/0.0.10/PLAN.md` D1–D3.
+
 ### Operator Precedence (low to high)
 
 ```
@@ -1021,46 +1066,47 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 |
-|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag) | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) | ✅ (+ `std.str` batch: 8 intrinsics) |
-| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ | ✅ | ✅ |
-| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ | ✅ | ✅ |
-| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) | ✅ | ✅ |
-| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) | ✅ | ✅ |
-| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) | ✅ | ✅ |
-| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01: `#feature` header directive, per-file `FeatureSet`, D1/D6) | ✅ |
-| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) | ✅ |
-| Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) | ✅ |
-| Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) | ✅ (stays content-driven — no new opcode in 0.0.9, D6) |
-| `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04: reserved words, loop-exit/continue lowering, no new opcode, D4) |
-| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
-| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 |
+|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string moves to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ (generalized to enums) | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) | ✅ (declared in std, non-shadowable; D1/D2) |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag) | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async borrow-free) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03: literal, `a[i]` read/write, bounds-checked) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Range` | ❌ | ❌ | ✅ (V04: builtin Copy type, end-exclusive; iterated by `for`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) | ✅ (+ `std.str` batch: 8 intrinsics) | ✅ |
+| `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Channels (`channel<T>`) | ❌ | ❌ | ❌ | ✅ (T07) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `unsafe` / `trusted` / `ptr` | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `enum` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T06: typed payloads, `choose` exhaustiveness, v6 `EnumNew`/`EnumIs`/`EnumPayload`) | ✅ | ✅ | ✅ | ✅ |
+| Bytecode v7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `enum_defs` gains one `type_param_count: u32`, no new opcodes) | ✅ | ✅ | ✅ |
+| Parameterized enums (`enum Option<T>`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01/T03/T04: fully applied use sites, argument-dependent `is_copy`, D1–D3) | ✅ | ✅ | ✅ |
+| Nested / or / type-guard patterns | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T05/T06: multi-payload, nested, `p₁ \| p₂`, `when v: T`) | ✅ | ✅ | ✅ |
+| Per-file feature flags (`#feature curry`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01: `#feature` header directive, per-file `FeatureSet`, D1/D6) | ✅ | ✅ |
+| Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) | ✅ | ✅ |
+| Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) | ✅ | ✅ |
+| Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) | ✅ (stays content-driven — no new opcode in 0.0.9, D6) | ✅ (stays content-driven — no new opcode in 0.0.10, D7; version stays v8) |
+| `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04: reserved words, loop-exit/continue lowering, no new opcode, D4) | ✅ |
+| String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06: `${expr}` + `\$`, lowers to `std.str.concat`, literals without `${` byte-identical; D4–D6) |
+| FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
+| Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ✅ |
 
 **Status of 0.0.3**: V01–V10 complete. V01–V08 are implemented and green (`FileId`/`SourceMap`,
 `struct`, arrays, `for` + `Range`, module system with `import` / `pub`, the std library,

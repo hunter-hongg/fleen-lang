@@ -1,3 +1,45 @@
+## [0.0.10] - 2026-11-24
+
+`Result` declared in std + string interpolation (PLAN D1–D7). The only source
+breaking set: a **string literal containing the exact sequence `${`** (previously
+a literal `$` followed by `{`) — the `${` sequence in an existing string is now
+interpolation. No bytecode change (D7): the version stays **v8**, no new opcodes,
+no table changes — `docs/BYTECODE.md` is untouched.
+
+### Added
+- **String interpolation `"${expr}"`** (D4–D6, T04–T06): `${expr}` embeds a full
+  expression (recursive — nested interpolating strings work); `int` / `float` /
+  `bool` stringify via exactly the `as string` path (`ToStr`), `string` embeds
+  verbatim (deep-copied, never moved), any other type is `InterpUnsupportedType`;
+  no format specifiers. Lowering desugars to a `std.str.concat` chain, so a
+  literal **without** `${` compiles **byte-identically** to 0.0.9. New lexer
+  errors `UnclosedInterpolation` (EOF inside `${…}`) and `InvalidEscape`.
+- **`\$` escape** (D4): the one new escape, producing a literal `$`. Without it,
+  `$` is special only immediately before `{`, so `"cost: $5"` is unchanged.
+- **`import std.result`** (D1, T01–T03): the `Result` module is now a normal
+  declared module. `Ok` / `Err` / `Result` remain available in every file
+  without an import (see Changed).
+
+### Changed
+- ⚠️ **`${` in a string literal now begins an interpolation** (D4) — the
+  milestone's breaking set. A source string containing the exact sequence `${`
+  is lexed as an interpolation; escape the dollar as `\$${` to keep a literal.
+- **`Result` is declared in std, not a compiler builtin** (D1): `std/result.fln`
+  declares `pub enum Result<T, E> { Ok(T), Err(E) }` as the language-level source
+  of truth, and the compiler maps `std.result.Result` onto the internal `Result`
+  type. **Language-level only** — the backend (the `Result` opcodes 0xA0–0xA4,
+  `FieldTypeTag::Result = 6`, the VM `Value::Ok` / `Value::Err`) is untouched, and
+  no `enum_defs` entry is emitted (the module is declaration-only).
+- **`Ok` / `Err` / `Result` are now non-shadowable** (D2): available in every file
+  without an import, but naming a binding/parameter/func/struct/enum `Ok`, `Err`,
+  or `Result` is a `ReservedBuiltinName` error — a behavior change from ≤0.0.9,
+  where they could be overwritten Python-style (see `docs/0.0.10/PLAN.md` D2).
+- `?` propagation and choose-on-Result keep their exact 0.0.2 / 0.0.9 semantics
+  and lowering (D3).
+
+### Fixed
+- *(none in 0.0.10 — no regressions found)*
+
 ## [0.0.9] - 2026-11-21
 
 Small repairs (PLAN D1–D7; codename **Mending Weaverbird 🪡**). Breaking set:
