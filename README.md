@@ -5,10 +5,11 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.9 · Mending Weaverbird 🪡 · small repairs** — the BUG-2
-> zero-payload variant-pattern fix, Result-`choose` completion (`otherwise` and general
-> arms), the `break` / `continue` keywords, and the eight-intrinsic std.str batch
-> (T01–T07; built on **0.0.8 · Cheeky Hamster 🐹 · per-file feature flags + function
+> Current version **0.0.10 · Loom Spider 🕸️ · `Result` in std + string interpolation** —
+> `Result` declared in std (the prelude trio non-shadowable) and string interpolation
+> `"${expr}"` with the `\$` escape
+> (T01–T08; built on **0.0.9 · Mending Weaverbird 🪡 · small repairs**,
+> **0.0.8 · Cheeky Hamster 🐹 · per-file feature flags + function
 > currying**, **0.0.7 · parameterized types + pattern matching**,
 > **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
 > **0.0.4 · Patient Ants 🐜**, **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚**

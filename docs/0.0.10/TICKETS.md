@@ -557,18 +557,27 @@ all corrected by T07):
 
 ## T08 — Examples, version bump, release gate (F3)
 
-- [ ] `examples/0.0.10/`: a Result-in-std demo (the declaration's
+- [x] `examples/0.0.10/`: a Result-in-std demo (the declaration's
       provenance, `?` / choose-`otherwise` flows, `import std.result`)
       + an interpolation demo (every D5-convertible type, `\$`,
       copy semantics, nested expressions).
-- [ ] `CHANGELOG.md` finalized; `Cargo.toml` workspace version →
+- [x] `CHANGELOG.md` finalized; `Cargo.toml` workspace version →
       `0.0.10`; `std/VERSION` → `0.0.10`.
-- [ ] Full gate suite: `cargo fmt -- --check`, `cargo clippy -- -D
+- [x] Full gate suite: `cargo fmt -- --check`, `cargo clippy -- -D
       warnings`, `cargo test`, `cargo doc --no-deps`.
 - [ ] Release follows the 0.0.7–0.0.9 pipeline; codename settled here
       (holder's call). Per the established cadence (L9): after the local
       commit + tag, **stop and report** for the user to push — the push
       is what starts the Release workflow.
+
+**As-built note (codename settled at the gate)**: the holder chose **Loom
+Spider 🕸️** — recorded in the PLAN header, the CHANGELOG `[0.0.10]` header,
+`examples/0.0.10/README.md`, and the README version line; release notes at
+`release/0.0.10/RELEASE_NOTES.md` (mirrors 0.0.7–0.0.9). The release box stays
+unchecked until the `v0.0.10` tag is pushed (L9: the tag push is what starts
+the Release workflow). The T07 review fixes (the FFI/Generics/Operator
+matrix cells, the DESIGN `${`→`$` typo, the §17 T-status) were folded in
+pre-release as editorial corrections within this same milestone.
 
 **Depends on**: T07.
 **Refs**: PLAN §10.

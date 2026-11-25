@@ -1,6 +1,6 @@
 # 0.0.10 — `Result` Moves to std + String Interpolation
 
-> **Codename**: TBD (settled at the release gate, holder's call; lineage
+> **Codename**: Loom Spider 🕸️ (settled at the release gate; lineage
 > 0.0.1 Swift Fox 🦊, 0.0.2 Hermit Crab 🐚, 0.0.3 Busy Beaver 🦫, 0.0.4
 > Patient Ants 🐜, 0.0.5 Careful Hedgehog 🦔, 0.0.7 Mantis Shrimp 🦐, 0.0.8
 > Cheeky Hamster 🐹, 0.0.9 Mending Weaverbird 🪡).

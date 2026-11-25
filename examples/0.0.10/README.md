@@ -1,8 +1,9 @@
 # 0.0.10 demo — `Result` declared in std + string interpolation
 
-Two single-file programs exercising the 0.0.10 feature set (PLAN D1–D7). No
-bytecode change this milestone (D7): the version stays **v8**, no new opcodes,
-no table changes — both files run on the unchanged 0.0.9 VM.
+Two single-file programs exercising the 0.0.10 feature set (PLAN D1–D7,
+codename **Loom Spider 🕸️**). No bytecode change this milestone (D7): the
+version stays **v8**, no new opcodes, no table changes — both files run on the
+unchanged 0.0.9 VM.
 
 - **`result_in_std.fln`** — the `Result` declaration's provenance and flows
   (TICKETS.md T08; D1–D3):

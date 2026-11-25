@@ -1,10 +1,10 @@
 ## [0.0.10] - 2026-11-25
 
-> Drafted by T06 (docs sync); **finalized at the T08 release gate** (codename
-> and publication pending — `docs/0.0.10/PLAN.md`). No bytecode change (D7):
-> the version stays v8, no new opcodes, no table changes.
+> Drafted by T06 (docs sync); finalized at the T08 release gate. No bytecode
+> change (D7): the version stays v8, no new opcodes, no table changes.
 
-`Result` declared in std + string interpolation (PLAN D1–D7). The only source
+`Result` declared in std + string interpolation (PLAN D1–D7; codename
+**Loom Spider 🕸️**). The only source
 breaking set: a **string literal containing the exact sequence `${`** (previously
 a literal `$` followed by `{`) — the `${` sequence in an existing string is now
 interpolation. No bytecode change (D7): the version stays **v8**, no new opcodes,
