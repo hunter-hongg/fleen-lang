@@ -565,7 +565,7 @@ all corrected by T07):
       `0.0.10`; `std/VERSION` → `0.0.10`.
 - [x] Full gate suite: `cargo fmt -- --check`, `cargo clippy -- -D
       warnings`, `cargo test`, `cargo doc --no-deps`.
-- [ ] Release follows the 0.0.7–0.0.9 pipeline; codename settled here
+- [x] Release follows the 0.0.7–0.0.9 pipeline; codename settled here
       (holder's call). Per the established cadence (L9): after the local
       commit + tag, **stop and report** for the user to push — the push
       is what starts the Release workflow.
@@ -573,9 +573,10 @@ all corrected by T07):
 **As-built note (codename settled at the gate)**: the holder chose **Loom
 Spider 🕸️** — recorded in the PLAN header, the CHANGELOG `[0.0.10]` header,
 `examples/0.0.10/README.md`, and the README version line; release notes at
-`release/0.0.10/RELEASE_NOTES.md` (mirrors 0.0.7–0.0.9). The release box stays
-unchecked until the `v0.0.10` tag is pushed (L9: the tag push is what starts
-the Release workflow). The T07 review fixes (the FFI/Generics/Operator
+`release/0.0.10/RELEASE_NOTES.md` (mirrors 0.0.7–0.0.9). The `v0.0.10` tag was
+pushed and the Release workflow (run `45613902732`) succeeded — **release
+published** (six target archives + the full release notes as the GitHub Release
+body). The T07 review fixes (the FFI/Generics/Operator
 matrix cells, the DESIGN `${`→`$` typo, the §17 T-status) were folded in
 pre-release as editorial corrections within this same milestone.
 

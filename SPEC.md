@@ -611,8 +611,9 @@ choose-on-Result keep their exact 0.0.2/0.0.9 lowering (D3); the backend is unto
 specifiers (D5); lowering desugars to a `std.str.concat` chain, so a literal without `${`
 compiles byte-identically (D6). No bytecode change (D7): the version stays v8, no new
 opcodes, no table changes — `docs/BYTECODE.md` is untouched. The only source breaking set is
-a string literal containing the exact sequence `${`. T01–T07 implemented and green; see
-`docs/0.0.10/PLAN.md` decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
+a string literal containing the exact sequence `${`. T01–T08 implemented and green;
+**release published — the `v0.0.10` tag and the six target archives are cut; `release/0.0.10/` mirrors the 0.0.9 layout**.
+See `docs/0.0.10/PLAN.md` decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
 
 ---
 
