@@ -1596,6 +1596,40 @@ func main() {
     }
 
     #[test]
+    fn reject_map_as_binding_name() {
+        // 0.0.11 T01 (D1): `map` is a reserved word (the source breaking set),
+        // so `map = 1;` names the keyword instead of a binding — the same
+        // path `enum = 1;` takes (the `reject_keyword_binding_name` guard).
+        let err = parse_err("map = 1;");
+        if let ParseErrorKind::Expected { expected, .. } = err.kind {
+            assert!(expected.contains("identifier"), "got: {expected}");
+        } else {
+            panic!("expected Expected error, got {:?}", err.kind);
+        }
+    }
+
+    #[test]
+    fn map_keyword_is_legal_as_namespace_member() {
+        // 0.0.11 T01 (D1 carve-out): `map` is reserved as a binding name but
+        // stays legal as a dotted-path member/namespace segment — the existing
+        // `std.collection.iter.map` helper must keep parsing. The
+        // `async`/`await`/`channel` carve-out (0.0.4) applied to `map`.
+        let ast = parse_str("xs = std.collection.iter.map(xs, twice);\n");
+        let Item::Decl(Decl::Var(v)) = &ast.items[0] else {
+            panic!("expected a Var binding, got {:?}", ast.items[0]);
+        };
+        assert_eq!(v.name, "xs");
+        let Expr::Call(callee, _args) = v.init.as_ref() else {
+            panic!("expected a call initializer, got {:?}", v.init);
+        };
+        // The member the carve-out exists for: the final `.map` segment.
+        let Expr::Field(_, member) = callee.as_ref() else {
+            panic!("expected a dotted-path callee, got {:?}", callee);
+        };
+        assert_eq!(member, "map", "the reserved word is accepted as a member");
+    }
+
+    #[test]
     fn parse_enum_decl_zero_and_multi_payload() {
         let ast = parse_str("enum Shape { Point, Circle(float), Rect(float, float) }");
         match &ast.items[0] {

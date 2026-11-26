@@ -242,6 +242,17 @@ pub enum TokenKind {
     /// `enum` keyword (0.0.6: tagged-union declaration introducer)
     Enum,
 
+    // Map keyword (0.0.11 T01, D1) — reserved word; the parser wires the
+    // `map { k -> v, … }` literal and the `map[K, V]` type use in T02, so
+    // until then misuse surfaces at the generic statement/expr entry guards
+    // (the same staging `enum` used before its T02).
+    // Like `enum`, `map` joins `can_start_stmt` immediately (it can begin a
+    // `map { … }` expression statement); `reject_keyword_binding_name` is
+    // extended in T01 so `map = 1` names the keyword instead of a
+    // statement-separator error.
+    /// `map` keyword (0.0.11: key→value map literal / type constructor)
+    Map,
+
     // Literals
     /// Integer literal (e.g., `42`)
     IntLit(i64),
@@ -374,6 +385,7 @@ impl TokenKind {
                 | TokenKind::Break
                 | TokenKind::Continue
                 | TokenKind::Enum
+                | TokenKind::Map
         )
     }
 
@@ -422,6 +434,7 @@ impl TokenKind {
             TokenKind::Break => "break",
             TokenKind::Continue => "continue",
             TokenKind::Enum => "enum",
+            TokenKind::Map => "map",
             _ => return None,
         })
     }

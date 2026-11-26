@@ -463,6 +463,10 @@ impl<'a> Lexer<'a> {
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "enum" => TokenKind::Enum,
+            // 0.0.11 T01 (D1): `map` is a reserved word (the source breaking
+            // set of 0.0.11) — using it as an identifier stops compiling, the
+            // 0.0.5/0.0.9/0.0.10 reserved-word precedent.
+            "map" => TokenKind::Map,
             "or" => TokenKind::Or,
             "and" => TokenKind::And,
             "not" => TokenKind::Not,
@@ -913,6 +917,26 @@ mod tests {
         assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "moveit"));
         assert!(matches!(tokens[4].kind, TokenKind::Ident(ref s) if s == "as_x"));
         assert!(matches!(tokens[5].kind, TokenKind::Ident(ref s) if s == "asb"));
+    }
+
+    #[test]
+    fn tokenize_map_keyword() {
+        // 0.0.11 T01: `map` is a reserved word (D1), lexing to TokenKind::Map.
+        let tokens = tokenize("map").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Map);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+        // Longer identifiers starting with "map" stay identifiers.
+        let tokens2 = tokenize("mapped map_x mapx").unwrap();
+        assert!(matches!(tokens2[0].kind, TokenKind::Ident(ref s) if s == "mapped"));
+        assert!(matches!(tokens2[1].kind, TokenKind::Ident(ref s) if s == "map_x"));
+        assert!(matches!(tokens2[2].kind, TokenKind::Ident(ref s) if s == "mapx"));
+    }
+
+    #[test]
+    fn map_keyword_metadata() {
+        assert!(TokenKind::Map.is_keyword());
+        assert_eq!(TokenKind::Map.keyword_str(), Some("map"));
+        assert_eq!(TokenKind::Map.to_string(), "map");
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub(crate) fn can_start_stmt(kind: &TokenKind) -> bool {
             // statement-entry guard into `reject_keyword_binding_name`, which
             // reports the keyword instead of a statement-separator error.
             | TokenKind::Enum
+            // 0.0.11 T01 (D1): `map` can begin a `map { … }` expression
+            // statement (the same brace-block posture as `struct`/`enum`).
+            // Statement-starting so `map = 1` routes into
+            // `reject_keyword_binding_name` (which names the keyword) rather
+            // than the statement-separator error.
+            | TokenKind::Map
             // 0.0.4 F1: `async` opens an `async func` declaration.
             | TokenKind::Async
             // 0.0.5 T02: `addr` / `deref_ptr` are unary prefixes (same group
@@ -383,6 +389,9 @@ mod tests {
             TokenKind::Struct,
             // 0.0.6 T01: `enum` opens an `enum` declaration (same shape).
             TokenKind::Enum,
+            // 0.0.11 T01: `map` opens a `map { … }` expression statement
+            // (same brace-block posture as `struct` / `enum`).
+            TokenKind::Map,
             // 0.0.4 F1: `async` opens an `async func` declaration.
             TokenKind::Async,
             TokenKind::Ident(String::new()),
@@ -504,6 +513,9 @@ mod tests {
         assert!(implies_stmt_end(&TokenKind::Struct));
         // 0.0.6 T01: `enum` starts a declaration (never a continuation).
         assert!(implies_stmt_end(&TokenKind::Enum));
+        // 0.0.11 T01: `map` starts a `map { … }` expression statement, so it
+        // implies an end (same brace-block posture as `struct` / `enum`).
+        assert!(implies_stmt_end(&TokenKind::Map));
         // 0.0.9 T03 (D4): `break` / `continue` start and end statements.
         assert!(implies_stmt_end(&TokenKind::Break));
         assert!(implies_stmt_end(&TokenKind::Continue));

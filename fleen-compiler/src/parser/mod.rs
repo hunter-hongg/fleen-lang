@@ -283,6 +283,9 @@ impl Parser {
             // `enum = 1` reaches this rejection instead of the ASI
             // statement-separator error — the message names the keyword.
             crate::lexer::TokenKind::Enum => "enum",
+            // 0.0.11 T01 (D1): `map` joins the same path (the source breaking
+            // set) — `map = 1` names the keyword, same staging as `enum`.
+            crate::lexer::TokenKind::Map => "map",
             _ => return Ok(()),
         };
         let next_starts_binding = matches!(
@@ -1418,6 +1421,19 @@ impl Parser {
             crate::lexer::TokenKind::Channel => {
                 self.advance();
                 Ok(keyword_name(crate::lexer::TokenKind::Channel))
+            }
+            // 0.0.11 T01 (D1): `map` is a reserved word, but the existing
+            // `std.collection.iter.map` helper keeps its dotted path — `map`
+            // is legal in member/namespace position (never a binding name),
+            // the same carve-out `async`/`await`/`channel` already have.
+            // Without this, making `map` reserved would break the std helper
+            // (its name lives on `TokenKind::Map`, so the `.member` selector
+            // must accept it here; T02's `map { … }` literal and `map[K, V]`
+            // type are wired separately and do not collide — those are
+            // statement-start / type positions, not this namespace selector).
+            crate::lexer::TokenKind::Map => {
+                self.advance();
+                Ok(keyword_name(crate::lexer::TokenKind::Map))
             }
             _ => {
                 let found = self.current().kind.clone();
