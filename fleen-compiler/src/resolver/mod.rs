@@ -78,6 +78,7 @@ fn type_contains_ref(ty: &Type) -> bool {
         Type::Future(inner) => type_contains_ref(inner),
         Type::Channel(inner) => type_contains_ref(inner),
         Type::Ptr(inner) => type_contains_ref(inner),
+        Type::Map { key, value } => type_contains_ref(key) || type_contains_ref(value),
         Type::Named { args, .. } => args.iter().any(type_contains_ref),
         Type::Range => false,
         Type::Base(_) => false,
@@ -416,6 +417,11 @@ impl Resolver {
             Type::Channel(inner) => Type::Channel(Box::new(self.resolve_type(inner, _span))),
             // 0.0.5 T02: `ptr<T>` recurses so the pointee type resolves.
             Type::Ptr(inner) => Type::Ptr(Box::new(self.resolve_type(inner, _span))),
+            // 0.0.11 T02: `map[K, V]` recurses so the key/value types resolve.
+            Type::Map { key, value } => Type::Map {
+                key: Box::new(self.resolve_type(key, _span)),
+                value: Box::new(self.resolve_type(value, _span)),
+            },
             Type::Base(_) | Type::Range => ty.clone(),
         }
     }
@@ -1526,6 +1532,18 @@ impl Resolver {
                     .map(|e| self.resolve_expr(e))
                     .collect::<Result<Vec<_>, ()>>()?;
                 ExprHir::ArrayLit(elems, lit.span)
+            }
+            Expr::MapLit(lit) => {
+                let pairs = lit
+                    .pairs
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let k = self.resolve_expr(k)?;
+                        let v = self.resolve_expr(v)?;
+                        Ok((k, v))
+                    })
+                    .collect::<Result<Vec<_>, ()>>()?;
+                ExprHir::MapLit(pairs, lit.span)
             }
             Expr::Field(obj, field) => {
                 let span = obj.span();

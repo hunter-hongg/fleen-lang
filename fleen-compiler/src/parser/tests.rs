@@ -1119,6 +1119,75 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
     }
 
     #[test]
+    fn parse_map_type_square_brackets() {
+        // 0.0.11 T02 (D1): `map[K, V]` is the canonical use-site spelling.
+        let ast = parse_str("const m: map[int, string] = x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Const(c)) => match &c.ty {
+                Some(Type::Map { key, value }) => {
+                    assert!(matches!(key.as_ref(), Type::Base(BaseType::Int)));
+                    assert!(matches!(value.as_ref(), Type::Base(BaseType::String)));
+                }
+                other => panic!("expected map type, got {other:?}"),
+            },
+            _ => panic!("expected Const decl"),
+        }
+    }
+
+    #[test]
+    fn parse_map_type_angle_brackets() {
+        // 0.0.11 T02 (D1): the angle spelling is accepted too (mirrors
+        // Result's dual `<`/`[` use-site spelling).
+        let ast = parse_str("const m: map<int, string> = x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Const(c)) => {
+                assert!(matches!(c.ty, Some(Type::Map { .. })));
+            }
+            _ => panic!("expected Const decl"),
+        }
+    }
+
+    #[test]
+    fn parse_map_type_in_function_param() {
+        // Type-use positions accept `map[K, V]` wherever a type is legal.
+        let ast = parse_str("func foo(m: map[string, int]) { }");
+        match &ast.items[0] {
+            Item::Decl(Decl::Func(f)) => match &f.params[0].ty {
+                Type::Map { key, value } => {
+                    assert!(matches!(key.as_ref(), Type::Base(BaseType::String)));
+                    assert!(matches!(value.as_ref(), Type::Base(BaseType::Int)));
+                }
+                other => panic!("expected map type, got {other:?}"),
+            },
+            _ => panic!("expected Func decl"),
+        }
+    }
+
+    #[test]
+    fn parse_map_type_missing_comma_is_error() {
+        // `map<int>` (one type arg, no comma) is a parse error — a map
+        // always carries exactly two type arguments.
+        let err = parse_err("const m: map<int> = x;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_map_type_nested_value() {
+        // A map value may itself be a composite type; both element types
+        // recurse through `parse_type`.
+        let ast = parse_str("const m: map[string, [int]] = x;");
+        match &ast.items[0] {
+            Item::Decl(Decl::Const(c)) => match &c.ty {
+                Some(Type::Map { value, .. }) => {
+                    assert!(matches!(value.as_ref(), Type::Array(_)));
+                }
+                other => panic!("expected map type, got {other:?}"),
+            },
+            _ => panic!("expected Const decl"),
+        }
+    }
+
+    #[test]
     fn parse_ref_type() {
         let ast = parse_str("func foo(r: ref int) { }");
         match &ast.items[0] {
@@ -2358,6 +2427,113 @@ func main() {
         // index from literal without one).
         let ast = parse_str("x = 1;\n[1, 2];");
         assert!(matches!(ast.items[1], Item::Expr(Expr::ArrayLit(_))));
+    }
+
+    // ========== Map literal (0.0.11 T02, D1) ==========
+
+    #[test]
+    fn parse_map_literal_two_pairs() {
+        let ast = parse_str("map { 1 -> \"a\", 2 -> \"b\" };");
+        let Item::Expr(Expr::MapLit(l)) = &ast.items[0] else {
+            panic!("expected map literal, got {:?}", ast.items[0]);
+        };
+        assert_eq!(l.pairs.len(), 2);
+    }
+
+    #[test]
+    fn parse_map_literal_single_pair() {
+        let ast = parse_str("map { \"k\" -> 42 };");
+        let Item::Expr(Expr::MapLit(l)) = &ast.items[0] else {
+            panic!("expected map literal");
+        };
+        assert_eq!(l.pairs.len(), 1);
+    }
+
+    #[test]
+    fn parse_map_literal_trailing_comma() {
+        // Trailing comma allowed (the array-literal rule, D1).
+        let ast = parse_str("map { 1 -> 2, };");
+        let Item::Expr(Expr::MapLit(l)) = &ast.items[0] else {
+            panic!("expected map literal");
+        };
+        assert_eq!(l.pairs.len(), 1);
+    }
+
+    #[test]
+    fn parse_map_literal_nested_value() {
+        // A map value may itself be a composite expression (a nested map
+        // literal, an array literal, ...). Keys and values recurse through
+        // `parse_expr`, so any expression is legal on either side.
+        let ast = parse_str("map { 1 -> map { 2 -> 3 } };");
+        let Item::Expr(Expr::MapLit(outer)) = &ast.items[0] else {
+            panic!("expected outer map literal");
+        };
+        assert_eq!(outer.pairs.len(), 1);
+        let Expr::MapLit(inner) = &outer.pairs[0].1 else {
+            panic!("expected nested map literal value");
+        };
+        assert_eq!(inner.pairs.len(), 1);
+    }
+
+    #[test]
+    fn parse_empty_map_literal_parses() {
+        // The parser accepts `map { }`; the missing element types are
+        // typeck's CannotInferMapType (T03).
+        assert!(matches!(
+            parse_str("map { };").items[0],
+            Item::Expr(Expr::MapLit(_))
+        ));
+    }
+
+    #[test]
+    fn parse_map_literal_statement() {
+        // `map` is statement-starting (T01 ASI table), so a `map { … }`
+        // expression statement is legal.
+        let ast = parse_str("x = 1;\nmap { 1 -> 2 };");
+        assert!(matches!(ast.items[1], Item::Expr(Expr::MapLit(_))));
+    }
+
+    #[test]
+    fn parse_map_literal_missing_arrow_is_error() {
+        // `map { k }` without `->`: a bare key is a parse error, not an
+        // implicit key (D1).
+        let err = parse_err("map { 1 };");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_map_literal_missing_value_is_error() {
+        // `map { k -> }` without a value expression is a parse error.
+        let err = parse_err("map { 1 -> };");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_map_literal_unclosed_brace_is_error() {
+        // `map { k -> v` without `}` (EOF inside the literal) is a parse
+        // error.
+        let err = parse_err("map { 1 -> 2");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_map_without_brace_is_error() {
+        // `map` not followed by `{` — e.g. `map 1` — is a parse error (a
+        // bare `map` token starts a literal, nothing else).
+        let err = parse_err("map 1;");
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn parse_map_key_is_full_expression() {
+        // A key is an arbitrary expression (a binary expr here), not just a
+        // literal — the pair separator is `->`, so the key expression runs
+        // to the arrow.
+        let ast = parse_str("map { 1 + 2 -> 3 };");
+        let Item::Expr(Expr::MapLit(l)) = &ast.items[0] else {
+            panic!("expected map literal");
+        };
+        assert!(matches!(l.pairs[0].0, Expr::Add(_, _)));
     }
 
     #[test]

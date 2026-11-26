@@ -100,6 +100,10 @@ fn collect_named_type_refs(ty: &ast::Type, f: &mut impl FnMut(&str)) {
         ast::Type::Future(inner) => collect_named_type_refs(inner, f),
         ast::Type::Channel(inner) => collect_named_type_refs(inner, f),
         ast::Type::Ptr(inner) => collect_named_type_refs(inner, f),
+        ast::Type::Map { key, value } => {
+            collect_named_type_refs(key, f);
+            collect_named_type_refs(value, f);
+        }
         ast::Type::Base(_) | ast::Type::Range => {}
     }
 }
@@ -924,6 +928,15 @@ impl TypeChecker {
             ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
             // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
             ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
+            // 0.0.11 T02 (D1): `map[K, V]` parses; its typeck representation,
+            // the key whitelist, and `is_copy` land with T03. This bridge
+            // converts both element types (so unknown names still report)
+            // and degrades to `Unsupported` until T03 adds the real variant.
+            ast::Type::Map { key, value } => {
+                let _ = self.convert_type(key, span);
+                let _ = self.convert_type(value, span);
+                Type::Unsupported("map[K, V]".to_string())
+            }
             ast::Type::Named { name, args, .. } => {
                 // 0.0.7 T03/D1: a bare name equal to a declaration-local type
                 // parameter (the `T` of `enum Option<T>`) becomes `Param(i)`
@@ -1437,6 +1450,8 @@ impl TypeChecker {
             ast::Type::Channel(_) => false,
             // 0.0.5 T02 D1: a ptr is a move-only handle — never Copy.
             ast::Type::Ptr(_) => false,
+            // 0.0.11 T02 (D1/D2): a map is always owned — never Copy.
+            ast::Type::Map { .. } => false,
         }
     }
 
@@ -1563,6 +1578,10 @@ impl TypeChecker {
             // 0.0.5 T02 D1: a ptr is a move-only handle — never Copy (and
             // cannot be a struct field at all; `PtrNotStorable`).
             ast::Type::Ptr(_) => false,
+            // 0.0.11 T02 (D1/D2): a map is always owned — never Copy (and
+            // cannot be a struct field in the async world; T03 enforces the
+            // boundary).
+            ast::Type::Map { .. } => false,
         }
     }
 
@@ -2409,6 +2428,25 @@ impl TypeChecker {
             } => self.typeck_enum_ctor_value(enum_name, variant_name, span, expected),
             ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
+            // 0.0.11 T02 (D1): the `map { k -> v }` literal parses and its
+            // key/value expressions are type-checked so they report their
+            // own errors; the literal itself is rejected until T03/T05 wire
+            // the `Type::Map` representation, `is_copy`, the whitelist, and
+            // lowering. This keeps T02 frontend-scoped and the backend
+            // unchanged.
+            ExprHir::MapLit(pairs, span) => {
+                for (k, v) in pairs {
+                    let _ = self.typeck_expr(k, None)?;
+                    let _ = self.typeck_expr(v, None)?;
+                }
+                self.add_error(
+                    TypeckErrorKind::UnsupportedFeature {
+                        feature: "map".into(),
+                    },
+                    span,
+                );
+                Err(())
+            }
             // 0.0.2 U05: ownership expressions — validated here; the
             // flow-sensitive move analysis runs afterwards in
             // `ownership.rs` over the produced TypedHir.

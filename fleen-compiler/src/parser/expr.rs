@@ -340,6 +340,14 @@ impl Parser {
                 }
                 Ok(Expr::Ident(name, span))
             }
+            TokenKind::Map => {
+                // `map { k -> v, ... }` literal (0.0.11 T02, D1). `map` is a
+                // reserved keyword, so `map {` at expression position is
+                // always a map literal — never a block expression (D1).
+                self.advance();
+                let lit = self.parse_map_literal(span)?;
+                Ok(Expr::MapLit(lit))
+            }
             TokenKind::Channel => {
                 // channel<T>(capacity) constructor (0.0.4 T07).
                 // `channel` is a reserved keyword, so this is unambiguous at
@@ -494,6 +502,57 @@ impl Parser {
             inits,
             span: self.span(name_span.start, end),
         }))
+    }
+
+    /// Parse the body of a map literal: `{` is already consumed by the
+    /// `TokenKind::Map` arm. Grammar (0.0.11 T02, D1):
+    /// `{` [ expr `->` expr (`,` expr `->` expr)* [`,`] ] `}`.
+    ///
+    /// Mirrors the array-literal list shape — trailing comma allowed, at
+    /// least one pair for a non-empty literal. Empty braces stay legal here
+    /// (`map { }`); the resulting empty map needs a type annotation, which
+    /// is typeck's `CannotInferMapType` (T03).
+    ///
+    /// `->` is required between every key and its value: `map { k }` (no
+    /// arrow) is a parse error, not an implicit key. No duplicate-key check
+    /// here (a map key is an arbitrary expression; equality is typeck's).
+    fn parse_map_literal(
+        &mut self,
+        map_span: Span,
+    ) -> Result<crate::parser::ast::ExprMapLit, ParseError> {
+        self.expect(&TokenKind::LBrace, "`{` after `map`")?;
+
+        let mut pairs: Vec<(Expr, Expr)> = Vec::new();
+        if !self.check(&TokenKind::RBrace) {
+            loop {
+                let key = self.parse_expr()?;
+                if !self.matches(&TokenKind::Arrow) {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected {
+                            expected: "`->` after map key".to_string(),
+                            found: self.current().kind.clone(),
+                        },
+                        span: self.current().span,
+                    });
+                }
+                let value = self.parse_expr()?;
+                pairs.push((key, value));
+                if !self.matches(&TokenKind::Comma) {
+                    break;
+                }
+                // Trailing comma allowed (`map { 1 -> 2, }`).
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&TokenKind::RBrace, "`}` or `,` after map pair")?;
+        let end = self.prev_span_end();
+        Ok(crate::parser::ast::ExprMapLit {
+            pairs,
+            span: self.span(map_span.start, end),
+        })
     }
 
     /// Parse an if expression.

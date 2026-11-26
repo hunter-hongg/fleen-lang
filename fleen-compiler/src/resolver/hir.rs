@@ -252,6 +252,11 @@ pub enum ExprHir {
     /// Array literal: `[e1, e2, ...]` (0.0.3 V03). Elements keep source
     /// order; empty literals need an annotation (typeck).
     ArrayLit(Vec<ExprHir>, Span),
+    /// Map literal: `map { k -> v, ... }` (0.0.11 T02, D1). Pairs keep
+    /// source order; key/value expressions are resolved in the enclosing
+    /// scope (no new rule). The key whitelist, `is_copy`, and lowering are
+    /// typeck / lower's business (T03 / T05).
+    MapLit(Vec<(ExprHir, ExprHir)>, Span),
     /// Struct literal: `Name { field: expr, ... }` (0.0.3 V02). Initializers
     /// keep source order; whether `Name` is a declared struct and the
     /// field-set rules are typeck's business.
@@ -384,6 +389,7 @@ impl ExprHir {
             ExprHir::AssignField { span, .. } => *span,
             ExprHir::AssignIndex { span, .. } => *span,
             ExprHir::ArrayLit(_, s) => *s,
+            ExprHir::MapLit(_, s) => *s,
             ExprHir::StructLit { span, .. } => *span,
             ExprHir::If(e) => e.span,
             ExprHir::While(e) => e.span,

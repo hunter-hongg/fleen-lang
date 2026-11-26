@@ -66,27 +66,41 @@ positions, not this namespace selector.
 
 ## T02 — Parser: the `map { k -> v }` literal + the `map[K, V]` type use (F1; D1)
 
-- [ ] Parser: new `parse_map_literal` gated on `TokenKind::Map` — `map`
+- [x] Parser: new `parse_map_literal` gated on `TokenKind::Map` — `map`
       followed by `{`, then a comma-separated list of `expr -> expr`
       pairs (trailing comma allowed, the array-literal rule), then `}`.
       Produces a new `Expr::MapLit { pairs: Vec<(Expr, Expr)>, span }` AST
       node.
-- [ ] Parser: `map` in type position starts a `map[K, V]` type use —
+- [x] Parser: `map` in type position starts a `map[K, V]` type use —
       `map` `<` type `,` type `>` (the `Result<T, E>` two-argument shape;
       `[]` is accepted at use sites per the 0.0.7 D9 precedent if the
       resolver's type-use path already handles it — record the exact
       spellings accepted). Produces `ast::Type::Map { key, value }`.
-- [ ] Parser: `map` in expression position **cannot** begin a block
+- [x] Parser: `map` in expression position **cannot** begin a block
       expression — `map {` is always a map literal (D1); a `map` token
       reaching the block-expression entry is a parse error.
-- [ ] Parser errors: `map` without `{` (`` expected `{` after `map` ``);
+- [x] Parser errors: `map` without `{` (`` expected `{` after `map` ``);
       `map { k }` without `->` (`` expected `->` after map key ``); `map {
       k -> }` without value (`` expected expression ``); `map { k -> v`
       without `}` (`` expected `}` or `,` ``); `map<T>` with one type arg
       (`` expected `,` after map key type ``).
-- [ ] Tests: parser unit tests (empty literal, 1/2/3-pair literal, trailing
+- [x] Tests: parser unit tests (empty literal, 1/2/3-pair literal, trailing
       comma, nested literal, the `map[K, V]` type use in every type
       position, every parse error above).
+
+**T02 implementation note**: both type-use spellings are accepted — `map[K, V]`
+(bracket, canonical, mirroring `Result[T, E]`) and `map<K, V>` (angle,
+mirroring `Result<T, E>`); both recurse through `parse_type` for the key and
+value, so nested composites resolve. `map {` is gated on `TokenKind::Map` in
+`primary`, so it is never reached by the block-expression path (`map { … }` is
+always a literal; D1) — the `map`-token-reaching-block case cannot occur. The
+resolver already carries `ExprHir::MapLit` / `ast::Type::Map` through (added in
+the T02 frontend skeleton), and typeck degrades both the literal and the
+type-use to `Unsupported` (map) / `Unsupported(map[K, V])` until T03 adds the
+real `Type::Map` representation, whitelist, and `is_copy`; T05 wires lowering.
+A map *type* in `is_copy` / `is_copy_exhaustive` already returns `false`
+(always-owned, D2). No std or e2e fixture regressed (`std.collection.iter.map`
+is protected by the T01 member carve-out).
 
 **Depends on**: T01.
 **Refs**: PLAN §1 D1, §3.1, §5; `parser/expr.rs:338` (the `LBrace`

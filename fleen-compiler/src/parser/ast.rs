@@ -336,6 +336,11 @@ pub enum Type {
     /// `ptr<T>` — a raw pointer (0.0.5 T02, D1/D2). Non-Copy, move-only;
     /// produced only by the unsafe op `addr`. There is no bare-`ptr` type.
     Ptr(Box<Type>),
+    /// `map[K, V]` — a key/value map type (0.0.11 T02, D1). The use-site
+    /// type spelling; construction is the `map { k -> v }` literal and
+    /// access is `m[k]`. Whether it resolves, and the key whitelist, are
+    /// typeck's business (T03).
+    Map { key: Box<Type>, value: Box<Type> },
     /// A named user type (0.0.3 V02), optionally applied to type arguments
     /// (0.0.7 T01, D1/D9). `args` is empty for a monomorphic name; both
     /// `Name<T>` and `Name[T]` spellings are accepted at use sites.
@@ -478,6 +483,7 @@ impl fmt::Display for Type {
             Type::Future(inner) => write!(f, "Future<{}>", inner),
             Type::Channel(inner) => write!(f, "channel<{}>", inner),
             Type::Ptr(inner) => write!(f, "ptr<{}>", inner),
+            Type::Map { key, value } => write!(f, "map[{}, {}]", key, value),
         }
     }
 }
@@ -584,6 +590,10 @@ pub enum Expr {
         capacity: Box<Expr>,
         span: Span,
     },
+    /// `map { k -> v, ... }` — a map literal (0.0.11 T02, D1). Pairs keep
+    /// source order; the key whitelist and duplicate-key rule are typeck's
+    /// (T03). `map {` is never a block expression (D1).
+    MapLit(ExprMapLit),
     /// `func(args)`
     Call(Box<Expr>, Vec<Expr>),
     /// `arr[idx]` — span covers the whole `arr[idx]`, including the `]`.
@@ -652,6 +662,7 @@ impl Expr {
             Expr::Call(f, _) => f.span(),
             Expr::Index(_, _, s) => *s,
             Expr::ArrayLit(l) => l.span,
+            Expr::MapLit(l) => l.span,
             Expr::Field(o, _) => o.span(),
             Expr::StructLit(l) => l.span,
             Expr::Int(_, s)
@@ -682,6 +693,15 @@ pub struct ExprStructLit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprArrayLit {
     pub elems: Vec<Expr>,
+    pub span: Span,
+}
+
+/// Map literal: `map { k -> v, ... }` (0.0.11 T02, D1). Pairs keep source
+/// order; an empty literal needs a type annotation (the array-literal rule).
+/// The key whitelist and duplicate-key rule are typeck's (T03).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprMapLit {
+    pub pairs: Vec<(Expr, Expr)>,
     pub span: Span,
 }
 
@@ -881,6 +901,17 @@ impl fmt::Display for Expr {
                     l.elems
                         .iter()
                         .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            Expr::MapLit(l) => {
+                write!(
+                    f,
+                    "map {{ {} }}",
+                    l.pairs
+                        .iter()
+                        .map(|(k, v)| format!("{} -> {}", k, v))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

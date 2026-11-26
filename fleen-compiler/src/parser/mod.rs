@@ -1620,6 +1620,30 @@ impl Parser {
                 self.expect(&crate::lexer::TokenKind::Gt, "`>` in ptr type")?;
                 ast::Type::Ptr(Box::new(inner))
             }
+            crate::lexer::TokenKind::Map => {
+                // map[K, V] (0.0.11 T02, D1): a key/value map type. `map` is
+                // a reserved keyword; the use-site spelling is always
+                // bracketed `map[K, V]` (angle `map<K, V>` is also accepted,
+                // matching the dual `<`/`[` spelling Result already allows
+                // at use sites). Both element types recurse so nested types
+                // resolve. Whether it resolves to `Type::Map`, the key
+                // whitelist, and `is_copy` are typeck's (T03).
+                self.advance();
+                let (close, close_msg) = if self.matches(&crate::lexer::TokenKind::Lt) {
+                    (crate::lexer::TokenKind::Gt, "`>` in map type")
+                } else {
+                    self.expect(&crate::lexer::TokenKind::LBracket, "`[` after `map` type")?;
+                    (crate::lexer::TokenKind::RBracket, "`]` in map type")
+                };
+                let key = self.parse_type()?;
+                self.expect(&crate::lexer::TokenKind::Comma, "`,` after map key type")?;
+                let value = self.parse_type()?;
+                self.expect(&close, close_msg)?;
+                ast::Type::Map {
+                    key: Box::new(key),
+                    value: Box::new(value),
+                }
+            }
             _ => {
                 let found = self.current().kind.clone();
                 let span = self.current().span;
