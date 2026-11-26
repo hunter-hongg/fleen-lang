@@ -75,6 +75,11 @@
 (* not builtins — the types and `Ok`/`Err`         *)
 (* constructors below are unchanged (D1/D2).       *)
 (* No bytecode change (D7).                        *)
+(* New in 0.0.11 (planned): the `map` type + map   *)
+(* literal — `map` is a reserved word (the 0.0.11   *)
+(* breaking set, D1). `map { k -> v }` literals,   *)
+(* `map[K, V]` type (both spellings), and `m[k]`    *)
+(* access riding the existing index suffix (D4).    *)
 (* ============================================ *)
 
 (* ---------- Program ---------- *)
@@ -229,7 +234,8 @@ type_atom       = base_type
                 | future_type
                 | channel_type
                 | ptr_type
-                | named_type ;
+                | named_type
+                | map_type ;
 
 base_type       = "int" | "float" | "bool" | "string" | "unit" ;
 
@@ -269,6 +275,11 @@ channel_type    = "channel" , "<" , type , ">" ;
    non-Copy, move-only, and non-storable; every pointer use is an unsafe op
    (D1/D2, `docs/0.0.5/PLAN.md`). *)
 ptr_type        = "ptr" , "<" , type , ">" ;
+
+(* 0.0.11 T02 (D1): `map[K, V]` — a parameterized map type. Both spellings
+   accepted (bracket and angle, like parameterized enums). `map` is a reserved
+   word (the 0.0.11 breaking set). *)
+map_type        = "map" , ( "[" , type , "," , type , "]" | "<" , type , "," , type , ">" ) ;
 
 func_type       = "(" , [ type , { "," , type } ] , ")" , "->" , type ;
 
@@ -452,7 +463,8 @@ primary         = literal
                 | block
                 | array_literal
                 | struct_literal
-                | channel_ctor ;
+                | channel_ctor
+                | map_literal ;
 
 (* 0.0.6 T02: an enum constructor needs NO new grammar rule — it is the
    existing `ident` primary followed by the dotted path and the call
@@ -478,6 +490,15 @@ array_literal   = "[" , [ expr , { "," , expr } ] , [ "," ] , "]" ;
 struct_literal  = ident , "{" , [ field_init , { "," , field_init } ] , [ "," ] , "}" ;
 
 field_init      = ident , ":" , expr ;
+
+(* 0.0.11 T02 (D1): `map { k -> v, k2 -> v2 }` — a map literal. `map` is a
+   reserved word (the 0.0.11 breaking set). The entry separator is `->` to
+   keep it visually distinct from a struct literal's `:` and from a `for`
+   binding. Key and value types are inferred; the key whitelist
+   `{int, bool, string}` is enforced by typeck (D5, `MapKeyNotComparable`). *)
+map_literal     = "map" , "{" , [ map_entry , { "," , map_entry } ] , [ "," ] , "}" ;
+
+map_entry       = expr , "->" , expr ;
 
 
 (* ---------- Literals ---------- *)

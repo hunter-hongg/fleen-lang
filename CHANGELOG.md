@@ -1,3 +1,29 @@
+## [Unreleased]
+
+## [0.0.11] - planned (Cartographer Ant 🗺️)
+
+> **Planning** — `docs/0.0.11/PLAN.md` (decisions D1–D8) and `docs/0.0.11/TICKETS.md`
+> (T01–T08) drafted; implementation not started. Nothing below is implemented yet.
+
+### Planned
+- **The `map` type + `std.map` intrinsics** (PLAN D1–D8): `map { k -> v, k2 -> v2 }`
+  literals; `m[k]` access riding the existing `index_suffix` (zero parser change, D4)
+  returning `Result[V, string]` (D3); `std/map.fln` with eight intrinsics (`get` /
+  `insert` / `remove` / `contains` / `keys` / `values` / `len` / `clone`, D3 — the
+  0.0.9 `std.str` batch template, zero opcodes); always-owned `map[K, V]` (D2); key
+  whitelist `{int, bool, string}` (D5, `MapKeyNotComparable`); no `Future` / `channel`
+  / `ptr` in the `V` slot (D6); insertion order preserved via `HashMap` + order `Vec`
+  + a `KeyHash` wrapper (D8).
+- **Bytecode v9** by the content-driven rule (D7): a module is v9 only when a `NewMap`
+  (0xAF) was encoded; every map-free module (including every `std` module) stays v8.
+  One new opcode (`NewMap` 0xAF), one new `FieldTypeTag` variant (`Map = 13`), no
+  other table or opcode change — `docs/BYTECODE.md` gains a v9 note only.
+
+### Planned breaking
+- ⚠️ **`map` becomes a reserved word** (D1) — the 0.0.11 declared breaking set. A
+  user identifier named `map` (variable / function / struct / enum) will no longer
+  be legal.
+
 ## [0.0.10] - 2026-11-25
 
 > Drafted by T06 (docs sync); finalized at the T08 release gate. No bytecode

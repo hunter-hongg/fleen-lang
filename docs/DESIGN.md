@@ -102,7 +102,9 @@ break  continue  or  and  not
 > user struct. `ptr` / `addr` / `deref_ptr` / `unsafe` / `trusted` joined in 0.0.5 and
 > `enum` in 0.0.6 (each that milestone's source breaking set). `break` / `continue` are
 > the new reserved words of 0.0.9 (the source breaking set of that milestone, D4 —
-> see §6 "break / continue").
+> see §6 "break / continue"). `map` is the new reserved word of **0.0.11** (the
+> source breaking set of that milestone, D1 — see §9.10); the table above is
+> updated when the keyword lands.
 
 ---
 
@@ -1016,7 +1018,9 @@ std.async.run([producer(move ch), consumer(move peer)]);   // move a handle into
 > Bytecode v7: `enum_defs` gains one descriptive `type_param_count: u32` per enum
 > (`docs/BYTECODE.md` §2/§9); no new opcodes; no `FieldTypeTag` change (D8).
 >
-> **0.0.10 (D1 / T01–T03)**: `Result` migrated from a compiler builtin to a **declared
+> **0.0.10 (D1 / T01–T03)**: `Result` migrated from a compiler builtin to a
+> **declared parameterized enum** in std
+
 > parameterized enum in std** — `std/result.fln` declares
 > `pub enum Result<T, E> { Ok(T), Err(E) }` as the language-level source of truth, and the
 > compiler maps `std.result.Result` onto the internal `Result` type. The migration is
@@ -1155,6 +1159,42 @@ b = true as string;  // "true"
 
 ### 9.9 string interpolation (0.0.10, D4–D6)
 
+### 9.10 the `map` type (0.0.11, planned D1–D8)
+
+> **Planning status**: implemented in no milestone yet. The design below
+> is settled at planning level (`docs/0.0.11/PLAN.md` D1–D8); this section
+> is filled out during T07 (docs sync) once the implementation lands.
+
+- **Literal**: `map { k -> v, k2 -> v2 }` — the reserved-word-prefix form
+  (D1). `map {` is always a map literal, never a block expression. Trailing
+  comma allowed (the array-literal rule).
+- **Type use**: `map[K, V]` (the `Result[T, E]` two-argument shape).
+- **Access**: `m[k]` rides the existing `index_suffix` (`expr [ expr ]`) —
+  zero parser change (D4). A hit returns the value; a miss returns the
+  missing-key error; the result is `Result[V, string]` so `m[k]?` composes
+  with `?` (D3).
+- **Ownership**: `map[K, V]` is always owned for every `K` / `V` (D2 — the
+  0.0.3 array posture). Functional `std.map.insert` / `std.map.remove`
+  (the input is consumed, a fresh map returned).
+- **Key whitelist (D5)**: keys must be one of `int` / `bool` / `string` —
+  the `==`-comparable set minus `float` / `unit` / `Range` (a float-keyed
+  map is a footgun; unit / Range keys are useless). Non-whitelisted key
+  types are `MapKeyNotComparable`.
+- **No `Future` / `channel` / `ptr` in `V`** (D6): the same `contains_*`
+  walk that bans them in struct fields, array elements and enum payloads
+  recurses into the map's `V` slot.
+- **`std.map` eight intrinsics (D3)**: `get` / `insert` / `remove` /
+  `contains` / `keys` / `values` / `len` / `clone`. Zero new opcodes; the
+  0.0.9 `std.str` batch template.
+- **Ordering (D8)**: `HashMap` (lookup) + insertion-order `Vec` (order) +
+  a `KeyHash` wrapper (the `KeyHash::Int` / `Bool` / `Str` enum). `keys`
+  / `values` return in declaration order.
+- **Bytecode (D7)**: one new opcode `NewMap` (0xAF) and `FieldTypeTag::Map
+  = 13`. Version **v9 content-driven** — a module is v9 only when a
+  `NewMap` was encoded; every map-free module (including every `std`
+  module) stays v8.
+
+
 A **string literal containing `${`** is lexed into a `StringInterp` token — a sequence of
 literal chunks and embedded expressions — rather than a plain `StringLit`; a literal **without**
 `${` stays a plain `StringLit` and compiles **byte-identically** to 0.0.9 (D6).
@@ -1178,6 +1218,7 @@ literal chunks and embedded expressions — rather than a plain `StringLit`; a l
 ---
 
 ## 10. Pointers and Ownership
+
 
 > **Version note**: not in 0.0.1; `box<T>` / `deref` / `ref` / `move` / `clone` were officially
 > adopted in **0.0.2** (see `docs/0.0.2/PLAN.md` §3.1–3.3 for decisions and details).
@@ -1668,29 +1709,30 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 |
-|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) | ✅ |
-| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) | ✅ (declared in std, non-shadowable; D1/D2) |
-| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag, §9) | ✅ | ✅ |
-| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ | ✅ (+ std.str batch: 8 intrinsics, §11) | ✅ |
-| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ | ✅ | ✅ | ✅ |
-| String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06, §2/§9.9; D4–D6) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 | 0.0.11 (planning) |
+|---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------------------|
+| `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `int` / `bool` / `string` / `float` | ✅ | ✅ (string switches to owned semantics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `func` single-line / multi-line | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `if` / `elif` / `else` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `while` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `choose` | ✅ | ✅ (+ `Ok`/`Err` patterns) | ✅ | ✅ | ✅ | ✅ | ✅ (+ recursive patterns) | ✅ | ✅ (+ zero-payload variant patterns, D1/D7) | ✅ | ✅ |
+| `Result` | ✅ (type only) | ✅ (+ `Ok`/`Err` constructors, `?`) | ✅ | ✅ | ✅ | ✅ | ✅ (stays builtin, D9) | ✅ | ✅ (+ `otherwise` on a Result scrutinee, D2) | ✅ (declared in std, non-shadowable; D1/D2) | ✅ |
+| Function types | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (curried arrow notation behind the flag, §9) | ✅ | ✅ | ✅ |
+| Semicolon `;` | ✅ required | ✅ optional (ASI) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `?` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `move` / `clone` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `box<T>` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ref` | ❌ | ✅ (parameters only) | ✅ | ✅ (async is borrow-free, §10.6) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `struct` | ❌ | ❌ | ✅ (V02) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ | ✅ (+ std.str batch: 8 intrinsics, §11) | ✅ | planned: `std.map` batch (8 intrinsics, §9.10) |
+| std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06, §2/§9.9; D4–D6) | ✅ |
+| `map` type + `std.map` intrinsics | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | planned (§9.10; D1–D8) |
 | `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1791,6 +1833,7 @@ decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
 | 0.0.8 | per-file feature flags (`#feature curry`, D1/D6) + two-part curried declarations behind the flag (§5, D2/D3) + curried arrow function types (§9, D4) + implicit partial application with Copy, deep-copied captures (§10.8, D5/D9–D11) + bytecode v8 `PartialApply` 0xCE, content-driven (only modules that encode a partial reach v8, D13/D14) — **implemented (T01–T10; T11 docs sync)**; non-breaking additive (D16). See `docs/0.0.8/PLAN.md` (D1–D16) and `docs/0.0.8/TICKETS.md` |
 | 0.0.9 | small repairs: zero-payload variant patterns resolve as variant references (BUG-2, D1; joint-coverage exhaustiveness D7) + Result-`choose` accepts `otherwise` / general arms (D2) + `break` / `continue` reserved words with loop-bound lowering (§6, D4) + std.str intrinsic batch — eight VM intrinsics, zero opcodes (§11, D3); no bytecode change (D6, version stays v8) — **implemented (T01–T05; T06 docs sync)**; the only source breaking set is the two new reserved words. See `docs/0.0.9/PLAN.md` (D1–D7) and `docs/0.0.9/TICKETS.md` |
 | 0.0.10 | `Result` declared in std — `std/result.fln` is the language-level source of truth (§8/§9.8, D1), the trio `Ok`/`Err`/`Result` is non-shadowable (D2, the one behavior change), `?`/choose-on-Result keep their exact lowering (D3), backend untouched (D7) + string interpolation `"${expr}"` with `\$` (§2/§9.9, D4–D6), lowering to a `std.str.concat` chain, literals without `${` byte-identical; no bytecode change (D7, version stays v8), BYTECODE.md untouched — **implemented (T01–T06; T07 docs sync)**; the only source breaking set is a string literal containing the exact sequence `${`. See `docs/0.0.10/PLAN.md` (D1–D7) and `docs/0.0.10/TICKETS.md` |
+| 0.0.11 | the `map` type — `map { k -> v }` literals (`map` a reserved word, D1), `m[k]` access riding the existing `index_suffix` (D4), a `std/map.fln` module with eight intrinsics (D3), always-owned `map[K, V]` (D2), key whitelist `{int, bool, string}` (D5), no `Future`/`channel`/`ptr` in the `V` slot (D6), insertion order preserved (D8); bytecode v9 by the content-driven rule (a module is v9 only when a `NewMap` 0xAF was encoded; every map-free module stays v8, D7) — **planning**; `docs/0.0.11/PLAN.md` (D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08) drafted, nothing implemented |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks

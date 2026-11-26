@@ -13,7 +13,12 @@ stack-based virtual machine.
 > currying**, **0.0.7 · parameterized types + pattern matching**,
 > **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
 > **0.0.4 · Patient Ants 🐜**, **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚**
-> and **0.0.1 · Swift Fox 🦊**).
+> and **0.0.1 · Swift Fox 🦊**). **Released** — the `v0.0.10` tag and the six target
+> archives are cut; `release/0.0.10/` mirrors the 0.0.9 layout.
+>
+> **Next milestone 0.0.11 · Cartographer Ant 🗺️ · the `map` type + `std.map` intrinsics** —
+> planning docs drafted (`docs/0.0.11/PLAN.md`, `docs/0.0.11/TICKETS.md`); implementation
+> not started.
 
 ## Language at a Glance
 
