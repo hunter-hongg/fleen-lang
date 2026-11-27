@@ -20,6 +20,8 @@
 > **v0.0.6 additions**: enum instructions (0xCB–0xCD) — `EnumNew` / `EnumIs` / `EnumPayload` — the appended `enum_defs` table, `FieldTypeTag::Enum = 12`, and `Value::Enum` in the value model. The `.flnc` version bumps to 6 (one appended table — the v1–v5 layout stays byte-identical). Design decisions are in `docs/0.0.6/PLAN.md`.
 > **v0.0.7 additions**: bytecode version 7 — the `enum_defs` table gains one descriptive `type_param_count: u32` per enum (§2, §9); **no new opcodes** and no `FieldTypeTag` change, so the only layout difference from v6 is that one field (the v1–v6 byte streams stay byte-identical). Design decisions are in `docs/0.0.7/PLAN.md` (D8).
 > **v0.0.8 additions**: bytecode version 8 — the `PartialApply` instruction (0xCE, §5.18) and the **content-driven** version rule: a module is v8 iff it contains at least one `PartialApply`, else a flag-on file still compiles to a v7 stream (`#feature curry` without a partial call is byte-identical to 0.0.7, D16). Captured function values are runtime-only and never serialized (D14) — v8 differs from v7 by exactly this one opcode and one §10 row. Design decisions are in `docs/0.0.8/PLAN.md` (D13/D14).
+>
+> **v0.0.11 additions**: bytecode version 9 — the `NewMap` instruction (0xAF, §5.19) and the **content-driven** version rule: a module is v9 iff it contains at least one `NewMap`, else the module stays v8 (a map-free module is byte-identical to 0.0.10). The `Map` runtime value is not serialized. Design decisions are in `docs/0.0.11/PLAN.md` (D7).
 
 ---
 
@@ -180,6 +182,7 @@ pub enum FieldTypeTag {
     Int = 0,  Float = 1,  Bool = 2,  Str = 3,  Unit = 4,  Func = 5,
     Result = 6, Array = 7, Box = 8,  Ref = 9,  Struct = 10, Range = 11,
     Enum = 12,  // 0.0.6 T06: a payload whose type is a user enum
+    Map = 13,   // 0.0.11 T05: a field whose type is a map (always owned, D2)
 }
 
 pub struct StructDef {
@@ -371,6 +374,7 @@ Number space is reserved by functional group for easy extension (0.0.2+ instruct
 0x94–0x9F  Reserved
 0xA0–0xA4  Result / error handling (0.0.2, §5.11)
 0xA5       `as` conversion `ToStr` (0.0.2 U13, F8 §3.6)
+0xAF       map literal construction `NewMap` (0.0.11 T05, §5.19)
 0xB0–0xB3  struct (0.0.3 V02, §5.12)
 0xB4–0xB8  array (0.0.3 V03, §5.13)
 0xB9–0xBB  Range / iteration (0.0.3 V04, §5.14)
@@ -689,6 +693,16 @@ Rules:
 - The version bump is **content-driven** (D13): a module is v8 iff it contains at least one `PartialApply`, decided structurally over the MIR (function bodies *and* global initializers — the latter are spliced into the synthesized `__init__`) — **not** by the `#feature curry` flag alone and **not** by a byte scan of the encoded stream (0xCE can appear as an operand byte of another instruction, and a false positive would break the flag-off byte-identity, D16)
 - Captured function values are **runtime-only and never serialized** (D14): the captured state lives in the VM's `Value::Func`, and v8 differs from v7 by exactly this one opcode plus one §10 row — no new table, no `FieldTypeTag` change
 - Verify validates the stack shape (`pops k+1, pushes 1`; the operand is read as the count) and keeps the opcode out of v1–v7 modules (§8); executing `PartialApply` in the VM lands with 0.0.8 T08 (function-value captures)
+
+### 5.19 map literal construction (v0.0.11 T05)
+
+| Instruction | Operand | Delta | Effect |
+|---|---|---|---|
+| `NewMap` | `u16 n` | −2n+1 | Pop `2n` values (key/value pairs in source order), push a fresh `Map` with `n` entries. The `n` pairs are the map's entries; the map is **always owned** (0.0.11 D2). The `Map` value is a runtime-only value (not serialized, D7). |
+
+- `NewMap` takes the **free slot `0xAF` below the `0xB0` v3 block** (§4.2); the slot was reserved but unused in v1–v8
+- The version bump is **content-driven** (D7): a module is v9 iff it contains at least one `NewMap`, decided structurally over the MIR — **not** by a byte scan of the encoded stream (0xAF can appear as an operand byte of another instruction, and a false positive would break the map-free byte-identity, D7)
+- Verify validates the stack shape (`pops 2n, pushes 1`) and keeps the opcode out of v1–v8 modules (§8); executing `NewMap` in the VM lands with 0.0.11 T05 (map value construction)
 
 ---
 
@@ -1312,7 +1326,7 @@ unchanged). The field is descriptive (§2), so the v6 → v7 difference is one u
 | `field_types` | `field_count` × u8 (a `FieldTypeTag`, §2) |
 
 The `FieldTypeTag` enum maps to the byte as `Int=0, Float=1, Bool=2, Str=3, Unit=4, Func=5,
-Result=6, Array=7, Box=8, Ref=9, Struct=10, Range=11, Enum=12`; any other byte is a format error.
+Result=6, Array=7, Box=8, Ref=9, Struct=10, Range=11, Enum=12, Map=13`; any other byte is a format error.
 The table is present only when `version >= 3`.
 
 ### Enum Definitions (`enum_defs`, 0.0.6 T06, version ≥ 6 only)
@@ -1339,7 +1353,7 @@ Rules:
 - `is_builtin` / `mutable` only accept `0` or `1`; any other byte is a format error.
 - The constant pool `tag` only accepts `0/1/2`; anything else is a format error.
 - Later versions (2+) only **append new tables at the end**; the field order and widths of existing tables remain stable.
-- `version` accepts `{1, 2, 3, 4, 5, 6, 7, 8}` (from 0.0.8 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`; v7 adds the `type_param_count: u32` per `enum_defs` entry (no new table); v8 (content-driven, D13) changes no table — its only delta is the `PartialApply` opcode (§5.18).
+- `version` accepts `{1, 2, 3, 4, 5, 6, 7, 8, 9}` (from 0.0.11 on); v3 appends `struct_defs`; v4 and v5 change no table; v6 appends `enum_defs`; v7 adds the `type_param_count: u32` per `enum_defs` entry (no new table); v8 (content-driven, D13) changes no table — its only delta is the `PartialApply` opcode (§5.18); v9 (content-driven, D7) changes no table — its only delta is the `NewMap` opcode (§5.19).
 
 ---
 
@@ -1355,6 +1369,7 @@ Rules:
 | 6 | 0.0.6 | + enum instructions: `EnumNew`/`EnumIs`/`EnumPayload` (0xCB–0xCD); the `Enum` runtime value (not serialized); the appended `enum_defs` table and `FieldTypeTag::Enum = 12` (§5.17, §2, §9) |
 | 7 | 0.0.7 | the `enum_defs` table gains one descriptive `type_param_count: u32` per enum, written after `variant_count`, only in v7+ streams (§2, §9); **zero layout changes beyond that field** — no new table, no new opcodes, no `FieldTypeTag` change (D8) |
 | 8 | 0.0.8 | + `PartialApply` (0xCE, first slot of the reserved `0xCE–0xDF` group, §5.18); **content-driven** (D13): emitted iff at least one `PartialApply` was encoded, else the module stays v7 (a flag-on file without partial calls compiles to a v7 stream, byte-identical to 0.0.7, D16); captured function values are runtime-only and never serialized (D14) — **zero layout changes** — no new table (§5.18) |
+| 9 | 0.0.11 | + `NewMap` (0xAF, the free slot below the `0xB0` v3 block, §5.19); the `Map` runtime value (not serialized); `FieldTypeTag::Map = 13` (§2, §9); **content-driven** (D7): emitted iff at least one `NewMap` was encoded, else the module stays v8 — **zero layout changes** — no new table (§5.19) |
 
 Rules:
 - The bytecode version increases **monotonically** with the language version

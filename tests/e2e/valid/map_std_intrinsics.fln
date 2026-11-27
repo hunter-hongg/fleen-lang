@@ -1,0 +1,33 @@
+// T08: std.map intrinsics end-to-end.
+import std.map;
+
+func main() {
+    // insert + len
+    m = map { 1 -> 10, 2 -> 20 };
+    m2 = std.map.insert(m, 3, 30);
+    print("len2=", std.map.len(m2) as string);  // 3
+    print("orig_len=", std.map.len(m) as string);  // 2 (unchanged)
+
+    // remove + contains
+    m3 = std.map.remove(m2, 1);
+    print("len3=", std.map.len(m3) as string);  // 2
+    print("has1=", std.map.contains(m3, 1) as string);  // false
+    print("has2=", std.map.contains(m3, 2) as string);  // true
+
+    // keys (insertion order)
+    ks = std.map.keys(m2);
+    print("keys=", ks[0] as string, ",", ks[1] as string, ",", ks[2] as string);  // 1,2,3
+
+    // get (Result) — hit and miss
+    r = m3[2];
+    choose move r {
+        when Ok(v) { print("get2=", v as string); }
+        when Err(e) { print("err=", e); }
+    };
+    r2 = m3[99];
+    choose move r2 {
+        when Ok(v) { print("get99=", v as string); }
+        when Err(e) { print("err99=", e); }  // "key not found"
+    };
+}
+

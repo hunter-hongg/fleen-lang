@@ -1,0 +1,38 @@
+// 0.0.11 T08: map demo — literal, accessors, intrinsics.
+import std.map;
+
+func main() {
+    // 1. Map literal + access + len
+    m = map { 1 -> "one", 2 -> "two", 3 -> "three" };
+    print("len:", std.map.len(m) as string);  // 3
+
+    // 2. get (Result) — hit and miss
+    r = m[2];
+    choose move r {
+        when Ok(v) { print("m[2] =", v); }
+        when Err(e) { print("m[2] err:", e); }
+    };
+    r2 = m[99];
+    choose move r2 {
+        when Ok(v) { print("m[99] =", v); }
+        when Err(e) { print("m[99] err:", e); }  // "key not found"
+    };
+
+    // 3. contains
+    print("has 1:", std.map.contains(m, 1) as string);  // true
+    print("has 4:", std.map.contains(m, 4) as string);  // false
+
+    // 4. insert (fresh map, D8)
+    m2 = std.map.insert(m, 4, "four");
+    print("len after insert:", std.map.len(m2) as string);  // 4
+    print("original len:", std.map.len(m) as string);       // 3 (unchanged)
+
+    // 5. remove (fresh map, D8)
+    m3 = std.map.remove(m2, 1);
+    print("len after remove:", std.map.len(m3) as string);  // 3
+    print("has 1:", std.map.contains(m3, 1) as string);     // false
+
+    // 6. keys (insertion order, D8)
+    ks = std.map.keys(m);
+    print("keys:", ks[0] as string, ",", ks[1] as string, ",", ks[2] as string);  // 1, 2, 3
+}

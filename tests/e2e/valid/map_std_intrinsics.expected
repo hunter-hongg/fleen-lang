@@ -1,0 +1,8 @@
+len2=3
+orig_len=2
+len3=2
+has1=false
+has2=true
+keys=1,2,3
+get2=20
+err99=key not found

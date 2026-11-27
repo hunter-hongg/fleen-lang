@@ -1,11 +1,11 @@
 ## [Unreleased]
 
-## [0.0.11] - planned (Cartographer Ant 🗺️)
+## [0.0.11] - T01-T08 implemented (Cartographer Ant 🗺️)
 
-> **Planning** — `docs/0.0.11/PLAN.md` (decisions D1–D8) and `docs/0.0.11/TICKETS.md`
-> (T01–T08) drafted; implementation not started. Nothing below is implemented yet.
+> T01-T08 implemented and green: `map` type + literals + `std.map` intrinsics
+> + bytecode v9. Release publication pending (tag + archives).
 
-### Planned
+### Implemented
 - **The `map` type + `std.map` intrinsics** (PLAN D1–D8): `map { k -> v, k2 -> v2 }`
   literals; `m[k]` access riding the existing `index_suffix` (zero parser change, D4)
   returning `Result[V, string]` (D3); `std/map.fln` with eight intrinsics (`get` /
@@ -19,7 +19,7 @@
   One new opcode (`NewMap` 0xAF), one new `FieldTypeTag` variant (`Map = 13`), no
   other table or opcode change — `docs/BYTECODE.md` gains a v9 note only.
 
-### Planned breaking
+### Breaking
 - ⚠️ **`map` becomes a reserved word** (D1) — the 0.0.11 declared breaking set. A
   user identifier named `map` (variable / function / struct / enum) will no longer
   be legal.
