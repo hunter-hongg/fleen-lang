@@ -4381,3 +4381,126 @@ fn map_type_annotation_rejects_a_foreign_value_type() {
 // (T02's `map_literal_is_rejected_until_t03` was replaced by the T03 suite
 // above — the literal is now a real map at the typeck level, and T05 lands
 // the lowering / access opcodes.)
+
+// ========== 0.0.11 T04: `m[k]` access through `index_suffix` ==========
+
+#[test]
+fn map_index_hit_returns_result_of_value_and_string() {
+    // D3: `m[k]` on a `map[K, V]` base (the `K` subscript unifies with the
+    // key type) has type `Result[V, string]` — the missing key is
+    // `Err("key not found")` at the runtime, but at the type level the
+    // result is always a Result. (No lowering yet, T05: the type only.)
+    let src = "func f(m: map[int, int]): Result[int, string] { r = m[1]; r }";
+    let hir = compile_ok(src);
+    match &hir.items[0] {
+        TypedHirItem::Decl(TypedDeclHir::Func(f)) => {
+            // The local `r` (the index result) has the Result type; the
+            // return is exactly that.
+            assert_eq!(
+                f.ret_type.as_ref(),
+                Some(&Type::Result(Box::new(Type::Int), Box::new(Type::String)))
+            );
+        }
+        other => panic!("expected Func decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_index_string_key_works() {
+    // D5: `string` keys are in the whitelist; `m["a"]` on a
+    // `map[string, int]` base is `Result<int, string>`.
+    let src = "func f(m: map[string, int]): Result<int, string> { r = m[\"a\"]; r }";
+    compile_ok(src);
+}
+
+#[test]
+fn map_index_bool_key_works() {
+    // D5: `bool` keys are in the whitelist.
+    let src = "func f(m: map[bool, int]): Result<int, string> { r = m[true]; r }";
+    compile_ok(src);
+}
+
+#[test]
+fn map_index_result_with_string_value_is_moved_out() {
+    // D2: the result of `m[k]` is `Result[V, string]`; when V is `string`
+    // the Result is *owned* (the value side is owned). The index read is
+    // already a copy out (the D2 read-copies rule), so the read itself
+    // does not trip the bare-owned-use gate — that gate fires only on a
+    // bare *variable* in a consuming position, and the index expression
+    // is not a variable. Instead, the consuming position is the call
+    // argument: `g(r)` where `r` holds an owned `Result<string, string>`
+    // is flagged `OwnedArgRequiresMove` — the same rule a `string`
+    // binding passed to a consuming argument follows. The flow-sensitive
+    // pass then sees `r` as moved, so a second use is `UseAfterMove`.
+    let src = "func g(r: Result<string, string>): int { 0 }\nfunc f(m: map[string, string]): Result<string, string> { r = m[\"a\"]; g(r); r }";
+    let errs = compile_err(src);
+    // The `OwnedArgRequiresMove` fires on the `g(r)` argument (the
+    // owned `Result` passed by a bare variable). That single error is
+    // sufficient to pin the D2 rule: the `Result[V, string]` index
+    // result is *owned* when V is `string`, so a bare-variable use in
+    // a consuming position is flagged exactly like a `string` binding.
+    let kinds = err_kinds(&errs);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::OwnedArgRequiresMove { .. })),
+        "expected OwnedArgRequiresMove for the owned Result argument, got {kinds:?}"
+    );
+}
+
+#[test]
+fn map_index_wrong_key_type_is_type_mismatch() {
+    // D4: an `int` key where the map wants a `string` key (or the reverse)
+    // is a `TypeMismatch` (the ticket's `ArgTypeMismatch` slot — `unify`
+    // reports it against the key type, the index expression's span).
+    let src = "func f(m: map[string, int]): Result<int, string> { 0 }";
+    let src_bad1 = "func f(m: map[string, int]): Result<int, string> { r = m[1]; 0 }";
+    let _ = src;
+    let errs = compile_err(src_bad1);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::TypeMismatch { .. })),
+        "expected TypeMismatch for the wrong key type, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_index_on_non_map_base_stays_invalid_operand() {
+    // A non-array, non-map base (e.g. a scalar `int`) is still the
+    // array-path `InvalidOperand(index)` error — the map case is a new
+    // base type, not a change to the array path.
+    let src = "func f(x: int): int { r = x[1]; 0 }";
+    let errs = compile_err(src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { op, .. } if *op == "index")),
+        "expected InvalidOperand(index) for a scalar base, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_index_composes_with_question() {
+    // D4: `m[k]?` composes with the 0.0.2 `?` propagation rules — the
+    // `typeck_question` path is unchanged (it already sees a `Result<V,
+    // string>` operand and requires the enclosing function to return
+    // `Result<_, string>`).
+    let src = "func f(m: map[int, int]): Result<int, string> { v = m[1]?; Ok(v) }";
+    compile_ok(src);
+}
+
+#[test]
+fn map_index_question_outside_result_fn_is_error() {
+    // The `?` on a map index is still `QuestionOutsideResultFn` when the
+    // enclosing function's return type is not a `Result` with the
+    // matching error type (the 0.0.2 rule, applied to the map result).
+    let src = "func f(m: map[int, int]): int { v = m[1]?; 0 }";
+    let errs = compile_err(src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::QuestionOutsideResultFn)),
+        "expected QuestionOutsideResultFn, got {errs:?}"
+    );
+}

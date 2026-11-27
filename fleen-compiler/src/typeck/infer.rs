@@ -4921,18 +4921,43 @@ impl TypeChecker {
         }
     }
 
-    /// Type check an index expression `a[i]` (0.0.3 V03).
+    /// Type check an index expression `a[i]` (0.0.3 V03) or `m[k]` on a map
+    /// (0.0.11 T04, D4).
     ///
-    /// The subscript must be `int` (`IndexNotInt`); the indexed value must
-    /// be an array (a `ref [T]` parameter reads as `[T]`; a `box<[T]>` must
-    /// be read with `deref` first). The result is a bounds-checked **copy**
-    /// of the element — deep for owned element types (D3) — so the read
-    /// never disturbs the array.
+    /// For an array base the subscript must be `int` (`IndexNotInt`); the
+    /// indexed value must be an array (a `ref [T]` parameter reads as
+    /// `[T]`; a `box<[T]>` must be read with `deref` first). The result is
+    /// a bounds-checked **copy** of the element — deep for owned element
+    /// types (D3) — so the read never disturbs the array.
+    ///
+    /// For a map base (`Type::Map(K, V)`, 0.0.11 T03) the subscript is typed
+    /// against the key type (the D5 whitelist: `int` / `bool` / `string`);
+    /// the result is `Result<V, string>` (D3) — a missing key is
+    /// `Err("key not found")`. Wrong-key-type subscripts are a
+    /// `TypeMismatch` against the key (the ticket's `ArgTypeMismatch` slot —
+    /// `unify` reports a `TypeMismatch` with the key type, the index
+    /// expression's span). `?` composes on the `Result<V, string>` result
+    /// without any extra wiring (the 0.0.2 `typeck_question` rule, D4):
+    /// `v = m[k]?;` propagates the missing-key error when the enclosing
+    /// function returns `Result<_, string>`.
     fn typeck_index(&mut self, arr: ExprHir, idx: ExprHir, span: Span) -> Result<TypedExprHir, ()> {
         let typed_arr = self.typeck_expr(arr, None)?;
         let typed_idx = self.typeck_expr(idx, None)?;
 
-        if !matches!(typed_idx.ty(), Type::Int) {
+        let arr_ty = typed_arr.ty();
+
+        // 0.0.11 T04 D4: a map base is typed by its key type, not `int` —
+        // the D5 whitelist is `int` / `bool` / `string`, so the subscript
+        // gate below only applies to arrays. A map subscript that is the
+        // *right type but the wrong one* (e.g. `m[1]` on a
+        // `map[string, V]`) is caught by the `unify` below as a
+        // `TypeMismatch` against the key type, with the index expression's
+        // span. `unify` sees through `ref K` (the `ref [T]` parameter
+        // posture), so a `ref`-wrapped key is accepted exactly as the
+        // array path accepts `ref [T]`.
+        let is_map_base = matches!(arr_ty, Type::Map(_, _))
+            || matches!(arr_ty, Type::Ref(ref inner) if matches!(**inner, Type::Map(_, _)));
+        if !is_map_base && !matches!(typed_idx.ty(), Type::Int) {
             self.add_error(
                 TypeckErrorKind::IndexNotInt {
                     found: typed_idx.ty(),
@@ -4942,13 +4967,29 @@ impl TypeChecker {
             return Err(());
         }
 
-        let arr_ty = typed_arr.ty();
         let target: &Type = match &arr_ty {
             Type::Ref(inner) => inner,
             ty => ty,
         };
         let elem_ty = match target {
             Type::Array(el) => (**el).clone(),
+            // 0.0.11 T04 D3/D4: `m[k]` on a `map[K, V]` is the same
+            // `index_suffix` (zero parser change); the result is
+            // `Result[V, string]` — the missing key is `Err("key not
+            // found")`, the D3 rule. The subscript must unify with the
+            // key type; the value is read out as a deep copy, exactly as
+            // an array element read (D2's read-copies rule). A `ref`
+            // parameter of map type is indexed through `target` the same
+            // way a `ref [T]` parameter is — the D2 rule keeps the map
+            // itself owned, and the subscript unifies against the key.
+            Type::Map(k, v) => {
+                let key_ty = (**k).clone();
+                if let Err(e) = unify(&key_ty, &typed_idx.ty(), typed_idx.span()) {
+                    self.add_error(e.kind, e.span);
+                    return Err(());
+                }
+                Type::Result(Box::new((**v).clone()), Box::new(Type::String))
+            }
             Type::Box(_) => {
                 self.add_error(TypeckErrorKind::IndexOnBox, typed_arr.span());
                 return Err(());
@@ -4970,7 +5011,10 @@ impl TypeChecker {
         // `std.async.run` moves the frames out; elements are never read.
         // (`clone a[i]` delegates here, so the clone spelling is covered too.)
         // The check sees through nesting: `tss[0]` on `[[Future]]` copies a
-        // whole array of frames.
+        // whole array of frames. The walk is array-only: a map's value slot
+        // is sealed at construction (T03's `check_map_value_storable`, D6),
+        // so a `Future` / `channel` / `ptr` value can never reach an index
+        // read through a map base.
         if elem_ty.contains_future() {
             self.add_error(TypeckErrorKind::FutureIndexRead, span);
             return Err(());
