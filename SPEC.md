@@ -624,8 +624,9 @@ module with eight intrinsics (`get` / `insert` / `remove` / `contains` / `keys` 
 `float` / `unit` / `Range`, D5), no `Future` / `channel` / `ptr` in the `V` slot (D6), insertion
 order preserved via `HashMap` + order `Vec` + a `KeyHash` wrapper (D8). Bytecode v9 by the
 content-driven rule: a module is v9 only when a `NewMap` (0xAF) was encoded; every map-free
-module (including every `std` module) stays v8 (D7). Status: **planning** — `docs/0.0.11/PLAN.md`
-(decisions D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08) drafted; implementation not started.**
+module (including every `std` module) stays v8 (D7). Status: **T01–T08 implemented and green** —
+`docs/0.0.11/PLAN.md` (decisions D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08) complete;
+release publication (tag + archives) pending.**
 
 ---
 
@@ -1181,10 +1182,13 @@ notation were written into DESIGN.md §5/§9, the capture rules into §10.8, the
 The release was published (the `v0.0.8` tag and the six target archives are cut;
 `release/0.0.8/` mirrors the 0.0.7 layout). Breaking set: none (non-breaking additive, D16). See `docs/0.0.8/PLAN.md` and `docs/0.0.8/TICKETS.md`.
 
-**Status of 0.0.11**: **planning**. Decisions D1–D8 settled at planning level
-(`docs/0.0.11/PLAN.md`); tickets T01–T08 drafted (`docs/0.0.11/TICKETS.md`).
-Nothing implemented. The declared breaking set: `map` becomes a reserved word
-(D1).
+**Status of 0.0.11**: **T01–T08 implemented and green**. Decisions D1–D8 settled
+(`docs/0.0.11/PLAN.md`); tickets T01–T08 complete (`docs/0.0.11/TICKETS.md`).
+T01: `map` keyword + reserved word (D1); T02: map literals + type system (D2/D3/D4/D5/D6);
+T03: typeck + 5 diagnostics; T04: lowering (MiExpr::Map → MIR); T05: bytecode v9
+(`NewMap` 0xAF, content-driven D7) + VM map value + 8 intrinsics; T06: std/map.fln;
+T07: 5 diagnostic paths + 5 error fixtures + 1 valid fixture; T08: examples +
+CHANGELOG + docs sync. Release publication (tag + archives) pending.
 
 ---
 
