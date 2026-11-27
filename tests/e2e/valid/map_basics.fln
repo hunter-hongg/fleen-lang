@@ -17,12 +17,13 @@ func main() {
     print("has2=", std.map.contains(m, 2) as string);  // true
     print("has9=", std.map.contains(m, 9) as string);  // false
 
-    // insert (fresh map, D8)
-    m2 = std.map.insert(m, 4, "d");
+    // insert (fresh map, D2/D8): the input is consumed, so a clone keeps
+    // `m` usable below — the PLAN D2 canonical spelling.
+    m2 = std.map.insert(clone m, 4, "d");
     print("len2=", std.map.len(m2) as string);  // 4
     print("has4=", std.map.contains(m2, 4) as string);  // true
 
-    // remove (fresh map, D8)
+    // remove (fresh map, D2/D8): consumes `m2`
     m3 = std.map.remove(m2, 1);
     print("len3=", std.map.len(m3) as string);  // 3
     print("has1=", std.map.contains(m3, 1) as string);  // false

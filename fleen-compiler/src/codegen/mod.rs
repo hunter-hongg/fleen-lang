@@ -32,8 +32,11 @@ use crate::lower::mir::{Mir, MirBlock, MirInstr, MirInstrKind};
 /// `PartialApply` instruction 0xCE — **content-driven**: emitted only when
 /// at least one `PartialApply` was encoded, else the module stays v7 (a
 /// `#feature curry` file without partial calls compiles to a v7 module).
-/// Readers accept all eight.
-pub const MODULE_VERSION: u16 = 9;
+/// Version 9 (0.0.11 T05/D7) adds the `NewMap` instruction 0xAF — likewise
+/// **content-driven**: emitted only when at least one `NewMap` was encoded,
+/// else the module stays at its v7/v8 baseline (a map-free module is
+/// byte-identical to 0.0.10 output, D7). Readers accept all nine.
+pub const MODULE_VERSION: u16 = 8;
 
 /// Bytecode version emitted when at least one `PartialApply` instruction
 /// was encoded (0.0.8 T07, content-driven bump, D13). The only delta from
@@ -48,13 +51,15 @@ pub const MODULE_VERSION_V9: u16 = 9;
 
 /// Lower MIR into a bytecode module.
 ///
-/// The emitted module is bytecode version 7 by default (BYTECODE.md §10):
-/// it carries the struct / async / pointer / enum instructions and the
+/// The emitted module is bytecode version 8 by default (BYTECODE.md §10):
+/// it carries the struct / async / pointer / enum / map instructions and the
 /// appended `struct_defs` and `enum_defs` tables (the latter with the
 /// per-enum `type_param_count` field, 0.0.7 T07/D8). When at least one
 /// `PartialApply` instruction was encoded, the module lifts to version 8
-/// (content-driven, 0.0.8 T07/D13) — a flag-on file without partial calls
-/// still produces a v7 module.
+/// (content-driven, 0.0.8 T07/D13); when at least one `NewMap` instruction
+/// was encoded, it lifts to version 9 (content-driven, 0.0.11 T05/D7) — a
+/// module with neither a partial call nor a map literal still produces a
+/// v8 module.
 ///
 /// # Errors
 /// `CodegenError` on missing `main` or malformed MIR (e.g. bad block index).

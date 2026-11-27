@@ -359,6 +359,7 @@ fn decode_field_tag(byte: u8) -> Result<FieldTypeTag, FlncError> {
         10 => FieldTypeTag::Struct,
         11 => FieldTypeTag::Range,
         12 => FieldTypeTag::Enum,
+        13 => FieldTypeTag::Map,
         t => return Err(FlncError(format!("bad field type tag {t}"))),
     })
 }

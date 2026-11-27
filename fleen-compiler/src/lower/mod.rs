@@ -1495,6 +1495,12 @@ impl<'a> FnBodyCx<'a> {
                 fb.emit(MirInstr::new(MirInstrKind::ToStr, expr.span()));
             }
             // 0.0.2 U06: `?` operator (Result propagation).
+            // 0.0.11 (review note): `m[k]?` — including a chained base
+            // (`m[k][k2]?`, whose operand is an Index over a Result) — goes
+            // through the generic path below: the operand lowering already
+            // runs the ArrGet chain once, the Dup copies the resulting
+            // Result, and UnwrapOk consumes the original, so there is no
+            // double lookup and the Err propagates.
             TypedExprHir::Question { operand, span, .. } => {
                 self.lower_question(fb, operand, *span)?;
             }

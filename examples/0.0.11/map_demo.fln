@@ -1,5 +1,14 @@
-// 0.0.11 T08: map demo — literal, accessors, intrinsics.
+// 0.0.11 T08: map demo — literal, accessors, intrinsics, chaining.
+//
+// Ownership note (D2): `insert` / `remove` consume their input map and
+// return a fresh one, so each binding is used exactly once after its
+// producer runs; reusing an earlier binding needs `clone` (the PLAN D2
+// canonical spelling for "keep the original alive").
 import std.map;
+
+func chained(nested: map[string, map[string, int]]): Result<int, string> {
+    Ok(nested["row"]["x"]?)
+}
 
 func main() {
     // 1. Map literal + access + len
@@ -22,17 +31,22 @@ func main() {
     print("has 1:", std.map.contains(m, 1) as string);  // true
     print("has 4:", std.map.contains(m, 4) as string);  // false
 
-    // 4. insert (fresh map, D8)
-    m2 = std.map.insert(m, 4, "four");
+    // 4. insert — the input is consumed (D2); a clone keeps `m` for §6
+    m2 = std.map.insert(clone m, 4, "four");
     print("len after insert:", std.map.len(m2) as string);  // 4
-    print("original len:", std.map.len(m) as string);       // 3 (unchanged)
 
-    // 5. remove (fresh map, D8)
+    // 5. remove — consumes `m2` (D2)
     m3 = std.map.remove(m2, 1);
     print("len after remove:", std.map.len(m3) as string);  // 3
     print("has 1:", std.map.contains(m3, 1) as string);     // false
 
-    // 6. keys (insertion order, D8)
+    // 6. chained access `m[k][k2]` (D4) + keys of the original map
+    nested = map { "row" -> map { "x" -> 7, "y" -> 8 } };
+    rc = chained(move nested);
+    choose move rc {
+        when Ok(cell) { print("chained:", cell as string); }  // 7
+        when Err(e) { print("chained err:", e); }
+    };
     ks = std.map.keys(m);
     print("keys:", ks[0] as string, ",", ks[1] as string, ",", ks[2] as string);  // 1, 2, 3
 }

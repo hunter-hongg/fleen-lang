@@ -90,6 +90,25 @@ fn reject_deep_fork(v: &Value) -> Result<(), RuntimeErrorKind> {
 
 /// Unconditional form for sites where the value being copied is by
 /// construction *nested* (a field read, a payload read, a capture being
+/// 0.0.11 (review): the shared prologue of the `std.map.*` intrinsics —
+/// resolve the first argument through a borrow handle (`ref map[K, V]` read
+/// path) and take its `MapCell`; anything else on the slot is malformed
+/// bytecode. One macro instead of eight copies of the same three lines (a
+/// `macro_rules!` cannot live inside an `impl`, so this sits at module
+/// scope next to the other VM helpers).
+macro_rules! map_cell_arg {
+    // Statement form: it binds the `Resolved` to `$binding` so the borrow
+    // inside `$cell` outlives the statement (an expression form would drop
+    // the temporary — E0716).
+    ($self:ident, $args:expr, $binding:ident, $cell:ident) => {
+        let $binding = $self.read_ref(&$args[0])?;
+        let $cell = match $binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+    };
+}
+
 /// merged): a fork kind at any depth is refused outright.
 fn reject_deep_fork_unconditional(v: &Value) -> Result<(), RuntimeErrorKind> {
     match deep_fork_kind(v) {
@@ -1539,11 +1558,7 @@ impl Vm {
 
     /// `std.map.get(m, k)` → `Result[V, string]`.
     fn builtin_map_get(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         let map_key = MapKey(args[1].clone());
         match cell.data.get(&map_key) {
             Some(v) => Ok(Value::Ok(Box::new(v.clone()))),
@@ -1558,11 +1573,7 @@ impl Vm {
     /// map keys at runtime.
     #[allow(clippy::mutable_key_type)]
     fn builtin_map_insert(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         let mut order = cell.order.clone();
         let mut data = cell.data.clone();
         let map_key = MapKey(args[1].clone());
@@ -1576,11 +1587,7 @@ impl Vm {
     /// `std.map.remove(m, k)` → fresh map with k removed.
     #[allow(clippy::mutable_key_type)]
     fn builtin_map_remove(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         let map_key = MapKey(args[1].clone());
         if cell.data.contains_key(&map_key) {
             let order: Vec<Value> = cell
@@ -1604,32 +1611,20 @@ impl Vm {
 
     /// `std.map.contains(m, k)` → bool.
     fn builtin_map_contains(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         let map_key = MapKey(args[1].clone());
         Ok(Value::Bool(cell.data.contains_key(&map_key)))
     }
 
     /// `std.map.keys(m)` → [K] (declaration order).
     fn builtin_map_keys(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         Ok(Value::Arr(cell.order.clone().into_boxed_slice()))
     }
 
     /// `std.map.values(m)` → [V] (declaration order).
     fn builtin_map_values(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         let mut values = Vec::with_capacity(cell.order.len());
         for k in &cell.order {
             let map_key = MapKey(k.clone());
@@ -1642,21 +1637,13 @@ impl Vm {
 
     /// `std.map.len(m)` → int.
     fn builtin_map_len(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         Ok(Value::Int(cell.data.len() as i64))
     }
 
     /// `std.map.clone(m)` → fresh map (deep copy).
     fn builtin_map_clone(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
-        let binding = self.read_ref(&args[0])?;
-        let cell = match binding.as_value() {
-            Value::Map(cell) => cell,
-            _ => return Err(RuntimeErrorKind::StackShape),
-        };
+        map_cell_arg!(self, args, binding, cell);
         Ok(Value::Map(cell.clone()))
     }
 
@@ -2373,8 +2360,14 @@ impl Vm {
                 for pair in pairs.chunks_exact(2) {
                     let k = pair[0].clone();
                     let v = pair[1].clone();
-                    order.push(k.clone());
-                    let key = MapKey(k);
+                    // D8 consistency: a duplicate literal key overwrites in
+                    // place — it must not append a second order entry, or
+                    // `len` / `keys` / `values` would disagree with each
+                    // other (the same rule `builtin_map_insert` follows).
+                    let key = MapKey(k.clone());
+                    if !data.contains_key(&key) {
+                        order.push(k);
+                    }
                     data.insert(key, v);
                 }
                 self.stack
@@ -2405,6 +2398,25 @@ impl Vm {
                 // `Ok(value)` if found, `Err("key not found")` if not.
                 let key = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let base = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                // One lookup body shared by the bare-map and chained-result
+                // arms (0.0.11 review fix): the deep-fork backstop and the
+                // D3 missing-key Err cannot drift between them.
+                let map_lookup = |cell: &MapCell, key: Value| -> Result<Value, RuntimeErrorKind> {
+                    let map_key = MapKey(key);
+                    match cell.data.get(&map_key) {
+                        Some(v) => {
+                            // Same defensive backstop as the array arm
+                            // above: the value read is a deep copy, which
+                            // would fork a suspended Future frame or alias
+                            // a channel buffer. Typeck seals a map's value
+                            // slot (D6), so this only fires for malformed
+                            // bytecode.
+                            reject_deep_fork_unconditional(v)?;
+                            Ok(Value::Ok(Box::new(v.clone())))
+                        }
+                        None => Ok(Value::Err(Box::new(Value::Str("key not found".into())))),
+                    }
+                };
                 let copy = {
                     let resolved = self.read_ref(&base)?;
                     match resolved.as_value() {
@@ -2429,13 +2441,18 @@ impl Vm {
                             reject_deep_fork_unconditional(&elems[i as usize])?;
                             elems[i as usize].clone()
                         }
-                        Value::Map(cell) => {
-                            let map_key = MapKey(key);
-                            match cell.data.get(&map_key) {
-                                Some(v) => Value::Ok(Box::new(v.clone())),
-                                None => Value::Err(Box::new(Value::Str("key not found".into()))),
-                            }
-                        }
+                        Value::Map(cell) => map_lookup(cell, key)?,
+                        // 0.0.11 D4 (review fix): `m[k][k2]` — the outer
+                        // base is the `Result` a previous `m[k]` read
+                        // produced. An `Ok` payload that is a map is looked
+                        // up exactly like a bare map; a bare `Err` (the
+                        // inner read missed) propagates unchanged — there
+                        // is no key to look up.
+                        Value::Ok(inner) => match &**inner {
+                            Value::Map(cell) => map_lookup(cell, key)?,
+                            _ => return Err(RuntimeErrorKind::StackShape),
+                        },
+                        v @ Value::Err(_) => v.clone(),
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
                 };
@@ -3088,14 +3105,15 @@ impl Vm {
     fn read_slot(&self, idx: usize) -> Result<Value, RuntimeErrorKind> {
         match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
             Value::Cell(cell) => Ok(cell.borrow().clone()),
-            // 0.0.11 T05 (D2): a map is a move-only owned type. The
-            // compiler emits `ArrGet` for `m[k]` when `m` is a `ref` parameter
-            // (the `ref` handle resolves to the pointee), but `StoreLocal` /
-            // `CloneLocal` can also find a map on the stack. The map value is
-            // deep-copied by its derived `Clone` (the `MapCell` + `HashMap`
-            // are both `Clone`), so we hand back the value as an owned copy.
-            // This is the 0.0.2 D3 rule: an element read is a deep copy.
-            Value::Map(_) => Ok(self.stack.get(idx).unwrap().clone()),
+            // Every other variant — including `Value::Map` (0.0.11 T05, D2:
+            // a map is a move-only owned type; the compiler emits `ArrGet`
+            // for `m[k]` when `m` is a `ref` parameter, but `StoreLocal` /
+            // `CloneLocal` can also find a map on the stack) — is
+            // deep-copied by the derived `Clone` (the `MapCell` + `HashMap`
+            // are both `Clone`), so the catch-all below hands back an owned
+            // copy. This is the 0.0.2 D3 rule: an element read is a deep
+            // copy. Only `Cell` needs the special arm: cloning a `Cell`
+            // handle would alias the RefCell instead of copying its value.
             v => Ok(v.clone()),
         }
     }

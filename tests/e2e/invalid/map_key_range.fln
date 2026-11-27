@@ -1,0 +1,4 @@
+func main() {
+    m: map[Range, string] = map { };
+    print("hi");
+}

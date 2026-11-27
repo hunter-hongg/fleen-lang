@@ -1136,10 +1136,10 @@ impl TypeChecker {
     /// pointer value would hand out aliasing access in safe code.
     fn check_map_value_storable(&mut self, ty: &Type, span: Span) -> Result<(), ()> {
         // A map value is a full value position: the same contains_* seal a
-        // struct field / array element / box cell applies (D6).
-        //
-        // 0.0.11 T07: the error message names the map position so the
-        // fix is actionable (MapValueInvalid).
+        // struct field / array element / box cell applies (D6). The
+        // diagnostics are the existing storable set (`ChannelNotStorable` /
+        // `FutureNotStorable` / `PtrNotStorable`); there is no separate
+        // `MapValueInvalid` kind.
         if ty.contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, span);
             return Err(());
@@ -3888,6 +3888,13 @@ impl TypeChecker {
             typed_args.push(typed_arg);
         }
 
+        // 0.0.11 T05 (D2): the D2 ownership contract for `insert` /
+        // `remove` (the input map is consumed) is enforced by the ownership
+        // pass, not here — a bare owned map argument is legal (the PLAN D2
+        // canonical spelling `std.map.insert(m, "c", 3)`) but CONSUMES `m`;
+        // reuse afterwards is the ordinary UseAfterMove. Read-only helpers
+        // keep the bare-read auto-clone. See `ownership.rs`, the `Call` arm.
+
         // 0.0.4 T08: same bare-read rule as the fixed builtin path — a
         // schematic call over an array of futures (`std.arr.get(ts, 0)`)
         // would copy frames through the element read. No schematic builtin
@@ -4958,7 +4965,26 @@ impl TypeChecker {
         // span. `unify` sees through `ref K` (the `ref [T]` parameter
         // posture), so a `ref`-wrapped key is accepted exactly as the
         // array path accepts `ref [T]`.
-        let is_map_base = matches!(arr_ty, Type::Map(_, _))
+        // 0.0.11 D4 (review fix): `m[k][k2]` — the outer base is the
+        // `Result[map[K2, V2], string]` that an inner `m[k]` produced. The
+        // chain indexes through the Ok payload: the subscript unifies
+        // against the inner map's key type and the result is again
+        // `Result[V2, string]` (D3); an Err from the inner read bubbles out
+        // unchanged ("key not found"). The base node keeps its Result type
+        // for lowering — the VM's map arm unwraps the Ok / propagates the
+        // Err — only the static type below is unwrapped. A Result base
+        // whose payload is not a map keeps the `InvalidOperand` error
+        // (chaining is a map-access rule, D4).
+        let chain_base = match &arr_ty {
+            Type::Result(ok, err)
+                if matches!(**ok, Type::Map(_, _)) && matches!(**err, Type::String) =>
+            {
+                Some(&**ok)
+            }
+            _ => None,
+        };
+        let is_map_base = chain_base.is_some()
+            || matches!(arr_ty, Type::Map(_, _))
             || matches!(arr_ty, Type::Ref(ref inner) if matches!(**inner, Type::Map(_, _)));
         if !is_map_base && !matches!(typed_idx.ty(), Type::Int) {
             self.add_error(
@@ -4970,9 +4996,12 @@ impl TypeChecker {
             return Err(());
         }
 
-        let target: &Type = match &arr_ty {
-            Type::Ref(inner) => inner,
-            ty => ty,
+        let target: &Type = match chain_base {
+            Some(ok) => ok,
+            None => match &arr_ty {
+                Type::Ref(inner) => inner,
+                ty => ty,
+            },
         };
         let elem_ty = match target {
             Type::Array(el) => (**el).clone(),

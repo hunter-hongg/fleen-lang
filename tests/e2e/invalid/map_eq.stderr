@@ -1,0 +1,1 @@
+error: invalid operand type `map[int, string]` for operator `==`

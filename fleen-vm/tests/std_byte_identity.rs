@@ -1,38 +1,41 @@
-//! std encoding probe (0.0.8 D16, re-pinned by 0.0.9 T05): the probe program
-//! (`import std.io` + a stub `main`) is compiled through HEAD and its module
-//! stream hex is pinned below — a deterministic regression guard on the std
-//! contribution to every module.
+//! std encoding probe (0.0.8 D16, re-pinned by 0.0.9 T05 and 0.0.11 T05):
+//! the probe program (`import std.io` + a stub `main`) is compiled through
+//! HEAD and its module stream hex is pinned below — a deterministic
+//! regression guard on the std contribution to every module.
 //!
 //! History: the pin originally asserted byte-identity with the released
 //! v0.0.7 compiler (0.0.8 D16: flag-off modules stay byte-identical). That
 //! premise ended when 0.0.9 T05 (PLAN D3) added eight std.str intrinsics
 //! to the builtin table: every builtin occupies a leading `FuncId` + name
 //! constant in EVERY module (`lower/mod.rs`), so the stream legitimately
-//! grew (`len=1859` → `len=2182`, version still 7 by the content-driven
-//! rule) and the gate became a self-pin instead of a cross-version
-//! identity claim. The delta account (both dumps decoded: exactly the
-//! eight new builtin names + their placeholder function records) and the
-//! corrected PLAN §9 reading are recorded once, in the T05 as-built note
-//! (`docs/0.0.9/TICKETS.md`).
+//! grew and the gate became a self-pin instead of a cross-version identity
+//! claim (the delta account is recorded once, in the T05 as-built note,
+//! `docs/0.0.9/TICKETS.md`). 0.0.11 T05 (PLAN D3) added the eight
+//! `std.map.*` intrinsics the same way (the stream grew again, still
+//! map-free → the content-driven rule of D7 keeps the version at 8, so the
+//! module stays byte-identical to 0.0.10 output apart from the pool
+//! growth that the 0.0.9 precedent already owns).
 //!
-//! Mechanism unchanged: register a root file `import std.io` +
-//! `func main(): int = 0`, run `Session::compile_project`, hex-encode the
-//! module stream, and compare with the pinned dump (`<len=N version=V>`
-//! header followed immediately by the hex, no separator).
+//! Mechanism: register a root file `import std.io` + `func main(): int =
+//! 0`, run `Session::compile_project`, hex-encode the module stream (the
+//! `FLNC` magic, then the version byte — v8 here — then the rest), and
+//! compare with the pinned dump below.
 //!
-//! Regen: run this test with the `fs::write` line (see below) temporarily
-//! restored, decode-and-diff the new dump against the pinned one, then
-//! replace the constant.
+//! Regen: compile the probe via `Session::compile_project` + `to_bytes`,
+//! hex-encode, decode-and-diff the new dump against the pinned one (the
+//! delta must be exactly the documented pool growth), then replace the
+//! constant.
 use fleen_compiler::{Session, codegen::flnc::to_bytes};
 
 const ROOT_SRC: &str = "import std.io\nfunc main(): int = 0\n";
 
-/// `<len=N version=V>` followed directly by the probe module's hex stream,
-/// as produced by HEAD's compiler with the 0.0.9 T05 builtin table (38
-/// builtins + the stub; the capture/delta verification is recorded in the
-/// T05 as-built note, `docs/0.0.9/TICKETS.md`).
+/// The probe module's hex stream (FLNC magic + version byte first), as
+/// produced by HEAD's compiler with the 0.0.11 T05 builtin table (46
+/// builtins + the stub). Version byte is 8: the probe encodes no `NewMap`,
+/// so the content-driven rule (0.0.11 D7) keeps the module at the v8
+/// baseline.
 const STD_PROBE_EXPECTED: &str = concat!(
-    "464c4e4309003600000002050000007072696e74020e0000007374642e696f2e7072696e746c6e02100000007374642e696f2e726561645f6c696e65020c0000",
+    "464c4e4308003600000002050000007072696e74020e0000007374642e696f2e7072696e746c6e02100000007374642e696f2e726561645f6c696e65020c0000",
     "007374642e696f2e736c656570020d0000007374642e6173796e632e72756e02130000007374642e6173796e632e7969656c645f6e6f7702140000007374642e",
     "636f6e63757272656e742e73706c6974020b0000007374642e7374722e6c656e020e0000007374642e7374722e636f6e636174020d0000007374642e7374722e",
     "73706c697402110000007374642e7374722e70617273655f696e7402130000007374642e7374722e70617273655f666c6f6174020c0000007374642e7374722e",
@@ -85,6 +88,6 @@ fn std_probe_dump_is_pinned() {
     let actual = hex;
     assert_eq!(
         actual, STD_PROBE_EXPECTED,
-        "std encoding diverged from the pinned 0.0.9 probe dump"
+        "std encoding diverged from the pinned 0.0.11 probe dump"
     );
 }

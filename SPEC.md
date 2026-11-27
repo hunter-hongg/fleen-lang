@@ -626,7 +626,8 @@ order preserved via `HashMap` + order `Vec` + a `KeyHash` wrapper (D8). Bytecode
 content-driven rule: a module is v9 only when a `NewMap` (0xAF) was encoded; every map-free
 module (including every `std` module) stays v8 (D7). Status: **T01–T08 implemented and green** —
 `docs/0.0.11/PLAN.md` (decisions D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08) complete;
-release publication (tag + archives) pending.**
+the version was bumped to 0.0.11 (`Cargo.toml` / `std/VERSION`); release publication
+(tag + archives) pending.**
 
 ---
 
@@ -1080,7 +1081,7 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 
 ## 15. Feature Scope
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 | 0.0.11 (planning) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 | 0.0.11 |
 |---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------------------|
 | `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `const` immutability | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1102,7 +1103,7 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 | `for` loop | ❌ | ❌ | ✅ (V04: over `[T]` or `Range`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Bytecode v3 | ❌ | ❌ | ✅ (V02–V04: struct 0xB0–0xB3, array 0xB4–0xB8, range 0xB9–0xBB, `struct_defs` table) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) | ✅ (+ `std.str` batch: 8 intrinsics) | ✅ | planned: `std.map` batch (8 intrinsics) |
+| `std` library | ❌ | ❌ | ✅ (V06: `io`/`str`/`num`/`arr`/`collection`/`os`/`time`) | ✅ (+ `async`/`concurrent`) | ✅ | ✅ (+ `concat`/`flatten`/`foldl`/`foldr`) | ✅ (untouched in 0.0.7) | ✅ (untouched in 0.0.8) | ✅ (+ `std.str` batch: 8 intrinsics) | ✅ | ✅ (+ `std.map` batch: 8 intrinsics) |
 | `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Cooperative executor | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1116,9 +1117,10 @@ box deref move clone addr deref_ptr - !    (unary prefix; box/deref/move/clone n
 | Curried declarations + arrow types | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T02/T03: two-part signature/body, right-associative `->`, `() -> T`, D2–D4) | ✅ | ✅ | ✅ |
 | Implicit partial application | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05/T06: fixed-arity user functions, captured arguments, Copy partials, D5/D9–D11) | ✅ | ✅ | ✅ |
 | Bytecode v8 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T07: `PartialApply` 0xCE, content-driven version — only modules that encode a partial reach v8, D13/D14) | ✅ (stays content-driven — no new opcode in 0.0.9, D6) | ✅ (stays content-driven — no new opcode in 0.0.10, D7; version stays v8) | ✅ (stays content-driven — no new opcode in 0.0.11 unless a `NewMap` encoded; D7) |
+| Bytecode v9 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T05: `NewMap` 0xAF + `FieldTypeTag::Map = 13`; content-driven — only modules that encode a map reach v9, D7) |
 | `break` / `continue` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T03/T04: reserved words, loop-exit/continue lowering, no new opcode, D4) | ✅ | ✅ |
 | String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06: `${expr}` + `\$`, lowers to `std.str.concat`, literals without `${` byte-identical; D4–D6) | ✅ |
-| `map` type + `std.map` intrinsics | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | planned (D1–D8: `map { k -> v }` literal, `m[k]` access, key whitelist `{int, bool, string}`, always-owned, 8 intrinsics, `NewMap` 0xAF, v9 content-driven) |
+| `map` type + `std.map` intrinsics | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T08: `map { k -> v }` literal (`map` reserved, D1), `m[k]` access → `Result[V, string]` (D3/D4), key whitelist `{int, bool, string}` (D5), always-owned (D2), 8 intrinsics (D3), order preserved (D8)) |
 | FFI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Generics | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
 | Operator overloading | ❌ | ❌ | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) | ❌ (0.1.0) |
@@ -1185,10 +1187,11 @@ The release was published (the `v0.0.8` tag and the six target archives are cut;
 **Status of 0.0.11**: **T01–T08 implemented and green**. Decisions D1–D8 settled
 (`docs/0.0.11/PLAN.md`); tickets T01–T08 complete (`docs/0.0.11/TICKETS.md`).
 T01: `map` keyword + reserved word (D1); T02: map literals + type system (D2/D3/D4/D5/D6);
-T03: typeck + 5 diagnostics; T04: lowering (MiExpr::Map → MIR); T05: bytecode v9
-(`NewMap` 0xAF, content-driven D7) + VM map value + 8 intrinsics; T06: std/map.fln;
-T07: 5 diagnostic paths + 5 error fixtures + 1 valid fixture; T08: examples +
-CHANGELOG + docs sync. Release publication (tag + archives) pending.
+T03: typeck + 5 diagnostics; T04: lowering (`MirInstrKind::NewMap` → MIR, the review
+follow-up renamed the codegen-level node); T05: bytecode v9 (`NewMap` 0xAF, content-driven
+D7) + VM map value + 8 intrinsics; T06: std/map.fln; T07: 5 diagnostic paths + error
+fixtures (8 `map_*` invalid + 2 valid); T08: examples + CHANGELOG + docs sync + version
+bump (0.0.11 in `Cargo.toml` / `std/VERSION`). Release publication (tag + archives) pending.
 
 ---
 

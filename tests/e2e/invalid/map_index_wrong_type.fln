@@ -1,0 +1,9 @@
+func go(): Result[string, string] {
+    m: map[int, string] = map { 1 -> "a" };
+    s = m["one"]?;
+    Ok(s)
+}
+
+func main() {
+    print("hi");
+}

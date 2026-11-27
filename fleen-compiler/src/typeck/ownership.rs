@@ -435,10 +435,50 @@ impl<'a> Cx<'a> {
                 self.walk_expr(r, false);
             }
             TypedExprHir::Call { callee, args, .. } => {
+                // 0.0.11 T05 (D2): the schematic intrinsic signature is
+                // type-erased by the time TypedHir reaches here (the
+                // substituted `map[K, V]` lives in the argument types, not
+                // the callee name), so the consuming first argument of
+                // `std.map.insert` / `std.map.remove` is upgraded by shape,
+                // BEFORE the generic walk: a bare `Access::Copy` map
+                // argument is the D2 consuming transfer (the PLAN D2
+                // canonical spelling `std.map.insert(m, "c", 3)` — the
+                // reuse of `m` afterwards is the ordinary UseAfterMove);
+                // `move m` and `clone m` keep the access typeck set. The
+                // upgrade must precede the walk because the walk would
+                // auto-clone the bare read first (Access::Clone), losing
+                // the consuming rule. Arrays keep the V06 read-copies
+                // posture — `std.arr.push` is NOT in this set. A `ref`
+                // argument is untouched (a borrow cannot consume, and
+                // `walk_ident` returns before the access match for refs).
+                let is_map_consumer = matches!(
+                    callee.as_ref(),
+                    TypedExprHir::Ident { name, .. }
+                        if name == "std.map.insert" || name == "std.map.remove"
+                );
+                if is_map_consumer
+                    && let Some(arg0) = args.first_mut()
+                    && matches!(arg0.ty(), Type::Map(_, _))
+                    && let TypedExprHir::Ident {
+                        name,
+                        binding_id,
+                        access,
+                        ..
+                    } = arg0
+                {
+                    // Owned globals are deep-copied reads, never moved out
+                    // of (D5) — only a local map joins the consuming rule.
+                    let is_local =
+                        !self.globals.contains(binding_id) && !self.global_names.contains(name);
+                    if is_local && *access == Access::Copy {
+                        *access = Access::Move;
+                    }
+                }
                 // The callee value is a plain read; each argument's own
-                // access (set by typeck) drives the transfer rules — a
-                // `move` argument registers, a `clone` one does not, a
-                // bare owned read auto-clones (print args, D3).
+                // access (set by typeck and the upgrade above) drives the
+                // transfer rules — a `move` argument registers, a `clone`
+                // one does not, a bare owned read auto-clones (print args,
+                // D3).
                 self.walk_expr(callee, false);
                 for arg in args.iter_mut() {
                     self.walk_expr(arg, false);

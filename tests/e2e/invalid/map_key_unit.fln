@@ -1,0 +1,4 @@
+func main() {
+    m: map[unit, string] = map { };
+    print("hi");
+}

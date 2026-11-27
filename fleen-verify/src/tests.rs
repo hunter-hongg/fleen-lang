@@ -2147,3 +2147,96 @@ func main(): int {
         crate::verify(&module)
     );
 }
+
+// ---------------------------------------------------------------------------
+// 0.0.11 T05: the NewMap (0xAF) version gate (D7) — one exact gate, the
+// 0.0.6 U07 pattern (ascending versions trip their own next-version gate).
+// ---------------------------------------------------------------------------
+
+/// `main` body: `Const 1` (key), `Const 2` (value), `NewMap 1`, `Return`.
+fn v9_map_main_code() -> Vec<u8> {
+    vec![
+        CONST_INT,
+        1,
+        0,
+        0,
+        0, // key
+        CONST_INT,
+        2,
+        0,
+        0,
+        0, // value
+        Opcode::NewMap as u8,
+        1,
+        0, // NewMap 1 (the n operand is u16, encoder.rs)
+        RETURN,
+    ]
+}
+
+fn v9_map_module(version: u16) -> Module {
+    let mut m = module(
+        vec![Const::Str("main".into()), Const::Int(1), Const::Int(2)],
+        vec![func(ConstId(0), 0, 0, v9_map_main_code())],
+        vec![],
+        0,
+    );
+    m.version = version;
+    m
+}
+
+#[test]
+fn new_map_verifies_in_a_v9_module() {
+    assert!(verify::verify(&v9_map_module(9)).is_ok());
+}
+
+#[test]
+fn new_map_stack_underflow_is_rejected() {
+    // `NewMap 2` with only two values on the stack: the depth pass must
+    // reject it (min 2n = 4).
+    let mut m = v9_map_module(9);
+    let code = v9_map_main_code();
+    let mut patched = code.clone();
+    // Byte layout: CONST(0..4), CONST(5..9), NewMap opcode @10, u16 operand
+    // @11..12, RETURN @13. Patch the operand low byte to 2 (NewMap 2).
+    patched[11] = 2;
+    m.functions[0].code = patched.into_boxed_slice();
+    match verify::verify(&m) {
+        Err(VerifyError::StackUnderflow { .. }) => {}
+        other => panic!("expected StackUnderflow for NewMap 2, got {other:?}"),
+    }
+}
+
+#[test]
+fn new_map_rejected_below_v9() {
+    // v8 is the immediate predecessor: 0xAF must trip the explicit v9 gate
+    // exactly (the same shape as `partial_apply_rejected_below_v8`).
+    match verify::verify(&v9_map_module(8)) {
+        Err(VerifyError::V9OpcodeInV1V2V3V4V5V6V7V8Module { pc, byte }) => {
+            assert_eq!(byte, Opcode::NewMap as u8);
+            assert_eq!(pc, 10);
+        }
+        other => panic!("version 8: expected the V9Opcode gate, got {other:?}"),
+    }
+    // Ascending exact gates for the lower versions. 0xAF lies ABOVE the
+    // v8 opcode base and below the v3 struct base (0xB0), so v1 trips its
+    // V2 gate and every version 2..=8 trips the explicit v9 gate — the
+    // observed behavior, pinned here (it still rejects; the identity of
+    // the error just differs from the 0xCE pattern).
+    let mut m = v9_map_module(8);
+    m.version = 1;
+    match verify::verify(&m) {
+        Err(VerifyError::V2OpcodeInV1Module { pc: 10, byte }) => {
+            assert_eq!(byte, 0xAF);
+        }
+        other => panic!("version 1: expected the V2Opcode gate, got {other:?}"),
+    }
+    for version in 2..=8u16 {
+        m.version = version;
+        match verify::verify(&m) {
+            Err(VerifyError::V9OpcodeInV1V2V3V4V5V6V7V8Module { pc: 10, byte }) => {
+                assert_eq!(byte, 0xAF);
+            }
+            other => panic!("version {version}: expected the V9Opcode gate, got {other:?}"),
+        }
+    }
+}

@@ -1,0 +1,4 @@
+func main() {
+    m: map[int, string] = map { 1 -> "a" };
+    print(m as string);
+}

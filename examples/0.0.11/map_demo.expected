@@ -1,0 +1,10 @@
+len:3
+m[2] =two
+m[99] err:key not found
+has 1:true
+has 4:false
+len after insert:4
+len after remove:3
+has 1:false
+chained:7
+keys:1,2,3

@@ -3,7 +3,8 @@
 ## [0.0.11] - T01-T08 implemented (Cartographer Ant 🗺️)
 
 > T01-T08 implemented and green: `map` type + literals + `std.map` intrinsics
-> + bytecode v9. Release publication pending (tag + archives).
+> + bytecode v9. Version bumped to 0.0.11 (`Cargo.toml` / `std/VERSION`);
+> release publication pending (tag + archives). Codename: Cartographer Ant 🗺️.
 
 ### Implemented
 - **The `map` type + `std.map` intrinsics** (PLAN D1–D8): `map { k -> v, k2 -> v2 }`
@@ -18,6 +19,27 @@
   (0xAF) was encoded; every map-free module (including every `std` module) stays v8.
   One new opcode (`NewMap` 0xAF), one new `FieldTypeTag` variant (`Map = 13`), no
   other table or opcode change — `docs/BYTECODE.md` gains a v9 note only.
+
+### Review follow-up (same release)
+- **D7 restored in code**: every map-free module (including every `std`
+  module) emits v8 again — the version byte is content-driven over a MIR
+  scan for `NewMap`, not a blanket bump.
+- **`.flnc` field-tag 13 decoded**: `decode_field_tag` recognizes
+  `FieldTypeTag::Map`, so a struct/array holding a map round-trips through
+  the project format.
+- **Duplicate literal keys overwrite in place** (`NewMap`): `map { 1 -> "a",
+  1 -> "b" }` has one entry (the same posture as `std.map.insert`, D8).
+- **Consuming `insert`/`remove` (D2)**: a bare owned map argument to
+  `std.map.insert` / `std.map.remove` is upgraded to a move in the
+  ownership pass — reuse is the ordinary `UseAfterMove`; `clone` keeps the
+  original alive (the PLAN D2 canonical spelling).
+- **Chained `m[k][k2]` (D4)**: the index suffix peeks the `Ok` payload of
+  the previous read, typeck-side (`chain_base`) and VM-side (`ArrGet`).
+- **`ArrGet` map arm hardened** with the deep-fork backstop (forged
+  bytecode only).
+- **New tests**: the verify v9 gate (ascending version matrix), VM map
+  runtime arms (duplicate key, chained lookup, insert/remove round-trips),
+  typeck ownership/chain tests, and 6 new `map_*` e2e invalid fixtures.
 
 ### Breaking
 - ⚠️ **`map` becomes a reserved word** (D1) — the 0.0.11 declared breaking set. A

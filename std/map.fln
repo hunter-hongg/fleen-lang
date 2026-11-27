@@ -13,8 +13,12 @@
 //     std.map.len(m)          // -> int
 //     std.map.clone(m)        // -> map<K, V>  (deep copy)
 //
-// Maps are always-owned values (0.0.11 D2), so `insert`/`remove`/`clone`
-// return a fresh map rather than mutating their argument; the argument map
-// itself is always cloned at the call site. `get` returns a `Result` so the
-// missing-key case is a value, not a runtime crash. Keys are restricted to
-// int/bool/string (D5); insertion order is preserved (D8).
+// Maps are always-owned values (0.0.11 D2), so `insert`/`remove` are
+// FUNCTIONAL: they consume their input map and return a fresh one — the
+// PLAN D2 canonical spelling is a bare argument (`std.map.insert(m, "c",
+// 3)` consumes `m`); reuse needs `std.map.insert(clone m, …)` or `move`.
+// The read-only helpers (`get` / `contains` / `keys` / `values` / `len` /
+// `clone`) accept a bare argument too: the read copies. `get` returns a
+// `Result` so the missing-key case is a value, not a runtime crash. Keys
+// are restricted to int/bool/string (D5); insertion order is preserved
+// (D8).

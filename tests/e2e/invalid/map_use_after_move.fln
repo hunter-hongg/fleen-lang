@@ -1,0 +1,8 @@
+import std.map;
+
+func main() {
+    m: map[int, string] = map { 1 -> "a" };
+    m2 = std.map.insert(m, 2, "b");
+    n = std.map.len(m);
+    print(n as string);
+}

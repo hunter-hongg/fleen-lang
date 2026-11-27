@@ -4539,3 +4539,91 @@ fn map_index_read_seals_channel_and_ptr_value_slots() {
         "expected PtrNotStorable, got {errs:?}"
     );
 }
+
+// ========== 0.0.11 review follow-up: map ownership (D2) + chained index (D4) ==========
+// These go through the full pipeline (`crate::compile`) because the
+// `std.map.*` intrinsics resolve through the embedded std crate — the
+// bare typeck helpers have no std prelude.
+
+#[test]
+fn map_insert_consumes_owned_map_reuse_is_use_after_move() {
+    // D2's canonical spelling: a bare `std.map.insert(m, …)` CONSUMES the
+    // owned map `m` (access upgraded to Move before the generic walk), so
+    // the later `keys(m)` is the ordinary `UseAfterMove`. Reuse requires
+    // `std.map.insert(clone m, …)` — which typechecks (the fixture
+    // `map_std_intrinsics.fln` pins the canonical read-then-consume order).
+    let result = crate::compile(
+        "import std.map;\nfunc go() {\n    m: map[int, string] = map { 1 -> \"a\" };\n    n = std.map.insert(m, 2, \"b\");\n    ks = std.map.keys(m);\n}\nfunc main(): int = 0",
+    );
+    let errs = match result {
+        Err(crate::CompileError::Typeck(errs)) => errs,
+        other => panic!("expected a typeck error, got {other:?}"),
+    };
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e.kind, TypeckErrorKind::UseAfterMove { .. })),
+        "expected UseAfterMove, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_insert_on_cloned_map_reuse_typechecks() {
+    // The D2 escape hatch: `std.map.insert(clone m, …)` leaves `m` usable.
+    assert!(
+        crate::compile(
+            "import std.map;\nfunc go() {\n    m: map[int, string] = map { 1 -> \"a\" };\n    n = std.map.insert(clone m, 2, \"b\");\n    ks = std.map.keys(m);\n}\nfunc main(): int = 0",
+        )
+        .is_ok(),
+        "insert(clone m, …) must leave m usable"
+    );
+}
+
+#[test]
+fn map_insert_consumes_regardless_of_value_copyness() {
+    // The map type itself is ALWAYS owned (D2): even a Copy-keyed,
+    // Copy-valued map's bare insert consumes the argument.
+    assert!(
+        crate::compile(
+            "import std.map;\nfunc go() {\n    m: map[int, int] = map { 1 -> 2 };\n    n = std.map.insert(m, 3, 4);\n}\nfunc main(): int = 0",
+        )
+        .is_ok(),
+        "one insert over an owned local is a legal consume"
+    );
+}
+
+#[test]
+fn chained_index_on_map_result_typechecks_with_question() {
+    // D4: `m[k][k2]` chains on the `Result[map[K2, V2], string]` a first
+    // map read produced — the index suffix sees through the Ok payload.
+    // With `?` inside a Result-returning function it propagates the miss.
+    assert!(
+        crate::compile(
+            "func go(): Result[int, string] {\n    m: map[int, map[int, int]] = map { 1 -> map { 2 -> 7 } };\n    v = m[1][2]?;\n    Ok(v)\n}\nfunc main(): int = 0",
+        )
+        .is_ok(),
+        "m[1][2]? must typecheck as Result[int, string]"
+    );
+}
+
+#[test]
+fn chained_index_without_question_outside_result_fn_is_rejected() {
+    // The chain itself is `Result[int, string]`: a bare chain as a value
+    // keeps the Result (a return-position use against `int` names it).
+    let result = crate::compile(
+        "func go(): int {\n    m: map[int, map[int, int]] = map { 1 -> map { 2 -> 7 } };\n    m[1][2]\n}\nfunc main(): int = 0",
+    );
+    let errs = match result {
+        Err(crate::CompileError::Typeck(errs)) => errs,
+        other => panic!("expected a typeck error, got {other:?}"),
+    };
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            TypeckErrorKind::TypeMismatch {
+                found: crate::typeck::typed_hir::Type::Result(_, _),
+                ..
+            }
+        )),
+        "expected the bare chain to stay Result[…], got {errs:?}"
+    );
+}

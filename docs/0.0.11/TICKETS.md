@@ -4,7 +4,9 @@
 > with tests. Decisions D1–D8 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 done; T03 done; T04 done; T05 todo; T06 todo; T07 todo; T08 todo.**
+> **Status: T01–T08 all done** (implementation + the review follow-up that
+> pinned D7 in codegen and the D2 consuming posture in the ownership pass;
+> release publication — tag + archives — pending).
 > **Posture reminder**: one new opcode (`NewMap` 0xAF), one new tag
 > (`FieldTypeTag::Map = 13`), version **v9 by the content-driven rule**
 > (PLAN D7) — a module is v9 only when a map was actually encoded, every
@@ -209,28 +211,34 @@ seal is the one that pins D6 on the `m[k]` path. Pinned by
 
 ## T05 — std: the `std.map` eight-intrinsic batch + Lower/Codegen/Verify/VM wiring (F2/F3; D3/D7/D8)
 
-- [ ] `std/map.fln`: doc comments for the eight intrinsics (signatures,
+> **Status: done** — implemented across the codegen/std-map commits; the
+> review follow-up added the verify-gate, duplicate-key-overwrite,
+> chained-`Ok`-payload lookup and shared-intrinsic-prologue polish (see the
+> as-built notes below and the `map_*` unit tests in `fleen-verify` /
+> `fleen-vm` / `fleen-compiler`).
+
+- [x] `std/map.fln`: doc comments for the eight intrinsics (signatures,
       the D3 missing-key rule, the D5 key whitelist, the D2 functional
       `insert` / `remove`, the D8 declaration-order guarantee).
-- [ ] `typeck/builtins.rs`: the eight `BuiltinSig`s — `std.map.get` /
+- [x] `typeck/builtins.rs`: the eight `BuiltinSig`s — `std.map.get` /
       `insert` / `remove` / `contains` / `keys` / `values` / `len` /
       `clone` — all `BuiltinLowering::Intrinsic`, schematic over `K` / `V`
       (the `std.str` batch shape, `builtins.rs:187-257`).
-- [ ] VM: `Value::Map(Box<MapCell>)` variant (the `KeyHash` wrapper, D8);
+- [x] VM: `Value::Map(Box<MapCell>)` variant (the `KeyHash` wrapper, D8);
       the `NewMap` dispatch; the map arm of the array-index opcode (or the
       `std.map.get` intrinsic — record the exact wiring); the eight
       `std.map.*` intrinsic arms; the deep-copy path in `clone` /
       assignment / `DupDeep`.
-- [ ] Lower: the map-literal node → `NewMap` (pops `2n` values, pushes one
+- [x] Lower: the map-literal node → `NewMap` (pops `2n` values, pushes one
       `Value::Map`); the eight intrinsics ride the intrinsic-call path;
       `m[k]` rides the array-index arm (or desugars to `std.map.get` — the
       wiring recorded here).
-- [ ] Codegen: `NewMap` (0xAF) encoder + `FieldTypeTag::Map = 13`; version
+- [x] Codegen: `NewMap` (0xAF) encoder + `FieldTypeTag::Map = 13`; version
       v9 content-driven (a `NewMap` in the module bumps the writer to v9).
-- [ ] Verify: the `NewMap` depth table entry (`-2n + 1`); the v9 opcode
+- [x] Verify: the `NewMap` depth table entry (`-2n + 1`); the v9 opcode
       gate (`NewMap` in a v1–v8 module → `BadOpcode`); the `Map` tag
       recognized in struct-field / array-element shape checks.
-- [ ] Tests: VM unit tests (`NewMap` builds, index hit/miss, each of the
+- [x] Tests: VM unit tests (`NewMap` builds, index hit/miss, each of the
       eight intrinsics, deep-copy); verify unit tests (depth, the v9 gate);
       codegen unit tests (the `NewMap` byte, the `Map` tag, the v9 writer
       / v8-map-free writer); the standing std byte-identity pin
@@ -245,7 +253,15 @@ precedent), `bytecode.rs:157` (`FieldTypeTag`).
 
 ## T06 — Integration matrix: e2e fixtures for the type, literal, access, and helpers (F1/F2/F3)
 
-- [ ] e2e valid: empty literal with annotation; N-pair literal (1, 2, 3
+> **Status: done** — as-built, the e2e layer carries 2 valid fixtures
+> (`map_basics`, `map_std_intrinsics`) and 11 invalid `map_*` fixtures
+> (key whitelist incl. `unit` / `Range`, value seal, `==` / `as string`
+> rejections, `UseAfterMove` after a consuming `insert`, wrong index
+> type, `map`-as-identifier); the remaining coverage lives in the unit
+> tests (`fleen-vm/tests.rs` map arms, `fleen-verify/tests.rs` v9 gate,
+> `fleen-compiler` typeck/codegen map tests).
+
+- [x] e2e valid: empty literal with annotation; N-pair literal (1, 2, 3
       pairs); trailing comma; nested literal; `m[k]` hit; `m[k]` miss;
       `m[k]?` propagation; `std.map.get` explicit form;
       `std.map.insert` / `remove` functional (`UseAfterMove` if the input
@@ -253,7 +269,7 @@ precedent), `bytecode.rs:157` (`FieldTypeTag`).
       `std.map.values` declaration order; `std.map.len`; `std.map.clone`;
       `for` over `std.map.keys`; nested map access (`m[k][k2]`); a map in
       a struct field and in an array element (`FieldTypeTag::Map = 13`).
-- [ ] e2e invalid: `map[float, V]` / `map[SomeStruct, V]` /
+- [x] e2e invalid: `map[float, V]` / `map[SomeStruct, V]` /
       `map[SomeEnum, V]` / `map[[int], V]` / `map[Result[int, string], V]`
       / `map[unit, V]` / `map[Range, V]` (each `MapKeyNotComparable`);
       `map[string, Future<int>]` / `map[string, channel<int>]` /
@@ -261,12 +277,12 @@ precedent), `bytecode.rs:157` (`FieldTypeTag`).
       (`InvalidOperand`); `as string` on a map; the `map`-as-identifier
       pin (T01's fixture, now invalid); `std.map.insert` with a
       non-whitelisted key.
-- [ ] Byte gate: recorded byte-identity expectation on a few map-free
+- [x] Byte gate: recorded byte-identity expectation on a few map-free
       fixtures against the 0.0.10 merge-base (not a hash gate); every std
       module stays v8; a map-using fixture reaches v9.
-- [ ] Reader compat: the standing v1–v8 `.flnc` fixtures decode, verify
+- [x] Reader compat: the standing v1–v8 `.flnc` fixtures decode, verify
       and execute unchanged (the reader accepts `{1..=9}`).
-- [ ] Full suite green with unchanged stdout/stderr for every
+- [x] Full suite green with unchanged stdout/stderr for every
       non-map fixture.
 
 **Depends on**: T05.
@@ -276,20 +292,25 @@ precedent), `bytecode.rs:157` (`FieldTypeTag`).
 
 ## T07 — Docs sync (F4)
 
-- [ ] `docs/DESIGN.md`: §9 (the `map` type subsection — literal, type,
+> **Status: done** — DESIGN.md §9.10 (as-built notes), §17, §18;
+> SYNTAX.ebnf `map_lit` / `map_type`; BYTECODE.md `NewMap` + tag + v9
+> reader note; SPEC/AGENTS/CLAUDE goal paragraph + matrix; CHANGELOG
+> `[0.0.11]`.
+
+- [x] `docs/DESIGN.md`: §9 (the `map` type subsection — literal, type,
       `index_suffix` access, the D5 key whitelist, the D2 ownership
       posture, the D8 ordering guarantee); §10 (the always-owned rule,
       the `contains_*` map arm); §12 (the `==` gate gains `map`); §17
       feature-matrix rows; §18 roadmap row.
-- [ ] `docs/SYNTAX.ebnf`: the `map_lit` production (`map { map_entry }`),
+- [x] `docs/SYNTAX.ebnf`: the `map_lit` production (`map { map_entry }`),
       the `map_type` production (`map [ type , type ]`), the `->` separator
       in a map entry.
-- [ ] `docs/BYTECODE.md`: the `NewMap` opcode row (§5.x), the
+- [x] `docs/BYTECODE.md`: the `NewMap` opcode row (§5.x), the
       `FieldTypeTag::Map = 13` tag row (§4), the v9 reader note (the
       content-driven rule applied to `NewMap`).
-- [ ] `SPEC.md` / `AGENTS.md` / `CLAUDE.md`: the 0.0.11 goal paragraph +
+- [x] `SPEC.md` / `AGENTS.md` / `CLAUDE.md`: the 0.0.11 goal paragraph +
       feature-matrix row(s) + a quick-reference section for `map`.
-- [ ] `CHANGELOG.md`: `[0.0.11]` entries — Added (`map` type, the `map { …
+- [x] `CHANGELOG.md`: `[0.0.11]` entries — Added (`map` type, the `map { …
       }` literal, `m[k]` access, the eight `std.map.*` intrinsics, `NewMap`
       0xAF, `FieldTypeTag::Map = 13`, bytecode v9 content-driven);
       Breaking (`map` is a reserved word).
@@ -301,15 +322,21 @@ precedent), `bytecode.rs:157` (`FieldTypeTag`).
 
 ## T08 — Examples, version bump, release gate (F4)
 
-- [ ] `examples/0.0.11/`: a single-file `map` demo (every D5-whitelisted
+> **Status: done (release publication pending)** — `examples/0.0.11/`
+> (`map_demo.fln` + `.expected` + README), CHANGELOG finalized, workspace
+> version and `std/VERSION` at 0.0.11, full gate suite green. The tag /
+> archive cut follows the 0.0.7–0.0.10 pipeline (L9: local commit + tag,
+> then stop and report for the user to push).
+
+- [x] `examples/0.0.11/`: a single-file `map` demo (every D5-whitelisted
       key type, `m[k]` hit/miss/`?`, the eight helpers, `for` over keys, a
       map in a struct field and in an array element, nested maps) + a
       README in the 0.0.7–0.0.10 layout.
-- [ ] `CHANGELOG.md` finalized; `Cargo.toml` workspace version →
+- [x] `CHANGELOG.md` finalized; `Cargo.toml` workspace version →
       `0.0.11`; `std/VERSION` → `0.0.11`.
-- [ ] Full gate suite: `cargo fmt -- --check`, `cargo clippy -- -D
+- [x] Full gate suite: `cargo fmt -- --check`, `cargo clippy -- -D
       warnings`, `cargo test`, `cargo doc --no-deps`.
-- [ ] Release follows the 0.0.7–0.0.10 pipeline; codename settled here
+- [x] Release follows the 0.0.7–0.0.10 pipeline; codename settled here
       (holder's call). Per the established cadence (L9): after the local
       commit + tag, **stop and report** for the user to push — the push
       is what starts the Release workflow.

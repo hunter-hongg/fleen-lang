@@ -2,7 +2,7 @@
 
 use super::diag::line_col;
 use super::error::{RuntimeError, RuntimeErrorKind};
-use super::value::{PayloadKind, Value};
+use super::value::{MapKey, PayloadKind, Value};
 use super::vm::Vm;
 use fleen_compiler::codegen::{
     Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, MODULE_VERSION,
@@ -4828,4 +4828,196 @@ fn deref_box_of_a_partial_with_a_fork_kind_capture_is_refused() {
         Vm::new(m).run().unwrap_err().kind,
         RuntimeErrorKind::ChannelNotClonable
     );
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.11 (review follow-up): NewMap runtime semantics — duplicate-key
+// overwrite (D8, consistent with `std.map.insert`), the Result-payload map
+// lookup (`m[k][k2]`: the inner `ArrGet` peeks the Ok payload), and the
+// `std.map.insert` / `std.map.remove` functional (consuming) posture (D2).
+// Hand-written v9 modules; NewMap's u16 operand = the pair count.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_map_duplicate_key_overwrites_in_place() {
+    // map { 1 -> "a", 1 -> "b" }: the second pair overwrites the first
+    // (D8, same posture as std.map.insert). One entry, value "b".
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 9,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(1),
+            Const::Str("a".into()),
+            Const::Str("b".into()),
+        ],
+        functions: vec![func(
+            enc(&[
+                (Opcode::Const, u32b(1)), // key 1
+                (Opcode::Const, u32b(2)), // "a"
+                (Opcode::Const, u32b(1)), // key 1 again
+                (Opcode::Const, u32b(3)), // "b"
+                (Opcode::NewMap, u16b(2)),
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            0,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    let out = Vm::new(m).run().unwrap();
+    let Value::Map(cell) = out else {
+        panic!("expected a map, got {out:?}")
+    };
+    let borrowed = &*cell;
+    assert_eq!(
+        borrowed.order.len(),
+        1,
+        "duplicate key collapses to one entry"
+    );
+    assert_eq!(borrowed.data.len(), 1);
+    assert_eq!(
+        borrowed.data.get(&MapKey(Value::Int(1))),
+        Some(&Value::Str("b".into()))
+    );
+}
+
+#[test]
+fn arr_get_through_result_payload_reads_nested_map() {
+    // m = { 1 -> { 2 -> "x" } }: the outer `m[1]` leaves Ok(map) on the
+    // stack; the chained inner `m[1][2]` must peek the Ok payload (D4).
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 9,
+        constants: vec![
+            Const::Str("main".into()),
+            Const::Int(1), // outer key
+            Const::Int(2), // inner key
+            Const::Str("x".into()),
+        ],
+        functions: vec![func(
+            enc(&[
+                // locals: slot 0 = m (outer map)
+                (Opcode::Const, u32b(1)),  // outer key 1
+                (Opcode::Const, u32b(2)),  // inner key 2
+                (Opcode::Const, u32b(3)),  // "x"
+                (Opcode::NewMap, u16b(1)), // inner map { 2 -> "x" }
+                (Opcode::NewMap, u16b(1)), // outer map { 1 -> inner }
+                (Opcode::StoreLocal, u16b(0)),
+                (Opcode::LoadLocal, u16b(0)), // m
+                (Opcode::Const, u32b(1)),     // outer key 1
+                (Opcode::ArrGet, vec![]),     // Ok(inner map)
+                (Opcode::Const, u32b(2)),     // inner key 2
+                (Opcode::ArrGet, vec![]),     // Ok("x") — peeked the Ok payload
+                (Opcode::UnwrapOk, vec![]),   // "x"
+                (Opcode::Return, vec![]),
+            ]),
+            0,
+            1,
+        )],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("x".into()));
+}
+
+#[test]
+fn std_map_insert_then_get_roundtrip() {
+    // std.map.insert({1 -> "a"}, 2, "b") consumes the input and returns a
+    // fresh map (D2): len 2, get(2) = Ok("b").
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 9,
+        constants: vec![
+            Const::Str("std.map.insert".into()),
+            Const::Int(1),
+            Const::Str("a".into()),
+            Const::Int(2),
+            Const::Str("b".into()),
+        ],
+        functions: vec![
+            func(
+                enc(&[
+                    (Opcode::Const, u32b(1)), // key 1
+                    (Opcode::Const, u32b(2)), // "a"
+                    (Opcode::NewMap, u16b(1)),
+                    // args: (m, 2, "b") — push arg0 first (bottom)
+                    (Opcode::Const, u32b(3)), // 2
+                    (Opcode::Const, u32b(4)), // "b"
+                    (Opcode::Call, u16b(1)),
+                    // stack: fresh map; get(2) via ArrGet → Ok("b"), unwrap
+                    (Opcode::Const, u32b(3)), // key 2
+                    (Opcode::ArrGet, vec![]),
+                    (Opcode::UnwrapOk, vec![]),
+                    (Opcode::Return, vec![]),
+                ]),
+                0,
+                0,
+            ),
+            Func {
+                name: ConstId(0),
+                params: 3,
+                locals: 0,
+                code: Box::new([]),
+                span_map: Box::new([]),
+                is_builtin: true,
+            },
+        ],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Str("b".into()));
+}
+
+#[test]
+fn std_map_remove_removes_key_from_fresh_map() {
+    // remove({1 -> "a", 2 -> "b"}, 1) → fresh map without key 1: get(1)
+    // misses (Err), get(2) hits.
+    let m = Module {
+        struct_defs: Vec::new(),
+        enum_defs: Vec::new(),
+        version: 9,
+        constants: vec![
+            Const::Str("std.map.remove".into()),
+            Const::Int(1),
+            Const::Str("a".into()),
+            Const::Int(2),
+            Const::Str("b".into()),
+        ],
+        functions: vec![
+            func(
+                enc(&[
+                    (Opcode::Const, u32b(1)), // key 1
+                    (Opcode::Const, u32b(2)), // "a"
+                    (Opcode::Const, u32b(3)), // key 2
+                    (Opcode::Const, u32b(4)), // "b"
+                    (Opcode::NewMap, u16b(2)),
+                    (Opcode::Const, u32b(1)), // remove key: 1
+                    (Opcode::Call, u16b(1)),
+                    // stack: {2 -> "b"}; get(1) → Err (propagate as-is)
+                    (Opcode::Const, u32b(1)),
+                    (Opcode::ArrGet, vec![]), // Err("key not found")
+                    (Opcode::IsErr, vec![]),
+                    (Opcode::Return, vec![]),
+                ]),
+                0,
+                0,
+            ),
+            Func {
+                name: ConstId(0),
+                params: 2,
+                locals: 0,
+                code: Box::new([]),
+                span_map: Box::new([]),
+                is_builtin: true,
+            },
+        ],
+        globals: vec![],
+        entry: FuncId(0),
+    };
+    assert_eq!(Vm::new(m).run().unwrap(), Value::Bool(true));
 }

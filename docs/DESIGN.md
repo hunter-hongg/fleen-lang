@@ -1159,11 +1159,12 @@ b = true as string;  // "true"
 
 ### 9.9 string interpolation (0.0.10, D4–D6)
 
-### 9.10 the `map` type (0.0.11, planned D1–D8)
+### 9.10 the `map` type (0.0.11, implemented D1–D8)
 
-> **Planning status**: implemented in no milestone yet. The design below
-> is settled at planning level (`docs/0.0.11/PLAN.md` D1–D8); this section
-> is filled out during T07 (docs sync) once the implementation lands.
+> **As-built status**: implemented in 0.0.11 (T01–T08 green; the review
+> follow-up pinned the D7 content-driven rule in the codegen and the D2
+> consuming posture in the ownership pass). The design below is the
+> settled `docs/0.0.11/PLAN.md` D1–D8 as built.
 
 - **Literal**: `map { k -> v, k2 -> v2 }` — the reserved-word-prefix form
   (D1). `map {` is always a map literal, never a block expression. Trailing
@@ -1172,10 +1173,21 @@ b = true as string;  // "true"
 - **Access**: `m[k]` rides the existing `index_suffix` (`expr [ expr ]`) —
   zero parser change (D4). A hit returns the value; a miss returns the
   missing-key error; the result is `Result[V, string]` so `m[k]?` composes
-  with `?` (D3).
+  with `?` (D3). The chain composes too: a first read producing
+  `Result[map[K2, V2], string]` can be indexed again — `m[k][k2]` peeks the
+  `Ok` payload and yields `Result[V2, string]` (typeck's `chain_base` + the
+  VM `ArrGet` `Ok` arm; an inner miss propagates the `Err` unchanged).
 - **Ownership**: `map[K, V]` is always owned for every `K` / `V` (D2 — the
   0.0.3 array posture). Functional `std.map.insert` / `std.map.remove`
-  (the input is consumed, a fresh map returned).
+  (the input is consumed, a fresh map returned): the PLAN D2 canonical
+  spelling passes the map bare — `std.map.insert(m, k, v)` consumes `m`, so
+  a later use is the ordinary `UseAfterMove`; keep the original alive with
+  `std.map.insert(clone m, …)` or hand over with `move`. The upgrade from a
+  bare read to a move happens in the ownership pass (`typeck/ownership.rs`,
+  the consumer set = `std.map.insert` / `std.map.remove` only — arrays keep
+  the V06 read-copies posture); owned globals are never moved out of (D5).
+  The read-only helpers (`get` / `contains` / `keys` / `values` / `len` /
+  `clone`) accept a bare argument too — the read copies.
 - **Key whitelist (D5)**: keys must be one of `int` / `bool` / `string` —
   the `==`-comparable set minus `float` / `unit` / `Range` (a float-keyed
   map is a footgun; unit / Range keys are useless). Non-whitelisted key
@@ -1191,8 +1203,10 @@ b = true as string;  // "true"
   / `values` return in declaration order.
 - **Bytecode (D7)**: one new opcode `NewMap` (0xAF) and `FieldTypeTag::Map
   = 13`. Version **v9 content-driven** — a module is v9 only when a
-  `NewMap` was encoded; every map-free module (including every `std`
-  module) stays v8.
+  `NewMap` was encoded (a MIR scan over every function body and the global
+  initializers); every map-free module (including every `std` module)
+  stays v8. A duplicate literal key overwrites in place (D8, the same
+  posture as `std.map.insert`), so the map keeps one entry.
 
 
 A **string literal containing `${`** is lexed into a `StringInterp` token — a sequence of
@@ -1709,7 +1723,7 @@ This follows the **concise and clear** principle.
 
 ## 17. Feature Matrix
 
-| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 | 0.0.11 (planning) |
+| Feature | 0.0.1 | 0.0.2 | 0.0.3 | 0.0.4 | 0.0.5 | 0.0.6 | 0.0.7 | 0.0.8 | 0.0.9 | 0.0.10 | 0.0.11 |
 |---------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------------------|
 | `=` binding/assignment | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `const` immutable | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1729,10 +1743,10 @@ This follows the **concise and clear** principle.
 | `[T]` arrays | ❌ | ❌ | ✅ (V03) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `Range` / `for` | ❌ | ❌ | ✅ (V04) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Modules (`import` / `pub`) | ❌ | ❌ | ✅ (V05) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ | ✅ (+ std.str batch: 8 intrinsics, §11) | ✅ | planned: `std.map` batch (8 intrinsics, §9.10) |
+| `std` library (modules + intrinsics) | ❌ | ❌ | ✅ (V06) | ✅ (+ `async` / `concurrent` modules, §6/§9.7) | ✅ | ✅ (+ `concat` / `flatten` / `foldl` / `foldr`) | ✅ | ✅ | ✅ (+ std.str batch: 8 intrinsics, §11) | ✅ | ✅ (+ `std.map` batch: 8 intrinsics, §9.10) |
 | std iterator helpers (`std.collection.iter`) | ❌ | ❌ | ✅ (V07, eager) | ✅ | ✅ | ✅ (`fold`→`foldl`, `foldr`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | String interpolation `"${expr}"` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T04–T06, §2/§9.9; D4–D6) | ✅ |
-| `map` type + `std.map` intrinsics | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | planned (§9.10; D1–D8) |
+| `map` type + `std.map` intrinsics | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (T01–T08: literal, `m[k]` → `Result[V, string]`, chained `m[k][k2]`, always-owned + consuming `insert`/`remove`, key whitelist, 8 intrinsics, §9.10) |
 | `flint` package manager | ❌ | ❌ | ✅ (V08) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `async` / `await` / `Future<T>` | ❌ | ❌ | ❌ | ✅ (T02/T05, §6/§9.6) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Cooperative executor (`std.async.run` / `yield_now` / `std.io.sleep`) | ❌ | ❌ | ❌ | ✅ (T06) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1833,7 +1847,7 @@ decisions D1–D7 and `docs/0.0.10/TICKETS.md`.**
 | 0.0.8 | per-file feature flags (`#feature curry`, D1/D6) + two-part curried declarations behind the flag (§5, D2/D3) + curried arrow function types (§9, D4) + implicit partial application with Copy, deep-copied captures (§10.8, D5/D9–D11) + bytecode v8 `PartialApply` 0xCE, content-driven (only modules that encode a partial reach v8, D13/D14) — **implemented (T01–T10; T11 docs sync)**; non-breaking additive (D16). See `docs/0.0.8/PLAN.md` (D1–D16) and `docs/0.0.8/TICKETS.md` |
 | 0.0.9 | small repairs: zero-payload variant patterns resolve as variant references (BUG-2, D1; joint-coverage exhaustiveness D7) + Result-`choose` accepts `otherwise` / general arms (D2) + `break` / `continue` reserved words with loop-bound lowering (§6, D4) + std.str intrinsic batch — eight VM intrinsics, zero opcodes (§11, D3); no bytecode change (D6, version stays v8) — **implemented (T01–T05; T06 docs sync)**; the only source breaking set is the two new reserved words. See `docs/0.0.9/PLAN.md` (D1–D7) and `docs/0.0.9/TICKETS.md` |
 | 0.0.10 | `Result` declared in std — `std/result.fln` is the language-level source of truth (§8/§9.8, D1), the trio `Ok`/`Err`/`Result` is non-shadowable (D2, the one behavior change), `?`/choose-on-Result keep their exact lowering (D3), backend untouched (D7) + string interpolation `"${expr}"` with `\$` (§2/§9.9, D4–D6), lowering to a `std.str.concat` chain, literals without `${` byte-identical; no bytecode change (D7, version stays v8), BYTECODE.md untouched — **implemented (T01–T06; T07 docs sync)**; the only source breaking set is a string literal containing the exact sequence `${`. See `docs/0.0.10/PLAN.md` (D1–D7) and `docs/0.0.10/TICKETS.md` |
-| 0.0.11 | the `map` type — `map { k -> v }` literals (`map` a reserved word, D1), `m[k]` access riding the existing `index_suffix` (D4), a `std/map.fln` module with eight intrinsics (D3), always-owned `map[K, V]` (D2), key whitelist `{int, bool, string}` (D5), no `Future`/`channel`/`ptr` in the `V` slot (D6), insertion order preserved (D8); bytecode v9 by the content-driven rule (a module is v9 only when a `NewMap` 0xAF was encoded; every map-free module stays v8, D7) — **planning**; `docs/0.0.11/PLAN.md` (D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08) drafted, nothing implemented |
+| 0.0.11 | the `map` type — `map { k -> v }` literals (`map` a reserved word, D1), `m[k]` access riding the existing `index_suffix` (D4), a `std/map.fln` module with eight intrinsics (D3), always-owned `map[K, V]` (D2), key whitelist `{int, bool, string}` (D5), no `Future`/`channel`/`ptr` in the `V` slot (D6), insertion order preserved (D8); bytecode v9 by the content-driven rule (a module is v9 only when a `NewMap` 0xAF was encoded; every map-free module stays v8, D7) — **implemented (T01–T08 green)**; `docs/0.0.11/PLAN.md` (D1–D8) and `docs/0.0.11/TICKETS.md` (T01–T08); version bumped to 0.0.11, release publication pending |
 | 0.1.0 | Generics / operator overloading; extended string escapes (`\0`, `\b`, `\f`, `\xHH`, `\uXXXX`) |
 
 ### Known Hacks
