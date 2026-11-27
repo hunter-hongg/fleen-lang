@@ -9,3 +9,6 @@ release/**/*.zip
 .flint-home-tmp/
 # Local reproduction scratch (session probes, not part of the test suite).
 .probe/
+
+.pi/
+.qwen/

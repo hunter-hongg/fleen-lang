@@ -188,6 +188,19 @@ array-literal tests (`parser/tests.rs:2289`).
       fixtures unchanged (the map case is a new base type, not a change to
       the array path).
 
+**T04 implementation note (the D6 read-route seal)**: the map branch of
+`typeck_index` also runs `check_map_value_storable` on the value type — the
+same `contains_*` seal applied at annotation / literal — so a `m[k]` *read*
+rejects a `map[K, Future<V>]` / `map[K, channel<V>]` / `map[K, ptr<V>]` base
+(`FutureNotStorable` / `ChannelNotStorable` / `PtrNotStorable`) instead of
+silently deep-copying a suspended frame / aliased buffer / pointer out of
+the value slot. This closes a review finding: the `FutureIndexRead` walk
+is array-only (a map's `elem_ty` is `Result<V, string>`, whose
+`contains_future()` is false even when `V` is a `Future`), so the read-route
+seal is the one that pins D6 on the `m[k]` path. Pinned by
+`typeck::tests::map_index_read_seals_future_value_slot` and
+`map_index_read_seals_channel_and_ptr_value_slots`.
+
 **Depends on**: T03.
 **Refs**: PLAN §1 D3/D4, §3.2, §5; `infer.rs:2410` / `:4584`
 (`typeck_index`), `infer.rs:4897` (`TypedExprHir::Index`).

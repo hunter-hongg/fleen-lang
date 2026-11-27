@@ -4453,9 +4453,7 @@ fn map_index_wrong_key_type_is_type_mismatch() {
     // D4: an `int` key where the map wants a `string` key (or the reverse)
     // is a `TypeMismatch` (the ticket's `ArgTypeMismatch` slot — `unify`
     // reports it against the key type, the index expression's span).
-    let src = "func f(m: map[string, int]): Result<int, string> { 0 }";
     let src_bad1 = "func f(m: map[string, int]): Result<int, string> { r = m[1]; 0 }";
-    let _ = src;
     let errs = compile_err(src_bad1);
     assert!(
         err_kinds(&errs)
@@ -4502,5 +4500,42 @@ fn map_index_question_outside_result_fn_is_error() {
             .iter()
             .any(|k| matches!(k, TypeckErrorKind::QuestionOutsideResultFn)),
         "expected QuestionOutsideResultFn, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_index_read_seals_future_value_slot() {
+    // D6 read-route seal: a map whose value slot is `Future<int>` is
+    // rejected at *every* `m[k]` read through the same
+    // `check_map_value_storable` walk used at declaration / literal — a
+    // deep copy of the index result would fork a suspended frame.
+    let src = "func f(m: map[int, Future<int>]): Result[int, string] { r = m[1]; r }";
+    let errs = compile_err(src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::FutureNotStorable)),
+        "expected FutureNotStorable for the map index read, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_index_read_seals_channel_and_ptr_value_slots() {
+    // D6 read-route seal, the channel / ptr mirrors of the future case.
+    let src_ch = "func f(m: map[int, channel<int>]): Result[channel<int>, string] { r = m[1]; r }";
+    let errs = compile_err(src_ch);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ChannelNotStorable)),
+        "expected ChannelNotStorable, got {errs:?}"
+    );
+    let src_ptr = "func f(m: map[int, ptr<int>]): Result[ptr<int>, string] { r = m[1]; r }";
+    let errs = compile_err(src_ptr);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable)),
+        "expected PtrNotStorable, got {errs:?}"
     );
 }

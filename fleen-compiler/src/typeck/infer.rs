@@ -4988,7 +4988,14 @@ impl TypeChecker {
                     self.add_error(e.kind, e.span);
                     return Err(());
                 }
-                Type::Result(Box::new((**v).clone()), Box::new(Type::String))
+                // D6 value seal on the read route: a map value slot may not
+                // carry a `Future` / `channel` / `ptr` — the same `contains_*`
+                // rule `check_map_value_storable` enforces at declaration /
+                // literal. A `m[k]` read deep-copies the value, so a `Future`
+                // value would fork a suspended frame through the index path.
+                let value_ty = (**v).clone();
+                let _ = self.check_map_value_storable(&value_ty, span);
+                Type::Result(Box::new(value_ty), Box::new(Type::String))
             }
             Type::Box(_) => {
                 self.add_error(TypeckErrorKind::IndexOnBox, typed_arr.span());
@@ -5011,10 +5018,10 @@ impl TypeChecker {
         // `std.async.run` moves the frames out; elements are never read.
         // (`clone a[i]` delegates here, so the clone spelling is covered too.)
         // The check sees through nesting: `tss[0]` on `[[Future]]` copies a
-        // whole array of frames. The walk is array-only: a map's value slot
-        // is sealed at construction (T03's `check_map_value_storable`, D6),
-        // so a `Future` / `channel` / `ptr` value can never reach an index
-        // read through a map base.
+        // whole array of frames. The walk is array-only: a map's value slot is
+        // sealed by the D6 check above (`check_map_value_storable`, the same
+        // seal applied at declaration / literal), so a `Future` / `channel`
+        // / `ptr` value can never reach an index read through a map base.
         if elem_ty.contains_future() {
             self.add_error(TypeckErrorKind::FutureIndexRead, span);
             return Err(());
