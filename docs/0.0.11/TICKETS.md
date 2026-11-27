@@ -4,7 +4,7 @@
 > with tests. Decisions D1–D8 referenced here are **settled at planning
 > level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
-> **Status: T01 done; T02 todo; T03 todo; T04 todo; T05 todo; T06 todo; T07 todo; T08 todo.**
+> **Status: T01 done; T02 done; T03 done; T04 done; T05 todo; T06 todo; T07 todo; T08 todo.**
 > **Posture reminder**: one new opcode (`NewMap` 0xAF), one new tag
 > (`FieldTypeTag::Map = 13`), version **v9 by the content-driven rule**
 > (PLAN D7) — a module is v9 only when a map was actually encoded, every
@@ -174,15 +174,16 @@ array-literal tests (`parser/tests.rs:2289`).
 
 ## T04 — Typeck: `m[k]` access through `index_suffix` (F2; D4)
 
-- [ ] Typeck: the `typeck_index` branch (`infer.rs:2410` / `:4584`) gains
+- [x] Typeck: the `typeck_index` branch (`infer.rs:2410` / `:4584`) gains
       a map case — base `Type::Map(K, V)` + index `K` → result
       `Type::Result(V, string)` (D3/D4). A wrong-type index is
-      `ArgTypeMismatch`.
-- [ ] Zero parser change (D4): `m[k]` parses as an ordinary
+      `ArgTypeMismatch` (the `unify` path reports a `TypeMismatch`
+      against the key type, the index expression's span).
+- [x] Zero parser change (D4): `m[k]` parses as an ordinary
       `index_suffix`; the change is typeck-only.
-- [ ] `m[k]?` composes with `?` (the 0.0.2 propagation rules apply to the
+- [x] `m[k]?` composes with `?` (the 0.0.2 propagation rules apply to the
       `Result[V, string]` result).
-- [ ] Tests: typeck unit tests (hit type, miss type, wrong-index-type
+- [x] Tests: typeck unit tests (hit type, miss type, wrong-index-type
       rejection, the `?` composition shape); the standing array-index
       fixtures unchanged (the map case is a new base type, not a change to
       the array path).
