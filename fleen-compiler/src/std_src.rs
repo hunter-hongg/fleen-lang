@@ -33,6 +33,8 @@ pub fn files() -> Vec<(&'static str, &'static str)> {
         ),
         ("std/os.fln", include_str!("../../std/os.fln")),
         ("std/time.fln", include_str!("../../std/time.fln")),
+        // 0.0.11 T06 (D3): the `std.map` intrinsic module (8 functions).
+        ("std/map.fln", include_str!("../../std/map.fln")),
     ]
 }
 

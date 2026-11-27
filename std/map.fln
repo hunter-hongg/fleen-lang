@@ -1,0 +1,20 @@
+// 0.0.11 T06 std library: `map` module — map helpers.
+//
+// All eight helpers are schematic over K and V — the bounded polymorphism of
+// 0.0.3 (resolved per call site by the compiler, never spelled by the user).
+// They are VM intrinsics:
+//
+//     std.map.get(m, k)       // -> Result<V, string>  (Ok(V) if present, Err otherwise)
+//     std.map.insert(m, k, v) // -> map<K, V>  (a fresh map; m is not mutated)
+//     std.map.remove(m, k)    // -> map<K, V>  (a fresh map; m is not mutated)
+//     std.map.contains(m, k)  // -> bool
+//     std.map.keys(m)         // -> [K]  (insertion order)
+//     std.map.values(m)       // -> [V]  (key order)
+//     std.map.len(m)          // -> int
+//     std.map.clone(m)        // -> map<K, V>  (deep copy)
+//
+// Maps are always-owned values (0.0.11 D2), so `insert`/`remove`/`clone`
+// return a fresh map rather than mutating their argument; the argument map
+// itself is always cloned at the call site. `get` returns a `Result` so the
+// missing-key case is a value, not a runtime crash. Keys are restricted to
+// int/bool/string (D5); insertion order is preserved (D8).
