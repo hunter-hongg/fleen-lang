@@ -309,6 +309,24 @@ pub enum TypeckErrorKind {
     /// `continue` outside a loop body of the lexically enclosing function.
     /// Same rule shape as [`TypeckErrorKind::BreakOutsideLoop`].
     ContinueOutsideLoop,
+    // ---- 0.0.11 T03: map family (D5/D6) ----
+    /// A `map[K, V]` type use (or a `map { … }` literal's inferred key) names
+    /// a key type outside the D5 whitelist `{int, bool, string}` — the
+    /// `==`-comparable set minus `float` / `unit` / `Range`. A key's value
+    /// must be `==`-comparable (the lookup story) and hash-stable (`float`'s
+    /// `NaN != NaN` would silently store an unfindable key), so the whitelist
+    /// is closed and widening it needs a new PLAN decision.
+    MapKeyNotComparable { found: Type },
+    /// An empty map literal `map { }` with no annotation has no key or value
+    /// type to infer from — the map-literal mirror of `CannotInferArrayType`
+    /// (0.0.11 T03).
+    CannotInferMapType,
+    /// A later map-literal key does not match the key type established by
+    /// the first key (or by the annotation) — 0.0.11 T03.
+    MapKeyTypeMismatch { expected: Type, found: Type },
+    /// A later map-literal value does not match the value type established
+    /// by the first value (or by the annotation) — 0.0.11 T03.
+    MapValueTypeMismatch { expected: Type, found: Type },
 }
 
 impl TypeckErrorKind {
@@ -411,6 +429,14 @@ impl TypeckErrorKind {
             }
             TypeckErrorKind::UnsupportedFeature { feature } => {
                 write!(f, "{} is not supported yet", feature)
+            }
+            TypeckErrorKind::MapKeyNotComparable { found } => {
+                write!(
+                    f,
+                    "type `{}` cannot be a map key — a map key must be one of \
+                     `int`, `bool`, `string`",
+                    found.name_with(curry)
+                )
             }
             TypeckErrorKind::InternalError { message } => {
                 write!(f, "internal compiler error: {}", message)
@@ -803,6 +829,29 @@ impl TypeckErrorKind {
                     f,
                     "cannot infer the element type of an empty array literal — \
                      help: add a type annotation, e.g. `empty: [int] = [];`"
+                )
+            }
+            TypeckErrorKind::CannotInferMapType => {
+                write!(
+                    f,
+                    "cannot infer the key and value types of an empty map literal — \
+                     help: add a type annotation, e.g. `empty: map[int, string] = map {{ }};`"
+                )
+            }
+            TypeckErrorKind::MapKeyTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "map keys must have one uniform type: expected `{}`, found `{}`",
+                    expected.name_with(curry),
+                    found.name_with(curry)
+                )
+            }
+            TypeckErrorKind::MapValueTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "map values must have one uniform type: expected `{}`, found `{}`",
+                    expected.name_with(curry),
+                    found.name_with(curry)
                 )
             }
             TypeckErrorKind::ArrayTypeMismatch { expected, found } => {

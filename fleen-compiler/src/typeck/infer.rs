@@ -928,28 +928,23 @@ impl TypeChecker {
             ast::Type::Channel(inner) => Type::Channel(Box::new(self.convert_type(inner, span))),
             // 0.0.5 T02 D1: a raw pointer type, non-Copy and move-only.
             ast::Type::Ptr(inner) => Type::Ptr(Box::new(self.convert_type(inner, span))),
-            // 0.0.11 T02 (D1): `map[K, V]` parses; its typeck representation,
-            // the key whitelist, and `is_copy` land with T03. This bridge
-            // converts both element types (so unknown names still report)
-            // and degrades to `Unsupported` until T03 adds the real variant.
-            //
-            // The bridge name is the *user-facing* spelling with the
-            // element types: a mismatch diagnostic renders `Unsupported`'s
-            // payload verbatim, so the raw placeholder `map[K, V]` leaked
-            // into user text as though it were a type name. `map[int,
-            // string]` reads as the type; T03 replaces this with the real
-            // `Type::Map` and its own name.
-            //
-            // The element types are folded into the bridge name so that two
-            // *different* map types do not unify with each other:
-            // `Unsupported` compares by string equality, so a single opaque
-            // name would make `map[int, string]` and `map[string, int]`
-            // interchangeable. Encoding the elements keeps them distinct
-            // until T03 gives them a real representation.
+            // 0.0.11 T03 (D1/D5/D6): `map[K, V]` is a real type. The key
+            // whitelist (D5) and the value storable discipline (D6) are
+            // enforced here, at every type use — the same seal shape the
+            // enum payload table applies per substituted payload
+            // (`check_payload_storable`). The element types convert first so
+            // an unknown name in either slot still reports `UnknownType`.
             ast::Type::Map { key, value } => {
                 let key_ty = self.convert_type(key, span);
                 let value_ty = self.convert_type(value, span);
-                Type::Unsupported(format!("map[{}, {}]", key_ty.name(), value_ty.name()))
+                // The D6 value seal (D5's key whitelist is `check_map_key`).
+                // `convert_type` returns `Type`, not `Result`, so both seals
+                // record their error and continue — typeck still fails on
+                // any recorded error; both run so one bad annotation yields
+                // both diagnostics rather than the first alone.
+                let _ = self.check_map_key(&key_ty, span);
+                let _ = self.check_map_value_storable(&value_ty, span);
+                Type::Map(Box::new(key_ty), Box::new(value_ty))
             }
             ast::Type::Named { name, args, .. } => {
                 // 0.0.7 T03/D1: a bare name equal to a declaration-local type
@@ -1108,6 +1103,53 @@ impl TypeChecker {
         } else if ty.contains_ptr() {
             self.add_error(TypeckErrorKind::PtrNotStorable, span);
         }
+    }
+
+    /// Enforce the D5 key whitelist at a `map[K, V]` type use or a map
+    /// literal (0.0.11 T03): a key must be `int`, `bool`, or `string`.
+    ///
+    /// The whitelist is `==`-comparable minus `float` / `unit` / `Range`
+    /// (D5): a key drives lookup, so it must compare stably — `float`'s
+    /// `NaN != NaN` / `0.0 == -0.0` would store a key no lookup can find, and
+    /// a single-value `unit` key is already expressed by a one-entry map.
+    /// Everything else (struct / enum / array / Result / box / Future /
+    /// channel / ptr / function) needs deep `==`, which is the 0.1.0 traits
+    /// work. Widening the set needs a new PLAN decision; the error names the
+    /// whitelist so the fix is actionable.
+    fn check_map_key(&mut self, ty: &Type, span: Span) -> Result<(), ()> {
+        if !matches!(ty, Type::Int | Type::Bool | Type::String) {
+            self.add_error(
+                TypeckErrorKind::MapKeyNotComparable { found: ty.clone() },
+                span,
+            );
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// Enforce the D6 value discipline at a `map[K, V]` type use or a map
+    /// literal (0.0.11 T03): a value may not carry a `Future`, a `channel`,
+    /// or a `ptr` — the same `contains_*` seal a struct field, array
+    /// element, and box cell apply (`check_payload_storable`). A map read
+    /// (`m[k]`) deep-copies the value, so a Future value would fork a
+    /// suspended frame, a channel value would alias the shared buffer, and a
+    /// pointer value would hand out aliasing access in safe code.
+    fn check_map_value_storable(&mut self, ty: &Type, span: Span) -> Result<(), ()> {
+        // A map value is a full value position: the same contains_* seal a
+        // struct field / array element / box cell applies (D6).
+        if ty.contains_channel() {
+            self.add_error(TypeckErrorKind::ChannelNotStorable, span);
+            return Err(());
+        }
+        if ty.contains_future() {
+            self.add_error(TypeckErrorKind::FutureNotStorable, span);
+            return Err(());
+        }
+        if ty.contains_ptr() {
+            self.add_error(TypeckErrorKind::PtrNotStorable, span);
+            return Err(());
+        }
+        Ok(())
     }
 
     /// Convert one enum's raw payload types into the final skeleton stored
@@ -2442,25 +2484,12 @@ impl TypeChecker {
             } => self.typeck_enum_ctor_value(enum_name, variant_name, span, expected),
             ExprHir::Index(arr, idx, span) => self.typeck_index(*arr, *idx, span),
             ExprHir::ArrayLit(elems, span) => self.typeck_array_lit(elems, expected, span),
-            // 0.0.11 T02 (D1): the `map { k -> v }` literal parses and its
-            // key/value expressions are type-checked so they report their
-            // own errors; the literal itself is rejected until T03/T05 wire
-            // the `Type::Map` representation, `is_copy`, the whitelist, and
-            // lowering. This keeps T02 frontend-scoped and the backend
-            // unchanged.
-            ExprHir::MapLit(pairs, span) => {
-                for (k, v) in pairs {
-                    let _ = self.typeck_expr(k, None)?;
-                    let _ = self.typeck_expr(v, None)?;
-                }
-                self.add_error(
-                    TypeckErrorKind::UnsupportedFeature {
-                        feature: "map".into(),
-                    },
-                    span,
-                );
-                Err(())
-            }
+            // 0.0.11 T03 (D1/D5/D6): the `map { k -> v, … }` literal type-checks
+            // like an array literal — the first key/value fix the map's key
+            // and value types, later entries must match, an empty literal
+            // needs an annotation (the array-empty rule), and the D5 key
+            // whitelist plus the D6 value discipline apply at construction.
+            ExprHir::MapLit(pairs, span) => self.typeck_map_lit(pairs, expected, span),
             // 0.0.2 U05: ownership expressions — validated here; the
             // flow-sensitive move analysis runs afterwards in
             // `ownership.rs` over the produced TypedHir.
@@ -3283,6 +3312,12 @@ impl TypeChecker {
         if matches!(op, "==" | "!=")
             && (typed_lhs.ty().as_enum().is_some()
                 || matches!(typed_lhs.ty(), Type::Struct(_) | Type::Array(_))
+                // 0.0.11 T03 (D5): a map has no `==` either — deep map
+                // equality needs the 0.1.0 traits work, the same posture
+                // as the 0.0.6 enums. (`unify` has already forced both
+                // operands to the same type, so a left-side check covers the
+                // comparison.)
+                || matches!(typed_lhs.ty(), Type::Map(_, _))
                 || typed_lhs.ty().contains_channel()
                 || typed_lhs.ty().contains_future()
                 || typed_rhs.ty().contains_channel()
@@ -5044,6 +5079,110 @@ impl TypeChecker {
         let ty = Type::Array(Box::new(elem));
         Ok(TypedExprHir::ArrayLit {
             elems: typed_elems,
+            ty,
+            span,
+        })
+    }
+
+    /// Type check a `map { k -> v, … }` literal (0.0.11 T03).
+    ///
+    /// The first key and value fix the map's key and value types; later
+    /// entries must match both; an empty literal needs a `map[K, V]`
+    /// annotation (the array-empty rule). The D5 key whitelist and the D6
+    /// value discipline apply at construction. The result is a fresh owned
+    /// `map[K, V]` (D2), mirroring an array literal's owned result.
+    fn typeck_map_lit(
+        &mut self,
+        pairs: Vec<(ExprHir, ExprHir)>,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Result<TypedExprHir, ()> {
+        let (hint_key, hint_value): (Option<Type>, Option<Type>) = match expected {
+            Some(Type::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
+            _ => (None, None),
+        };
+
+        // An empty map literal must get its types from the annotation.
+        if pairs.is_empty() {
+            let Some(key_ty) = hint_key else {
+                self.add_error(TypeckErrorKind::CannotInferMapType, span);
+                return Err(());
+            };
+            let Some(value_ty) = hint_value else {
+                self.add_error(TypeckErrorKind::CannotInferMapType, span);
+                return Err(());
+            };
+            // An annotated empty literal runs both seals; the first failure
+            // aborts (the array-empty seal posture).
+            self.check_map_key(&key_ty, span)?;
+            self.check_map_value_storable(&value_ty, span)?;
+            return Ok(TypedExprHir::MapLit {
+                pairs: Vec::new(),
+                ty: Type::Map(Box::new(key_ty), Box::new(value_ty)),
+                span,
+            });
+        }
+
+        let mut key_ty = hint_key;
+        let mut value_ty = hint_value;
+        let mut typed_pairs = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            let typed_k = self.typeck_expr(k, key_ty.as_ref())?;
+            let typed_v = self.typeck_expr(v, value_ty.as_ref())?;
+            match &key_ty {
+                Some(exp) => {
+                    if *exp != typed_k.ty() {
+                        self.add_error(
+                            TypeckErrorKind::MapKeyTypeMismatch {
+                                expected: exp.clone(),
+                                found: typed_k.ty(),
+                            },
+                            typed_k.span(),
+                        );
+                        return Err(());
+                    }
+                }
+                None => {
+                    // First key: whitelist it (D5); a rejected key aborts the
+                    // literal so one bad key yields one error, not a cascade
+                    // of follow-on key/value mismatches against a type that
+                    // was never accepted.
+                    let kt = typed_k.ty().clone();
+                    self.check_map_key(&kt, span)?;
+                    key_ty = Some(kt);
+                }
+            }
+            match &value_ty {
+                Some(exp) => {
+                    if *exp != typed_v.ty() {
+                        self.add_error(
+                            TypeckErrorKind::MapValueTypeMismatch {
+                                expected: exp.clone(),
+                                found: typed_v.ty(),
+                            },
+                            typed_v.span(),
+                        );
+                        return Err(());
+                    }
+                }
+                None => {
+                    // First value: apply the storable discipline (D6); a
+                    // rejected value aborts the literal (the key/value seals
+                    // stay symmetric with the array literal's element check).
+                    let vt = typed_v.ty().clone();
+                    self.check_map_value_storable(&vt, span)?;
+                    value_ty = Some(vt);
+                }
+            }
+            typed_pairs.push((typed_k, typed_v));
+        }
+
+        let ty = Type::Map(
+            Box::new(key_ty.expect("non-empty literal has a key type")),
+            Box::new(value_ty.expect("non-empty literal has a value type")),
+        );
+        Ok(TypedExprHir::MapLit {
+            pairs: typed_pairs,
             ty,
             span,
         })

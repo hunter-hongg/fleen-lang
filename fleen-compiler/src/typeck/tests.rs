@@ -1022,6 +1022,11 @@ fn is_copy_exhaustive() {
     assert!(!copy_enum.is_owned());
     assert!(!owned_enum.is_copy());
     assert!(owned_enum.is_owned());
+    // 0.0.11 T03 D2: a map is ALWAYS owned — never Copy, for every `K` / `V`
+    // (the `[T]` posture). A Copy-verdict whitelist key does not flip it.
+    assert!(!map_ty(Type::Int, Type::Int).is_copy());
+    assert!(!map_ty(Type::Bool, Type::String).is_copy());
+    assert!(!map_ty(Type::String, Type::Int).is_copy());
 }
 
 #[test]
@@ -1029,6 +1034,10 @@ fn is_owned_exhaustive() {
     assert!(Type::String.is_owned());
     assert!(Type::Box(Box::new(Type::Int)).is_owned());
     assert!(Type::Result(Box::new(Type::String), Box::new(Type::Int)).is_owned());
+    // 0.0.11 T03 D2: a map is always an owned, move-only value.
+    assert!(map_ty(Type::Int, Type::Int).is_owned());
+    assert!(map_ty(Type::Bool, Type::String).is_owned());
+    assert!(map_ty(Type::String, Type::Int).is_owned());
     assert!(
         Type::Result(
             Box::new(Type::Int),
@@ -3997,10 +4006,9 @@ fn map_type_annotation_reports_a_readable_type_name() {
 
 #[test]
 fn two_different_map_types_do_not_unify() {
-    // `Unsupported` compares by string equality, so the bridge must encode
-    // the element types in its name — otherwise `map[int, string]` and
-    // `map[string, int]` would be interchangeable until T03 lands the real
-    // `Type::Map` representation.
+    // `Type::Map(k, v)` compares structurally (its key and value types), so
+    // `map[int, string]` and `map[string, int]` are distinct types and do
+    // not unify — the 0.0.3 V03 posture where `Array<int>` ≠ `Array<char>`.
     //
     // The value comes from a parameter (a `map[int, string]`-typed
     // binding); it is passed to a function that wants a
@@ -4018,6 +4026,345 @@ fn two_different_map_types_do_not_unify() {
     );
 }
 
+// ========== 0.0.11 T03: the `map` type ==========
+
+/// Build a `Type::Map` for the pure-rule tests (is_copy / is_owned /
+/// contains_*). A map is one of the owned types, mirroring `[T]`.
+fn map_ty(k: Type, v: Type) -> Type {
+    Type::Map(Box::new(k), Box::new(v))
+}
+
+#[test]
+fn map_is_copy_exhaustive_matrix() {
+    // D2/D3: a map is ALWAYS owned — never Copy, for every K / V (the `[T]`
+    // posture). The element types span every whitelist key and a spread of
+    // owned / Copy / non-Copy values, so the false verdict is not an accident
+    // of one shape.
+    assert!(!map_ty(Type::Int, Type::Int).is_copy());
+    assert!(!map_ty(Type::Bool, Type::Bool).is_copy());
+    assert!(!map_ty(Type::String, Type::String).is_copy());
+    // owned value inside a Copy key
+    assert!(!map_ty(Type::Int, Type::String).is_copy());
+    // non-Copy value (a struct payload) inside a whitelist key
+    let s = Type::Struct(Box::new(StructInfo {
+        id: StructId(0),
+        name: "S".into(),
+        copy: false,
+    }));
+    assert!(!map_ty(Type::String, s).is_copy());
+    // an enum value inside a whitelist key
+    let e = Type::Enum(Box::new(EnumInfo {
+        id: EnumId(0),
+        name: "E".into(),
+        copy: false,
+        type_param_count: 0,
+        payloads: Vec::new(),
+    }));
+    assert!(!map_ty(Type::String, e).is_copy());
+    // a nested map is still a map — always owned.
+    assert!(!map_ty(Type::Int, map_ty(Type::Int, Type::Int)).is_copy());
+}
+
+#[test]
+fn map_is_owned_for_every_element() {
+    // D2/D3: a map is one of the owned types (like `[T]`) — every
+    // key / value combination is owned, so the ownership checker requires
+    // `move` / `clone` at every consuming use.
+    assert!(map_ty(Type::Int, Type::Int).is_owned());
+    assert!(map_ty(Type::Bool, Type::String).is_owned());
+    assert!(map_ty(Type::String, Type::Int).is_owned());
+}
+
+#[test]
+fn map_contains_walks_key_and_value() {
+    // D6: a map carries its keys and its values by ownership, so the
+    // ownership checker's `contains_*` walk descends into BOTH slots. A
+    // `map[string, Future<int>]` is exactly as fork-prone as a bare future at
+    // every read route (`m[k]` deep-copies the value).
+    assert!(map_ty(Type::Int, Type::Future(Box::new(Type::Int))).contains_future());
+    assert!(map_ty(Type::Int, Type::Channel(Box::new(Type::Int))).contains_channel());
+    assert!(map_ty(Type::Int, Type::Ptr(Box::new(Type::Int))).contains_ptr());
+    // a whitelist key never trips the walk (keys are Copy / storable).
+    assert!(!map_ty(Type::String, Type::Int).contains_future());
+    assert!(!map_ty(Type::String, Type::Int).contains_channel());
+    assert!(!map_ty(Type::String, Type::Int).contains_ptr());
+}
+
+#[test]
+fn map_type_name_renders_user_facing_spelling() {
+    // D5: the user-facing spelling is `map[K, V]` (the `[]` form). Error
+    // messages that name a map use it, so a mismatch renders the real map
+    // rather than an opaque placeholder.
+    assert_eq!(map_ty(Type::Int, Type::String).name(), "map[int, string]");
+}
+
+#[test]
+fn map_key_whitelist_accepts_int_bool_string() {
+    // D5: a key must be one of `int`, `bool`, `string` — the `==`-comparable
+    // set minus `float` / `unit` / `Range`. Each whitelist key typechecks.
+    // The value is `string` so the literal needs no inference help; each key
+    // type is spelled in the annotation and exercised by the literal's key.
+    for (key_lit, key_ty) in [("0", "int"), ("true", "bool"), ("\"k\"", "string")] {
+        compile_ok(&format!(
+            "m: map[{key_ty}, string] = map {{ {key_lit} -> \"v\" }};"
+        ));
+    }
+}
+
+#[test]
+fn map_key_rejects_outside_whitelist() {
+    // D5: `float`, `unit`, `Range`, an array, a box, a Result, a function, a
+    // Future, a channel, a ptr — none may be a key. Each reports
+    // `MapKeyNotComparable` (named after what a key requires). The map type
+    // is used as a parameter annotation, so the whitelist check in
+    // `convert_type` is what fires — no literal involved.
+    let key_cases = [
+        "float",
+        "unit",
+        "Range",
+        "[int]",
+        "box<int>",
+        "Result[int, string]",
+        "(int) -> int",
+        "Future<int>",
+        "channel<int>",
+        "ptr<int>",
+    ];
+    for key in key_cases {
+        let src = format!("func f(m: map[{key}, int]): int {{ 0 }}");
+        let errs = compile_err(&src);
+        assert!(
+            err_kinds(&errs)
+                .iter()
+                .any(|k| matches!(k, TypeckErrorKind::MapKeyNotComparable { .. })),
+            "expected MapKeyNotComparable for key `{key}`, got {errs:?}"
+        );
+    }
+    // A user struct / enum key (declared locally) is also rejected.
+    let errs = compile_err(
+        "struct S { x: int }\n\
+         func f(m: map[S, int]): int { 0 }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MapKeyNotComparable { .. }))
+    );
+    let errs = compile_err(
+        "enum E { A, B }\n\
+         func f(m: map[E, int]): int { 0 }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MapKeyNotComparable { .. }))
+    );
+}
+
+#[test]
+fn map_key_not_comparable_message_names_the_whitelist() {
+    // The error is actionable (SPEC §4): it names the offending key type and
+    // lists the whitelist, so the fix is readable from the message.
+    let errs = compile_err("func f(m: map[float, int]): int { 0 }");
+    let msg = errs[0].to_string();
+    assert!(
+        msg.contains("float")
+            && msg.contains("map key")
+            && msg.contains("int")
+            && msg.contains("bool")
+            && msg.contains("string"),
+        "expected the message to name `float` and the whitelist, got: {msg}"
+    );
+}
+
+#[test]
+fn map_literal_infers_key_and_value_from_first_entry() {
+    // The first key/value fix the map's types; the result is a fresh owned
+    // `map[K, V]` (D2). (Wrapped in parens so it is an expression item: a
+    // bare `map { … }` statement takes no semicolon from ASI's `}` rule.)
+    let hir = compile_ok("(map { 1 -> 2 });");
+    assert_eq!(only_expr_ty(&hir), map_ty(Type::Int, Type::Int));
+    let hir = compile_ok("(map { \"a\" -> true });");
+    assert_eq!(only_expr_ty(&hir), map_ty(Type::String, Type::Bool));
+}
+
+#[test]
+fn map_literal_rejects_inconsistent_keys_and_values() {
+    // Later entries must match the first key / first value.
+    let errs = compile_err("map { 1 -> 2, 3 -> \"x\" };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MapValueTypeMismatch { .. }))
+    );
+    let errs = compile_err("map { 1 -> 2, \"x\" -> 3 };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::MapKeyTypeMismatch { .. }))
+    );
+}
+
+#[test]
+fn map_literal_bad_first_key_yields_one_error() {
+    // A non-whitelisted first key aborts the literal, so the single bad key
+    // produces exactly ONE `MapKeyNotComparable` — no follow-on key/value
+    // mismatch errors against a type that was never accepted.
+    let errs = compile_err("func f(): int { m = map { 1.0 -> \"a\", 2.0 -> 3 }; 0 }");
+    let map_errs = err_kinds(&errs)
+        .iter()
+        .filter(|k| matches!(k, TypeckErrorKind::MapKeyNotComparable { .. }))
+        .count();
+    assert_eq!(
+        map_errs, 1,
+        "expected exactly one map-key error, got {errs:?}"
+    );
+    assert!(
+        !err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::MapKeyTypeMismatch { .. }
+                | TypeckErrorKind::MapValueTypeMismatch { .. }
+        )),
+        "a rejected key must not cascade, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_literal_bad_first_value_yields_one_error() {
+    // Symmetric with the key: a non-storable first value aborts the literal,
+    // so it produces exactly one seal error and no follow-on mismatches.
+    let errs = compile_err(
+        "async func t(): int { 0 }\n\
+         func f(): int { m = map { 1 -> t(), \"x\" -> 2 }; 0 }",
+    );
+    let future_errs = err_kinds(&errs)
+        .iter()
+        .filter(|k| matches!(k, TypeckErrorKind::FutureNotStorable))
+        .count();
+    assert_eq!(
+        future_errs, 1,
+        "expected exactly one value error, got {errs:?}"
+    );
+    assert!(
+        !err_kinds(&errs).iter().any(|k| matches!(
+            k,
+            TypeckErrorKind::MapKeyTypeMismatch { .. }
+                | TypeckErrorKind::MapValueTypeMismatch { .. }
+        )),
+        "a rejected value must not cascade, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_literal_value_rejects_future_channel_and_pointer() {
+    // D6: a value may not carry a Future, a channel, or a ptr (the same
+    // contains_* seal a struct field / array element / box cell applies).
+    // Each is a separate snippet: the Future value is an awaited async call,
+    // the channel value a fresh channel, and the ptr a raw `ptr<int>` inside
+    // an unsafe body.
+    let future_src = "async func half(n: int): int { n }\n\
+                      func f(): int {\n\
+                          m = map { 0 -> half(1) };\n\
+                          0\n\
+                      }";
+    let errs = compile_err(future_src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::FutureNotStorable))
+    );
+
+    let channel_src = "func f(): int {\n\
+                           m = map { 0 -> channel<int>(1) };\n\
+                           0\n\
+                       }";
+    let errs = compile_err(channel_src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ChannelNotStorable))
+    );
+
+    let ptr_src = "unsafe func f(): int {\n\
+                       x = 1;\n\
+                       p = addr x;\n\
+                       m = map { 0 -> p };\n\
+                       0\n\
+                   }";
+    let errs = compile_err(ptr_src);
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::PtrNotStorable))
+    );
+}
+
+#[test]
+fn map_has_no_equality() {
+    // D5: a map has no `==` / `!=` — deep map equality needs the 0.1.0
+    // traits work (the 0.0.6 enums' posture).
+    for op in ["==", "!="] {
+        let errs = compile_err(&format!("m = map {{ 1 -> 2 }}; m {op} map {{ 1 -> 2 }};"));
+        assert!(
+            err_kinds(&errs)
+                .iter()
+                .any(|k| matches!(k, TypeckErrorKind::InvalidOperand { op: _, ty: _ })),
+            "expected InvalidOperand for `m {op} …`, got {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn map_has_no_as_string() {
+    // D5: a map is not `as string`-convertible (the 0.0.6 enums' posture).
+    let errs = compile_err("m = map { 1 -> 2 }; print(m as string);");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UnsupportedCast { .. }))
+    );
+}
+
+#[test]
+fn map_key_whitelist_is_independent_of_annotation() {
+    // D5/D1: a bare `map` keyword is not a type; the annotation carries K
+    // and V. A map literal annotated `map[int, int]` is not affected by the
+    // whitelist — only its *key* type is checked, not its spelling.
+    compile_ok("m: map[int, int] = map { 1 -> 2, 3 -> 4 };");
+}
+
+#[test]
+fn map_is_move_and_clone() {
+    // D2/D3: a map is an owned value — `clone m` deep-copies the table and
+    // `move m` transfers ownership (the ownership checker consumes the
+    // binding). This is a typeck-level assertion: the snippet typechecks. A
+    // read route (`m[k]`) is T05's.
+    compile_ok("func f(): int { m = map { 1 -> 2 }; c = clone m; t = move m; 0 }");
+}
+
+#[test]
+fn map_literal_needs_annotation_when_empty() {
+    // The array-empty rule: an empty map literal has nothing to fix its key
+    // and value types from, so it needs a `map[K, V]` annotation (and that
+    // annotation is whitelist / storable-checked).
+    let errs = compile_err("func f(): int { empty = map { }; 0 }");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::CannotInferMapType))
+    );
+    compile_ok("func f(): map[int, string] { map { } }");
+}
+
+#[test]
+fn map_is_never_inferred_from_an_int_literal() {
+    // The `map` keyword is a literal prefix, not a type (D1): a map literal
+    // is the ONLY way to introduce a map value; no coercion from another type
+    // produces one. A bare map literal fixes its type from its entries.
+    let hir = compile_ok("(map { 1 -> 2 });");
+    assert_eq!(only_expr_ty(&hir), map_ty(Type::Int, Type::Int));
+}
+
 #[test]
 fn map_type_annotation_rejects_a_foreign_value_type() {
     // The bridge must still reject a value that is not a map at all —
@@ -4031,16 +4378,6 @@ fn map_type_annotation_rejects_a_foreign_value_type() {
     );
 }
 
-#[test]
-fn map_literal_is_rejected_until_t03() {
-    // 0.0.11 T02: the literal parses but typeck rejects it — the real
-    // `Type::Map` representation, the key whitelist and the lowering land
-    // with T03/T05. The rejection names the feature.
-    let errs = compile_err("map { 1 -> 2 };");
-    assert!(
-        err_kinds(&errs)
-            .iter()
-            .any(|k| matches!(k, TypeckErrorKind::UnsupportedFeature { .. })),
-        "expected UnsupportedFeature, got {errs:?}"
-    );
-}
+// (T02's `map_literal_is_rejected_until_t03` was replaced by the T03 suite
+// above — the literal is now a real map at the typeck level, and T05 lands
+// the lowering / access opcodes.)

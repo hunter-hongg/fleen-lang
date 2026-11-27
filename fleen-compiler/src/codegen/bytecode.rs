@@ -208,6 +208,19 @@ impl FieldTypeTag {
                 debug_assert!(false, "future/channel/ptr cannot be a storable field type");
                 FieldTypeTag::Unit
             }
+            // 0.0.11 T03: a `map[K, V]` in a struct field / enum payload is
+            // rejected by typeck (`MapKeyNotComparable` / the storable
+            // discipline reach every slot a `FieldTypeTag` is written for),
+            // so this arm is a total-match guard only — `Unit` is the same
+            // honest "a slot exists here" placeholder the non-storable types
+            // use. The format's Map tag lands with T05 (the `NewMap` opcode).
+            Type::Map(_, _) => {
+                debug_assert!(
+                    false,
+                    "map cannot be a storable field type (banned by typeck)"
+                );
+                FieldTypeTag::Unit
+            }
             // `Var` is only in std builtin signatures (V06); it is always
             // resolved to a concrete type before codegen ever runs.
             Type::Var(_) => {

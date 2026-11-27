@@ -114,6 +114,13 @@ pub enum Type {
     /// (`PtrNotStorable`), because every one of those reads is a safe-code
     /// Value-level copy that would hand out a pointer without `unsafe`.
     Ptr(Box<Type>),
+    /// `map[K, V]` (0.0.11 T03, D1/D2): a key→value map, **always owned** —
+    /// the 0.0.3 V03 D3 array posture (`is_copy == false` for every `K` /
+    /// `V`): map identity is the heap table's state, so a shared handle would
+    /// let two names alias one map through a functional `insert`. The key
+    /// whitelist (D5) and the value discipline (D6) are enforced at every
+    /// type use and every literal, in `typeck`.
+    Map(Box<Type>, Box<Type>),
     /// Type variable (0.0.3 V06): appears **only** in the schematic
     /// signatures of std intrinsics — never in user-visible syntax. A
     /// fresh `Var(n)` is created per call site, unified against the
@@ -155,6 +162,10 @@ impl Type {
             Type::Future(inner) => format!("Future<{}>", inner.name()),
             Type::Channel(inner) => format!("channel<{}>", inner.name()),
             Type::Ptr(inner) => format!("ptr<{}>", inner.name()),
+            // The user-facing spelling (PLAN §1 D5): a map renders its key
+            // and value types, so a mismatch names the actual map rather than
+            // an opaque placeholder.
+            Type::Map(k, v) => format!("map[{}, {}]", k.name(), v.name()),
             Type::Var(id) => format!("?T{}", id),
             Type::Unsupported(name) => name.clone(),
         }
@@ -207,6 +218,7 @@ impl Type {
             Type::Future(inner) => format!("Future<{}>", inner.name_with(true)),
             Type::Channel(inner) => format!("channel<{}>", inner.name_with(true)),
             Type::Ptr(inner) => format!("ptr<{}>", inner.name_with(true)),
+            Type::Map(k, v) => format!("map[{}, {}]", k.name_with(true), v.name_with(true)),
             Type::App(info, args) => format!(
                 "{}<{}>",
                 info.name,
@@ -326,7 +338,12 @@ impl Type {
             // F3: a Future owns its suspended state — never Copy (driven once).
             // 0.0.5 T02 D1: a ptr is a move-only handle — copying it would
             // alias without the explicit `move` at every boundary.
-            Type::Future(_)
+            // 0.0.11 T03 D2: a map is always owned — never Copy, for every
+            // `K` / `V` (the `[T]` posture, D3 of 0.0.3 V03): the type is a
+            // handle onto heap table state, so a Copy verdict would let two
+            // names alias one map.
+            Type::Map(_, _)
+            | Type::Future(_)
             | Type::Channel(_)
             | Type::Ptr(_)
             | Type::Var(_)
@@ -360,6 +377,10 @@ impl Type {
             // Copy under argument substitution (`Option<string>` is owned
             // while `Option<int>` is Copy).
             Type::App(info, args) => !app_is_copy(info, args),
+            // 0.0.11 T03 D2: a map owns its table (`insert` / `remove` are
+            // functional and return a NEW map), so it is always an owned,
+            // move-only value — the `[T]` posture for every `K` / `V`.
+            Type::Map(_, _) => true,
             // F3: a Future owns its suspended coroutine frame; it is moved
             // (e.g. into `std.async.run` or `await`), never shared.
             Type::Future(_) => true,
@@ -418,6 +439,13 @@ fn contains_in_value_position(ty: &Type, kind: &ContainsKind) -> bool {
         Type::Channel(_) => *kind == ContainsKind::Channel,
         Type::Ptr(_) => *kind == ContainsKind::Ptr,
         Type::Array(elem) => contains_in_value_position(elem, kind),
+        // 0.0.11 T03 D6: a map carries both its keys and its values by
+        // ownership, so the walk descends into `K` and `V` — a
+        // `map[string, Future<int>]` is exactly as fork-prone as a bare
+        // future at every read route (`m[k]` deep-copies the value).
+        Type::Map(k, v) => {
+            contains_in_value_position(k, kind) || contains_in_value_position(v, kind)
+        }
         Type::Result(t, e) => {
             contains_in_value_position(t, kind) || contains_in_value_position(e, kind)
         }
@@ -450,6 +478,12 @@ pub(crate) fn visit_params(ty: &Type, f: &mut impl FnMut(usize)) {
         | Type::Future(e)
         | Type::Channel(e)
         | Type::Ptr(e) => visit_params(e, f),
+        // 0.0.11 T03: a map's key and value are both walked, so a schematic
+        // signature built over a map type resolves every parameter slot.
+        Type::Map(k, v) => {
+            visit_params(k, f);
+            visit_params(v, f);
+        }
         Type::App(_, args) => {
             for a in args {
                 visit_params(a, f);
@@ -487,6 +521,10 @@ pub(crate) fn rewrite_type(
             Box::new(rewrite_type(b, on_param, on_var)),
         ),
         Type::Array(e) => Type::Array(Box::new(rewrite_type(e, on_param, on_var))),
+        Type::Map(k, v) => Type::Map(
+            Box::new(rewrite_type(k, on_param, on_var)),
+            Box::new(rewrite_type(v, on_param, on_var)),
+        ),
         Type::Box(e) => Type::Box(Box::new(rewrite_type(e, on_param, on_var))),
         Type::Ref(e) => Type::Ref(Box::new(rewrite_type(e, on_param, on_var))),
         Type::Future(e) => Type::Future(Box::new(rewrite_type(e, on_param, on_var))),
@@ -830,6 +868,15 @@ pub enum TypedExprHir {
         ty: Type,
         span: Span,
     },
+    /// `map { k -> v, ... }` (0.0.11 T03). Pairs keep source order; `ty` is
+    /// the full `map[K, V]` type (an empty literal takes it from the
+    /// annotation). Each pair contributes one key and one value expression
+    /// (both evaluate in source order; T05 lowers them to `NewMap`).
+    MapLit {
+        pairs: Vec<(TypedExprHir, TypedExprHir)>,
+        ty: Type,
+        span: Span,
+    },
     /// `Name { field: expr, ... }` (0.0.3 V02). Initializers are in
     /// *source* order paired with their declaration-order field index, so
     /// lowering evaluates source-first and reorders into `StructNew`'s
@@ -976,6 +1023,7 @@ impl TypedExprHir {
             },
             TypedExprHir::Addr { ty, .. } => ty.clone(),
             TypedExprHir::ArrayLit { ty, .. } => ty.clone(),
+            TypedExprHir::MapLit { ty, .. } => ty.clone(),
             TypedExprHir::StructLit { ty, .. } => ty.clone(),
             TypedExprHir::Call { ty: ret_ty, .. } => ret_ty.clone(),
             TypedExprHir::Index { ty, .. } => ty.clone(),
@@ -1035,6 +1083,7 @@ impl TypedExprHir {
             TypedExprHir::AssignField { span, .. } => *span,
             TypedExprHir::AssignIndex { span, .. } => *span,
             TypedExprHir::ArrayLit { span, .. } => *span,
+            TypedExprHir::MapLit { span, .. } => *span,
             TypedExprHir::StructLit { span, .. } => *span,
             TypedExprHir::Call { callee, .. } => callee.span(),
             TypedExprHir::Index { span, .. } => *span,

@@ -457,6 +457,15 @@ impl<'a> Cx<'a> {
                     self.walk_expr(elem, true);
                 }
             }
+            // 0.0.11 T03: a fresh map consumes its key and value
+            // initializers — both are value positions (the key is stored, the
+            // value is stored), so each walks as a consuming use.
+            TypedExprHir::MapLit { pairs, .. } => {
+                for (k, v) in pairs.iter_mut() {
+                    self.walk_expr(k, true);
+                    self.walk_expr(v, true);
+                }
+            }
             TypedExprHir::Int(..)
             | TypedExprHir::Float(..)
             | TypedExprHir::Bool(..)
@@ -966,6 +975,15 @@ fn scan_owned_local_uses(
         TypedExprHir::ArrayLit { elems, .. } => {
             for elem in elems {
                 scan_owned_local_uses(elem, out, globals, global_names, entry);
+            }
+        }
+        // 0.0.11 T03: each map pair's key and value are consumed by the
+        // literal (the key whitelist makes keys Copy, but the scan is
+        // uniform with the array-element shape).
+        TypedExprHir::MapLit { pairs, .. } => {
+            for (k, v) in pairs {
+                scan_owned_local_uses(k, out, globals, global_names, entry);
+                scan_owned_local_uses(v, out, globals, global_names, entry);
             }
         }
         TypedExprHir::Field { obj, .. } => {

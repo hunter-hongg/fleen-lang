@@ -139,28 +139,28 @@ array-literal tests (`parser/tests.rs:2289`).
 
 ## T03 — Resolver/Typeck: `Type::Map`, the D5 key whitelist, `is_copy`, the D6 `contains_*` arms (F1; D2/D5/D6)
 
-- [ ] Typeck: new `Type::Map(Box<Type>, Box<Type>)` variant; the resolver
+- [x] Typeck: new `Type::Map(Box<Type>, Box<Type>)` variant; the resolver
       resolves the `ast::Type::Map` use to it.
-- [ ] Typeck: `is_copy(map[K, V]) == false` for every `K` / `V` (D2) — the
+- [x] Typeck: `is_copy(map[K, V]) == false` for every `K` / `V` (D2) — the
       `is_copy` match (`typed_hir.rs:305`) gains a `Type::Map(_) => false`
       arm; `is_copy_exhaustive` (`typeck/tests.rs:976`) updated.
-- [ ] Typeck: the D5 key whitelist (`int` / `bool` / `string`) enforced at
+- [x] Typeck: the D5 key whitelist (`int` / `bool` / `string`) enforced at
       every `map[K, V]` type use — a non-whitelisted key is
       `MapKeyNotComparable` (new `TypeckErrorKind`) with a hint naming the
       whitelist. Covers `float` / `unit` / `Range` / `enum` / `struct` /
       `array` / `Result` / `box` / `Future` / `channel` / `ptr` / function
       values.
-- [ ] Typeck: the D6 `contains_*` walk (`contains_in_value_position`)
+- [x] Typeck: the D6 `contains_*` walk (`contains_in_value_position`)
       gains a `Type::Map` arm that recurses into `K` and `V` — a
       `map[K, Future<_>]` / `map[K, channel<_>]` / `map[K, ptr<_>]` is
       rejected at the literal and at every `std.map.insert` / `values`
       call.
-- [ ] Typeck: `==` / `!=` on a map operand is `InvalidOperand` (D5's
+- [x] Typeck: `==` / `!=` on a map operand is `InvalidOperand` (D5's
       enum/array posture) — the `typeck_binary_op` gate
       (`infer.rs:3231`) gains `Type::Map(_)` in its reject list.
-- [ ] Typeck: `as string` on a map is rejected (no auto-derived
+- [x] Typeck: `as string` on a map is rejected (no auto-derived
       formatting; the 0.0.6 enum posture).
-- [ ] Tests: typeck unit tests (`is_copy` false, the whitelist
+- [x] Tests: typeck unit tests (`is_copy` false, the whitelist
       accept/reject matrix, the `contains_*` rejections, the `==`
       rejection, the `as string` rejection); `is_copy_exhaustive` green.
 

@@ -237,6 +237,14 @@ fn collect_expr(alloc: &mut SlotAlloc, expr: &TypedExprHir) {
                 collect_expr(alloc, elem);
             }
         }
+        // 0.0.11 T03: each map pair's key and value allocate like any
+        // sub-expression (the `NewMap` opcode lands in T05).
+        TypedExprHir::MapLit { pairs, .. } => {
+            for (k, v) in pairs {
+                collect_expr(alloc, k);
+                collect_expr(alloc, v);
+            }
+        }
         TypedExprHir::Field { obj, .. } => collect_expr(alloc, obj),
         TypedExprHir::StructLit { inits, .. } => {
             for (_, init) in inits {
