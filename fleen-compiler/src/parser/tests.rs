@@ -1168,7 +1168,15 @@ func apply(f: (int, int) -> int, a: int, b: int): int = f(a, b)
         // `map<int>` (one type arg, no comma) is a parse error — a map
         // always carries exactly two type arguments.
         let err = parse_err("const m: map<int> = x;");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        match err.kind {
+            ParseErrorKind::Expected { expected, .. } => {
+                assert!(
+                    expected.contains("`,` after map key type"),
+                    "got: {expected}"
+                );
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2450,6 +2458,17 @@ func main() {
     }
 
     #[test]
+    fn parse_map_literal_three_pairs() {
+        // Three pairs — the list is unbounded, so a third entry must parse
+        // exactly like the first two (the array-literal rule, D1).
+        let ast = parse_str("map { 1 -> \"a\", 2 -> \"b\", 3 -> \"c\" };");
+        let Item::Expr(Expr::MapLit(l)) = &ast.items[0] else {
+            panic!("expected map literal");
+        };
+        assert_eq!(l.pairs.len(), 3);
+    }
+
+    #[test]
     fn parse_map_literal_trailing_comma() {
         // Trailing comma allowed (the array-literal rule, D1).
         let ast = parse_str("map { 1 -> 2, };");
@@ -2498,14 +2517,28 @@ func main() {
         // `map { k }` without `->`: a bare key is a parse error, not an
         // implicit key (D1).
         let err = parse_err("map { 1 };");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        match err.kind {
+            ParseErrorKind::Expected { expected, .. } => {
+                assert!(expected.contains("`->` after map key"), "got: {expected}");
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
     }
 
     #[test]
     fn parse_map_literal_missing_value_is_error() {
-        // `map { k -> }` without a value expression is a parse error.
+        // `map { k -> }` without a value expression is a parse error. The
+        // renderer prepends "expected " to the `expected` field, so the
+        // user-visible text is "expected expression" (the ticket's wording).
         let err = parse_err("map { 1 -> };");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        let rendered = err.to_string();
+        match err.kind {
+            ParseErrorKind::Expected { expected, .. } => {
+                assert_eq!(expected, "expression");
+                assert!(rendered.contains("expected expression"), "got: {rendered}");
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2513,7 +2546,15 @@ func main() {
         // `map { k -> v` without `}` (EOF inside the literal) is a parse
         // error.
         let err = parse_err("map { 1 -> 2");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        match err.kind {
+            ParseErrorKind::Expected { expected, .. } => {
+                assert!(
+                    expected.contains("`}` or `,` after map pair"),
+                    "got: {expected}"
+                );
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2521,7 +2562,12 @@ func main() {
         // `map` not followed by `{` — e.g. `map 1` — is a parse error (a
         // bare `map` token starts a literal, nothing else).
         let err = parse_err("map 1;");
-        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+        match err.kind {
+            ParseErrorKind::Expected { expected, .. } => {
+                assert!(expected.contains("`{` after `map`"), "got: {expected}");
+            }
+            other => panic!("expected Expected error, got {other:?}"),
+        }
     }
 
     #[test]

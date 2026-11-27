@@ -96,11 +96,39 @@ value, so nested composites resolve. `map {` is gated on `TokenKind::Map` in
 always a literal; D1) — the `map`-token-reaching-block case cannot occur. The
 resolver already carries `ExprHir::MapLit` / `ast::Type::Map` through (added in
 the T02 frontend skeleton), and typeck degrades both the literal and the
-type-use to `Unsupported` (map) / `Unsupported(map[K, V])` until T03 adds the
-real `Type::Map` representation, whitelist, and `is_copy`; T05 wires lowering.
-A map *type* in `is_copy` / `is_copy_exhaustive` already returns `false`
-(always-owned, D2). No std or e2e fixture regressed (`std.collection.iter.map`
-is protected by the T01 member carve-out).
+type-use to `Unsupported` until T03 adds the real `Type::Map` representation,
+whitelist, and `is_copy`; T05 wires lowering. No std or e2e fixture regressed
+(`std.collection.iter.map` is protected by the T01 member carve-out).
+
+**T02 review findings (fixed in the same ticket)**: a review of T02 surfaced
+three gaps, all closed before the ticket was signed off.
+
+1. *The bridge name leaked into user diagnostics.* The bridge produced
+   `Unsupported("map[K, V]")`, and `Unsupported`'s payload is rendered
+   verbatim by `Type::name` — so a mismatch printed
+   ``expected `map[K, V]`, found `int` ``, i.e. an internal placeholder
+   presented as a type name. The bridge now renders the *user-facing* spelling
+   with the element types: ``expected `map[int, string]`, found `int` ``.
+2. *The bridge collapsed every map type into one.* `Unsupported` compares by
+   string equality, so the single opaque name made `map[int, string]` and
+   `map[string, int]` interchangeable — a `map[int, string]` value was
+   accepted where a `map[string, int]` was expected. The bridge now encodes
+   the element types in its name, so distinct map types stay distinct until
+   T03 gives them a real representation. Pinned by
+   `typeck::tests::two_different_map_types_do_not_unify`.
+3. *The parser tests did not pin the error texts.* The five parse errors were
+   implemented with the exact texts this ticket specifies, but the tests only
+   asserted `ParseErrorKind::Expected { .. }` — a regression could change the
+   wording silently. They now assert the text, following the repo's existing
+   convention (`parser/tests.rs:1513`). The missing 3-pair literal test was
+   added at the same time.
+
+**Known limitation (T03's job, not T02's)**: the bridge's `Unsupported` is
+neither Copy nor owned, so a map-typed parameter used twice is *not* flagged
+as an owned-value use (a `string` parameter is). The D2 always-owned rule
+lands with T03's real `Type::Map` variant, which gains the `is_owned` arm
+alongside `is_copy`. T02's ast-level `ast::Type::Map { .. } => false` arm in
+`ast_type_is_copy_with_enums` already covers the ast-side verdict.
 
 **Depends on**: T01.
 **Refs**: PLAN §1 D1, §3.1, §5; `parser/expr.rs:338` (the `LBrace`

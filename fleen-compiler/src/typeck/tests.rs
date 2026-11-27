@@ -3961,3 +3961,86 @@ fn result_prelude_unify_reports_mapped_type_in_text() {
         "expected ArgTypeMismatch naming `Result[int, string]`, got {errs:?}"
     );
 }
+
+// ========== 0.0.11 T02: the `map[K, V]` typeck bridge ==========
+
+#[test]
+fn map_type_is_never_copy() {
+    // 0.0.11 D2: a map is always owned — `is_copy` is false for every
+    // key/value pair, regardless of the element types.
+    let hir = compile_ok("func f(m: map[int, int]): int { 0 }");
+    match &hir.items[0] {
+        TypedHirItem::Decl(TypedDeclHir::Func(f)) => {
+            assert!(!f.params[0].ty.is_copy(), "map must never be Copy");
+        }
+        other => panic!("expected Func decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_type_annotation_reports_a_readable_type_name() {
+    // The bridge degrades a map type to `Unsupported`, but the *name* the
+    // user sees in a mismatch must read as a type, not as an internal
+    // placeholder. `map[K, V]` (the bridge's raw string) leaked straight
+    // into the diagnostic; the user-facing spelling names the element
+    // types: `map[int, string]`.
+    let errs = compile_err("func f(): map[int, string] { 1 }");
+    let hit = errs.iter().any(|e| {
+        matches!(e.kind, TypeckErrorKind::TypeMismatch { .. })
+            && e.to_string().contains("`map[int, string]`")
+    });
+    assert!(
+        hit,
+        "expected TypeMismatch naming `map[int, string]`, got {errs:?}"
+    );
+}
+
+#[test]
+fn two_different_map_types_do_not_unify() {
+    // `Unsupported` compares by string equality, so the bridge must encode
+    // the element types in its name — otherwise `map[int, string]` and
+    // `map[string, int]` would be interchangeable until T03 lands the real
+    // `Type::Map` representation.
+    //
+    // The value comes from a parameter (a `map[int, string]`-typed
+    // binding); it is passed to a function that wants a
+    // `map[string, int]`. Nothing else in the snippet mismatches, so any
+    // reported error is the cross-type unification.
+    let errs = compile_err(
+        "func g(m: map[string, int]): int { 0 }\n\
+         func f(m: map[int, string]): int { g(m); 0 }",
+    );
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::ArgTypeMismatch { .. })),
+        "expected ArgTypeMismatch between two distinct map types, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_type_annotation_rejects_a_foreign_value_type() {
+    // The bridge must still reject a value that is not a map at all —
+    // `Unsupported` unifies with `Unsupported` but never with `Int`.
+    let errs = compile_err("func f(): map[int, string] { 1 }");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::TypeMismatch { .. })),
+        "expected TypeMismatch, got {errs:?}"
+    );
+}
+
+#[test]
+fn map_literal_is_rejected_until_t03() {
+    // 0.0.11 T02: the literal parses but typeck rejects it — the real
+    // `Type::Map` representation, the key whitelist and the lowering land
+    // with T03/T05. The rejection names the feature.
+    let errs = compile_err("map { 1 -> 2 };");
+    assert!(
+        err_kinds(&errs)
+            .iter()
+            .any(|k| matches!(k, TypeckErrorKind::UnsupportedFeature { .. })),
+        "expected UnsupportedFeature, got {errs:?}"
+    );
+}

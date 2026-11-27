@@ -932,10 +932,24 @@ impl TypeChecker {
             // the key whitelist, and `is_copy` land with T03. This bridge
             // converts both element types (so unknown names still report)
             // and degrades to `Unsupported` until T03 adds the real variant.
+            //
+            // The bridge name is the *user-facing* spelling with the
+            // element types: a mismatch diagnostic renders `Unsupported`'s
+            // payload verbatim, so the raw placeholder `map[K, V]` leaked
+            // into user text as though it were a type name. `map[int,
+            // string]` reads as the type; T03 replaces this with the real
+            // `Type::Map` and its own name.
+            //
+            // The element types are folded into the bridge name so that two
+            // *different* map types do not unify with each other:
+            // `Unsupported` compares by string equality, so a single opaque
+            // name would make `map[int, string]` and `map[string, int]`
+            // interchangeable. Encoding the elements keeps them distinct
+            // until T03 gives them a real representation.
             ast::Type::Map { key, value } => {
-                let _ = self.convert_type(key, span);
-                let _ = self.convert_type(value, span);
-                Type::Unsupported("map[K, V]".to_string())
+                let key_ty = self.convert_type(key, span);
+                let value_ty = self.convert_type(value, span);
+                Type::Unsupported(format!("map[{}, {}]", key_ty.name(), value_ty.name()))
             }
             ast::Type::Named { name, args, .. } => {
                 // 0.0.7 T03/D1: a bare name equal to a declaration-local type
