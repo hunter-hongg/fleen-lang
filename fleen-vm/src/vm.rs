@@ -1,12 +1,12 @@
 //! Core interpreter loop.
 
-use fleen_compiler::codegen::{Const, FuncId, MODULE_VERSION_V8, Module, Opcode};
+use fleen_compiler::codegen::{Const, FuncId, MODULE_VERSION_V9, Module, Opcode};
 
 use crate::error::{RuntimeError, RuntimeErrorKind};
 use crate::executor::{Scheduler, Task};
 use crate::fmt::fmt_scalar;
 use crate::frame::{CallFrame, FutureFrame, FutureState};
-use crate::value::{ChannelInner, Value};
+use crate::value::{ChannelInner, MapCell, MapKey, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -61,6 +61,10 @@ fn deep_fork_kind(v: &Value) -> Option<DeepFork> {
         // admits Future/channel captures, so this backstop must see inside
         // the list.
         Value::Func { captures, .. } => captures.iter().find_map(deep_fork_kind),
+        // 0.0.11 T05: a map is a container — its values travel with the
+        // same copy rules as array/enum payloads (D8: insertion order, deep
+        // copy on clone).
+        Value::Map(cell) => cell.data.values().find_map(deep_fork_kind),
         _ => None,
     }
 }
@@ -279,7 +283,7 @@ impl Vm {
         // flag-blind). Structurally v8 differs from v7 by the `PartialApply`
         // opcode only; executing it lands with T08 (function-value captures)
         // and is rejected below until then.
-        if !(1..=MODULE_VERSION_V8).contains(&self.module.version) {
+        if !(1..=MODULE_VERSION_V9).contains(&self.module.version) {
             return Err(RuntimeErrorKind::UnsupportedVersion(self.module.version));
         }
         let entry = self.module.entry;
@@ -647,6 +651,11 @@ impl Vm {
             Value::Enum { payload, .. } => {
                 payload.iter().any(|p| self.value_has_blocked_channel(p))
             }
+            // 0.0.11 T05: map values are a container.
+            Value::Map(cell) => cell
+                .data
+                .values()
+                .any(|v| self.value_has_blocked_channel(v)),
             Value::Range { .. } => false,
             Value::Future(f) => self.frame_has_blocked_channel(f),
             _ => false,
@@ -1236,6 +1245,26 @@ impl Vm {
                     _ => self.builtin_arr_set(&args),
                 }
             }
+            // 0.0.11 T05: std.map intrinsics.
+            "std.map.get" | "std.map.insert" | "std.map.remove" | "std.map.contains"
+            | "std.map.keys" | "std.map.values" | "std.map.len" | "std.map.clone" => {
+                // All args are copied (whole-map clone or element clone).
+                // Deep-fork backstop for any Future/channel/ptr buried in
+                // map values (D6).
+                for arg in &args {
+                    reject_deep_fork_unconditional(arg)?;
+                }
+                match name {
+                    "std.map.get" => self.builtin_map_get(&args),
+                    "std.map.insert" => self.builtin_map_insert(&args),
+                    "std.map.remove" => self.builtin_map_remove(&args),
+                    "std.map.contains" => self.builtin_map_contains(&args),
+                    "std.map.keys" => self.builtin_map_keys(&args),
+                    "std.map.values" => self.builtin_map_values(&args),
+                    "std.map.len" => self.builtin_map_len(&args),
+                    _ => self.builtin_map_clone(&args),
+                }
+            }
             // 0.0.8 T09: `range` / `range_from` and the inline-iteration
             // helpers fold to dedicated bytecode only at a full-arity call
             // site. As first-class values (a curried partial like
@@ -1504,6 +1533,131 @@ impl Vm {
             }
         }
         Ok(Value::Arr(elems.into_boxed_slice()))
+    }
+
+    // 0.0.11 T05: std.map intrinsic implementations (D3/D5/D8).
+
+    /// `std.map.get(m, k)` → `Result[V, string]`.
+    fn builtin_map_get(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let map_key = MapKey(args[1].clone());
+        match cell.data.get(&map_key) {
+            Some(v) => Ok(Value::Ok(Box::new(v.clone()))),
+            None => Ok(Value::Err(Box::new(Value::Str("key not found".into())))),
+        }
+    }
+
+    /// `std.map.insert(m, k, v)` → fresh map with (k,v) inserted/updated.
+    ///
+    /// The `MapKey` type is restricted to int/bool/string by typeck (D5),
+    /// so the interior-mutability-bearing `Value` variants can never be
+    /// map keys at runtime.
+    #[allow(clippy::mutable_key_type)]
+    fn builtin_map_insert(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let mut order = cell.order.clone();
+        let mut data = cell.data.clone();
+        let map_key = MapKey(args[1].clone());
+        if !data.contains_key(&map_key) {
+            order.push(args[1].clone());
+        }
+        data.insert(map_key, args[2].clone());
+        Ok(Value::Map(Box::new(MapCell { order, data })))
+    }
+
+    /// `std.map.remove(m, k)` → fresh map with k removed.
+    #[allow(clippy::mutable_key_type)]
+    fn builtin_map_remove(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let map_key = MapKey(args[1].clone());
+        if cell.data.contains_key(&map_key) {
+            let order: Vec<Value> = cell
+                .order
+                .iter()
+                .filter(|k| match (k, &map_key) {
+                    (Value::Int(a), MapKey(Value::Int(b))) => a != b,
+                    (Value::Bool(a), MapKey(Value::Bool(b))) => a != b,
+                    (Value::Str(a), MapKey(Value::Str(b))) => a != b,
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            let mut data = cell.data.clone();
+            data.remove(&map_key);
+            Ok(Value::Map(Box::new(MapCell { order, data })))
+        } else {
+            Ok(Value::Map(cell.clone()))
+        }
+    }
+
+    /// `std.map.contains(m, k)` → bool.
+    fn builtin_map_contains(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let map_key = MapKey(args[1].clone());
+        Ok(Value::Bool(cell.data.contains_key(&map_key)))
+    }
+
+    /// `std.map.keys(m)` → [K] (declaration order).
+    fn builtin_map_keys(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        Ok(Value::Arr(cell.order.clone().into_boxed_slice()))
+    }
+
+    /// `std.map.values(m)` → [V] (declaration order).
+    fn builtin_map_values(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        let mut values = Vec::with_capacity(cell.order.len());
+        for k in &cell.order {
+            let map_key = MapKey(k.clone());
+            if let Some(v) = cell.data.get(&map_key) {
+                values.push(v.clone());
+            }
+        }
+        Ok(Value::Arr(values.into_boxed_slice()))
+    }
+
+    /// `std.map.len(m)` → int.
+    fn builtin_map_len(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        Ok(Value::Int(cell.data.len() as i64))
+    }
+
+    /// `std.map.clone(m)` → fresh map (deep copy).
+    fn builtin_map_clone(&self, args: &[Value]) -> Result<Value, RuntimeErrorKind> {
+        let binding = self.read_ref(&args[0])?;
+        let cell = match binding.as_value() {
+            Value::Map(cell) => cell,
+            _ => return Err(RuntimeErrorKind::StackShape),
+        };
+        Ok(Value::Map(cell.clone()))
     }
 
     /// The out-of-bounds runtime error for `std.arr.set`, matching the raw
@@ -2198,6 +2352,34 @@ impl Vm {
                 let elems: Vec<Value> = self.stack.split_off(self.stack.len() - n);
                 self.stack.push(Value::Arr(elems.into_boxed_slice()));
             }
+            // 0.0.11 T05: map literal construction (bytecode 0xAF, v9).
+            // Map keys are restricted to int/bool/string by typeck (D5), so the
+            // interior-mutability-bearing `Value` variants can never be keys.
+            #[allow(clippy::mutable_key_type)]
+            Opcode::NewMap => {
+                let s = take!(2);
+                let n = u16::from_le_bytes([s[0], s[1]]) as usize;
+                if self.stack.len() < 2 * n {
+                    return Err(RuntimeErrorKind::StackUnderflow);
+                }
+                let pairs = self.stack.split_off(self.stack.len() - 2 * n);
+                let mut order = Vec::with_capacity(n);
+                let mut data: std::collections::HashMap<MapKey, Value> =
+                    std::collections::HashMap::new();
+                // Clippy's `chunks_exact_to_as_chunks` suggests `as_chunks::<2>()`,
+                // but that returns `(&[[Value; 2]], &[Value])` which is not
+                // directly iterable — keep `chunks_exact` with explicit indexing.
+                #[allow(clippy::chunks_exact_to_as_chunks)]
+                for pair in pairs.chunks_exact(2) {
+                    let k = pair[0].clone();
+                    let v = pair[1].clone();
+                    order.push(k.clone());
+                    let key = MapKey(k);
+                    data.insert(key, v);
+                }
+                self.stack
+                    .push(Value::Map(Box::new(MapCell { order, data })));
+            }
             Opcode::ArrLen => {
                 // `a → a int`: peek — the array stays on the stack. Through
                 // a borrow handle (`ref [T]` read path) the target's length
@@ -2217,15 +2399,20 @@ impl Vm {
                 // so the read never disturbs the original. The sign check
                 // comes before the range check — `a[-1]` must be an
                 // out-of-range error, never a huge usize index.
-                let i = match self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)? {
-                    Value::Int(i) => i,
-                    _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
-                };
-                let a = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                //
+                // For a map base (`Value::Map`), the key is popped first,
+                // then the map; the result is `Result[V, string]` —
+                // `Ok(value)` if found, `Err("key not found")` if not.
+                let key = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
+                let base = self.stack.pop().ok_or(RuntimeErrorKind::StackUnderflow)?;
                 let copy = {
-                    let resolved = self.read_ref(&a)?;
+                    let resolved = self.read_ref(&base)?;
                     match resolved.as_value() {
                         Value::Arr(elems) => {
+                            let i = match key {
+                                Value::Int(i) => i,
+                                _ => return Err(RuntimeErrorKind::ArithTypeMismatch),
+                            };
                             if i < 0 || i as usize >= elems.len() {
                                 return Err(RuntimeErrorKind::IndexOutOfRange {
                                     index: i,
@@ -2241,6 +2428,13 @@ impl Vm {
                             // containers (0.0.4 review fix).
                             reject_deep_fork_unconditional(&elems[i as usize])?;
                             elems[i as usize].clone()
+                        }
+                        Value::Map(cell) => {
+                            let map_key = MapKey(key);
+                            match cell.data.get(&map_key) {
+                                Some(v) => Value::Ok(Box::new(v.clone())),
+                                None => Value::Err(Box::new(Value::Str("key not found".into()))),
+                            }
                         }
                         _ => return Err(RuntimeErrorKind::StackShape),
                     }
@@ -2894,6 +3088,14 @@ impl Vm {
     fn read_slot(&self, idx: usize) -> Result<Value, RuntimeErrorKind> {
         match self.stack.get(idx).ok_or(RuntimeErrorKind::StackShape)? {
             Value::Cell(cell) => Ok(cell.borrow().clone()),
+            // 0.0.11 T05 (D2): a map is a move-only owned type. The
+            // compiler emits `ArrGet` for `m[k]` when `m` is a `ref` parameter
+            // (the `ref` handle resolves to the pointee), but `StoreLocal` /
+            // `CloneLocal` can also find a map on the stack. The map value is
+            // deep-copied by its derived `Clone` (the `MapCell` + `HashMap`
+            // are both `Clone`), so we hand back the value as an owned copy.
+            // This is the 0.0.2 D3 rule: an element read is a deep copy.
+            Value::Map(_) => Ok(self.stack.get(idx).unwrap().clone()),
             v => Ok(v.clone()),
         }
     }

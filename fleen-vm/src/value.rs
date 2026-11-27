@@ -4,6 +4,58 @@ use std::fmt;
 
 use fleen_compiler::codegen::FuncId;
 
+/// A map's storage (0.0.11 T05, D8): insertion-ordered keys backed by a
+/// `HashMap` for O(1) lookup, plus an `order` Vec preserving declaration
+/// order for `keys` / `values`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapCell {
+    pub order: Vec<Value>,
+    pub data: std::collections::HashMap<MapKey, Value>,
+}
+
+/// Hashable key wrapper for `Value` keys (int/bool/string only, D5).
+///
+/// Clippy's `mutable_key_type` fires because `Value` (and the `MapCell`
+/// / `ChannelInner` variants) contain `Rc` / `RefCell`. Map keys are
+/// restricted to `int` / `bool` / `string` by typeck (D5), so the
+/// interior-mutability-bearing variants can never be keys at runtime.
+#[allow(clippy::mutable_key_type)]
+#[derive(Debug, Clone)]
+pub struct MapKey(pub Value);
+
+impl PartialEq for MapKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MapKey {}
+
+impl std::hash::Hash for MapKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match &self.0 {
+            Value::Int(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            Value::Bool(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            Value::Str(v) => {
+                2u8.hash(state);
+                v.hash(state);
+            }
+            _ => {}
+        }
+    }
+}
+
 use crate::frame::FutureFrame;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -67,6 +119,7 @@ pub enum PayloadKind {
     Ptr,
     Cell,
     Enum,
+    Map,
 }
 
 impl PayloadKind {
@@ -90,6 +143,7 @@ impl PayloadKind {
             PayloadKind::Ptr => "ptr",
             PayloadKind::Cell => "cell",
             PayloadKind::Enum => "enum",
+            PayloadKind::Map => "map",
         }
     }
 }
@@ -116,6 +170,7 @@ impl Value {
             Value::Ptr(_) => PayloadKind::Ptr,
             Value::Cell(_) => PayloadKind::Cell,
             Value::Enum { .. } => PayloadKind::Enum,
+            Value::Map(_) => PayloadKind::Map,
         }
     }
 }
@@ -176,6 +231,10 @@ pub enum Value {
     /// (D3 — even `[int]`); `Eq` on an array is a typeck-level error
     /// (defensive error in the VM).
     Arr(Box<[Value]>),
+    /// Map value (0.0.11 T05, D8): insertion-ordered map. Keys are drawn
+    /// from the `{int, bool, string}` whitelist (D5). The `KeyHash` wrapper
+    /// makes the key hashable while preserving declaration order via `order`.
+    Map(Box<MapCell>),
     /// Range value (0.0.3 V04): an int interval, `start..end` with an
     /// exclusive `end`. Copy (two `i64`s — no heap). Source-level range
     /// construction arrives with `std.collection.range` (V06); until then
@@ -270,6 +329,21 @@ impl fmt::Display for Value {
                     write!(f, "{elem}")?;
                 }
                 write!(f, "]")
+            }
+            Value::Map(cell) => {
+                write!(f, "{{")?;
+                for (i, k) in cell.order.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    let v = cell
+                        .data
+                        .get(&MapKey(k.clone()))
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    write!(f, "{k} -> {v}")?;
+                }
+                write!(f, "}}")
             }
             // `start..end`, `end` exclusive (matches `std.collection.range`).
             Value::Range { start, end } => write!(f, "{start}..{end}"),

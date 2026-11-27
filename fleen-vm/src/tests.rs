@@ -712,18 +712,18 @@ fn v2_module_gate() {
     };
     assert!(matches!(Vm::new(m).run(), Ok(Value::Str(_))));
 
-    // Unknown module versions are rejected before execution. v8 stopped
-    // being a future version in 0.0.8 T07 (the run gate widened to 1..=8,
-    // D15), so probe v9.
+    // Unknown module versions are rejected before execution. v9 stopped
+    // being a future version in 0.0.11 T05 (the run gate widened to 1..=9,
+    // D7), so probe v10.
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 9,
+        version: 10,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     assert_eq!(
         Vm::new(m).run(),
-        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(9)))
+        Err(RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(10)))
     );
 }
 
@@ -1647,16 +1647,17 @@ fn error_without_span_map_entries_degrades() {
 #[test]
 fn unsupported_version_has_no_location() {
     // No frame is ever pushed, so no location can be attached.
+    // Probe v10 now that v9 is accepted (0.0.11 T05 widened the gate to 1..=9).
     let m = Module {
         struct_defs: Vec::new(),
         enum_defs: Vec::new(),
-        version: 9,
+        version: 10,
         ..v2_module(enc(&[(Opcode::Return, vec![])]))
     };
     let err = Vm::new(m).run().unwrap_err();
     assert_eq!(
         err,
-        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(9))
+        RuntimeError::new(RuntimeErrorKind::UnsupportedVersion(10))
     );
 }
 

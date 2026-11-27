@@ -122,6 +122,7 @@ impl Encoder {
             MirInstrKind::CallValue(argc) => self.emit_u8(*argc),
             // 0.0.8 T07: the applied-argument count rides as one u8.
             MirInstrKind::PartialApply(k) => self.emit_u8(*k),
+            MirInstrKind::NewMap(n) => self.emit_u16(*n),
             MirInstrKind::BindMatch(slot) => self.emit_u16(*slot),
             // 0.0.3 V02: struct instructions. `SetField*` carry two u16
             // operands (slot/gid + field offset).
@@ -299,6 +300,7 @@ fn mir_opcode(kind: &MirInstrKind) -> Result<Opcode, CodegenError> {
         // BYTECODE.md §4.2/§5.18). Its presence in the encoded module lifts
         // the version to 8 (content-driven, D13).
         MirInstrKind::PartialApply(_) => Opcode::PartialApply,
+        MirInstrKind::NewMap(_) => Opcode::NewMap,
     };
     Ok(op)
 }

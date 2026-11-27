@@ -389,18 +389,6 @@ fn emit_partial_capture_args(
 ///
 /// Control-flow-bearing initializers are rejected: 0.0.1 requires global
 /// initializers to be "simple" (literals, arithmetic, calls, identifiers).
-fn map_lit_unlowered(span: Span) -> LowerError {
-    // 0.0.11 T03: a `map { … }` literal's lowering (the `NewMap` opcode)
-    // lands with T05; T03 keeps the backend total by rejecting at the shared
-    // feature gate. Shared by the global-initializer and function-body paths.
-    LowerError::new(
-        LowerErrorKind::UnsupportedFeature {
-            feature: "map literal lowering (0.0.11 T05)",
-        },
-        span,
-    )
-}
-
 fn lower_global_init(
     lcx: &LowerCtx,
     expr: &TypedExprHir,
@@ -616,10 +604,14 @@ fn lower_global_init(
             }
             out.push(MirInstr::new(MirInstrKind::ArrNew(n), *span));
         }
-        // 0.0.11 T03: a map literal's lowering (the `NewMap` opcode) lands
-        // with T05; T03 keeps the compiler total by rejecting at the
-        // existing shared feature gate.
-        TypedExprHir::MapLit { span, .. } => return Err(map_lit_unlowered(*span)),
+        TypedExprHir::MapLit { pairs, span, .. } => {
+            let n = arr_len_u16(pairs.len(), *span)?;
+            for (k, v) in pairs {
+                lower_global_init(lcx, k, out)?;
+                lower_global_init(lcx, v, out)?;
+            }
+            out.push(MirInstr::new(MirInstrKind::NewMap(n), *span));
+        }
         _ => {
             return Err(LowerError::new(
                 LowerErrorKind::ComplexGlobalInit,
@@ -1765,11 +1757,18 @@ impl<'a> FnBodyCx<'a> {
                     )),
                 }
             }
-            // 0.0.11 T03: a map literal's lowering (the `NewMap` opcode) lands
-            // with T05; T03 keeps the backend total by rejecting at the
-            // existing shared feature gate. (A map literal never reaches here
-            // in the 0.0.11 fixtures — the e2e suite is T05's.)
-            TypedExprHir::MapLit { span, .. } => return Err(map_lit_unlowered(*span)),
+            // 0.0.11 T05: map literal. Keys and values evaluate in source
+            // order (k₁ v₁ … kₙ vₙ), then `NewMap(n)` pops them and builds
+            // a fresh map. Empty literals need the annotation to fix K/V;
+            // typeck already verified the types.
+            TypedExprHir::MapLit { pairs, span, .. } => {
+                let n = arr_len_u16(pairs.len(), *span)?;
+                for (k, v) in pairs {
+                    self.lower_expr_into(fb, k)?;
+                    self.lower_expr_into(fb, v)?;
+                }
+                fb.emit(MirInstr::new(MirInstrKind::NewMap(n), *span));
+            }
             // 0.0.3 V03: array literal. Elements evaluate in source order
             // (which is the declaration order for arrays — no temp-slot
             // reorder, unlike struct literals).

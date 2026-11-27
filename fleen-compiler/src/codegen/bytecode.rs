@@ -170,6 +170,8 @@ pub enum FieldTypeTag {
     Range = 11,
     /// `Enum` (0.0.6 T06): an enum value, represented by the `enum_defs` table.
     Enum = 12,
+    /// `Map` (0.0.11 T05): a map value, represented by the map table.
+    Map = 13,
 }
 
 impl FieldTypeTag {
@@ -214,13 +216,7 @@ impl FieldTypeTag {
             // so this arm is a total-match guard only — `Unit` is the same
             // honest "a slot exists here" placeholder the non-storable types
             // use. The format's Map tag lands with T05 (the `NewMap` opcode).
-            Type::Map(_, _) => {
-                debug_assert!(
-                    false,
-                    "map cannot be a storable field type (banned by typeck)"
-                );
-                FieldTypeTag::Unit
-            }
+            Type::Map(_, _) => FieldTypeTag::Map,
             // `Var` is only in std builtin signatures (V06); it is always
             // resolved to a concrete type before codegen ever runs.
             Type::Var(_) => {
@@ -415,6 +411,13 @@ pub enum Opcode {
     /// driven version: its presence in a module lifts the module to v8
     /// (D13); captures are runtime-only and never serialized (D14).
     PartialApply = 0xCE,
+    // 0xAF map instruction (0.0.11 T05, bytecode v9).
+    /// Construct a map value: k₁ v₁ … kₙ vₙ → m. Operand `u16 n` — the
+    /// number of key/value pairs (pops `2n` values, pushes one map).
+    /// Stack effect: k₁ v₁ … kₙ vₙ → m (Δ 1 - 2n, min 2n). Last slot of
+    /// the v2 range (`0xAF`); content-driven version: its presence in a
+    /// module lifts the module to v9 (D7).
+    NewMap = 0xAF,
 }
 
 /// Lowest opcode number reserved for the 0.0.2 (v2) instruction set.
@@ -444,6 +447,13 @@ pub const V6_OPCODE_BASE: u8 = 0xCB;
 /// (`PartialApply` 0xCE, first slot of the reserved `0xCE–0xDF` group).
 /// v8 opcodes are at or above this.
 pub const V8_OPCODE_BASE: u8 = 0xCE;
+
+/// Lowest opcode number reserved for the 0.0.11 (v9) instruction set
+/// (`NewMap` 0xAF, the last slot of the v2 range — content-driven: its
+/// presence lifts the module to v9, D7). The v9 gate is explicit
+/// (opcode-equality check in `fleen-verify`), not a range comparison,
+/// so this constant is descriptive only.
+pub const V9_OPCODE_BASE: u8 = 0xAF;
 
 impl Opcode {
     /// Number of operand bytes follow the opcode (BYTECODE.md §4.1).
@@ -488,6 +498,8 @@ impl Opcode {
             Opcode::CallValue => 1,
             // 0.0.8 T07: `PartialApply` carries the applied-argument count.
             Opcode::PartialApply => 1,
+            // 0.0.11 T05: `NewMap` carries the pair count.
+            Opcode::NewMap => 2,
             _ => 0,
         }
     }
@@ -581,6 +593,7 @@ impl Opcode {
             0xCD => Opcode::EnumPayload,
             // 0.0.8 (v8): partial application (T07).
             0xCE => Opcode::PartialApply,
+            0xAF => Opcode::NewMap,
             _ => return None,
         })
     }

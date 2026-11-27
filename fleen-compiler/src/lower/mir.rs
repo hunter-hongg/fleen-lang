@@ -333,4 +333,8 @@ pub enum MirInstrKind {
     /// Stack effect: f a₁…aₖ → f' (delta −k, min k + 1). u8 = number of
     /// arguments applied at this site.
     PartialApply(u8),
+    // 0.0.11 T05: map literal construction (bytecode 0xAF, v9).
+    /// Pop 2n values (k₁ v₁ … kₙ vₙ) and build a fresh map. u16 = pair count.
+    /// Stack effect: k₁ v₁ … kₙ vₙ → m (delta 1 - 2n, min 2n).
+    NewMap(u16),
 }

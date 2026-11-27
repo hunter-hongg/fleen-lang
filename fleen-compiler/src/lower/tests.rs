@@ -861,6 +861,8 @@ fn stack_delta(
         // 0.0.8 T06: `PartialApply` keeps the function value and pops the k
         // applied arguments into its capture list (f a₁…aₖ → f', Δ−k).
         MirInstrKind::PartialApply(k) => -(*k as i64),
+        // 0.0.11 T05: `NewMap` pops 2n values and pushes one map (Δ 1-2n).
+        MirInstrKind::NewMap(n) => 1 - 2 * (*n as i64),
     }
 }
 

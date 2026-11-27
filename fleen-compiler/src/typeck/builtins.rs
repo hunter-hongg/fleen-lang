@@ -435,6 +435,79 @@ pub fn builtins() -> Vec<BuiltinSig> {
             ret: range(),
             lowering: BuiltinLowering::MakeRange,
         },
+        // 0.0.11 T05: std.map batch — schematic over K (Var 0) and V (Var 1).
+        BuiltinSig {
+            name: "std.map.get",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1())), t0()],
+                ret: Type::Result(Box::new(t1()), Box::new(string())),
+            },
+            ret: Type::Result(Box::new(t1()), Box::new(string())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.insert",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1())), t0(), t1()],
+                ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            },
+            ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.remove",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1())), t0()],
+                ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            },
+            ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.contains",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1())), t0()],
+                ret: bool(),
+            },
+            ret: bool(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.keys",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1()))],
+                ret: Type::Array(Box::new(t0())),
+            },
+            ret: Type::Array(Box::new(t0())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.values",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1()))],
+                ret: Type::Array(Box::new(t1())),
+            },
+            ret: Type::Array(Box::new(t1())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.len",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1()))],
+                ret: int(),
+            },
+            ret: int(),
+            lowering: BuiltinLowering::Intrinsic,
+        },
+        BuiltinSig {
+            name: "std.map.clone",
+            param: BuiltinParam::Schematic {
+                params: vec![Type::Map(Box::new(t0()), Box::new(t1()))],
+                ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            },
+            ret: Type::Map(Box::new(t0()), Box::new(t1())),
+            lowering: BuiltinLowering::Intrinsic,
+        },
     ]
 }
 
@@ -633,6 +706,10 @@ fn collect_bindings(
         }
         (Type::Array(schema_elem), Type::Array(concrete_elem)) => {
             collect_bindings(schema_elem, concrete_elem, arg_index, subst, conflict);
+        }
+        (Type::Map(sk, sv), Type::Map(ck, cv)) => {
+            collect_bindings(sk, ck, arg_index, subst, conflict);
+            collect_bindings(sv, cv, arg_index, subst, conflict);
         }
         (Type::Result(schema_ok, schema_err), Type::Result(c_ok, c_err)) => {
             collect_bindings(schema_ok, c_ok, arg_index, subst, conflict);

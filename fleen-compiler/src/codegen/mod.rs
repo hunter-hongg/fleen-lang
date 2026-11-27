@@ -10,7 +10,7 @@ mod tests;
 pub use bytecode::{
     Bytecode, Const, ConstId, EnumDefMeta, EnumVariantDefMeta, FieldTypeTag, Func, FuncId, Global,
     GlobalId, Module, Opcode, SpanEntry, StructDefMeta, V2_OPCODE_BASE, V3_OPCODE_BASE,
-    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE,
+    V4_OPCODE_BASE, V5_OPCODE_BASE, V6_OPCODE_BASE, V8_OPCODE_BASE, V9_OPCODE_BASE,
 };
 pub use encoder::{CodegenError, ConstPool, EncodedFunc, encode_func};
 pub use flnc::{FlncError, from_bytes, to_bytes};
@@ -33,12 +33,18 @@ use crate::lower::mir::{Mir, MirBlock, MirInstr, MirInstrKind};
 /// at least one `PartialApply` was encoded, else the module stays v7 (a
 /// `#feature curry` file without partial calls compiles to a v7 module).
 /// Readers accept all eight.
-pub const MODULE_VERSION: u16 = 7;
+pub const MODULE_VERSION: u16 = 9;
 
 /// Bytecode version emitted when at least one `PartialApply` instruction
 /// was encoded (0.0.8 T07, content-driven bump, D13). The only delta from
 /// v7 is that opcode — no new table, no `FieldTypeTag` change (D14).
 pub const MODULE_VERSION_V8: u16 = 8;
+
+/// Bytecode version emitted when at least one `NewMap` instruction was
+/// encoded (0.0.11 T05, content-driven bump, D7). The only delta from v8
+/// is that opcode — no new table, no `FieldTypeTag` layout change beyond
+/// the descriptive `Map = 13` tag (D7).
+pub const MODULE_VERSION_V9: u16 = 9;
 
 /// Lower MIR into a bytecode module.
 ///
@@ -68,6 +74,8 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
     // false positive would break the flag-off byte-identity posture (D16).
     let has_partial_apply = funcs.iter().any(|f| blocks_have_partial(&f.blocks))
         || globals.iter().any(|g| instrs_have_partial(&g.init));
+    let has_new_map = funcs.iter().any(|f| blocks_have_newmap(&f.blocks))
+        || globals.iter().any(|g| instrs_have_newmap(&g.init));
 
     let mut pool = ConstPool::new();
 
@@ -185,7 +193,9 @@ pub fn codegen(mir: Mir) -> Result<Bytecode, CodegenError> {
         .collect();
 
     Ok(Module {
-        version: if has_partial_apply {
+        version: if has_new_map {
+            MODULE_VERSION_V9
+        } else if has_partial_apply {
             MODULE_VERSION_V8
         } else {
             MODULE_VERSION
@@ -208,6 +218,20 @@ fn blocks_have_partial(blocks: &[MirBlock]) -> bool {
             .iter()
             .any(|i| matches!(i.kind, MirInstrKind::PartialApply(_)))
     })
+}
+
+fn blocks_have_newmap(blocks: &[MirBlock]) -> bool {
+    blocks.iter().any(|b| {
+        b.instrs
+            .iter()
+            .any(|i| matches!(i.kind, MirInstrKind::NewMap(_)))
+    })
+}
+
+fn instrs_have_newmap(instrs: &[MirInstr]) -> bool {
+    instrs
+        .iter()
+        .any(|i| matches!(i.kind, MirInstrKind::NewMap(_)))
 }
 
 /// The instruction-level scan backing `blocks_have_partial`; used directly

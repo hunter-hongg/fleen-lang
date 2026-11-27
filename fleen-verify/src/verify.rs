@@ -121,6 +121,12 @@ pub enum VerifyError {
         pc: usize,
         byte: u8,
     },
+    /// A v9 instruction (`NewMap`, 0xAF) appears in a v1–v8 module
+    /// (0.0.11 T05; the explicit gate).
+    V9OpcodeInV1V2V3V4V5V6V7V8Module {
+        pc: usize,
+        byte: u8,
+    },
     /// `StructNew` names a struct id outside the `struct_defs` table.
     StructIndexOutOfRange {
         pc: usize,
@@ -269,6 +275,12 @@ impl std::fmt::Display for VerifyError {
                 write!(
                     f,
                     "opcode 0x{byte:02x} at pc {pc} requires bytecode v8, module is v1/v2/v3/v4/v5/v6/v7"
+                )
+            }
+            Self::V9OpcodeInV1V2V3V4V5V6V7V8Module { pc, byte } => {
+                write!(
+                    f,
+                    "opcode 0x{byte:02x} at pc {pc} requires bytecode v9, module is v1/v2/v3/v4/v5/v6/v7/v8"
                 )
             }
             Self::StructIndexOutOfRange { pc, index } => {
@@ -533,6 +545,12 @@ pub fn stack_effect(code: &[u8], d: &Decoded, module: &Module) -> Result<(i64, i
         // for-desugar require the pop.
         Opcode::ArrGet => (-1, 2),
         Opcode::ArrSetLocal | Opcode::ArrSetGlobal => (-2, 2), // v i →
+        // 0.0.11 T05: map (bytecode 0xAF, v9). `NewMap` pops 2n values
+        // (keys/values in source order) and pushes one map (Δ 1-2n, min 2n).
+        Opcode::NewMap => {
+            let n = slot_index(code, d)? as i64;
+            (1 - 2 * n, 2 * n)
+        }
         // 0.0.3 V04: range (BYTECODE v3, 0xB9–0xBB). `MakeRange` pops the two
         // int bounds and pushes the Range (start end → r, Δ−1, min 2);
         // `RangeStart`/`RangeEnd` are peek-shaped like `ArrLen` (r → r int,
@@ -643,6 +661,13 @@ fn walk_function(
             if module.version < min_version && (d.opcode as u8) >= base {
                 return Err(err(d.pc, d.opcode as u8));
             }
+        }
+        // 0.0.11 T05: `NewMap` (0xAF) requires bytecode v9 (D7).
+        if module.version < 9 && d.opcode == Opcode::NewMap {
+            return Err(VerifyError::V9OpcodeInV1V2V3V4V5V6V7V8Module {
+                pc: d.pc,
+                byte: d.opcode as u8,
+            });
         }
         match d.opcode {
             // 0.0.3 V02: `StructNew`'s struct id must index the
