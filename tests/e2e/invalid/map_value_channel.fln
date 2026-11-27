@@ -1,0 +1,5 @@
+func main() {
+    ch = channel<int>(4);
+    m: map<int, channel<int>> = map { 1 -> ch };
+    print("hi");
+}

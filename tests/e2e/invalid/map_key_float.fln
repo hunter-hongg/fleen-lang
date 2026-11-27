@@ -1,0 +1,4 @@
+func main() {
+    m = map { 1.5 -> 1 };
+    print("hi");
+}

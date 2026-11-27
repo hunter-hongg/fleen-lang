@@ -1,0 +1,33 @@
+// T07: map literals + accessors + intrinsics (0.0.11 D2-D8).
+import std.map;
+
+func main() {
+    // literal + access + len
+    m = map { 1 -> "a", 2 -> "b", 3 -> "c" };
+    print("len=", std.map.len(m) as string);  // 3
+
+    // get (Result)
+    r = m[1];
+    choose move r {
+        when Ok(v) { print("get1=", v); }
+        when Err(e) { print("err=", e); }
+    };
+
+    // contains
+    print("has2=", std.map.contains(m, 2) as string);  // true
+    print("has9=", std.map.contains(m, 9) as string);  // false
+
+    // insert (fresh map, D8)
+    m2 = std.map.insert(m, 4, "d");
+    print("len2=", std.map.len(m2) as string);  // 4
+    print("has4=", std.map.contains(m2, 4) as string);  // true
+
+    // remove (fresh map, D8)
+    m3 = std.map.remove(m2, 1);
+    print("len3=", std.map.len(m3) as string);  // 3
+    print("has1=", std.map.contains(m3, 1) as string);  // false
+
+    // keys (insertion order, D8)
+    ks = std.map.keys(m);
+    print("keys=", ks[0] as string, ",", ks[1] as string, ",", ks[2] as string);  // 1,2,3
+}

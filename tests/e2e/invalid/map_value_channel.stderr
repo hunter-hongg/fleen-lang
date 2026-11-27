@@ -1,0 +1,2 @@
+Compile error: typeck: 1 error(s)
+  error: channels cannot be stored in structs, arrays, boxes, globals, or map values — reads would copy or alias the shared buffer; use `split` to share

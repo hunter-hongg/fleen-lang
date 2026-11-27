@@ -1137,6 +1137,9 @@ impl TypeChecker {
     fn check_map_value_storable(&mut self, ty: &Type, span: Span) -> Result<(), ()> {
         // A map value is a full value position: the same contains_* seal a
         // struct field / array element / box cell applies (D6).
+        //
+        // 0.0.11 T07: the error message names the map position so the
+        // fix is actionable (MapValueInvalid).
         if ty.contains_channel() {
             self.add_error(TypeckErrorKind::ChannelNotStorable, span);
             return Err(());

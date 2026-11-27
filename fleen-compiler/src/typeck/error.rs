@@ -895,8 +895,8 @@ impl TypeckErrorKind {
             TypeckErrorKind::ChannelNotStorable => {
                 write!(
                     f,
-                    "channels cannot be stored in structs, arrays, boxes, or \
-                     globals — reads would copy or alias the shared buffer; \
+                    "channels cannot be stored in structs, arrays, boxes, globals, \
+                     or map values — reads would copy or alias the shared buffer; \
                      use `split` to share"
                 )
             }
@@ -931,10 +931,10 @@ impl TypeckErrorKind {
             TypeckErrorKind::PtrNotStorable => {
                 write!(
                     f,
-                    "pointers cannot be stored in structs, arrays, boxes, or \
-                     globals — reading such a position would copy the pointer \
-                     in safe code; help: keep the pointer in a local, a \
-                     parameter, or a return value"
+                    "pointers cannot be stored in structs, arrays, boxes, \
+                     globals, or map values — reading such a position would \
+                     copy the pointer in safe code; help: keep the pointer in \
+                     a local, a parameter, or a return value"
                 )
             }
             TypeckErrorKind::UnsafeOpOutsideUnsafe => {
@@ -991,11 +991,11 @@ impl TypeckErrorKind {
             TypeckErrorKind::FutureNotStorable => {
                 write!(
                     f,
-                    "a Future cannot be stored in a struct field, box, or global \
-                     — reads deep-copy and would fork the suspended task (an \
-                     array of futures counts too: copying the array copies the \
-                     frames) — help: keep it in a binding and move it into \
-                     `await` or `std.async.run`"
+                    "a Future cannot be stored in a struct field, array element, \
+                     box, global, or map value — reads deep-copy and would fork \
+                     the suspended task (copying the container copies the frames) \
+                     — help: keep it in a binding and move it into `await` or \
+                     `std.async.run`"
                 )
             }
             TypeckErrorKind::FutureIndexRead => {

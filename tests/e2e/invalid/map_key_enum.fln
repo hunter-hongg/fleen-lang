@@ -1,0 +1,5 @@
+enum E { A, B }
+func main() {
+    m = map { E.A -> 10 };
+    print("hi");
+}
