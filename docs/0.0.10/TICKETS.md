@@ -327,7 +327,7 @@ emission), `lower/mod.rs:682` (`result_payload_ty`).
       Both fixtures are written **before** the lexer change; the first
       changes its expectation in the same commit as the lexer work (the
       declared breaking set, D4), the second flips from invalid to valid.
-- [x] `\$` becomes the eighth valid escape, producing a literal `$`
+- [x] `\$` becomes the one new valid escape, producing a literal `$`
       (`lexer_impl.rs` escape match, alongside `\n` / `\t` / `\r` / `\\`
       / `\"` / `\'`).
 - [x] `$` is special only immediately before `{`: on `${` inside a string

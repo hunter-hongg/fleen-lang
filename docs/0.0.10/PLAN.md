@@ -149,8 +149,9 @@ available to user-declared enums only.
   ordinary expression grammar (calls, field access, arithmetic, nested
   string literals — recursive scanning makes `"a${ "x${1}" }b"` work
   naturally).
-- `\$` becomes a valid escape producing a literal `$` (the eighth escape;
-  previously `invalid_escape`). `"a\${b}c"` is the literal `a${b}c`.
+- `\$` becomes a valid escape producing a literal `$` (the one new escape,
+  joining the six pre-existing ones; previously `invalid_escape`).
+  `"a\${b}c"` is the literal `a${b}c`.
 - `$` is special **only immediately before `{`**; in every other position
   it is an ordinary character. Existing strings containing `$` elsewhere
   (`"a$b"`, `"100$"`) keep compiling with byte-identical output.

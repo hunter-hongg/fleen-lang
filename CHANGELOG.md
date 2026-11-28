@@ -75,7 +75,8 @@ no table changes — `docs/BYTECODE.md` is untouched.
 ### Changed
 - ⚠️ **`${` in a string literal now begins an interpolation** (D4) — the
   milestone's breaking set. A source string containing the exact sequence `${`
-  is lexed as an interpolation; escape the dollar as `\$${` to keep a literal.
+  is lexed as an interpolation; escape the dollar as `\${` to keep the literal
+  text.
 - **`Result` is declared in std, not a compiler builtin** (D1): `std/result.fln`
   declares `pub enum Result<T, E> { Ok(T), Err(E) }` as the language-level source
   of truth, and the compiler maps `std.result.Result` onto the internal `Result`

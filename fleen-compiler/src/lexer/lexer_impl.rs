@@ -240,7 +240,7 @@ impl<'a> Lexer<'a> {
                             lit.push('\'');
                             self.advance();
                         }
-                        // 0.0.10 T04 (D4): `\$` is the eighth escape — a
+                        // 0.0.10 T04 (D4): `\$` is the one new escape — a
                         // literal `$`. Escaping is only needed before `{`.
                         Some('$') => {
                             lit.push('$');
@@ -1154,7 +1154,7 @@ func fib(n: int): int {
 
     #[test]
     fn dollar_escape_produces_literal_dollar() {
-        // `\$` is the eighth escape (D4). The literals contain no `${`, so
+        // `\$` is the one new escape (D4). The literals contain no `${`, so
         // they stay plain StringLit tokens (D6: unchanged compile path).
         let tokens = tokenize(r#""a\$b" "100\$""#).unwrap();
         assert_eq!(tokens[0].kind, TokenKind::StringLit("a$b".to_string()));

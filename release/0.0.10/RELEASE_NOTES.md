@@ -63,7 +63,7 @@ Decisions: `docs/0.0.10/PLAN.md` (D1–D7). Tickets: `docs/0.0.10/TICKETS.md`
 ## Breaking changes
 
 A string literal containing the exact sequence `${` now begins an
-interpolation (escape the dollar as `\$${` to keep a literal `$` + `{`). The
+interpolation (escape the dollar as `\${` to keep the literal `$` + `{`). The
 `Ok` / `Err` / `Result` names are non-shadowable — a program that declares its
 own `Result` (or binds `Ok`/`Err`) is now a `ReservedBuiltinName` error. No
 other behavior change; `?`, choose-on-Result, and the bytecode are untouched.
