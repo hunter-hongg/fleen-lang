@@ -5,8 +5,7 @@
 > planning level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
 >
-> **Status: T01 done（`scripts/check-versions.sh` + `ci.yml` 的 `versions` job + `SPEC §13` 版本一致性规则 + 基线快照 Note 均已落地）。
-> T02–T19 not started.** No file exists under `website/` yet; this
+> **Status: T01–T02 done。T03–T19 not started.** No file exists under `website/` yet; this
 > document is the work breakdown only. Nothing here changes the language: no
 > syntax, no opcode, no `std` module, no version number. The site is a
 > presentation layer over the repository (PLAN D2).
@@ -67,18 +66,27 @@
 
 ---
 
-## T02 — `lang_docs/0.0.11` 中英双语补齐 (D2, D4)
+## T02 — `lang_docs/0.0.11` 中英双语补齐 (D2, D4) — **done（内容已在仓库，无需新建）**
 
-- [ ] 以 `lang_docs/0.0.10/{zh,en}` 为模板，补齐 `lang_docs/0.0.11/{zh,en}`
+> **Note（核对结论，2026-11-28）**：T02 是照“`lang_docs` 最新只到 0.0.10”的旧事实写的；
+> 实际 `lang_docs/0.0.11/{zh,en}` 已由 commit **`d4afed2`**（早于 website PLAN/TICKETS 撰写）
+> 落盘，17 文件 × 2 语言。逐项核对均满足：zh/en 文件名逐一相同（17=17，diff 为空，D9 断言三）;
+> map 主题全覆盖（`m[k]`/`Result[V,string]` 7 文件、键白名单 4 文件、std.map 八内建 8 文件、
+> `map` 保留字 2 文件）；各章为增量修订（04-types 16 处、05-operators 3 处、13-stdlib 30 处、
+> 15-appendix 16 处、README Contents 表逐章标 "(0.0.11)"）；README 有“Breaking set: `map`
+> becomes a reserved word”，与 `docs/0.0.11/PLAN.md` §55 一致。**无独立 CI 断言**（其 zh/en
+> 一致性并入 T01 落地即绿与后续 T05/T07 的 D9 断言），纯内容前置，内容已在，故整张卡关闭。
+
+- [x] 以 `lang_docs/0.0.10/{zh,en}` 为模板，补齐 `lang_docs/0.0.11/{zh,en}`
       的 16 章 + `README.md`，内容覆盖 0.0.11 的实际变更：`map { k -> v }`
       字面量、`m[k]` 返回 `Result[V, string]`、键白名单 `{int, bool, string}`、
       八个 `std.map` 内建、`insert`/`remove` 的消费语义、插入序保留、`map`
-      成为保留字。
-- [ ] 对既有章节做增量修订，而不是整章重写：`04-types` 增 `map[K, V]`，
+      成为保留字。（已由 `d4afed2` 完成，核对通过）
+- [x] 对既有章节做增量修订，而不是整章重写：`04-types` 增 `map[K, V]`，
       `05-operators` 增索引后缀的 map 分支，`13-standard-library` 增
-      `std.map`，`15-appendix` 增保留字表一行。
-- [ ] 双语对齐：`zh` 与 `en` 的章节数量与文件名逐一相同（D9 断言三）。
-- [ ] 更新 `lang_docs/0.0.11/README.md` 的章节索引与"本版破坏性变更"一节。
+      `std.map`，`15-appendix` 增保留字表一行。（核对通过）
+- [x] 双语对齐：`zh` 与 `en` 的章节数量与文件名逐一相同（D9 断言三）。（17=17）
+- [x] 更新 `lang_docs/0.0.11/README.md` 的章节索引与“本版破坏性变更”一节。（核对通过）
 
 **Depends on**: T01（基线断言先落地，补齐后断言转绿，才算闭环）。
 **Refs**: PLAN §2 结论 3, §8.1; `release/0.0.11/RELEASE_NOTES.md`。
