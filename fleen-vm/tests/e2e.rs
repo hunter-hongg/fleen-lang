@@ -44,6 +44,19 @@ fn run_vm_args(args: &[&Path]) -> (i32, String, String) {
     )
 }
 
+/// Normalize CRLF (and lone CR) line endings to LF.
+///
+/// Fixture files (`.expected` / `.stderr` / `.exit`) and the VM's own stdout
+/// / stderr can disagree on line endings depending on the platform and
+/// `core.autocrlf`: a Windows checkout may hand the test CRLF fixtures while
+/// the VM always emits LF. Comparing raw bytes then fails spuriously. The
+/// `.gitattributes` `eol=lf` rules prevent this at checkout; this helper is
+/// the second line of defense for fixtures read by the tests. It only
+/// touches the test harness, never VM semantics.
+fn normalize_lf(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// `tests/e2e/<sub>` next to the repo root.
 fn e2e_dir(sub: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,8 +81,10 @@ fn valid_programs_print_expected_output() {
     let mut ran = 0;
     for path in fln_files(&dir) {
         let expected_path = path.with_extension("expected");
-        let expected = fs::read_to_string(&expected_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", expected_path.display()));
+        let expected = normalize_lf(
+            &fs::read_to_string(&expected_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", expected_path.display())),
+        );
 
         let (code, stdout, stderr) = run_vm(&path);
         assert_eq!(code, 0, "{}: exit code (stderr: {stderr})", path.display());
@@ -96,10 +111,11 @@ fn invalid_programs_fail_with_expected_error() {
             .parse()
             .unwrap_or_else(|e| panic!("{}: bad exit code: {e}", exit_path.display()));
         let stderr_path = path.with_extension("stderr");
-        let needle = fs::read_to_string(&stderr_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", stderr_path.display()))
-            .trim()
-            .to_owned();
+        let needle = normalize_lf(
+            fs::read_to_string(&stderr_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", stderr_path.display()))
+                .trim(),
+        );
 
         let (code, _stdout, stderr) = run_vm(&path);
         assert_eq!(
@@ -130,8 +146,9 @@ fn compiled_bytecode_roundtrip_prints_expected_output() {
     let (code, stdout, stderr) = run_vm(&out);
     let _ = fs::remove_file(&out);
 
-    let expected =
-        fs::read_to_string(e2e_dir("valid").join("fib.expected")).expect("read fib.expected");
+    let expected = normalize_lf(
+        &fs::read_to_string(e2e_dir("valid").join("fib.expected")).expect("read fib.expected"),
+    );
     assert_eq!(code, 0, "exit code (stderr: {stderr})");
     assert_eq!(stdout, expected, "stdout mismatch via .flnc path");
 }
@@ -178,7 +195,8 @@ fn no_arguments_exits_2() {
 #[test]
 fn project_demo_prints_expected_output() {
     let project = e2e_dir("projects/netdemo");
-    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let expected =
+        normalize_lf(&fs::read_to_string(project.join(".expected")).expect("read .expected"));
     let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
     assert_eq!(code, 0, "exit code (stderr: {stderr})");
     assert_eq!(stdout, expected, "stdout mismatch for project mode");
@@ -187,7 +205,8 @@ fn project_demo_prints_expected_output() {
 #[test]
 fn project_imported_globals_prints_expected_output() {
     let project = e2e_dir("projects/globaldemo");
-    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let expected =
+        normalize_lf(&fs::read_to_string(project.join(".expected")).expect("read .expected"));
     let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
     assert_eq!(code, 0, "exit code (stderr: {stderr})");
     assert_eq!(stdout, expected, "stdout mismatch for imported globals");
@@ -199,7 +218,8 @@ fn project_imported_globals_prints_expected_output() {
 #[test]
 fn project_curry_two_part_main_runs() {
     let project = e2e_dir("projects/curry_main");
-    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let expected =
+        normalize_lf(&fs::read_to_string(project.join(".expected")).expect("read .expected"));
     let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
     assert_eq!(code, 0, "exit code (stderr: {stderr})");
     assert_eq!(stdout, expected, "stdout mismatch for two-part main");
@@ -211,7 +231,8 @@ fn project_curry_two_part_main_runs() {
 #[test]
 fn project_curry_import_cross_module_runs() {
     let project = e2e_dir("projects/curry_import");
-    let expected = fs::read_to_string(project.join(".expected")).expect("read .expected");
+    let expected =
+        normalize_lf(&fs::read_to_string(project.join(".expected")).expect("read .expected"));
     let (code, stdout, stderr) = run_vm_args(&[Path::new("--project"), project.as_path()]);
     assert_eq!(code, 0, "exit code (stderr: {stderr})");
     assert_eq!(stdout, expected, "stdout mismatch for curried import");
@@ -281,8 +302,10 @@ fn std_library_tests_pass() {
     let mut ran = 0;
     for path in fln_files(&dir) {
         let expected_path = path.with_extension("expected");
-        let expected = fs::read_to_string(&expected_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", expected_path.display()));
+        let expected = normalize_lf(
+            &fs::read_to_string(&expected_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", expected_path.display())),
+        );
 
         let (code, stdout, stderr) = run_vm(&path);
         assert_eq!(code, 0, "{}: exit code (stderr: {stderr})", path.display());

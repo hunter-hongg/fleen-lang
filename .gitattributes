@@ -1,1 +1,10 @@
 tests/fixtures/v1/*.flnc binary
+
+# Test fixtures must always check out with LF, regardless of core.autocrlf.
+# GitHub Actions windows runners default to autocrlf=true, which converts LF
+# to CRLF on checkout and breaks assert_eq!(stdout, expected) in e2e tests
+# (the VM emits LF; the fixture must match).
+*.expected text eol=lf
+*.stderr text eol=lf
+*.exit   text eol=lf
+*.fln    text eol=lf
