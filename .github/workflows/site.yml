@@ -1,6 +1,7 @@
 name: Site
 
 # website/ build gate (T04; PLAN D1 static-only, D9 build-is-the-check).
+# Node version and cache strategy mirror the project's Node toolchain choice.
 # Language-version agreement is asserted separately by ci.yml's versions job.
 on:
   push:
