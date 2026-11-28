@@ -32,12 +32,12 @@ export default defineConfig({
         { icon: 'github', label: 'Fleen on GitHub', href: 'https://github.com/hunter-hongg/fleen-lang' },
       ],
 
-      customCss: ['/src/custom-styles.css'],
     }),
   ],
 
-  // Starlight 0.43 (Astro 5 content layer)：由 Starlight 自身注册 docs 集合，
-  // 无需在项目层再定义 content.collections（docsLoader/docsSchema 由 Starlight 内部使用）。
+  // Starlight 0.43 (Astro 5 content layer)：docs 集合由项目在 src/content.config.ts
+  // 里用 docsLoader/docsSchema 注册（实测：去掉该注册后 0 个 docs 页构建并告警，
+  // 故这里不能省），条目由 scripts/build-docs.js 在构建期生成（T05）。
   srcDir: './src',
   site: 'https://fleen-lang.github.io/',
 });

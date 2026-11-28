@@ -11,6 +11,8 @@
     "dev": "astro dev",
     "build": "node scripts/build-docs.js && astro build",
     "build-docs": "node scripts/build-docs.js",
+    "test": "node --test tests/build-docs.mjs",
+    "test-static": "node tests/static-output.mjs",
     "preview": "astro preview",
     "check": "astro check"
   },
