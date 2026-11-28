@@ -1,0 +1,43 @@
+name: Site
+
+# website/ build gate (T04; PLAN D1 static-only, D9 build-is-the-check).
+# Language-version agreement is asserted separately by ci.yml's versions job.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+      - name: Build
+        working-directory: website
+        run: npm run build
+      - name: Assert static output and local links
+        working-directory: website
+        run: node tests/static-output.mjs
+      - name: Record dist size baseline
+        working-directory: website
+        run: |
+          echo "## dist size baseline" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          du -sh dist >> "$GITHUB_STEP_SUMMARY"
+          echo "files: $(find dist -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          path: website/dist
+          retention-days: 7

@@ -132,15 +132,52 @@
 
 ## T04 — `website/` 骨架与 CI 构建 (D1, D9)
 
-- [ ] 初始化 `website/`（Astro + Starlight），提交 `package.json`、
-      `astro.config.mjs`、最小的 `src/pages/index.astro`。
-- [ ] 锁定静态输出：不使用任何 SSR adapter；构建产物为纯静态目录。
-- [ ] 新增 `.github/workflows/site.yml`：安装依赖 → `astro build` → 链接与
-      断言检查 → 上传产物。Node 版本与缓存策略与既有 `ci.yml` 保持一致。
-- [ ] 记录构建产物体积基线（首次可行构建后写入本票据 note），后续卡对照。
+- [x] 初始化 `website/`（Astro + Starlight），提交 `package.json`、
+      `astro.config.mjs`、最小的 `src/pages/index.astro`。（锁定精确版本：
+      astro 7.4.13、@astrojs/starlight 0.43.2、sharp 0.35.5、typescript 5.9.3、
+      @astrojs/check 0.9.12；node engines `>=22.23.4`；`package-lock.json` 入库，
+      CI 用 `npm ci`）
+- [x] 锁定静态输出：不使用任何 SSR adapter；构建产物为纯静态目录。
+      （`astro.config.mjs` 无 adapter、默认 `output: "static"`；由
+      `website/tests/static-output.mjs` 断言 `dist/` 无 `server/` / `entry.mjs`
+      等 SSR 残留，并逐一解析全部 HTML 的本地 `href`/`src`）
+- [x] 新增 `.github/workflows/site.yml`：安装依赖 → `astro build` → 断言检查 →
+      上传产物。Node 版本与缓存策略与既有 `ci.yml` 保持一致。
+      （actions/setup-node node 22 + npm 缓存，路径 `website/package-lock.json`；
+      触发 master push / PR，与 ci.yml 一致）
+- [x] 记录构建产物体积基线（首次可行构建后写入本票据 note），后续卡对照。
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D1, §10 技术选型表, §11。
+
+> **Note（2026-11-28 首次构建基线，本地实测）**
+>
+> 产物 `website/dist`：30 个文件，共 860.4 KB（原始）/ 410.8 KB（gzip -9）。
+> 分项（原始/gzip KB）：HTML 45.1/12.2（index、404、introduction 三页）、
+> JS 554.7/139.1（`_astro/*`，全部懒加载或渐进增强）、CSS 146.9/27.0、
+> pagefind 624.9/232.5（搜索索引，按需拉取，不计入首屏）。
+> 页面清单：`/`、`/404.html`、`/introduction/`；本地链接全部可解析，无外链。
+>
+> 实现注意点（0.43.x + Astro 7 实测）：
+> - **docs 集合必须由项目自己注册**：Starlight 0.43 不再自动注入 `docs`
+>   内容集合，缺 `src/content.config.ts`（`docsLoader` + `docsSchema`）会在
+>   构建期报 `Invalid frontmatter props passed to the <StarlightPage/>`
+>   与 `The collection "docs" does not exist`。
+> - **`<StarlightPage />` 要求必填 `frontmatter.title`**：裸用
+>   `<StarlightPage />` 无法通过 schema 校验，最小写法为
+>   `<StarlightPage frontmatter={{ title: 'Fleen' }} />`。
+> - **`sidebar` 顶层必须是数组**：0.43 拒绝旧文档里的对象/分组键写法
+>   （`Expected type "array", received "object"`）；本卡先不配侧栏，T05
+>   按 `lang_docs` 生成时再补。
+> - **TS 预设路径是 `astro/tsconfigs/strict`**：旧文档的
+>   `astro/ts-config/strict` 在当前版本不存在。
+> - **favicon 必须真实存在**：Starlight 默认 `<head>` 引用 `/favicon.svg`，
+>   没有 `public/favicon.svg` 时链接断（本卡补了占位 favicon，静态断言
+>   曾据此抓出缺失，负路径验证过断言会失败）。
+> - **构建期既有警告（可接受，后续卡消除）**：`i18n` 集合为空（T07 双语
+>   落地后消失）、`sitemap` 缺 `site` 配置跳过（T19 定域名后处理）、
+>   `Entry docs → 404 was not found`（404 页非 docs 内容，Starlight 0.43
+>   的既有噪音）。
 
 ---
 

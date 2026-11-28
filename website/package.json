@@ -1,0 +1,24 @@
+{
+  "name": "fleen-website",
+  "description": "Static presentation layer for the Fleen repository.",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/check": "0.9.12",
+    "@astrojs/markdown-remark": "7.3.0",
+    "@astrojs/starlight": "0.43.2",
+    "astro": "7.4.13",
+    "sharp": "0.35.5",
+    "typescript": "5.9.3"
+  }
+}
