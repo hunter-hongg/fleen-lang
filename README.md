@@ -5,20 +5,19 @@ source to bytecode to execution: a five-stage compiler (lexing → parsing → n
 type checking → lowering and bytecode generation), a static bytecode verifier, and a
 stack-based virtual machine.
 
-> Current version **0.0.10 · Loom Spider 🕸️ · `Result` in std + string interpolation** —
-> `Result` declared in std (the prelude trio non-shadowable) and string interpolation
-> `"${expr}"` with the `\$` escape
-> (T01–T08; built on **0.0.9 · Mending Weaverbird 🪡 · small repairs**,
+> Current version **0.0.11 · Cartographer Ant 🗺️ · the `map` type + `std.map` intrinsics** —
+> `map { k -> v }` literals (always-owned `map[K, V]`, keys `{int, bool, string}`),
+> `m[k]` access returning `Result[V, string]`, and the eight-helper `std.map`
+> intrinsic batch; bytecode v9 by the content-driven rule (one new opcode,
+> `NewMap` 0xAF; every map-free module stays v8)
+> (T01–T08; built on **0.0.10 · Loom Spider 🕸️ · `Result` in std + string
+> interpolation**, **0.0.9 · Mending Weaverbird 🪡 · small repairs**,
 > **0.0.8 · Cheeky Hamster 🐹 · per-file feature flags + function
 > currying**, **0.0.7 · parameterized types + pattern matching**,
 > **0.0.6 · tagged unions**, **0.0.5 · Careful Hedgehog 🦔**,
 > **0.0.4 · Patient Ants 🐜**, **0.0.3 · Busy Beaver 🦫**, **0.0.2 · Hermit Crab 🐚**
-> and **0.0.1 · Swift Fox 🦊**). **Released** — the `v0.0.10` tag and the six target
-> archives are cut; `release/0.0.10/` mirrors the 0.0.9 layout.
->
-> **Next milestone 0.0.11 · Cartographer Ant 🗺️ · the `map` type + `std.map` intrinsics** —
-> planning docs drafted (`docs/0.0.11/PLAN.md`, `docs/0.0.11/TICKETS.md`); implementation
-> not started.
+> and **0.0.1 · Swift Fox 🦊**). **Released** — the `v0.0.11` tag and the six target
+> archives are cut; `release/0.0.11/` mirrors the 0.0.10 layout.
 
 ## Language at a Glance
 
@@ -43,7 +42,9 @@ func main(): int {
 ```
 
 Feature overview: mutable bindings with `=` and immutable `const`; `int` / `float` / `bool` / `string` / `unit`;
-`Result<T, U>` (`Ok` / `Err` constructors, `choose` patterns, `?` propagation); first-class functions
+`map[K, V]` (`map { k -> v }` literals, `m[k]` access → `Result[V, string]`, the `std.map` helper batch;
+keys are `{int, bool, string}` and `map` is a reserved word); `Result<T, U>` (`Ok` / `Err` constructors,
+`choose` patterns, `?` propagation); first-class functions
 and function types; `if` / `elif` / `else` expressions; `while`; `choose` pattern matching
 (with guards); optional semicolons (ASI; explicit semicolons remain legal).
 
@@ -89,6 +90,19 @@ pinning (`FLINT_STD_PATH` → `$FLINT_HOME/std/<version>/` → embedded, a misma
 error, D8). `ptr` / `addr` / `deref_ptr` / `unsafe` / `trusted` are now reserved words
 (the only source breaking change of 0.0.5).
 See [docs/0.0.5/PLAN.md](docs/0.0.5/PLAN.md) and [docs/0.0.5/TICKETS.md](docs/0.0.5/TICKETS.md).
+
+**0.0.11 · The `map` type**: `map { k -> v }` literals over the always-owned `map[K, V]`
+(the array posture — assignment and argument passing deep-copy; `move` transfers);
+`m[k]` access rides the existing index suffix and returns `Result[V, string]`
+(a missing key is an `Err` value, not a crash); the eight-helper `std.map` batch
+(`get` / `insert` / `remove` / `contains` / `keys` / `values` / `len` / `clone`) with
+zero new opcodes — `insert` / `remove` are functional and consuming; keys are
+`{int, bool, string}` (`MapKeyNotComparable` otherwise); no `Future` / `channel` / `ptr`
+in the value slot; insertion order is preserved (`std.map.keys` / `values`). Bytecode v9
+by the content-driven rule: one new opcode (`NewMap`, 0xAF), one new field tag
+(`Map = 13`); every map-free module stays v8 and byte-identical to 0.0.10 output.
+`map` is now a reserved word (the only source breaking change of 0.0.11).
+See [docs/0.0.11/PLAN.md](docs/0.0.11/PLAN.md) and [docs/0.0.11/TICKETS.md](docs/0.0.11/TICKETS.md).
 
 ## Quick Start
 
@@ -156,6 +170,8 @@ cargo doc --no-deps
 - [docs/BYTECODE.md](docs/BYTECODE.md) — bytecode format specification
 - [docs/0.0.2/PLAN.md](docs/0.0.2/PLAN.md) — 0.0.2 feature plan (the beginning of ownership)
 - [docs/0.0.3/PLAN.md](docs/0.0.3/PLAN.md) — 0.0.3 feature plan · [docs/0.0.3/TICKETS.md](docs/0.0.3/TICKETS.md) — implementation tickets (V01–V10)
+- [docs/0.0.11/PLAN.md](docs/0.0.11/PLAN.md) — 0.0.11 feature plan (the `map` type) · [docs/0.0.11/TICKETS.md](docs/0.0.11/TICKETS.md) — implementation tickets (T01–T08)
+- [lang_docs/0.0.11/](lang_docs/0.0.11/) — the 0.0.11 language reference (English + Chinese)
 - [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License
