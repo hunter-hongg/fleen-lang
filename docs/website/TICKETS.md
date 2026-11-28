@@ -5,7 +5,8 @@
 > planning level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
 >
-> **Status: T01–T19 not started.** No file exists under `website/` yet; this
+> **Status: T01 done（`scripts/check-versions.sh` + `ci.yml` 的 `versions` job + `SPEC §13` 版本一致性规则 + 基线快照 Note 均已落地）。
+> T02–T19 not started.** No file exists under `website/` yet; this
 > document is the work breakdown only. Nothing here changes the language: no
 > syntax, no opcode, no `std` module, no version number. The site is a
 > presentation layer over the repository (PLAN D2).
@@ -35,20 +36,31 @@
 
 ---
 
-## T01 — 版本事实的单一来源 + 内容基线检查 (D9)
+## T01 — 版本事实的单一来源 + 内容基线检查 (D9) — **done**
 
-- [ ] 建立"版本事实"读取层：从 `Cargo.toml` 的 `version` 与 `std/VERSION`
-      读取版本号，从 `CHANGELOG.md` 头部读取代号，作为站点唯一的版本来源
-      （PLAN D2 的最后一行）。
-- [ ] CI 断言一：五处版本号一致 —— `Cargo.toml`、`std/VERSION`、
-      `CHANGELOG.md` 最新条目、`release/` 下最大目录名、`lang_docs/` 下最大
-      目录名。当前基线即不一致（`lang_docs` 到 0.0.10，其余到 0.0.11），
-      断言落地后先暴露、再由 T02 修平。
-- [ ] 修正 `README.md` 顶部 "Current version **0.0.10**" 与实际 0.0.11 的偏差；
-      并在 SPEC §13 版本段补一句"版本号五处一致由 CI 保证"，使这条规则可被
-      人读到，而不只活在 CI 里。
-- [ ] 记录当前基线快照（版本号、代号、发布产物数、`lang_docs` 覆盖范围），
-      写入本票据的 note，供后续回看。
+> **Note（基线快照，2026-11-28 落地时实测）**
+> - 版本号 **0.0.11**，代号 **Cartographer Ant 🗺️**。
+> - 发布产物：`release/0.0.11/` 共 6 个压缩包（`x86_64-linux-gnu` / `x86_64-linux-musl` /
+>   `aarch64-linux` / `x86_64-macos` / `aarch64-macos` / `x86_64-windows`）+ `RELEASE_NOTES.md`。
+> - `lang_docs/` 覆盖 **0.0.4–0.0.11**（8 个版本 × zh/en 各 17 个文件）。
+> - `examples/` 覆盖 0.0.1–0.0.11（11 个版本目录）；当前字节码版本 **v9**。
+> - **断言落地即绿**：下方“先暴露再由 T02 修平”的剧情未发生——PLAN 2026-11-28 更正后基线
+>   已一致（五处均 0.0.11，`README.md` 顶部亦已 0.0.11），T02 无需再修平任何版本号。
+> - **note 段格式约定**（本卡建立，供 T07/T18 沿用）：卡片末尾以 `> **Note**` 引用块追加，
+>   只记录实测事实与本卡引入的约定，不改写卡片原始条目（append-only）。
+>
+> **读取层**：`scripts/check-versions.sh`（bash + grep/sort/awk，零依赖；semver 数值比较，
+>   非 字典序；跳过 `CHANGELOG` 的 `[Unreleased]`；`std/VERSION` 无尾换行需 trim）。
+>   失败时退出码：1 = 版本不一致（指出哪两处）；2 = 某处无法读取。
+
+- [x] 建立“版本事实”读取层：`scripts/check-versions.sh`，从 `Cargo.toml`、`std/VERSION`、
+      `CHANGELOG.md` 头部条目读取版本号，作为站点唯一的版本来源（PLAN D2 的最后一行）。
+- [x] CI 断言一：五处版本号一致 —— `Cargo.toml`、`std/VERSION`、`CHANGELOG.md` 最新条目、
+      `release/` 下最大目录名、`lang_docs/` 下最大目录名。挂为 `ci.yml` 的独立 `versions` job
+      （ubuntu-only，不进三 OS 矩阵，带 `timeout-minutes`）。基线已一致，落地即绿。
+- [x] `README.md` 顶部已为 0.0.11（PLAN 更正确认，无需修正）；并在 `SPEC.md` §13 版本段补一句
+      “版本号五处一致由 CI 保证”，使这条规则可被人读到，而不只活在 CI 里。
+- [x] 记录当前基线快照，写入上方 Note。
 
 **Depends on**: nothing.
 **Refs**: PLAN §1 D9, §2, §8; PLAN §13.2 风险表首行。

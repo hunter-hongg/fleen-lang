@@ -510,6 +510,12 @@ Check before submitting a PR:
 
 ## 13. Versioning
 
+> The released version string is kept in **five** places — `Cargo.toml`, `std/VERSION`, the
+> latest `CHANGELOG.md` entry, the max `release/` directory, and the max `lang_docs/` directory.
+> Their agreement is guaranteed by CI (`scripts/check-versions.sh`, the `versions` job in
+> `ci.yml`); a release that updates one place but not the others fails the build. See
+> `docs/website/PLAN.md` D9 and `docs/website/TICKETS.md` T01.
+
 | Version | Meaning |
 |---------|---------|
 | `0.0.x` | early development, unstable API |

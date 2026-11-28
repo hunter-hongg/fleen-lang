@@ -7,6 +7,15 @@ on:
   pull_request:
 
 jobs:
+  versions:
+    name: version facts agree (website T01)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert version agreement across the five sources
+        run: bash scripts/check-versions.sh
+
   check:
     strategy:
       matrix:
