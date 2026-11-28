@@ -1,0 +1,17 @@
+{
+  "version": "0.0.6",
+  "codename": "Busy Beaver",
+  "emoji": "🦫",
+  "status": "released",
+  "bytecode_version": 6,
+  "breaking_changes": [
+    {
+      "item": "`enum` becomes a reserved word — programs using `enum` as an identifier fail to compile. No deprecation shims.",
+      "decision_ref": "D6"
+    },
+    {
+      "item": "`std.collection.iter.fold` is renamed to `foldl` (`foldr` added); existing callers must update.",
+      "decision_ref": "D6"
+    }
+  ]
+}

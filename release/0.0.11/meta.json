@@ -1,0 +1,13 @@
+{
+  "version": "0.0.11",
+  "codename": "Cartographer Ant",
+  "emoji": "🗺️",
+  "status": "released",
+  "bytecode_version": 9,
+  "breaking_changes": [
+    {
+      "item": "`map` becomes a reserved word — a user identifier named `map` (variable / function / struct / enum) no longer compiles.",
+      "decision_ref": "D1"
+    }
+  ]
+}

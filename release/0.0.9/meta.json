@@ -1,0 +1,13 @@
+{
+  "version": "0.0.9",
+  "codename": "Mending Weaverbird",
+  "emoji": "🪡",
+  "status": "released",
+  "bytecode_version": 8,
+  "breaking_changes": [
+    {
+      "item": "`break` and `continue` become reserved words — programs using them as identifiers must rename (the only source breaking set).",
+      "decision_ref": "D4"
+    }
+  ]
+}

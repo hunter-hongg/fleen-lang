@@ -5,7 +5,7 @@
 > planning level** (see PLAN §1); a card may reopen one only by adding a new
 > decision entry, not by editing it silently.
 >
-> **Status: T01–T02 done。T03–T19 not started.** No file exists under `website/` yet; this
+> **Status: T01–T03 done（T03 范围 0.0.4–0.0.11，用户裁定 0.0.4 以前不做）。T04–T19 not started.** No file exists under `website/` yet; this
 > document is the work breakdown only. Nothing here changes the language: no
 > syntax, no opcode, no `std` module, no version number. The site is a
 > presentation layer over the repository (PLAN D2).
@@ -93,17 +93,37 @@
 
 ---
 
-## T03 — `release/<版本>/meta.json` 结构化元数据 (D2)
+## T03 — `release/<版本>/meta.json` 结构化元数据 (D2) — **done（范围 0.0.4–0.0.11）**
 
-- [ ] 定义并落地 `release/<版本>/meta.json` 的最小字段集：
+> **Note（落地记录，append-only）**
+> - 用户裁定范围：0.0.4 以前不做；0.0.1–0.0.3 无 meta.json，校验脚本以
+>   `MIN_VERSION = 0.0.4` 豁免（coverage 检查同样跳过）。
+> - 8 份文件全部存在：`release/0.0.{4..11}/meta.json`；历史取值逐项核对了
+>   各版 `RELEASE_NOTES.md` 的 Breaking 段 + `CHANGELOG.md` + `docs/<版本>/PLAN.md`，
+>   非凭记忆。字节码版本以 `docs/BYTECODE.md` §10 版本表为准：0.0.4→v4、0.0.5→v5、
+>   0.0.6→v6、0.0.7→v7、0.0.8→v8、0.0.9→v8（D6 不变）、0.0.10→v8（D7 不变）、0.0.11→v9。
+> - 代号/emoji 来源：0.0.4/0.0.5 取自 `CHANGELOG.md` 条目；0.0.7–0.0.11 取自
+>   RELEASE_NOTES 标题；0.0.6 在 RELEASE_NOTES/CHANGELOG 中无代号（历史缺口，
+>   按用户裁定沿用 `docs/0.0.6/PLAN.md` 头部声明的 Busy Beaver 🦫）。
+> - `decision_ref` 规则：非空时必须命中 `docs/<版本>/PLAN.md` 的 `### D<n> —` 标题；
+>   空串合法（用于无 D 编号体系的条目，如 0.0.4 的保留字破坏项——该条目在
+>   RELEASE_NOTES 中不挂 D 号）。
+> - 校验：`scripts/validate-meta.sh`（bash + python3 标准库 json，零第三方依赖；
+>   ticket 中"JSON schema 校验库以外的依赖不引入"由纯结构检查满足）；
+>   已挂 `ci.yml` `versions` job（与 T01 的 `check-versions.sh` 并列，方案 A）。
+>   负路径验证过：假 D 号、缺字段均 exit 1。
+
+- [x] 定义并落地 `release/<版本>/meta.json` 的最小字段集：
       `version`、`codename`、`emoji`、`status`（`released` / `implemented` /
       `planned`）、`bytecode_version`、`breaking_changes[]`
       （每条 `{ item, decision_ref }`）。
-- [ ] 为 `0.0.1`–`0.0.11` 各写一份。历史取值以各版本 `RELEASE_NOTES.md`
-      与 `CHANGELOG.md` 为准，不凭记忆填写；写入前逐条核对原文。
-- [ ] 校验脚本：字段齐全、枚举值合法、`breaking_changes[].decision_ref`
-      指向真实存在的 `docs/<版本>/PLAN.md` 决策编号。
-- [ ] 不引入 JSON schema 校验库以外的依赖；脚本与其断言并进 CI（D9）。
+- [x] 为 `0.0.4`–`0.0.11` 各写一份（用户裁定 0.0.4 以前不做；原条目
+      "0.0.1–0.0.11" 按此收窄）。历史取值以各版本 `RELEASE_NOTES.md`
+      与 `CHANGELOG.md` 为准，不凭记忆填写；写入前逐条核对原文。（已完成，见上方 Note）
+- [x] 校验脚本：字段齐全、枚举值合法、`breaking_changes[].decision_ref`
+      指向真实存在的 `docs/<版本>/PLAN.md` 决策编号。（`scripts/validate-meta.sh`）
+- [x] 不引入 JSON schema 校验库以外的依赖；脚本与其断言并进 CI（D9）。
+      （python3 标准库 json，无第三方依赖；已进 `ci.yml` `versions` job）
 
 **Depends on**: nothing（可与 T01 并行）。
 **Refs**: PLAN §1 D2, §7.6, §8。

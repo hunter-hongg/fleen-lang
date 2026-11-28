@@ -1,0 +1,17 @@
+{
+  "version": "0.0.5",
+  "codename": "Careful Hedgehog",
+  "emoji": "🦔",
+  "status": "released",
+  "bytecode_version": 5,
+  "breaking_changes": [
+    {
+      "item": "`ptr`, `addr`, `deref_ptr`, `unsafe`, and `trusted` become reserved words — 0.0.4 programs using them as identifiers must rename them.",
+      "decision_ref": "D1"
+    },
+    {
+      "item": "Bytecode `.flnc` version writes 5 (`AddrOf`/`LoadPtr`/`StorePtr` in the 0xC8–0xCA band); zero layout change; readers accept {1, 2, 3, 4, 5}.",
+      "decision_ref": "D5"
+    }
+  ]
+}

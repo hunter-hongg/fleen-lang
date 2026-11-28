@@ -1,0 +1,17 @@
+{
+  "version": "0.0.10",
+  "codename": "Loom Spider",
+  "emoji": "🕸️",
+  "status": "released",
+  "bytecode_version": 8,
+  "breaking_changes": [
+    {
+      "item": "A string literal containing the exact sequence `${` now begins an interpolation; escape as `\\${` to keep a literal `$` + `{`.",
+      "decision_ref": "D4"
+    },
+    {
+      "item": "`Ok` / `Err` / `Result` are non-shadowable prelude names — declaring or binding them is a `ReservedBuiltinName` error.",
+      "decision_ref": "D2"
+    }
+  ]
+}

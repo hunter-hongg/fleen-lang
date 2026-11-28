@@ -1,0 +1,8 @@
+{
+  "version": "0.0.8",
+  "codename": "Cheeky Hamster",
+  "emoji": "🐹",
+  "status": "released",
+  "bytecode_version": 8,
+  "breaking_changes": []
+}

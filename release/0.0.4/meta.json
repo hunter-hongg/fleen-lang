@@ -1,0 +1,13 @@
+{
+  "version": "0.0.4",
+  "codename": "Patient Ants",
+  "emoji": "🐜",
+  "status": "released",
+  "bytecode_version": 4,
+  "breaking_changes": [
+    {
+      "item": "`async`, `await`, and `channel` become reserved words — 0.0.3 programs using them as identifiers must rename them (the only source breaking set; the `.flnc` version bump to 4 carries zero layout change and is not a source break).",
+      "decision_ref": ""
+    }
+  ]
+}
