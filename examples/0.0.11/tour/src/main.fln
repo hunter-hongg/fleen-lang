@@ -1,0 +1,116 @@
+// 0.0.9 → 0.0.11 feature tour — one warehouse-intake program.
+//
+// Run (project mode, one command):
+//     cargo fln --project examples/0.0.11/tour
+//   or flint:   cd examples/0.0.11/tour && cargo run -q -p flint-cli -- run
+//
+// Milestones this program exercises (decisions cited per section):
+//   0.0.9  Mending Weaverbird 🪡 — zero-payload variant patterns (§1, D1/D7),
+//          Result-`choose` guards + `otherwise` (§2, D2), `break` /
+//          `continue` (§4, D4), the std.str batch (§5, D3)
+//   0.0.10 Loom Spider 🕸️ — the prelude trio with no import (§3, D1/D2),
+//          unchanged `?` (§3, D3), string interpolation (woven into every
+//          print, details in §6, D4–D6)
+//   0.0.11 Cartographer Ant 🗺️ — map literals + `m[k]` (§7, D1/D3/D4),
+//          functional insert/remove + the read-only batch (§8, D2/D8),
+//          chained access (§9, D4)
+//
+// The compile-error shapes (ReservedBuiltinName, UnclosedInterpolation,
+// ComplexGlobalInit, BreakOutsideLoop, …) are pinned by the e2e fixtures
+// under tests/e2e/{valid,invalid}/ — they cannot run here.
+import audit;
+import intake;
+import ledger;
+import std.io;
+import std.result;   // optional — the trio is already in scope without it (0.0.10 D1)
+
+func main() {
+    // ── 1. 0.0.9 — zero-payload variant patterns (BUG-2 fix, D1/D7):
+    //       both names in every pattern are variant *references* ──
+    std.io.println("== 1. zero-payload variant patterns (0.0.9) ==");
+    a1 = audit.Audit.Row(audit.Health.Green, audit.Health.Green);
+    a2 = audit.Audit.Row(audit.Health.Green, audit.Health.Red);
+    a3 = audit.Audit.Row(audit.Health.Red, audit.Health.Green);
+    a4 = audit.Audit.Row(audit.Health.Red, audit.Health.Red);
+    std.io.println("row(g, g) -> ", audit.classify(a1));
+    std.io.println("row(g, r) -> ", audit.classify(a2));
+    std.io.println("row(r, g) -> ", audit.classify(a3));
+    std.io.println("row(r, r) -> ", audit.classify(a4));
+
+    // ── 2. 0.0.9 — Result-`choose` completion (D2): a guard on the `Ok`
+    //       arm falls through to `otherwise`; an `Err` lands there too ──
+    std.io.println("== 2. Result-choose with otherwise (0.0.9) ==");
+    std.io.println("parse_level(\"42\") -> ", audit.parse_level("42") as string);
+    std.io.println("parse_level(\"-7\") -> ", audit.parse_level("-7") as string);
+    std.io.println("parse_level(\"x7\") -> ", audit.parse_level("x7") as string);
+
+    // ── 3. 0.0.10 — the prelude trio + `?` (D1/D3): audit.fln used
+    //       Result / Ok / Err with no import; the optional explicit
+    //       spelling (this file's header) imports the very same names ──
+    std.io.println("== 3. Result in std + ? (0.0.10) ==");
+    r1 = audit.level_or("31");
+    r2 = audit.level_or("-5");
+    r3 = audit.level_or("oops");
+    std.io.println("level_or(\"31\")   -> ", audit.show(move r1));
+    std.io.println("level_or(\"-5\")   -> ", audit.show(move r2));
+    std.io.println("level_or(\"oops\") -> ", audit.show(move r3));
+
+    // ── 4. 0.0.9 — `break` / `continue` (D4): both loop forms, innermost
+    //       binding ──
+    std.io.println("== 4. break / continue (0.0.9) ==");
+    std.io.println("scan([\"4\", \"skip\", \"5\", \"halt\", \"9\"]) -> ",
+        intake.scan(["4", "skip", "5", "halt", "9"]) as string);
+    std.io.println("countdown(6) -> ", intake.countdown(6) as string);
+
+    // ── 5. 0.0.9 — the std.str batch (D3), reported through interpolation ──
+    std.io.println("== 5. std.str batch (0.0.9) ==");
+    std.io.println(intake.report("  héllo world  ", "l"));
+    std.io.println("reading(\"2.5\") -> ", intake.reading("2.5") as string);
+    std.io.println("reading(\"x1\")  -> ", intake.reading("x1") as string);
+
+    // ── 6. 0.0.10 — interpolation details (D4/D5): `\$` is a literal `$`,
+    //       `${…}` embeds full expressions, and a bare `$` before a
+    //       non-`{` is already literal ──
+    std.io.println("== 6. interpolation details (0.0.10) ==");
+    rate = 3;
+    std.io.println("unit price: \$${rate}");        // $3 — the \$ escape
+    std.io.println("pallet total: \$${rate * 11}"); // $33 — full expressions
+    std.io.println("nested: ${"bin=${rate}"}");     // a string inside ${…}
+    std.io.println("just a dollar: $");             // no interpolation here
+
+    // ── 7. 0.0.11 — map literals + `m[k]` (D1/D3/D4): the missing key is
+    //       a value, not a crash; `clone` keeps `book` alive for §8 (D2) ──
+    std.io.println("== 7. map + m[k] (0.0.11) ==");
+    book = map { "bolt" -> 3, "nut" -> 1, "washer" -> 2 };
+    hit = ledger.price_of(clone book, "bolt");
+    miss = ledger.price_of(clone book, "gear");
+    std.io.println("prices[\"bolt\"] -> ", audit.show(move hit));
+    std.io.println("prices[\"gear\"] -> ", audit.show(move miss));
+    b1 = ledger.bill(clone book, ["bolt", "nut", "washer"]);
+    b2 = ledger.bill(clone book, ["bolt", "gear"]);
+    std.io.println("bill(bolt, nut, washer) -> ", audit.show(move b1));
+    std.io.println("bill(bolt, gear)       -> ", audit.show(move b2));
+
+    // ── 8. 0.0.11 — functional insert/remove (D2) + the read-only batch
+    //       with insertion-order keys (D8) ──
+    std.io.println("== 8. std.map batch (0.0.11) ==");
+    std.io.println("start           -> ", ledger.inventory(clone book));
+    step1 = ledger.restocked(clone book, "gear", 5);    // clone: book stays alive
+    std.io.println("after +gear=5   -> ", ledger.inventory(clone step1));
+    step2 = ledger.without(move step1, "nut");          // move: step1 is spent
+    std.io.println("after -nut      -> ", ledger.inventory(move step2));
+    std.io.println("original intact -> ", ledger.inventory(clone book));
+
+    // ── 9. 0.0.11 — chained access (D4): the second `[…]` rides the
+    //       Result the first produced ──
+    std.io.println("== 9. chained m[k][k] (0.0.11) ==");
+    grid = map { "bin1" -> map { "bolt" -> 7, "nut" -> 40 }, "bin2" -> map { "bolt" -> 12 } };
+    c1 = ledger.bin_of(clone grid, "bin1", "nut");
+    c2 = ledger.bin_of(clone grid, "bin2", "washer");
+    c3 = ledger.bin_of(move grid, "bin9", "bolt");
+    std.io.println("grid[\"bin1\"][\"nut\"]    -> ", audit.show(move c1));
+    std.io.println("grid[\"bin2\"][\"washer\"] -> ", audit.show(move c2));
+    std.io.println("grid[\"bin9\"][\"bolt\"]   -> ", audit.show(move c3));
+
+    std.io.println("tour done");
+}

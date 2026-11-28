@@ -1,0 +1,63 @@
+// ledger.fln — the price-book module of the 0.0.9→0.0.11 tour.
+//
+// Showcased here (0.0.11 D1–D8):
+//   D1    — `map { k -> v }` literals (`map` is a reserved word; keys are
+//           int / bool / string, D5).
+//   D3/D4 — `m[k]` rides the existing index suffix and returns
+//           `Result[V, string]`: the missing key is a value, not a crash.
+//   D2    — maps are always-owned; `insert` / `remove` are FUNCTIONAL —
+//           they consume their input map and return a fresh one. The
+//           PLAN D2 canonical spelling for "keep the original alive" is
+//           `clone` at the call site.
+//   D4    — chained access `grid[row][col]` rides the Result.
+//   D8    — keys keep insertion order; values follow key order.
+//   0.0.9 D2 / 0.0.10 D3 — the Result flows reuse `?` and general arms.
+import std.map;
+
+// §1 — a hit and a miss through the same door: `m[k]` is `Result[V, string]`
+// and `?` hands the payload (or the `Err("key not found")`) to this
+// function's caller.
+pub func price_of(prices: map[string, int], item: string): Result<int, string> {
+    Ok(prices[item]?)
+}
+
+// §2 — total a bill: the first missing item aborts the whole bill with its
+// `Err` (0.0.10 D3), a success accumulates. The map parameter is owned —
+// the caller decides whether to hand over the original or a `clone` (D2).
+pub func bill(prices: map[string, int], items: [string]): Result<int, string> {
+    sum = 0;
+    for it in items {
+        p = prices[it]?;
+        sum = sum + p;
+    };
+    Ok(sum)
+}
+
+// §3 — the functional update (D2): `insert` / `remove` consume their input
+// and return a fresh map; these helpers just forward that contract.
+pub func restocked(prices: map[string, int], item: string, price: int): map[string, int] {
+    std.map.insert(prices, item, price)
+}
+
+pub func without(prices: map[string, int], item: string): map[string, int] {
+    std.map.remove(prices, item)
+}
+
+// §4 — the read-only batch: `len` / `contains` / `keys` / `values` accept a
+// bare map (the read copies — `std/map.fln`), and `keys` preserves
+// insertion order (D8) with `values` following key order. Assembled with
+// interpolation (0.0.10 D4/D5).
+pub func inventory(prices: map[string, int]): string {
+    ks = std.map.keys(prices);
+    vs = std.map.values(prices);
+    n = std.map.len(prices);
+    last = n - 1;
+    "len=${n} head=${ks[0]}=${vs[0]} tail=${ks[last]}=${vs[last]} has_nut=${std.map.contains(prices, "nut")}"
+}
+
+// §5 — chained access (D4): the second `[…]` rides the
+// `Result[map[string, int], string]` the first produced; the single `?` at
+// the end propagates whichever link missed.
+pub func bin_of(grid: map[string, map[string, int]], row: string, col: string): Result<int, string> {
+    Ok(grid[row][col]?)
+}

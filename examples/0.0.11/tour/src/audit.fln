@@ -1,0 +1,64 @@
+// audit.fln — the quality-control module of the 0.0.9→0.0.11 tour.
+//
+// Showcased here:
+//   0.0.9 D1/D7 (BUG-2 fix) — a zero-payload variant pattern is a variant
+//     *reference*: every arm of `classify` names two of them in one pattern
+//     (`when Row(Green, Red)`), which 0.0.7 rejected as `DuplicateBinding`
+//     because the second zero-payload name occupied the binding namespace.
+//   0.0.9 D2 — a guard on an `Ok` arm falls through to a general
+//     `otherwise` tail; an `Err` value lands there too (the retired
+//     `ChooseResultNeedsOkErrArms` rule no longer forces an `Err` arm).
+//   0.0.10 D1 — `Result` / `Ok` / `Err` are used in this file with **no
+//     import at all**: the prelude trio, declared at the language level in
+//     `std/result.fln` and available in every file.
+//   0.0.10 D3 — `?` propagation, the exact 0.0.2 lowering.
+import std.str;
+
+pub enum Health {
+    Green,
+    Red,
+}
+
+// One audit row pairs two lights — the two-zero-payload-payloads shape the
+// BUG-2 fix unblocks. `Audit` is Copy (every payload of every variant is
+// Copy), so `choose` below needs no `move`.
+pub enum Audit {
+    Row(Health, Health),
+}
+
+// §1 — exhaustive, one arm per pairing; both names in each pattern are
+// variant references, not bindings.
+pub func classify(a: Audit): string {
+    choose a {
+        when Row(Green, Green) { "both green" }
+        when Row(Green, Red) { "green then red" }
+        when Row(Red, Green) { "red then green" }
+        when Row(Red, Red) { "both red" }
+    }
+}
+
+// §2 — the guarded-`Ok` + `otherwise` shape (0.0.9 D2): a negative parse
+// fails the guard and lands in `otherwise`, and so does an unparseable
+// `Err`. No `Err` arm is needed.
+pub func parse_level(raw: string): int {
+    choose std.str.parse_int(raw) {
+        when Ok(v) if v >= 0 { v }
+        otherwise { 0 }
+    }
+}
+
+// §3 — `?` (0.0.10 D3): an `Err` short-circuits this whole function; an
+// `Ok` yields its payload. Failure is a value this function's caller sees.
+pub func level_or(raw: string): Result<int, string> {
+    v = std.str.parse_int(raw)?;
+    if v < 0 { Err("negative level") } else { Ok(v) }
+}
+
+// §4 — the classic exhaustive `Ok` + `Err` pair (no `otherwise` needed).
+// The string payload makes the Result owned, so `choose move r` consumes it.
+pub func show(r: Result<int, string>): string {
+    choose move r {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    }
+}

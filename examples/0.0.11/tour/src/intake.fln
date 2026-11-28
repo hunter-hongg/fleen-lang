@@ -1,0 +1,67 @@
+// intake.fln — the belt-scanning module of the 0.0.9→0.0.11 tour.
+//
+// Showcased here:
+//   0.0.9 D4 — `break` / `continue` in both loop forms (`for` and `while`),
+//     each binding to the innermost enclosing loop.
+//   0.0.9 D3 — the std.str intrinsic batch: parse_int / parse_float / trim /
+//     contains / starts_with / ends_with / index_of / replace. Failure is an
+//     `Err` value extracted with `choose`, never a crash; positions are
+//     Unicode scalar values, never byte offsets.
+//   0.0.10 D4/D5 — the report is assembled with string interpolation
+//     (`${…}` embeds full expressions; every read deep-copies, so `raw`
+//     survives each use).
+import std.str;
+
+// §1 — the `for` form: "skip" tokens are passed over with `continue`, the
+// belt stops dead at "halt" with `break`; every other token contributes its
+// parsed value (an unparseable token contributes 0 via the `otherwise` tail).
+pub func scan(tokens: [string]): int {
+    total = 0;
+    for t in tokens {
+        if t == "skip" { continue; }
+        if t == "halt" { break; }
+        choose std.str.parse_int(t) {
+            when Ok(v) { total = total + v; }
+            otherwise { }
+        };
+    };
+    total
+}
+
+// §2 — the `while` form: the same two keywords bind to the innermost (here:
+// only) loop, and `i = i - 1` assigns the outer `i` (DESIGN.md §4.5), not a
+// shadowing. countdown(6): tick 5 is counted, tick 4 is skipped by
+// `continue`, tick 3 stops the loop with `break` — the result is 1.
+pub func countdown(from: int): int {
+    steps = 0;
+    i = from;
+    while i > 0 {
+        i = i - 1;
+        if i % 2 == 0 { continue; }
+        if i == 3 { break; }
+        steps = steps + 1;
+    };
+    steps
+}
+
+// §3 — the 0.0.9 std.str batch (D3) reported through 0.0.10 interpolation:
+// `trim` cleans the reading, the three predicates are plain bools,
+// `index_of` reports a Unicode-scalar-value position as a `Result`, and
+// `replace` rewrites every occurrence.
+pub func report(raw: string, needle: string): string {
+    t = std.str.trim(raw);
+    at = choose std.str.index_of(t, needle) {
+        when Ok(v) { "at ${v}" }
+        otherwise { "absent" }
+    };
+    "trimmed=${t} | contains=${std.str.contains(t, needle)} starts=${std.str.starts_with(t, needle)} ends=${std.str.ends_with(t, needle)} index_of(${needle})=${at} replaced=${std.str.replace(t, needle, "*")}"
+}
+
+// §4 — `parse_float`: failure is an `Err` value, extracted with `choose`
+// (`parse_int` ran in §1's choose arms; this closes out the 0.0.9 batch).
+pub func reading(raw: string): float {
+    choose std.str.parse_float(raw) {
+        when Ok(v) { v }
+        otherwise { 0.0 }
+    }
+}

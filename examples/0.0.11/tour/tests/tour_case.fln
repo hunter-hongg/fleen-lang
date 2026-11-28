@@ -1,0 +1,83 @@
+// `flint test` fixture (0.0.11): a 0.0.9 → 0.0.11 feature case.
+// Standalone by contract — `flint test` compiles each `tests/*.fln` as a
+// single file, so this file declares everything it uses (no project
+// imports). It compresses the project tour into one file: the zero-payload
+// variant patterns (0.0.9 D1/D7), the guarded-`Ok` + `otherwise` shape
+// (0.0.9 D2), `break` / `continue` (0.0.9 D4), the prelude trio + `?`
+// (0.0.10 D1/D3), interpolation (0.0.10 D4/D5), and the `map` door
+// (0.0.11 D1–D4).
+import std.io;
+import std.str;
+import std.map;
+
+enum Light {
+    Green,
+    Red,
+}
+
+pub enum Panel {
+    Row(Light, Light),
+}
+
+func classify(p: Panel): string {
+    choose p {
+        when Row(Green, Green) { "both green" }
+        when Row(Green, Red) { "green then red" }
+        when Row(Red, Green) { "red then green" }
+        when Row(Red, Red) { "both red" }
+    }
+}
+
+func level(raw: string): int {
+    choose std.str.parse_int(raw) {
+        when Ok(v) if v >= 0 { v }
+        otherwise { 0 }
+    }
+}
+
+func scan(tokens: [string]): int {
+    total = 0;
+    for t in tokens {
+        if t == "skip" { continue; }
+        if t == "halt" { break; }
+        choose std.str.parse_int(t) {
+            when Ok(v) { total = total + v; }
+            otherwise { }
+        };
+    };
+    total
+}
+
+func bill(prices: map[string, int], items: [string]): Result<int, string> {
+    sum = 0;
+    for it in items {
+        p = prices[it]?;
+        sum = sum + p;
+    };
+    Ok(sum)
+}
+
+func show(r: Result<int, string>): string {
+    choose move r {
+        when Ok(v) { v as string }
+        when Err(m) { m }
+    }
+}
+
+func main() {
+    std.io.println(classify(Panel.Row(Light.Green, Light.Red)));
+    std.io.println(classify(Panel.Row(Light.Red, Light.Red)));
+    std.io.println(level("42") as string);
+    std.io.println(level("nope") as string);
+    std.io.println(scan(["3", "skip", "4", "halt", "5"]) as string);
+    std.io.println("value=${1 + 2} escaped=\$5 dollar=$");
+    book = map { "a" -> 1, "b" -> 2 };
+    ks = std.map.keys(book);
+    std.io.println("len=${std.map.len(book)} head=${ks[0]}");
+    grown = std.map.insert(book, "c", 3);
+    std.io.println("grown len=${std.map.len(grown)}");
+    b1 = bill(clone grown, ["a", "b", "c"]);
+    std.io.println(show(move b1));
+    b2 = bill(move grown, ["a", "zz"]);
+    std.io.println(show(move b2));
+}
