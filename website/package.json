@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "node scripts/build-docs.js && astro build",
+    "build-docs": "node scripts/build-docs.js",
     "preview": "astro preview",
     "check": "astro check"
   },

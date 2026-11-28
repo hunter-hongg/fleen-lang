@@ -7,3 +7,15 @@ dist/
 
 # Generated type declarations
 .astro/types.d.ts
+
+# T05: generated docs content + sidebar (from lang_docs via scripts/build-docs.js).
+# Generated per-locale docs under src/content/docs/{en,zh}/ plus the generated
+# root index/quickstart + chapter files. Hand-written pages (e.g. introduction.md)
+# are kept via the negation rule below.
+src/content/docs/[0-9]*-*.md
+src/content/docs/index.md
+src/content/docs/quickstart.md
+src/content/docs/en/
+src/content/docs/zh/
+!src/content/docs/introduction.md
+src/config/sidebar.js
