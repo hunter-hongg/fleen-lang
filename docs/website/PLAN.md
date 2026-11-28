@@ -17,6 +17,12 @@
 > breakdown lives in `docs/website/TICKETS.md` (T01–T19, **none started**).
 > They may be revised only by a new entry here, not silently in a ticket card.
 >
+> **Correction (2026-11-28)**: the content gaps named in §2 (conclusion 3)
+> are closed — `lang_docs/0.0.11/` (17 files per language) now exists and
+> `README.md` states 0.0.11. The version ranges in §0, D3, §2, §8.1 and the
+> §13.2 risk table now read 0.0.4–0.0.11; T01/T02 remain as CI-assertion
+> work, no longer content prerequisites.
+>
 > **What this is not**: no content management system, no user accounts, no
 > comments, no forum, no backend execution of Fleen code, no third-party
 > analytics, no rewritten marketing copy that duplicates the repository's
@@ -33,7 +39,7 @@ tracks language versions instead of being one.
 | Item | Scope |
 |------|-------|
 | 0.0.1 – 0.0.11 | the language releases the site must be able to present |
-| `lang_docs/0.0.4` – `0.0.10` | the only versions with documentation today (16 chapters, zh + en) — the version switcher may list only these until T02 lands |
+| `lang_docs/0.0.4` – `0.0.11` | the only versions with documentation today (16 chapters, zh + en) — the version switcher may list only these until T02 lands |
 | **website** | M0 content baseline → M1 skeleton → M2 content pages → M3 playground → M4 polish |
 | 0.1.0 (language) | unrelated to site scope; the roadmap page merely marks `Generics` / `Operator overloading` / `FFI` as "after 0.1.0" without dates |
 
@@ -80,7 +86,7 @@ the version number and codename are injected from `Cargo.toml` + `std/VERSION`.
 - `/docs/<version>/<chapter>` serves that exact version and stays stable as a
   permalink.
 - The version switcher lists **only versions that exist on disk** (today
-  0.0.4–0.0.10; 0.0.11 appears after T02) — never a version that would 404.
+  0.0.4–0.0.11) — never a version that would 404.
 - Old-version pages carry a banner naming the current version, and their
   `canonical` points at the latest equivalent page so stale pages do not win
   search results.
@@ -175,7 +181,7 @@ view is enough.
 | 语言设计稿 | `docs/DESIGN.md` | "为什么这样设计" / 实现内幕 | 完整，含各版本 D 编号决策 |
 | 语法定义 | `docs/SYNTAX.ebnf` | 语法参考页、语法高亮规则来源 | 完整 |
 | 字节码规范 | `docs/BYTECODE.md` | 实现内幕、`.flnc` 格式说明 | 完整（含 v9 注记） |
-| 语言参考（双语） | `lang_docs/<版本>/{zh,en}/01..16` | **文档站主体** | 0.0.4–0.0.10，每版 16 章 |
+| 语言参考（双语） | `lang_docs/<版本>/{zh,en}/01..16` | **文档站主体** | 0.0.4–0.0.11，每版 16 章 |
 | 版本计划与票 | `docs/<版本>/{PLAN,TICKETS}.md` | 路线图、"为什么这么做" | 0.0.1–0.0.11 |
 | 发布说明 | `release/<版本>/RELEASE_NOTES.md` | 发布记录页 | 0.0.1–0.0.11 |
 | 发布产物 | `release/0.0.11/*.tar.gz` / `.zip` | 下载页 | 六个目标全在 |
@@ -189,7 +195,12 @@ view is enough.
 
 1. **文档已经是双语的、已经按版本分目录的**，官网文档系统不需要新建内容体系，只需要一个渲染层和一层版本/语言路由（D2、D3、D4）。
 2. **版本号在仓库里出现五处**（`Cargo.toml`、`std/VERSION`、`CHANGELOG.md`、`release/<版本>/`、`lang_docs/<版本>/`），官网必须有一处"版本事实"的单一来源，否则必然漂移（D9）。
-3. **已有内容缺口**（M0 前置任务，见 §12 与 T01/T02）：`lang_docs/` 最新只到 `0.0.10`，而 `0.0.11` 已实现并按 `Cargo.toml` / `std/VERSION` 升版；`README.md` 顶部仍写着 "Current version 0.0.10"。
+3. ~~**已有内容缺口**（M0 前置任务，见 §12 与 T01/T02）：`lang_docs/` 最新只到
+   `0.0.10`，而 `0.0.11` 已实现并按 `Cargo.toml` / `std/VERSION` 升版；
+   `README.md` 顶部仍写着 "Current version 0.0.10"。~~
+   **更正（2026-11-28）**：该缺口已关闭 —— `lang_docs/0.0.11/`（中英各 17 个文件）
+   已落盘，`README.md` 顶部已同步为 0.0.11（commits `d4afed2` 之前的仓库状态即
+   本节撰写时的事实基础）。T01/T02 仍需落地的是 CI 层面的基线检查，内容本身不再是前置。
 
 ---
 
@@ -372,7 +383,7 @@ view is enough.
 - **版本目录独立构建**：`/docs/` 永远指向最新稳定版；`/docs/<版本>/...` 形式固定供旧链接使用（D3）。
 - **旧版本的 canonical 指向最新版**（SEO 上避免旧版本抢占）；旧版本页面顶部显示"你正在看 0.0.9 的文档，最新为 0.0.11"横幅。
 - **双语用 URL 前缀**：英文默认无前缀（`/docs/...`），中文 `/zh/docs/...`；`hreflang` 双向声明（D4）。
-- **版本切换器只列出 `lang_docs/` 真实存在的版本**，避免把用户导向 404（当前即 0.0.4–0.0.10）。
+- **版本切换器只列出 `lang_docs/` 真实存在的版本**，避免把用户导向 404（当前即 0.0.4–0.0.11）。
 
 ---
 
@@ -460,7 +471,7 @@ M0 是硬前置：**文档缺一个版本，官网上就会出现一个"最新�
 
 | 风险 | 影响 | 应对 |
 |------|------|------|
-| **内容漂移**（版本号在五处、`README.md` 已落后于 `Cargo.toml`） | 官网显示过期信息，损害可信度 | D9 的 CI 版本一致性断言 + T01 |
+| **内容漂移**（版本号在五处；T01 落地前无一致性断言——2026-11-28 人工核对已一致） | 官网显示过期信息，损害可信度 | D9 的 CI 版本一致性断言 + T01 |
 | `lang_docs` 落后一个版本 | 最新版文档页 404 或空白 | T02 补齐；版本切换器只列真实存在的版本 |
 | Fleen 语法高频演进（0.0.x 每版都有破坏性变更） | 旧文档页与旧示例迅速失效 | 版本化目录 + 每版"破坏性变更"结构化字段 + 旧版本横幅 |
 | 演练场无限循环 | 浏览器标签卡死 | D7：Web Worker + 超时 terminate |
